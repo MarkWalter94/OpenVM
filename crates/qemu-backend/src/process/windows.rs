@@ -46,6 +46,7 @@ impl ProcessContainer for JobContainer {
         };
         Ok(ChildProcess {
             identity: ProcessIdentity {
+                run_id: req.run_id,
                 pid: spawned.pid,
                 creation_time,
             },

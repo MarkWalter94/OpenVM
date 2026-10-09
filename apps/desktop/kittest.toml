@@ -1,0 +1,21 @@
+# Configurazione delle istantanee egui_kittest (F1-19, ADR-0022 criterio 4).
+# egui_kittest cerca questo file risalendo dalla directory di lavoro dei test
+# (la radice del crate `apps/desktop`).
+
+# Percorso relativo alla radice del crate.
+output_path = "tests/snapshots"
+
+# Distanza colore YIQ pesata e al quadrato oltre la quale un pixel conta come
+# diverso (valore predefinito di egui_kittest).
+threshold = 0.6
+
+# Pixel diversi ammessi prima del fallimento. Le istantanee di riferimento
+# sono generate su Windows con WARP (adattatore CPU scelto da egui_kittest):
+# sullo stesso host il confronto è esatto.
+max_failed_pixels = 0
+
+# Su Linux (llvmpipe) il rasterizzatore è diverso: l'antialiasing dei bordi e
+# dei glifi può variare di pochi pixel. Tolleranza dichiarata, da confermare
+# sul runner CI Linux (non ancora misurata: vedi F1-05).
+[linux]
+max_failed_pixels = 200

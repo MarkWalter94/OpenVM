@@ -9,9 +9,9 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::compat::{MediaId, RunId};
 use crate::error::{BackendError, Result};
 use crate::validate::{UNIX_SOCKET_PATH_MAX, check_token, qemu_path_value};
+use lightvm_proto::{MediaId, RunId};
 
 /// Percorso assoluto verificato e rappresentabile senza ambiguità nelle
 /// opzioni QEMU.

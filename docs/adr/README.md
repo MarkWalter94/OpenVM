@@ -74,8 +74,9 @@ Quando un ADR Proposta viene chiuso si aggiornano: lo stato e la sezione Decisio
 | [0018](0018-hardware-di-riferimento.md) | Hardware di riferimento | Accettata | 13, 17 |
 | [0019](0019-fixture-test-deterministica.md) | Fixture di test deterministica | Accettata (definizione; realizzazione entro F3) | 9, 17 |
 | [0020](0020-firma-e-revisione-indipendente.md) | Responsabilità di firma e revisione indipendente | Proposta | 10 F6, 14, 17 |
-| [0021](0021-sdk-e-client-mcp.md) | SDK e client MCP | Proposta (entro F1) | 9, 17 |
+| [0021](0021-sdk-e-client-mcp.md) | SDK e client MCP | Accettata per l'SDK (`rmcp` 3.5.1); client aperti fino a F5 | 9, 17 |
 | [0022](0022-framework-test-ui.md) | Framework di test UI | Proposta (entro F1) | 13, 17 |
-| [0023](0023-dipendenze-e-licenze.md) | Dipendenze e licenze | Proposta (entro F1) | 6.0, 6.3, 17 |
+| [0023](0023-dipendenze-e-licenze.md) | Dipendenze e licenze | Accettata per politica e controlli; SBOM e font di egui aperti fino a F6 | 6.0, 6.3, 17 |
 | [0024](0024-crate-rfb-client-separato.md) | Crate `rfb-client` separato usato dalla UI; `qemu-backend` resta nel supervisor | Accettata | 6.1, 6.2, 6.4 |
 | [0025](0025-esclusione-dischi-nel-supervisor.md) | Esclusione dei dischi garantita dal supervisor, non dal lock di QEMU | Accettata (Windows; Linux in R2a) | 3, 6.3, 7.1, 8 |
+| [0026](0026-codici-autenticazione-autorizzazione.md) | Codici pubblici `unauthenticated`, `session_expired`, `permission_denied` | Proposta | 6.3, 7, 9 |

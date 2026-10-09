@@ -17,7 +17,7 @@
 //!   comando. Nessuna API pubblica esegue comandi QMP arbitrari.
 //! - [`process`]: [`ProcessContainer`] (Job Object su Windows; firma pronta
 //!   per cgroup/`PR_SET_PDEATHSIG` su Linux), identità del processo con handle e
-//!   tempo di creazione.
+//!   tempo di creazione e `run_id`, classificazione dei codici d'uscita.
 //! - [`run`]: [`QemuRun`] collega processo, QMP, verifiche post-avvio
 //!   (acceleratore, assenza di NIC), macchina a stati, arresto gentile con
 //!   scalata ed [`EmergencyStop`] indipendente dalla coda QMP.
@@ -32,16 +32,29 @@
 //! `PROC_THREAD_ATTRIBUTE_JOB_LIST` (processo nel job dalla creazione, senza la
 //! finestra di un'assegnazione successiva) e `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`
 //! (eredità limitata ai tre handle standard), `TerminateJobObject`,
-//! `GetProcessTimes`. La libreria standard non espone queste primitive in forma
+//! `GetProcessTimes`, `OpenProcess` (verifica dell'identità PID + tempo di
+//! creazione). La libreria standard non espone queste primitive in forma
 //! stabile e il crate `win32job` non permette l'assegnazione alla creazione né
 //! la lista di handle: la scelta segue i risultati verificati in
 //! `docs/verification/F0-06-supervisore-processi.md`. Ogni blocco `unsafe` ha un
 //! commento `SAFETY:` e il modulo espone soltanto funzioni sicure.
 
+//!
+//! # Tipi condivisi
+//!
+//! Identificativi ([`lightvm_proto::RunId`], [`lightvm_proto::MediaId`],
+//! [`lightvm_proto::VmId`]), input tipizzato ([`lightvm_proto::InputEvent`]),
+//! geometria, errori pubblici ([`lightvm_proto::PublicError`]) e osservazioni
+//! ([`lightvm_proto::BackendObservation`]) vengono da `lightvm-proto`. Restano
+//! locali soltanto i tipi specifici del backend: allowlist dei qcode
+//! ([`input`]), screenshot con i byte del PNG ([`CapturedScreenshot`]), stati e
+//! rapporti del processo ([`run`]).
+
 pub mod cmdline;
-pub mod compat;
 pub mod error;
+pub mod input;
 pub mod paths;
+pub mod prepare;
 pub mod probe;
 pub mod process;
 pub mod qmp;
@@ -54,12 +67,16 @@ pub mod validate;
 pub use cmdline::{
     Accelerator, CpuModel, DiskFormat, DiskSpec, MachineType, QemuCommand, VmLaunchSpec,
 };
-pub use compat::{DisplayGeometry, InputButton, InputEvent, MediaId, QKeyCode, RunId, Screenshot};
-pub use error::{BackendError, PublicErrorKind};
+pub use error::BackendError;
 pub use paths::{ManagedPath, ManagedPaths};
-pub use probe::{AcceleratorStatus, HostCapabilities};
-pub use process::{ContainmentMechanism, ProcessContainer, ProcessIdentity};
+pub use prepare::{HostResources, RunDirs};
+pub use probe::{AcceleratorStatus, HostCapabilities, ProbeConfig};
+pub use process::{
+    ContainmentMechanism, ExitCodeClass, IdentityStatus, ProcessContainer, ProcessIdentity,
+};
 pub use qmp::{QmpClient, QmpConfig, QmpEvent};
 pub use run::{
-    EmergencyStop, ExitCause, ExitReport, ProcessState, QemuRun, RunConfig, ShutdownPolicy,
+    CloseReport, EmergencyStop, ExitCause, ExitReport, ProcessState, QemuRun, Reconciliation,
+    RunConfig, ShutdownPolicy, StopPhase,
 };
+pub use screenshot::CapturedScreenshot;

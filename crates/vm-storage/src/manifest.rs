@@ -11,9 +11,9 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::compat::{BaselineId, MediaId, VmId};
 use crate::enums::{DiskRole, MediaSlot};
 use crate::error::{Result, StorageError};
+use crate::ids::{BaselineId, MediaId, VmId};
 use crate::layout::CatalogLayout;
 use crate::paths::ManagedPath;
 

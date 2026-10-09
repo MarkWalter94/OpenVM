@@ -43,9 +43,27 @@ impl fmt::Display for QmpError {
                 class,
                 desc,
             } => write!(f, "QEMU ha rifiutato `{command}`: {class}: {desc}"),
-            Self::Timeout { command } => write!(f, "nessuna risposta QMP a `{command}` entro il timeout"),
+            Self::Timeout { command } => {
+                write!(f, "nessuna risposta QMP a `{command}` entro il timeout")
+            }
             Self::Disconnected => write!(f, "canale QMP chiuso da QEMU"),
             Self::Closed => write!(f, "client QMP chiuso"),
+        }
+    }
+}
+
+impl QmpError {
+    /// Riassunto senza testo proveniente da QEMU (che può contenere percorsi).
+    pub fn public_summary(&self) -> String {
+        match self {
+            Self::Io(_) => "errore di I/O".to_owned(),
+            Self::Protocol(_) => "messaggio non conforme al protocollo".to_owned(),
+            Self::Command { command, class, .. } => {
+                format!("comando `{command}` rifiutato ({class})")
+            }
+            Self::Timeout { command } => format!("nessuna risposta a `{command}` entro il timeout"),
+            Self::Disconnected => "canale chiuso da QEMU".to_owned(),
+            Self::Closed => "canale chiuso localmente".to_owned(),
         }
     }
 }
@@ -242,10 +260,9 @@ pub(crate) fn machine_name_from_qom_type(v: &Value) -> Result<String, QmpError> 
 
 pub(crate) fn find_machine(v: Value, name: &str) -> Result<CurrentMachine, QmpError> {
     let list: Vec<MachineWire> = from_value("query-machines", v)?;
-    let m = list
-        .into_iter()
-        .find(|m| m.name == name)
-        .ok_or_else(|| QmpError::Protocol(format!("macchina `{name}` assente da query-machines")))?;
+    let m = list.into_iter().find(|m| m.name == name).ok_or_else(|| {
+        QmpError::Protocol(format!("macchina `{name}` assente da query-machines"))
+    })?;
     Ok(CurrentMachine {
         name: m.name,
         alias: m.alias,
@@ -337,7 +354,11 @@ impl QmpEvent {
     pub fn kind(&self) -> EventKind {
         match self.name.as_str() {
             "SHUTDOWN" => EventKind::Shutdown {
-                guest: self.data.get("guest").and_then(Value::as_bool).unwrap_or(false),
+                guest: self
+                    .data
+                    .get("guest")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
                 reason: self
                     .data
                     .get("reason")
@@ -382,8 +403,15 @@ pub enum EventKind {
 /// Messaggio in arrivo dal server.
 #[derive(Debug)]
 pub(crate) enum Incoming {
-    Return { id: Option<u64>, value: Value },
-    Error { id: Option<u64>, class: String, desc: String },
+    Return {
+        id: Option<u64>,
+        value: Value,
+    },
+    Error {
+        id: Option<u64>,
+        class: String,
+        desc: String,
+    },
     Event(QmpEvent),
 }
 
@@ -391,7 +419,10 @@ pub(crate) fn classify(v: Value) -> Result<Incoming, QmpError> {
     let id = v.get("id").and_then(Value::as_u64);
     if let Some(name) = v.get("event").and_then(Value::as_str) {
         let ts = v.get("timestamp");
-        let secs = ts.and_then(|t| t.get("seconds")).and_then(Value::as_u64).unwrap_or(0);
+        let secs = ts
+            .and_then(|t| t.get("seconds"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
         let us = ts
             .and_then(|t| t.get("microseconds"))
             .and_then(Value::as_u64)
@@ -411,11 +442,21 @@ pub(crate) fn classify(v: Value) -> Result<Incoming, QmpError> {
     if let Some(e) = v.get("error") {
         return Ok(Incoming::Error {
             id,
-            class: e.get("class").and_then(Value::as_str).unwrap_or("?").to_owned(),
-            desc: e.get("desc").and_then(Value::as_str).unwrap_or("").to_owned(),
+            class: e
+                .get("class")
+                .and_then(Value::as_str)
+                .unwrap_or("?")
+                .to_owned(),
+            desc: e
+                .get("desc")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned(),
         });
     }
-    Err(QmpError::Protocol(format!("messaggio non riconosciuto: {v}")))
+    Err(QmpError::Protocol(format!(
+        "messaggio non riconosciuto: {v}"
+    )))
 }
 
 fn from_value<T: serde::de::DeserializeOwned>(cmd: &str, v: Value) -> Result<T, QmpError> {
@@ -489,9 +530,10 @@ mod tests {
 
     #[test]
     fn pci_senza_e_con_nic() {
-        let no_nic: Value =
-            serde_json::from_str(include_str!("../../tests/fixtures/qmp-query-pci-nodefaults.json"))
-                .unwrap();
+        let no_nic: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/qmp-query-pci-nodefaults.json"
+        ))
+        .unwrap();
         assert!(pci_network_devices(&no_nic).unwrap().is_empty());
         let with_nic = json!([{"bus": 0, "devices": [
             {"bus": 0, "slot": 2, "class_info": {"class": 512, "desc": "Ethernet controller"}},

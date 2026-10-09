@@ -1,0 +1,717 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ClientMessage",
+  "description": "Messaggi dal client al servizio.",
+  "oneOf": [
+    {
+      "description": "Primo messaggio obbligatorio.",
+      "type": "object",
+      "properties": {
+        "client_name": {
+          "description": "Nome del client, solo diagnostico (troncato a 64 caratteri).",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "credential": {
+          "description": "Credenziale del canale: 32 byte in 64 cifre esadecimali minuscole.\nResta testo libero nello schema perché una credenziale malformata\ndia lo stesso esito (`unauthenticated`) di una assente o errata,\nsenza distinguere i motivi. Segreto: mai in log o report.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "writeOnly": true
+        },
+        "protocol_versions": {
+          "description": "Versioni del protocollo offerte dal client.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          }
+        },
+        "request_id": {
+          "description": "Identificativo della richiesta.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "type": {
+          "type": "string",
+          "const": "hello"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "protocol_versions"
+      ]
+    },
+    {
+      "description": "Richiesta tipizzata dopo l'handshake.",
+      "type": "object",
+      "properties": {
+        "body": {
+          "description": "Operazione richiesta.",
+          "$ref": "#/$defs/Request"
+        },
+        "request_id": {
+          "description": "Identificativo della richiesta.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "type": {
+          "type": "string",
+          "const": "request"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "body"
+      ]
+    }
+  ],
+  "$defs": {
+    "DisplayGeometry": {
+      "description": "Geometria del display guest in pixel.",
+      "type": "object",
+      "properties": {
+        "height": {
+          "description": "Altezza (1..=8192).",
+          "type": "integer",
+          "format": "uint32",
+          "maximum": 8192,
+          "minimum": 1
+        },
+        "width": {
+          "description": "Larghezza (1..=8192).",
+          "type": "integer",
+          "format": "uint32",
+          "maximum": 8192,
+          "minimum": 1
+        }
+      },
+      "required": [
+        "width",
+        "height"
+      ]
+    },
+    "Firmware": {
+      "description": "Firmware del guest. Nel MVP solo UEFI con stato NVRAM gestito (ROADMAP 8).",
+      "oneOf": [
+        {
+          "description": "UEFI (OVMF) con NVRAM per VM.",
+          "type": "string",
+          "const": "uefi"
+        }
+      ]
+    },
+    "GuestOs": {
+      "description": "Sistema operativo guest dichiarato. Nel MVP il riferimento è Ubuntu LTS\nx86_64 con versione e checksum fissati in F0 (ROADMAP 4).",
+      "oneOf": [
+        {
+          "description": "Ubuntu LTS x86_64 (guest di riferimento del MVP).",
+          "type": "string",
+          "const": "ubuntu_lts_x86_64"
+        },
+        {
+          "description": "Altro Linux x86_64: gestibile manualmente, senza garanzie di compatibilità.",
+          "type": "string",
+          "const": "other_linux_x86_64"
+        }
+      ]
+    },
+    "InputBatch": {
+      "description": "Lotto di eventi di input riferito a un'esecuzione e a una geometria: il core\nrifiuta lotti riferiti a un `run_id` superato o a una geometria non corrente\n(ROADMAP 6.4). Gli input non vengono mai ripetuti automaticamente.",
+      "type": "object",
+      "properties": {
+        "events": {
+          "description": "Eventi, al massimo [`MAX_INPUT_EVENTS_PER_REQUEST`].",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/InputEvent"
+          }
+        },
+        "geometry": {
+          "description": "Geometria su cui il chiamante ha calcolato le coordinate.",
+          "$ref": "#/$defs/DisplayGeometry"
+        },
+        "run_id": {
+          "description": "Esecuzione attesa.",
+          "$ref": "#/$defs/RunId"
+        },
+        "vm_id": {
+          "description": "VM destinataria.",
+          "$ref": "#/$defs/VmId"
+        }
+      },
+      "required": [
+        "vm_id",
+        "run_id",
+        "geometry",
+        "events"
+      ]
+    },
+    "InputEvent": {
+      "description": "Evento di input elementare.",
+      "oneOf": [
+        {
+          "description": "Tasto.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "key"
+            }
+          },
+          "$ref": "#/$defs/KeyAction",
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "Movimento assoluto.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "pointer_move"
+            }
+          },
+          "$ref": "#/$defs/PointerMove",
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "Pulsante.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "pointer_button"
+            }
+          },
+          "$ref": "#/$defs/PointerButton",
+          "required": [
+            "type"
+          ]
+        }
+      ]
+    },
+    "KeyAction": {
+      "description": "Pressione o rilascio di un tasto.",
+      "type": "object",
+      "properties": {
+        "down": {
+          "description": "`true` = premuto, `false` = rilasciato.",
+          "type": "boolean"
+        },
+        "qcode": {
+          "description": "Tasto QEMU.",
+          "$ref": "#/$defs/QCode"
+        }
+      },
+      "required": [
+        "qcode",
+        "down"
+      ]
+    },
+    "MediaId": {
+      "description": "MediaId: UUID versione 7 in minuscolo con trattini.",
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "MouseButton": {
+      "description": "Pulsante del puntatore (nomi QMP `InputButton` ammessi).",
+      "oneOf": [
+        {
+          "description": "Sinistro.",
+          "type": "string",
+          "const": "left"
+        },
+        {
+          "description": "Centrale.",
+          "type": "string",
+          "const": "middle"
+        },
+        {
+          "description": "Destro.",
+          "type": "string",
+          "const": "right"
+        },
+        {
+          "description": "Rotella su.",
+          "type": "string",
+          "const": "wheel_up"
+        },
+        {
+          "description": "Rotella giù.",
+          "type": "string",
+          "const": "wheel_down"
+        }
+      ]
+    },
+    "NetworkProfile": {
+      "description": "Profilo di rete. Nel MVP l'unico valore ammesso è `offline` (ADR-0004): nessuna\nNIC guest, periferiche di rete predefinite escluse, nessun forwarding.",
+      "oneOf": [
+        {
+          "description": "Nessuna NIC.",
+          "type": "string",
+          "const": "offline"
+        }
+      ]
+    },
+    "OperationId": {
+      "description": "OperationId: UUID versione 7 in minuscolo con trattini.",
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "PointerButton": {
+      "description": "Pressione o rilascio di un pulsante del puntatore.",
+      "type": "object",
+      "properties": {
+        "button": {
+          "description": "Pulsante.",
+          "$ref": "#/$defs/MouseButton"
+        },
+        "down": {
+          "description": "`true` = premuto, `false` = rilasciato.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "button",
+        "down"
+      ]
+    },
+    "PointerMove": {
+      "description": "Movimento assoluto del puntatore in coordinate QEMU 0..=32767 su ciascun asse.",
+      "type": "object",
+      "properties": {
+        "x": {
+          "description": "Asse X (0..=32767).",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 32767,
+          "minimum": 0
+        },
+        "y": {
+          "description": "Asse Y (0..=32767).",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 32767,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "x",
+        "y"
+      ]
+    },
+    "QCode": {
+      "description": "QKeyCode QEMU.",
+      "type": "string",
+      "pattern": "^[a-z0-9_]{1,32}$"
+    },
+    "Request": {
+      "description": "Operazioni tipizzate.",
+      "oneOf": [
+        {
+          "description": "Verifica di vivacità.",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "ping"
+            }
+          },
+          "required": [
+            "op"
+          ]
+        },
+        {
+          "description": "Capacità del servizio e del backend.",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "get_capabilities"
+            }
+          },
+          "required": [
+            "op"
+          ]
+        },
+        {
+          "description": "Elenco delle VM del catalogo (solo UI).",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "list_vms"
+            }
+          },
+          "required": [
+            "op"
+          ]
+        },
+        {
+          "description": "Stato di una VM (solo UI).",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "vm_status"
+            },
+            "vm_id": {
+              "description": "VM.",
+              "$ref": "#/$defs/VmId"
+            }
+          },
+          "required": [
+            "op",
+            "vm_id"
+          ]
+        },
+        {
+          "description": "Creazione di una VM nel catalogo (solo UI; mai da sessioni agente).",
+          "type": "object",
+          "properties": {
+            "config": {
+              "description": "Configurazione richiesta.",
+              "$ref": "#/$defs/VmConfig"
+            },
+            "op": {
+              "type": "string",
+              "const": "create_vm"
+            }
+          },
+          "required": [
+            "op",
+            "config"
+          ]
+        },
+        {
+          "description": "Azione su una VM esistente tramite la coda del core (solo UI in F1).\nLa risposta arriva dopo l'esito del backend.",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "submit_vm"
+            },
+            "request": {
+              "description": "Richiesta con chiave di idempotenza.",
+              "$ref": "#/$defs/VmRequest"
+            }
+          },
+          "required": [
+            "op",
+            "request"
+          ]
+        },
+        {
+          "description": "Iscrizione agli eventi di stato (solo UI).",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "subscribe"
+            }
+          },
+          "required": [
+            "op"
+          ]
+        },
+        {
+          "description": "Elenco delle connessioni attive (solo UI).",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "list_connections"
+            }
+          },
+          "required": [
+            "op"
+          ]
+        },
+        {
+          "description": "Revoca di una connessione e della sua credenziale (solo UI).",
+          "type": "object",
+          "properties": {
+            "connection_id": {
+              "description": "Connessione da revocare.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "op": {
+              "type": "string",
+              "const": "revoke_connection"
+            }
+          },
+          "required": [
+            "op",
+            "connection_id"
+          ]
+        },
+        {
+          "description": "Emissione di una credenziale di pairing da consegnare fuori banda (solo UI).",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "create_pairing_credential"
+            }
+          },
+          "required": [
+            "op"
+          ]
+        },
+        {
+          "description": "Emergency Stop: percorso prioritario, non passa dalla coda (solo UI).",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "emergency_stop"
+            }
+          },
+          "required": [
+            "op"
+          ]
+        },
+        {
+          "description": "Arresto controllato del servizio (solo UI).",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "shutdown"
+            }
+          },
+          "required": [
+            "op"
+          ]
+        }
+      ]
+    },
+    "RunId": {
+      "description": "RunId: UUID versione 7 in minuscolo con trattini.",
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "VmAction": {
+      "description": "Azione richiesta su una VM esistente.",
+      "oneOf": [
+        {
+          "description": "Avvio.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "start"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "Arresto ordinario.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "stop"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "Arresto forzato con primitive OS.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "force_stop"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "Reset del guest.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "reset"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "Screenshot.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "screenshot"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "Input tipizzato.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "input"
+            }
+          },
+          "$ref": "#/$defs/InputBatch",
+          "required": [
+            "type"
+          ]
+        }
+      ]
+    },
+    "VmConfig": {
+      "description": "Configurazione di una VM richiesta dall'utente. Nessun campo è un percorso o\nun'opzione QEMU: i media sono riferiti per [`MediaId`] del registro approvato.",
+      "type": "object",
+      "properties": {
+        "data_media": {
+          "description": "Supporto dati opzionale in sola lettura (tipo `data_iso`), montato a VM spenta.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MediaId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "disk_gib": {
+          "description": "Dimensione virtuale del disco principale QCOW2 in GiB.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "firmware": {
+          "description": "Firmware; nel MVP solo `uefi`.",
+          "$ref": "#/$defs/Firmware",
+          "default": "uefi"
+        },
+        "guest_os": {
+          "description": "Sistema operativo guest dichiarato.",
+          "$ref": "#/$defs/GuestOs"
+        },
+        "install_media": {
+          "description": "Supporto di installazione dal registro media (tipo `install_iso`).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MediaId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "memory_mib": {
+          "description": "Memoria guest in MiB (non è il limite dell'intero processo QEMU).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "name": {
+          "description": "Nome visibile.",
+          "$ref": "#/$defs/VmName"
+        },
+        "network": {
+          "description": "Profilo di rete; nel MVP solo `offline`.",
+          "$ref": "#/$defs/NetworkProfile",
+          "default": "offline"
+        },
+        "vcpus": {
+          "description": "Numero di vCPU (non è un limite percentuale di CPU: ROADMAP 7.2).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "guest_os",
+        "vcpus",
+        "memory_mib",
+        "disk_gib"
+      ]
+    },
+    "VmId": {
+      "description": "VmId: UUID versione 7 in minuscolo con trattini.",
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "VmName": {
+      "description": "Nome VM: etichetta ASCII, non un percorso.",
+      "type": "string",
+      "maxLength": 64,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9_][A-Za-z0-9 ._-]*$"
+    },
+    "VmRequest": {
+      "description": "Richiesta di azione su una VM.",
+      "type": "object",
+      "properties": {
+        "action": {
+          "description": "Azione (oggetto con discriminante `type`).",
+          "$ref": "#/$defs/VmAction"
+        },
+        "expected_run_id": {
+          "description": "Esecuzione attesa: obbligatoria per reset, screenshot e input; se presente\ne diversa dall'esecuzione corrente la richiesta è rifiutata (`state_conflict`).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RunId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "operation_id": {
+          "description": "Chiave di idempotenza scelta dal chiamante: la stessa richiesta ripetuta con\nlo stesso `operation_id` non duplica l'effetto.",
+          "$ref": "#/$defs/OperationId"
+        },
+        "vm_id": {
+          "description": "VM.",
+          "$ref": "#/$defs/VmId"
+        }
+      },
+      "required": [
+        "operation_id",
+        "vm_id",
+        "action"
+      ]
+    }
+  }
+}

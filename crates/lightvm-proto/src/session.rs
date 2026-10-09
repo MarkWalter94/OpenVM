@@ -11,7 +11,9 @@ use crate::{GrantId, OperationId, PublicError, SessionId, UtcTimestamp, VmId};
 
 /// Azione autorizzabile su una VM. I nomi serializzati seguono il catalogo MCP
 /// (ROADMAP 9); `vm.input` copre mouse e tastiera.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 pub enum Capability {
     /// Elenco filtrato dal grant.
     #[serde(rename = "vm.list")]
@@ -151,7 +153,9 @@ impl Quotas {
 }
 
 /// Revisione monotona della policy applicata (registrata nei report, ROADMAP 9).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(transparent)]
 pub struct PolicyRevision(pub u64);
 
@@ -278,7 +282,9 @@ impl Lease {
 }
 
 /// Stato di una sessione agente.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionState {
     /// Attiva.
@@ -290,7 +296,9 @@ pub enum SessionState {
 }
 
 /// Causa di terminazione di una sessione (registrata nel report, ROADMAP 9).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum TerminationCause {
     /// Chiusura ordinaria dall'app.
@@ -319,7 +327,9 @@ pub enum TerminationCause {
 
 /// Esito di un test (ROADMAP 9). Il completamento della conversazione non produce
 /// automaticamente `passed`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum TestOutcome {
     /// Criteri verificati.

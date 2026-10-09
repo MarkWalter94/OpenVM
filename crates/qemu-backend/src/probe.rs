@@ -18,10 +18,10 @@ use std::time::{Duration, Instant};
 use sha2::{Digest, Sha256};
 
 use crate::cmdline::{Accelerator, CpuModel, MachineType, build_probe_command, parse_q35_version};
-use crate::compat::RunId;
 use crate::error::{BackendError, Result};
 use crate::paths::ManagedPath;
 use crate::qmp::QmpConfig;
+use lightvm_proto::RunId;
 
 /// Versione di QEMU.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -153,6 +153,43 @@ impl AcceleratorStatus {
     pub fn is_available(&self) -> bool {
         matches!(self, Self::Available { .. })
     }
+
+    /// Messaggio per l'utente senza estratti di stderr (che possono contenere
+    /// percorsi): motivo sintetico e suggerimento, sempre con la dichiarazione
+    /// che TCG non viene usato.
+    pub fn public_message(&self) -> String {
+        match self {
+            Self::Available { .. } | Self::NotProbed => self.to_string(),
+            Self::Unavailable {
+                accelerator,
+                reason,
+            } => {
+                let a = accelerator.qemu_name().to_uppercase();
+                let what = match reason {
+                    UnavailableReason::NotCompiled { .. } => {
+                        format!("{a} non è incluso nel binario QEMU")
+                    }
+                    UnavailableReason::InitFailed { .. } => {
+                        format!("{a} non si è inizializzato")
+                    }
+                    UnavailableReason::WrongAccelerator { enabled } => {
+                        format!("QEMU è partito con `{enabled}` invece di {a}")
+                    }
+                    UnavailableReason::IncompatibleConfiguration { .. } => {
+                        format!("macchina o modello CPU rifiutati da QEMU con {a}")
+                    }
+                    UnavailableReason::ProbeFailed { .. } => {
+                        format!("verifica di {a} non conclusa")
+                    }
+                };
+                format!(
+                    "acceleratore hardware non disponibile: {what}. Avvio rifiutato: nessun \
+                     ripiego sull'emulazione TCG. {}",
+                    accel_hint(*accelerator)
+                )
+            }
+        }
+    }
 }
 
 fn accel_hint(a: Accelerator) -> &'static str {
@@ -231,6 +268,8 @@ pub struct HostCapabilities {
     pub qemu_system_sha256: String,
     /// Binario `qemu-img`.
     pub qemu_img: ManagedPath,
+    /// SHA-256 di `qemu-img`.
+    pub qemu_img_sha256: String,
     /// Versione di QEMU.
     pub version: QemuVersion,
     /// Versione di `qemu-img`.
@@ -406,7 +445,10 @@ pub fn parse_accel_help(text: &str) -> Vec<String> {
     text.lines()
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.ends_with(':'))
-        .filter(|l| l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+        .filter(|l| {
+            l.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        })
         .map(str::to_owned)
         .collect()
 }
@@ -674,6 +716,13 @@ pub fn find_firmware(qemu_system: &Path) -> Result<Option<FirmwareInfo>> {
     }))
 }
 
+/// SHA-256 di `qemu-system-x86_64.exe` 11.1.0 approvato (ADR-0010, F0-02 §2).
+pub const APPROVED_QEMU_SYSTEM_SHA256: &str =
+    "47d57a6072e0bb3bd98f87926eb129eb1736dfe818c67b3b81ef7ce4edd0b3cd";
+/// SHA-256 di `qemu-img.exe` 11.1.0 approvato (ADR-0010, F0-02 §2).
+pub const APPROVED_QEMU_IMG_SHA256: &str =
+    "9d930582d0d574bb106d89982c547688e10b8f356192d302cc3d0ae4e8674534";
+
 /// Configurazione del probe.
 #[derive(Clone, Debug)]
 pub struct ProbeConfig {
@@ -681,6 +730,11 @@ pub struct ProbeConfig {
     pub command_timeout: Duration,
     /// Timeout complessivo del probe dell'acceleratore.
     pub accelerator_timeout: Duration,
+    /// SHA-256 (esadecimale minuscolo) dei `qemu-system-x86_64` approvati.
+    /// Un binario con hash diverso non viene eseguito.
+    pub approved_qemu_system_sha256: Vec<String>,
+    /// SHA-256 dei `qemu-img` approvati.
+    pub approved_qemu_img_sha256: Vec<String>,
 }
 
 impl Default for ProbeConfig {
@@ -688,7 +742,27 @@ impl Default for ProbeConfig {
         Self {
             command_timeout: Duration::from_secs(15),
             accelerator_timeout: Duration::from_secs(20),
+            approved_qemu_system_sha256: vec![APPROVED_QEMU_SYSTEM_SHA256.to_owned()],
+            approved_qemu_img_sha256: vec![APPROVED_QEMU_IMG_SHA256.to_owned()],
         }
+    }
+}
+
+/// Calcola lo SHA-256 del binario e lo confronta con la lista approvata.
+///
+/// Limite dichiarato: fra il calcolo dell'hash e l'esecuzione il file potrebbe
+/// essere sostituito da un processo dello stesso utente; la directory dei
+/// binari approvati va quindi protetta dal proprietario dell'installazione.
+pub fn verify_approved_binary(
+    binary: &'static str,
+    path: &ManagedPath,
+    approved: &[String],
+) -> Result<String> {
+    let sha256 = sha256_file(path.as_path())?;
+    if approved.iter().any(|a| a.eq_ignore_ascii_case(&sha256)) {
+        Ok(sha256)
+    } else {
+        Err(BackendError::UnapprovedBinary { binary, sha256 })
     }
 }
 
@@ -701,6 +775,14 @@ pub fn probe_host(
     cfg: &ProbeConfig,
 ) -> Result<HostCapabilities> {
     let exe = qemu_system.as_path();
+    // Hash prima di qualunque esecuzione (ADR-0010).
+    let qemu_system_sha256 = verify_approved_binary(
+        "qemu-system-x86_64",
+        qemu_system,
+        &cfg.approved_qemu_system_sha256,
+    )?;
+    let qemu_img_sha256 =
+        verify_approved_binary("qemu-img", qemu_img, &cfg.approved_qemu_img_sha256)?;
     let run = |args: &[&str]| -> Result<String> {
         let o = run_capture(exe, args, cfg.command_timeout)?;
         if o.code != Some(0) {
@@ -743,7 +825,8 @@ pub fn probe_host(
         .collect();
     let q35_machines = q35_versioned(&machines);
     Ok(HostCapabilities {
-        qemu_system_sha256: sha256_file(exe)?,
+        qemu_system_sha256,
+        qemu_img_sha256,
         qemu_system: qemu_system.clone(),
         qemu_img: qemu_img.clone(),
         version,
@@ -776,14 +859,8 @@ pub async fn probe_accelerator(
         accelerator,
         reason,
     };
-    let tag = match RunId::new(format!("probe-{}", std::process::id())) {
-        Ok(t) => t,
-        Err(e) => {
-            return unavailable(UnavailableReason::ProbeFailed {
-                detail: e.to_string(),
-            });
-        }
-    };
+    // Ogni probe è un'esecuzione distinta con il proprio `run_id`.
+    let tag = RunId::new_v7();
     let cmd = match build_probe_command(
         caps.qemu_system.clone(),
         machine,
@@ -904,7 +981,14 @@ mod tests {
     #[test]
     fn cpu_reali() {
         let c = parse_cpu_help(CPU);
-        for m in ["qemu64", "Skylake-Client-v4", "Haswell-v4", "host", "max", "486"] {
+        for m in [
+            "qemu64",
+            "Skylake-Client-v4",
+            "Haswell-v4",
+            "host",
+            "max",
+            "486",
+        ] {
             assert!(c.contains(m), "{m}");
         }
         // la sezione dei flag CPUID non è confusa con i modelli
@@ -945,6 +1029,41 @@ mod tests {
         .to_string();
         assert!(msg.contains("WHPX non inizializzato"));
         assert!(msg.contains("Piattaforma hypervisor Windows"));
+    }
+
+    #[test]
+    fn lista_binari_approvati() {
+        let dir = std::env::temp_dir().join("lightvm-qemu-backend-tests");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = ManagedPath::verify(dir.join("finto-qemu.bin")).unwrap();
+        std::fs::write(p.as_path(), b"abc").unwrap();
+        // SHA-256 di "abc".
+        let abc = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        assert_eq!(
+            verify_approved_binary("qemu-img", &p, &[abc.to_uppercase()]).unwrap(),
+            abc
+        );
+        let e = verify_approved_binary("qemu-img", &p, &["00".repeat(32)]).unwrap_err();
+        assert!(matches!(e, BackendError::UnapprovedBinary { .. }), "{e}");
+        assert!(verify_approved_binary("qemu-img", &p, &[]).is_err());
+        let d = ProbeConfig::default();
+        assert_eq!(d.approved_qemu_system_sha256, [APPROVED_QEMU_SYSTEM_SHA256]);
+        assert_eq!(d.approved_qemu_img_sha256, [APPROVED_QEMU_IMG_SHA256]);
+        std::fs::remove_file(p.as_path()).unwrap();
+    }
+
+    #[test]
+    fn messaggio_pubblico_acceleratore() {
+        let s = AcceleratorStatus::Unavailable {
+            accelerator: Accelerator::Whpx,
+            reason: classify_accel_stderr(Accelerator::Whpx, ERR_WHPX),
+        };
+        let m = s.public_message();
+        assert!(m.contains("WHPX") && m.contains("TCG"), "{m}");
+        assert!(
+            !m.contains("No accelerator found"),
+            "niente stderr nel messaggio pubblico"
+        );
     }
 
     #[test]

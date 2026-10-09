@@ -3,12 +3,12 @@
 mod common;
 
 use rusqlite::params;
-use vm_storage::compat::{DiskId, MediaId};
 use vm_storage::{
-    AuditEvent, AuditOutcome, Catalog, CatalogLayout, DiskRecord, DiskRole, DiskStatus,
-    IntentKind, IntentSpec, Lifecycle, ManagedPath, MediaKind, MediaRecord, MediaSlot,
-    MediaStatus, NewVm, StorageError, TargetKind, TerminationCause, RunState, now_rfc3339,
+    AuditEvent, AuditOutcome, Catalog, CatalogLayout, DiskRecord, DiskRole, DiskStatus, IntentKind,
+    IntentSpec, Lifecycle, ManagedPath, MediaKind, MediaRecord, MediaSlot, MediaStatus, NewVm,
+    RunState, StorageError, TargetKind, TerminationCause, now_rfc3339,
 };
+use vm_storage::{DiskId, MediaId};
 
 #[test]
 fn vm_name_is_unique_case_insensitive() {
@@ -55,7 +55,10 @@ fn referenced_baseline_cannot_be_deleted() {
             read_only: false,
         })
         .unwrap_err();
-    assert!(matches!(err, StorageError::Referenced("baseline_referenced")));
+    assert!(matches!(
+        err,
+        StorageError::Referenced("baseline_referenced")
+    ));
     // Anche dopo la fine dell'esecuzione l'overlay conservato la referenzia.
     cat.with_tx(|tx| tx.end_run(&run.run_id, RunState::Stopped, TerminationCause::Shutdown))
         .unwrap();
@@ -69,7 +72,11 @@ fn referenced_baseline_cannot_be_deleted() {
     assert!(matches!(err, StorageError::Referenced("disk_referenced")));
 
     assert_eq!(common::base_hash(&mut cat, &b), before, "base integra");
-    assert!(dir.path().join(CatalogLayout::baseline_disk(&vm, &b).as_str()).is_file());
+    assert!(
+        dir.path()
+            .join(CatalogLayout::baseline_disk(&vm, &b).as_str())
+            .is_file()
+    );
 }
 
 #[test]
@@ -79,7 +86,10 @@ fn protected_baseline_cannot_be_deleted() {
     let vm = common::new_vm(&mut cat, "vm");
     let b = common::baseline(&mut cat, &vm, true);
     let err = cat.with_tx(|tx| tx.delete_baseline(&b)).unwrap_err();
-    assert!(matches!(err, StorageError::Referenced("baseline_protected")));
+    assert!(matches!(
+        err,
+        StorageError::Referenced("baseline_protected")
+    ));
 }
 
 #[test]
@@ -103,7 +113,11 @@ fn unreferenced_baseline_is_deleted_through_the_journal() {
     assert!(i.temp_path.is_dir(), "directory spostata in tmp/");
     cat.commit(&i, |tx| tx.delete_baseline(&b)).unwrap();
     assert!(!i.temp_path.exists(), "temporaneo rimosso dopo la conferma");
-    assert!(!dir.path().join(CatalogLayout::baseline_dir(&vm, &b).as_str()).exists());
+    assert!(
+        !dir.path()
+            .join(CatalogLayout::baseline_dir(&vm, &b).as_str())
+            .exists()
+    );
     assert!(cat.read(|tx| tx.baseline(&b)).is_err());
 }
 
@@ -178,8 +192,15 @@ fn overlay_backing_must_be_a_base_and_base_is_immutable() {
         status: DiskStatus::Ready,
         created_at: now_rfc3339(),
     };
-    cat.with_tx(|tx| tx.insert_disk(&rec(primary, DiskRole::Primary, None, "vms/a/primary.qcow2")))
-        .unwrap();
+    cat.with_tx(|tx| {
+        tx.insert_disk(&rec(
+            primary,
+            DiskRole::Primary,
+            None,
+            "vms/a/primary.qcow2",
+        ))
+    })
+    .unwrap();
     let err = cat
         .with_tx(|tx| {
             tx.insert_disk(&rec(
@@ -239,7 +260,10 @@ fn audit_is_append_only_and_monotonic() {
     }
     let events = cat.read(|tx| tx.audit_since(0, 100)).unwrap();
     assert_eq!(events.len(), 3);
-    assert_eq!(events[1].event.error_code.as_deref(), Some("permission_denied"));
+    assert_eq!(
+        events[1].event.error_code.as_deref(),
+        Some("permission_denied")
+    );
     let dbp = dir.path().join(vm_storage::DB_FILE);
     drop(cat);
     let conn = vm_storage::migrate::open_connection(&dbp).unwrap();

@@ -4,9 +4,10 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
-use crate::compat::{BaselineId, IdSql, OperationId, VmId};
 use crate::enums::{DiskRole, DiskStatus, IntentKind, IntentState, TargetKind};
 use crate::error::{PathRejection, Result, SqlResultExt, StorageError};
+use crate::fsx;
+use crate::ids::{BaselineId, IdSql, OperationId, VmId};
 use crate::layout::{CatalogLayout, CatalogLock, TMP_DIR, TmpCleanup};
 use crate::manifest::{
     self, BaselineManifest, Divergence, MANIFEST_FORMAT_VERSION, ManifestFile, ManifestMedia,
@@ -17,6 +18,10 @@ use crate::paths::{ManagedPath, is_link};
 use crate::records::Tx;
 use crate::recover::RecoveryReport;
 use crate::time::{UtcMillis, now_rfc3339};
+
+/// Esito registrato quando la pubblicazione trova la destinazione già occupata
+/// da un file che l'intento non ha creato: quel file non va mai rimosso.
+const DESTINATION_CONFLICT: &str = "destination_conflict";
 
 /// Esito dell'apertura del catalogo.
 #[derive(Debug, Clone)]
@@ -316,22 +321,25 @@ impl Catalog {
                     ));
                 }
                 sync_file(&intent.temp_path)?;
-                if intent.read_only {
-                    let mut p = meta.permissions();
-                    p.set_readonly(true);
-                    std::fs::set_permissions(&intent.temp_path, p)
-                        .map_err(|e| StorageError::io(&intent.temp_path, e))?;
-                }
-                if exists_no_follow(dest)? {
-                    return Err(StorageError::StateConflict(
-                        "destinazione comparsa durante l'operazione".into(),
-                    ));
-                }
                 // Ricontrollo dei collegamenti sul percorso di destinazione.
-                if let Some(rel) = &intent.final_rel {
-                    self.layout.resolve(rel)?;
+                let rel = intent
+                    .final_rel
+                    .as_ref()
+                    .ok_or_else(|| StorageError::StateConflict("destinazione assente".into()))?;
+                self.layout.resolve(rel)?;
+                // Pubblicazione senza sovrascrittura (collegamento fisico): una
+                // destinazione comparsa nel frattempo non viene mai sostituita.
+                if let Err(e) = fsx::publish_no_replace(&intent.temp_path, dest, rel) {
+                    if matches!(e, StorageError::StateConflict(_)) {
+                        // La destinazione non è nostra: l'annullamento e la
+                        // riconciliazione non devono rimuoverla.
+                        self.set_resolution(intent.id, DESTINATION_CONFLICT)?;
+                    }
+                    return Err(e);
                 }
-                std::fs::rename(&intent.temp_path, dest).map_err(|e| StorageError::io(dest, e))?;
+                if intent.read_only {
+                    fsx::ensure_readonly(dest)?;
+                }
             }
             IntentKind::DeleteFile => {
                 let src = intent
@@ -439,20 +447,31 @@ impl Catalog {
             .db()
     }
 
-    /// Intenti non conclusi (`pending` o `applied`).
+    /// Intenti non conclusi (`pending`, `applied` o `needs_review`).
     pub fn open_intents(&self) -> Result<Vec<Intent>> {
-        let ids: Vec<i64> = {
-            let mut st = self
-                .conn
-                .prepare(
-                    "SELECT intent_id FROM journal WHERE state IN ('pending','applied')
-                     ORDER BY intent_id",
-                )
-                .db()?;
-            let rows = st.query_map([], |r| r.get(0)).db()?;
-            rows.collect::<rusqlite::Result<_>>().db()?
-        };
-        ids.into_iter().map(|id| self.intent_row(id)).collect()
+        self.intent_ids_in("'pending','applied','needs_review'")?
+            .into_iter()
+            .map(|id| self.intent_row(id))
+            .collect()
+    }
+
+    /// Intenti che la riconciliazione non è riuscita a risolvere ("da
+    /// verificare"): la VM coinvolta resta occupata. Il dettaglio dell'ultimo
+    /// tentativo è in [`Self::intent_resolution`].
+    pub fn intents_needing_review(&self) -> Result<Vec<i64>> {
+        self.intent_ids_in("'needs_review'")
+    }
+
+    /// Identificativi degli intenti negli stati indicati (letterali SQL fissi).
+    pub(crate) fn intent_ids_in(&self, states: &'static str) -> Result<Vec<i64>> {
+        let mut st = self
+            .conn
+            .prepare(&format!(
+                "SELECT intent_id FROM journal WHERE state IN ({states}) ORDER BY intent_id"
+            ))
+            .db()?;
+        let rows = st.query_map([], |r| r.get(0)).db()?;
+        rows.collect::<rusqlite::Result<_>>().db()
     }
 
     pub(crate) fn intent_row(&self, id: i64) -> Result<Intent> {
@@ -507,11 +526,22 @@ impl Catalog {
         })
     }
 
+    /// Temporanei degli intenti non conclusi, da non toccare nella pulizia di
+    /// `tmp/`. Letti come testo: un intento con percorsi non risolvibili (per
+    /// esempio dietro un collegamento) non impedisce l'apertura del catalogo.
     fn open_intent_temp_paths(&self) -> Result<Vec<ManagedPath>> {
-        Ok(self
-            .open_intents()?
-            .into_iter()
-            .map(|i| i.temp_rel)
+        let mut st = self
+            .conn
+            .prepare(
+                "SELECT temp_path FROM journal
+                 WHERE state IN ('pending','applied','needs_review')",
+            )
+            .db()?;
+        let rows = st.query_map([], |r| r.get::<_, String>(0)).db()?;
+        let texts = rows.collect::<rusqlite::Result<Vec<_>>>().db()?;
+        Ok(texts
+            .iter()
+            .filter_map(|t| ManagedPath::parse(t).ok())
             .collect())
     }
 
@@ -561,7 +591,11 @@ impl Catalog {
                     remove_temp(&self.layout, &i.temp_rel)?;
                     parts.push("temp_removed");
                 }
-                if final_exists && !row_exists {
+                let foreign_final =
+                    self.intent_resolution(i.id)?.as_deref() == Some(DESTINATION_CONFLICT);
+                if final_exists && !row_exists && foreign_final {
+                    parts.push("foreign_final_kept");
+                } else if final_exists && !row_exists {
                     if let Some(rel) = &i.final_rel {
                         remove_managed_file(&self.layout, rel)?;
                         if i.kind == IntentKind::PromoteBaseline {
@@ -569,6 +603,15 @@ impl Catalog {
                         }
                     }
                     parts.push("orphan_final_removed");
+                } else if !final_exists
+                    && !row_exists
+                    && i.kind == IntentKind::PromoteBaseline
+                    && let Some(rel) = &i.final_rel
+                {
+                    // Interruzione prima della pubblicazione: la directory
+                    // della nuova baseline (creata da `begin_intent`) e un
+                    // eventuale manifest vanno rimossi.
+                    remove_baseline_leftovers(&self.layout, rel)?;
                 }
                 if parts.is_empty() {
                     parts.push("nothing_to_undo");
@@ -798,7 +841,7 @@ fn check_vm_free(tx: &Tx<'_>, vm: Option<&VmId>, op: Option<&OperationId>) -> Re
         .conn()
         .prepare(
             "SELECT operation_id FROM journal
-             WHERE vm_id = ?1 AND state IN ('pending','applied')",
+             WHERE vm_id = ?1 AND state IN ('pending','applied','needs_review')",
         )
         .db()?;
     let ops = st

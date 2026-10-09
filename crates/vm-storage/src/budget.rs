@@ -9,10 +9,11 @@
 //! rifiutata con [`StorageError::Unsupported`].
 
 use rusqlite::{OptionalExtension, params};
+use serde::{Deserialize, Serialize};
 
 use crate::catalog::Catalog;
-use crate::compat::{IdSql, VmId};
 use crate::error::{Result, SqlResultExt, StorageError};
+use crate::ids::{BaselineId, IdSql, RunId, VmId, idc};
 use crate::time::now_rfc3339;
 
 /// Natura del controllo richiesta dalla policy.
@@ -25,7 +26,7 @@ pub enum Enforcement {
 }
 
 /// Consumo per categoria, in byte.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageUsage {
     /// Overlay delle esecuzioni (byte misurati).
     pub overlays: u64,
@@ -283,5 +284,243 @@ impl Catalog {
             config,
             requested_bytes,
         })
+    }
+}
+
+/// Nome del manifest di budget nella radice del catalogo.
+pub const BUDGET_MANIFEST_FILE: &str = "budget.json";
+
+/// Occupazione di una baseline (disco base e vars).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BaselineUsage {
+    /// Baseline.
+    pub baseline_id: BaselineId,
+    /// Byte del disco base.
+    pub disk_bytes: u64,
+    /// Byte del vars della baseline.
+    pub vars_bytes: u64,
+    /// Totale.
+    pub total_bytes: u64,
+}
+
+/// Occupazione di un'esecuzione.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunUsage {
+    /// Esecuzione.
+    pub run_id: RunId,
+    /// Esecuzione conclusa (overlay conservato o in attesa di eliminazione).
+    pub ended: bool,
+    /// Byte dell'overlay.
+    pub overlay_bytes: u64,
+    /// Byte del vars dell'esecuzione.
+    pub firmware_bytes: u64,
+    /// Screenshot e report.
+    pub artifact_bytes: u64,
+    /// Log.
+    pub log_bytes: u64,
+    /// Totale.
+    pub total_bytes: u64,
+}
+
+/// Occupazione e limite di una VM.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VmBudget {
+    /// VM.
+    pub vm_id: VmId,
+    /// Budget dichiarato (`None` = non dichiarato).
+    pub budget_bytes: Option<u64>,
+    /// Consumo per categoria.
+    pub usage: StorageUsage,
+    /// Totale.
+    pub total_bytes: u64,
+    /// Budget dichiarato e superato.
+    pub exceeded: bool,
+    /// Baseline della VM.
+    pub baselines: Vec<BaselineUsage>,
+    /// Esecuzioni della VM.
+    pub runs: Vec<RunUsage>,
+}
+
+/// Manifest di budget: occupazione per catalogo, VM, baseline ed esecuzione,
+/// con i limiti dichiarati. Fotografia dei byte registrati nel catalogo (vedi
+/// [`Catalog::refresh_disk_sizes`]); non è una quota rigida del sistema.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BudgetManifest {
+    /// Versione del formato.
+    pub format_version: u32,
+    /// Sempre `"budget"`.
+    pub kind: String,
+    /// Istante di produzione (UTC).
+    pub generated_at: String,
+    /// Natura del controllo: sempre `"application_budget"`.
+    pub enforcement: String,
+    /// Budget del catalogo.
+    pub global_bytes: Option<u64>,
+    /// Riserva da lasciare libera sul volume host.
+    pub host_reserve_bytes: u64,
+    /// Consumo del catalogo (media e metadati inclusi).
+    pub catalog_usage: StorageUsage,
+    /// Totale del catalogo.
+    pub catalog_total_bytes: u64,
+    /// Budget del catalogo dichiarato e superato.
+    pub catalog_exceeded: bool,
+    /// VM, ordinate per identificativo.
+    pub vms: Vec<VmBudget>,
+}
+
+/// Richiesta di controllo del budget per una nuova esecuzione.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunBudgetRequest {
+    /// Crescita stimata dell'esecuzione (overlay, vars, artefatti, log).
+    pub requested_bytes: u64,
+    /// Spazio libero del volume misurato dal chiamante.
+    pub host_free_bytes: u64,
+    /// Natura del controllo richiesta dalla policy.
+    pub enforcement: Enforcement,
+}
+
+impl Catalog {
+    /// Costruisce il manifest di budget dai byte registrati.
+    pub fn budget_manifest(&mut self) -> Result<BudgetManifest> {
+        let vm_ids = self.read(|tx| tx.vm_ids())?;
+        let catalog_usage = self.storage_usage(None)?;
+        let (global_bytes, host_reserve_bytes) = self.budget_config_global()?;
+        let mut vms = Vec::new();
+        for vm in vm_ids {
+            let config = self.budget_config(&vm)?;
+            let usage = self.storage_usage(Some(&vm))?;
+            let total = usage.total();
+            vms.push(VmBudget {
+                vm_id: vm,
+                budget_bytes: config.vm_bytes,
+                usage,
+                total_bytes: total,
+                exceeded: config.vm_bytes.is_some_and(|l| total > l),
+                baselines: self.baseline_usage(&vm)?,
+                runs: self.run_usage(&vm)?,
+            });
+        }
+        vms.sort_by_key(|v| v.vm_id);
+        let catalog_total = catalog_usage.total();
+        Ok(BudgetManifest {
+            format_version: crate::manifest::MANIFEST_FORMAT_VERSION,
+            kind: "budget".into(),
+            generated_at: now_rfc3339(),
+            enforcement: "application_budget".into(),
+            global_bytes,
+            host_reserve_bytes,
+            catalog_usage,
+            catalog_total_bytes: catalog_total,
+            catalog_exceeded: global_bytes.is_some_and(|l| catalog_total > l),
+            vms,
+        })
+    }
+
+    /// Scrive il manifest di budget in `budget.json` (scrittura atomica) e ne
+    /// registra lo SHA-256 in `catalog_meta`. Restituisce il manifest scritto.
+    pub fn write_budget_manifest(&mut self) -> Result<BudgetManifest> {
+        let m = self.budget_manifest()?;
+        let rel = crate::paths::ManagedPath::parse(BUDGET_MANIFEST_FILE)?;
+        let sha = crate::manifest::write_atomic(&self.layout, &rel, &m)?;
+        self.with_tx(|tx| {
+            tx.conn()
+                .execute(
+                    "INSERT INTO catalog_meta(key, value) VALUES ('budget_manifest_sha256', ?1)
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    params![sha],
+                )
+                .db()?;
+            Ok(())
+        })?;
+        Ok(m)
+    }
+
+    fn budget_config_global(&self) -> Result<(Option<u64>, u64)> {
+        let g: Option<(i64, i64)> = self
+            .conn
+            .query_row(
+                "SELECT budget_bytes, host_reserve_bytes FROM storage_budgets WHERE scope_key = 'global'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .db()?;
+        Ok((g.map(|g| u(g.0)), g.map(|g| u(g.1)).unwrap_or(0)))
+    }
+
+    fn baseline_usage(&self, vm: &VmId) -> Result<Vec<BaselineUsage>> {
+        let mut st = self
+            .conn
+            .prepare(
+                "SELECT b.baseline_id, d.allocated_bytes, coalesce(f.size_bytes, 0)
+                 FROM baselines b JOIN disks d ON d.disk_id = b.base_disk_id
+                 LEFT JOIN firmware_state f ON f.fw_id = b.vars_fw_id
+                 WHERE b.vm_id = ?1 ORDER BY b.baseline_id",
+            )
+            .db()?;
+        let rows = st
+            .query_map(params![vm.sql()], |r| {
+                Ok((
+                    idc::<BaselineId>(r, 0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            })
+            .db()?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (baseline_id, d, f) = row.db()?;
+            let (disk_bytes, vars_bytes) = (u(d), u(f));
+            out.push(BaselineUsage {
+                baseline_id,
+                disk_bytes,
+                vars_bytes,
+                total_bytes: disk_bytes.saturating_add(vars_bytes),
+            });
+        }
+        Ok(out)
+    }
+
+    fn run_usage(&self, vm: &VmId) -> Result<Vec<RunUsage>> {
+        let mut st = self
+            .conn
+            .prepare(
+                "SELECT r.run_id, r.ended_at IS NOT NULL,
+                        coalesce((SELECT allocated_bytes FROM disks WHERE disk_id = r.overlay_disk_id), 0),
+                        coalesce((SELECT size_bytes FROM firmware_state WHERE fw_id = r.vars_fw_id), 0),
+                        coalesce((SELECT sum(size_bytes) FROM artifacts a
+                                  WHERE a.run_id = r.run_id AND a.kind <> 'log'), 0),
+                        coalesce((SELECT sum(size_bytes) FROM artifacts a
+                                  WHERE a.run_id = r.run_id AND a.kind = 'log'), 0)
+                 FROM runs r WHERE r.vm_id = ?1 ORDER BY r.run_id",
+            )
+            .db()?;
+        let rows = st
+            .query_map(params![vm.sql()], |r| {
+                Ok((
+                    idc::<RunId>(r, 0)?,
+                    r.get::<_, bool>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, i64>(5)?,
+                ))
+            })
+            .db()?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (run_id, ended, o, f, a, l) = row.db()?;
+            let (o, f, a, l) = (u(o), u(f), u(a), u(l));
+            out.push(RunUsage {
+                run_id,
+                ended,
+                overlay_bytes: o,
+                firmware_bytes: f,
+                artifact_bytes: a,
+                log_bytes: l,
+                total_bytes: o.saturating_add(f).saturating_add(a).saturating_add(l),
+            });
+        }
+        Ok(out)
     }
 }

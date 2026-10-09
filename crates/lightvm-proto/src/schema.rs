@@ -62,6 +62,9 @@ pub fn public_schemas() -> Vec<(&'static str, Schema)> {
         ("vm_request", generate::<VmRequest>()),
         ("admission", generate::<Admission>()),
     ]
+    .into_iter()
+    .chain(ipc::schemas())
+    .collect()
 }
 
 /// Serializzazione canonica di uno schema (JSON indentato, `\n` finale).

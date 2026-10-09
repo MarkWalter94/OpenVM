@@ -105,6 +105,15 @@ pub enum StorageError {
     /// Capacità richiesta non disponibile (per esempio quota rigida OS).
     #[error("non supportato: {0}")]
     Unsupported(&'static str),
+    /// Il contenuto di un file gestito non corrisponde a quanto registrato
+    /// (hash o dimensione): baseline o media alterati fuori dal catalogo.
+    #[error("integrità non verificata per {path}: {detail}")]
+    IntegrityMismatch {
+        /// Percorso gestito.
+        path: String,
+        /// Dettaglio (valore atteso e osservato).
+        detail: String,
+    },
 }
 
 impl StorageError {
@@ -127,9 +136,10 @@ impl StorageError {
     pub fn public_code(&self) -> Option<&'static str> {
         match self {
             Self::VmBusy(_) | Self::CatalogLocked(_) => Some("vm_busy"),
-            Self::StateConflict(_) | Self::Referenced(_) | Self::Constraint(_) => {
-                Some("state_conflict")
-            }
+            Self::StateConflict(_)
+            | Self::Referenced(_)
+            | Self::Constraint(_)
+            | Self::IntegrityMismatch { .. } => Some("state_conflict"),
             Self::ResourceLimit(_) => Some("resource_limit"),
             Self::Unsupported(_) => Some("unsupported"),
             Self::InvalidPath { .. } => Some("permission_denied"),

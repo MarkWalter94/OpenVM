@@ -23,7 +23,7 @@ pub enum Caller {
     Agent {
         /// Sessione dichiarata.
         session_id: SessionId,
-        /// Segreto di sessione; assente = diniego.
+        /// Segreto di sessione; assente = diniego `unauthenticated`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         token: Option<SessionToken>,
     },

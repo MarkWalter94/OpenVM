@@ -1,0 +1,31 @@
+[package]
+name = "lightvm-mcp"
+description = "LightVM: spike F1-19 dell'SDK MCP (rmcp) con trasporto stdio e tool finti; non è l'adapter di prodotto (F5)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Spike di selezione dell'SDK (ADR-0021, docs/verification/F1-06-mcp-sdk.md).
+# Il crate di prodotto `mcp-server` nasce in F5 (ROADMAP 6.2): questo crate
+# serve solo a provare l'SDK con la revisione MCP 2025-11-25 su stdio.
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "lightvm-mcp-spike"
+path = "src/main.rs"
+
+# Versioni esatte (`=`), nessuna dipendenza git, nessuna feature di rete:
+# niente HTTP, niente OAuth, niente processo figlio lato client.
+[dependencies]
+rmcp = { version = "=3.5.1", default-features = false, features = ["server", "macros", "transport-io"] }
+schemars = { version = "=1.2.2", default-features = false, features = ["derive", "std"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+tokio = { version = "=1.53.2", features = ["io-std", "macros", "rt"] }
+
+[lints]
+workspace = true

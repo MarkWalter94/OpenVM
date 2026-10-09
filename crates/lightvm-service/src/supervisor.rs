@@ -1,30 +1,26 @@
-//! Ciclo principale del supervisor: un thread dedicato possiede `Catalog` e
-//! `Backend` (unico proprietario, nessun lock condiviso sullo stato VM) e
-//! serve i comandi in ordine. L'Emergency Stop NON passa da qui: usa
-//! [`EmergencyStop`], ottenuto dal backend all'avvio e chiamabile da qualunque
-//! task (ROADMAP 7.3, ADR-0009).
+//! Ciclo principale del supervisor: un thread dedicato possiede il motore
+//! delle VM ([`VmEngine`], con `vm_core::Core`) e l'host ([`Backend`]) come
+//! unico proprietario (nessun lock condiviso sullo stato VM) e serve i comandi
+//! in ordine. L'Emergency Stop NON passa da qui: usa [`EmergencyStop`],
+//! ottenuto dall'host all'avvio e chiamabile da qualunque task (ROADMAP 7.3,
+//! ADR-0009); solo dopo la terminazione il supervisor la registra nel core.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Condvar, Mutex};
 
+use lightvm_proto::ipc::{
+    Capabilities, ResponseBody, SUPPORTED_PROTOCOL_VERSIONS, ServiceEvent, ServiceState, StopReason,
+};
+use lightvm_proto::{Caller, PublicError, ReplyError, VmConfig, VmId, VmRequest};
 use tokio::sync::{OwnedSemaphorePermit, broadcast, oneshot, watch};
 
-use crate::compat::{
-    Capabilities, ErrorCode, ReplyError, ResponseBody, SUPPORTED_PROTOCOL_VERSIONS, ServiceEvent,
-    ServiceState, StopReason, VmState, VmSummary, op_error,
-};
+use crate::engine::VmEngine;
 
-/// Catalogo delle VM.
+/// Host del servizio: processi, sessioni agente e percorso prioritario.
 ///
-/// TODO(F1): implementazione reale in `vm-storage` (SQLite, manifest).
-pub trait Catalog: Send + 'static {
-    /// Elenco delle VM.
-    fn list_vms(&mut self) -> Result<Vec<VmSummary>, ReplyError>;
-}
-
-/// Backend di esecuzione.
-///
-/// TODO(F1): implementazione reale in `qemu-backend` (processi, QMP, Job Object).
+/// Implementazioni: [`crate::adapters::backend::QemuHost`] (reale) e
+/// [`crate::fakes::FakeHost`] (test).
 pub trait Backend: Send + 'static {
     /// Nome del backend.
     fn name(&self) -> String;
@@ -37,10 +33,11 @@ pub trait Backend: Send + 'static {
     /// Hook per la sorte delle VM manuali dopo la perdita della UI.
     ///
     /// ADR-0015 parte B è in sospeso: il servizio chiama questo hook e poi
-    /// applica [`OrphanPolicy`]; il backend reale deciderà se arrestare o
-    /// mantenere le VM manuali.
+    /// applica [`OrphanPolicy`]; con la politica predefinita segue l'arresto
+    /// controllato, che arresta anche le VM manuali.
     fn on_parent_lost(&mut self, policy: OrphanPolicy);
-    /// Arresto controllato delle VM possedute (chiamato durante lo shutdown).
+    /// Rilascio finale dell'host (chiamato durante lo shutdown, dopo l'arresto
+    /// delle VM da parte del motore).
     fn shutdown(&mut self);
 }
 
@@ -73,11 +70,22 @@ pub enum OrphanPolicy {
 }
 
 /// Richieste servite dal thread del supervisor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SupervisorRequest {
     Ping,
     GetCapabilities,
     ListVms,
+    VmStatus(VmId),
+    CreateVm(Box<VmConfig>),
+    SubmitVm(Box<VmRequest>),
+}
+
+impl SupervisorRequest {
+    /// Richiesta che modifica VM o catalogo: scartata se accodata prima di
+    /// un Emergency Stop.
+    fn is_mutation(&self) -> bool {
+        matches!(self, Self::CreateVm(_) | Self::SubmitVm(_))
+    }
 }
 
 pub(crate) type Reply = oneshot::Sender<Result<ResponseBody, ReplyError>>;
@@ -85,13 +93,19 @@ pub(crate) type Reply = oneshot::Sender<Result<ResponseBody, ReplyError>>;
 pub(crate) enum Command {
     Request {
         req: SupervisorRequest,
+        /// Chiamante verso il core; `None` per i ruoli senza permessi VM.
+        caller: Option<Caller>,
         /// Revoca della connessione: ricontrollata immediatamente prima di
         /// eseguire (doppio controllo, ROADMAP 7.3).
         revoked: watch::Receiver<bool>,
+        /// Generazione dell'Emergency Stop al momento dell'accodamento.
+        epoch: u64,
         reply: Reply,
         /// Posto in coda: rilasciato quando il comando è servito.
         _permit: OwnedSemaphorePermit,
     },
+    /// L'Emergency Stop ha già terminato i processi: registrazione nel core.
+    EmergencyReconcile,
     ParentLost {
         policy: OrphanPolicy,
         done: oneshot::Sender<()>,
@@ -105,42 +119,52 @@ impl std::fmt::Debug for Command {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Request { req, .. } => write!(f, "Request({req:?})"),
+            Self::EmergencyReconcile => write!(f, "EmergencyReconcile"),
             Self::ParentLost { policy, .. } => write!(f, "ParentLost({policy:?})"),
             Self::Shutdown { .. } => write!(f, "Shutdown"),
         }
     }
 }
 
+/// Errore per credenziale o connessione non più valida.
+pub(crate) fn unauthenticated(message: &str) -> ReplyError {
+    ReplyError::Operational(PublicError::unauthenticated(message))
+}
+
 pub(crate) struct SupervisorThread {
-    pub(crate) catalog: Box<dyn Catalog>,
+    pub(crate) engine: Box<dyn VmEngine>,
     pub(crate) backend: Box<dyn Backend>,
     pub(crate) events: broadcast::Sender<ServiceEvent>,
     pub(crate) max_frame: u32,
+    pub(crate) emergency_epoch: Arc<AtomicU64>,
 }
 
 impl SupervisorThread {
     pub(crate) fn run(mut self, rx: mpsc::Receiver<Command>) {
-        let _ = self.events.send(ServiceEvent::ServiceState {
-            state: ServiceState::Running,
-        });
         while let Ok(cmd) = rx.recv() {
             match cmd {
                 Command::Request {
                     req,
+                    caller,
                     revoked,
+                    epoch,
                     reply,
                     _permit,
                 } => {
                     let res = if *revoked.borrow() {
-                        Err(op_error(
-                            ErrorCode::PermissionDenied,
-                            "connessione revocata",
-                        ))
+                        Err(unauthenticated("connessione revocata"))
+                    } else if req.is_mutation()
+                        && epoch != self.emergency_epoch.load(Ordering::SeqCst)
+                    {
+                        Err(ReplyError::Operational(PublicError::state_conflict(
+                            "richiesta scartata dall'Emergency Stop",
+                        )))
                     } else {
-                        self.handle(req)
+                        self.handle(req, caller.as_ref())
                     };
                     let _ = reply.send(res);
                 }
+                Command::EmergencyReconcile => self.engine.after_emergency_stop(),
                 Command::ParentLost { policy, done } => {
                     self.backend.stop_agent_sessions(StopReason::ParentLost);
                     self.backend.on_parent_lost(policy);
@@ -157,27 +181,45 @@ impl SupervisorThread {
                     while let Ok(pending) = rx.try_recv() {
                         match pending {
                             Command::Request { reply, .. } => {
-                                let _ = reply.send(Err(op_error(
-                                    ErrorCode::StateConflict,
-                                    "servizio in arresto",
+                                let _ = reply.send(Err(ReplyError::Operational(
+                                    PublicError::state_conflict("servizio in arresto"),
                                 )));
                             }
+                            Command::EmergencyReconcile => self.engine.after_emergency_stop(),
                             Command::ParentLost { done, .. } | Command::Shutdown { done } => {
                                 let _ = done.send(());
                             }
                         }
                     }
                     self.backend.stop_agent_sessions(StopReason::Shutdown);
+                    self.engine.stop_all();
+                    self.publish_state_changes();
                     self.backend.shutdown();
                     let _ = done.send(());
                     return;
                 }
             }
+            self.publish_state_changes();
         }
     }
 
-    fn handle(&mut self, req: SupervisorRequest) -> Result<ResponseBody, ReplyError> {
-        match req {
+    fn publish_state_changes(&mut self) {
+        for (vm_id, state) in self.engine.state_changes() {
+            let _ = self.events.send(ServiceEvent::VmState { vm_id, state });
+        }
+    }
+
+    fn handle(
+        &mut self,
+        req: SupervisorRequest,
+        caller: Option<&Caller>,
+    ) -> Result<ResponseBody, ReplyError> {
+        let who = || {
+            caller.ok_or_else(|| {
+                PublicError::permission_denied("nessun permesso sulle VM per questo ruolo")
+            })
+        };
+        let r = match req {
             SupervisorRequest::Ping => Ok(ResponseBody::Pong),
             SupervisorRequest::GetCapabilities => Ok(ResponseBody::Capabilities(Capabilities {
                 protocol_versions: SUPPORTED_PROTOCOL_VERSIONS.to_vec(),
@@ -186,129 +228,26 @@ impl SupervisorThread {
                 max_frame_bytes: self.max_frame,
             })),
             SupervisorRequest::ListVms => self
-                .catalog
-                .list_vms()
+                .engine
+                .list_vms(who()?)
                 .map(|vms| ResponseBody::VmList { vms }),
-        }
-    }
-}
-
-/// Implementazioni finte per lo skeleton e per i test. Non avviano processi.
-pub mod fake {
-    use super::*;
-
-    /// Registro delle chiamate ricevute dalle implementazioni finte.
-    pub type Calls = Arc<Mutex<Vec<String>>>;
-
-    /// Cancello che blocca `list_vms` finché non viene aperto (per i test di coda).
-    #[derive(Debug, Default)]
-    pub struct Gate {
-        open: Mutex<bool>,
-        cv: Condvar,
-    }
-
-    impl Gate {
-        /// Cancello chiuso.
-        pub fn closed() -> Arc<Self> {
-            Arc::new(Self::default())
-        }
-
-        /// Apre il cancello.
-        pub fn open(&self) {
-            let mut g = self.open.lock().unwrap_or_else(|e| e.into_inner());
-            *g = true;
-            self.cv.notify_all();
-        }
-
-        fn wait(&self) {
-            let mut g = self.open.lock().unwrap_or_else(|e| e.into_inner());
-            while !*g {
-                g = self.cv.wait(g).unwrap_or_else(|e| e.into_inner());
+            SupervisorRequest::VmStatus(vm_id) => self
+                .engine
+                .vm_status(who()?, vm_id)
+                .map(|vm| ResponseBody::Vm { vm }),
+            SupervisorRequest::CreateVm(config) => self
+                .engine
+                .create_vm(who()?, *config)
+                .map(|vm| ResponseBody::VmCreated { vm }),
+            SupervisorRequest::SubmitVm(req) => {
+                self.engine
+                    .submit(who()?, *req)
+                    .map(|(admission, operation)| ResponseBody::Operation {
+                        admission,
+                        operation,
+                    })
             }
-        }
-    }
-
-    /// Catalogo finto con VM fisse.
-    #[derive(Debug, Default)]
-    pub struct FakeCatalog {
-        /// VM restituite.
-        pub vms: Vec<VmSummary>,
-        /// Cancello opzionale su `list_vms`.
-        pub gate: Option<Arc<Gate>>,
-    }
-
-    impl FakeCatalog {
-        /// Catalogo con una VM di esempio spenta.
-        pub fn sample() -> Self {
-            Self {
-                vms: vec![VmSummary {
-                    vm_id: "vm-0001".into(),
-                    name: "esempio".into(),
-                    state: VmState::Stopped,
-                }],
-                gate: None,
-            }
-        }
-    }
-
-    impl Catalog for FakeCatalog {
-        fn list_vms(&mut self) -> Result<Vec<VmSummary>, ReplyError> {
-            if let Some(g) = &self.gate {
-                g.wait();
-            }
-            Ok(self.vms.clone())
-        }
-    }
-
-    /// Backend finto: registra le chiamate.
-    #[derive(Debug, Default)]
-    pub struct FakeBackend {
-        /// Chiamate ricevute.
-        pub calls: Calls,
-    }
-
-    #[derive(Debug)]
-    struct FakeEmergency {
-        calls: Calls,
-    }
-
-    impl EmergencyStop for FakeEmergency {
-        fn emergency_stop_all(&self) -> EmergencyOutcome {
-            push(&self.calls, "emergency_stop_all");
-            EmergencyOutcome {
-                processes_terminated: 0,
-                completed: true,
-            }
-        }
-    }
-
-    fn push(calls: &Calls, s: impl Into<String>) {
-        calls
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(s.into());
-    }
-
-    impl Backend for FakeBackend {
-        fn name(&self) -> String {
-            "fake".into()
-        }
-        fn accelerator(&self) -> Option<String> {
-            None
-        }
-        fn emergency_handle(&self) -> Arc<dyn EmergencyStop> {
-            Arc::new(FakeEmergency {
-                calls: self.calls.clone(),
-            })
-        }
-        fn stop_agent_sessions(&mut self, reason: StopReason) {
-            push(&self.calls, format!("stop_agent_sessions:{reason:?}"));
-        }
-        fn on_parent_lost(&mut self, policy: OrphanPolicy) {
-            push(&self.calls, format!("on_parent_lost:{policy:?}"));
-        }
-        fn shutdown(&mut self) {
-            push(&self.calls, "shutdown");
-        }
+        };
+        r.map_err(ReplyError::Operational)
     }
 }

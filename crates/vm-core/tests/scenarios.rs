@@ -23,15 +23,27 @@ fn create_vm_validates_resources_and_media() {
     let m = h.install_media();
     let mut cfg = h.vm_config("big", Some(m));
     cfg.memory_mib = 64 * 1024;
-    denied(ErrorCode::ResourceLimit, h.core.create_vm(&Caller::User, cfg.clone()));
+    denied(
+        ErrorCode::ResourceLimit,
+        h.core.create_vm(&Caller::User, cfg.clone()),
+    );
     cfg.memory_mib = 4096;
     cfg.vcpus = 64;
-    denied(ErrorCode::ResourceLimit, h.core.create_vm(&Caller::User, cfg.clone()));
+    denied(
+        ErrorCode::ResourceLimit,
+        h.core.create_vm(&Caller::User, cfg.clone()),
+    );
     cfg.vcpus = 0;
-    denied(ErrorCode::InvalidArgument, h.core.create_vm(&Caller::User, cfg.clone()));
+    denied(
+        ErrorCode::InvalidArgument,
+        h.core.create_vm(&Caller::User, cfg.clone()),
+    );
     cfg.vcpus = 2;
     cfg.disk_gib = 10_000;
-    denied(ErrorCode::ResourceLimit, h.core.create_vm(&Caller::User, cfg.clone()));
+    denied(
+        ErrorCode::ResourceLimit,
+        h.core.create_vm(&Caller::User, cfg.clone()),
+    );
     cfg.disk_gib = 40;
     // Media inesistente o di tipo sbagliato.
     let mut bad = cfg.clone();
@@ -40,10 +52,16 @@ fn create_vm_validates_resources_and_media() {
     let data = h.media(MediaKind::DataIso, "data.iso");
     let mut bad = cfg.clone();
     bad.install_media = Some(data);
-    denied(ErrorCode::InvalidArgument, h.core.create_vm(&Caller::User, bad));
+    denied(
+        ErrorCode::InvalidArgument,
+        h.core.create_vm(&Caller::User, bad),
+    );
     let mut bad = cfg.clone();
     bad.data_media = Some(m);
-    denied(ErrorCode::InvalidArgument, h.core.create_vm(&Caller::User, bad));
+    denied(
+        ErrorCode::InvalidArgument,
+        h.core.create_vm(&Caller::User, bad),
+    );
     // Configurazione valida con supporto dati.
     cfg.data_media = Some(data);
     let rec = h.core.create_vm(&Caller::User, cfg).unwrap();
@@ -57,7 +75,10 @@ fn create_vm_validates_resources_and_media() {
     let mut h2 = Harness::with_config(small);
     let m2 = h2.install_media();
     cfg2.install_media = Some(m2);
-    denied(ErrorCode::ResourceLimit, h2.core.create_vm(&Caller::User, cfg2));
+    denied(
+        ErrorCode::ResourceLimit,
+        h2.core.create_vm(&Caller::User, cfg2),
+    );
 }
 
 #[test]
@@ -85,7 +106,11 @@ fn replaced_media_is_not_used() {
     let rec = h.run_next(vm).unwrap();
     assert_eq!(rec.status, OperationStatus::Failed);
     assert_eq!(rec.error, Some(ErrorCode::PermissionDenied));
-    assert_eq!(h.backend.count(|c| matches!(c, Call::Start(..))), 0, "QEMU non avviato");
+    assert_eq!(
+        h.backend.count(|c| matches!(c, Call::Start(..))),
+        0,
+        "QEMU non avviato"
+    );
     assert_eq!(
         h.core.vm_status(&Caller::User, vm).unwrap().state,
         VmState::Failed
@@ -175,7 +200,10 @@ fn start_stop_cycles_use_fresh_run_ids_and_audit_in_order() {
     );
     drop(store);
     let ev = h.audit_events();
-    assert!(ev.windows(2).all(|w| w[1].seq == w[0].seq + 1), "ordine totale");
+    assert!(
+        ev.windows(2).all(|w| w[1].seq == w[0].seq + 1),
+        "ordine totale"
+    );
     assert_eq!(ev[0].action, AuditAction::VmCreate);
     let starts = ev
         .iter()
@@ -271,13 +299,20 @@ fn operation_id_is_idempotent() {
     let a3 = h.core.submit(&Caller::User, req.clone()).unwrap();
     assert!(a3.duplicate);
     assert_eq!(a3.status, OperationStatus::Succeeded);
-    assert_eq!(h.backend.count(|c| matches!(c, Call::Start(..))), 1, "un solo effetto");
+    assert_eq!(
+        h.backend.count(|c| matches!(c, Call::Start(..))),
+        1,
+        "un solo effetto"
+    );
     // Stesso id con azione diversa: rifiutato.
     let other = VmRequest {
         action: VmAction::Stop,
         ..req
     };
-    denied(ErrorCode::InvalidArgument, h.core.submit(&Caller::User, other));
+    denied(
+        ErrorCode::InvalidArgument,
+        h.core.submit(&Caller::User, other),
+    );
 }
 
 #[test]
@@ -460,21 +495,21 @@ fn missing_wrong_expired_revoked_or_restarted_token_is_denied_without_effect() {
         token: None,
     };
     let r = h.req(vm, Some(run), VmAction::Screenshot);
-    denied(ErrorCode::PermissionDenied, h.core.submit(&none, r));
+    denied(ErrorCode::Unauthenticated, h.core.submit(&none, r));
     // Token errato.
     let wrong = Caller::Agent {
         session_id: sid,
         token: Some(SessionToken::from_bytes([2; 32])),
     };
     let r = h.req(vm, Some(run), VmAction::Screenshot);
-    denied(ErrorCode::PermissionDenied, h.core.submit(&wrong, r));
+    denied(ErrorCode::Unauthenticated, h.core.submit(&wrong, r));
     // Sessione inesistente.
     let ghost = Caller::Agent {
         session_id: SessionId::from_unix_millis(9, [9; 10]),
         token: Some(SessionToken::from_bytes([1; 32])),
     };
     let r = h.req(vm, Some(run), VmAction::Screenshot);
-    denied(ErrorCode::PermissionDenied, h.core.submit(&ghost, r));
+    denied(ErrorCode::Unauthenticated, h.core.submit(&ghost, r));
     // Valido.
     let r = h.req(vm, Some(run), VmAction::Screenshot);
     h.core.submit(&agent, r).unwrap();
@@ -484,8 +519,12 @@ fn missing_wrong_expired_revoked_or_restarted_token_is_denied_without_effect() {
         .revoke_session(sid, TerminationCause::Revoked)
         .unwrap();
     let r = h.req(vm, Some(run), VmAction::Screenshot);
-    denied(ErrorCode::PermissionDenied, h.core.submit(&agent, r));
-    assert!(h.core.renew_lease(sid, &SessionToken::from_bytes([1; 32]), 10_000).is_err());
+    denied(ErrorCode::Unauthenticated, h.core.submit(&agent, r));
+    denied(
+        ErrorCode::Unauthenticated,
+        h.core
+            .renew_lease(sid, &SessionToken::from_bytes([1; 32]), 10_000),
+    );
 
     // Scaduto (grant).
     let (sid2, agent2) = h.session(&[vm], &ALL_CAPS, 3);
@@ -498,7 +537,7 @@ fn missing_wrong_expired_revoked_or_restarted_token_is_denied_without_effect() {
     let mut h2 = Harness::with_store(config(), h.store.clone());
     h2.core.load_catalog().unwrap();
     let r = h2.req(vm, None, VmAction::Stop);
-    denied(ErrorCode::PermissionDenied, h2.core.submit(&agent, r));
+    denied(ErrorCode::Unauthenticated, h2.core.submit(&agent, r));
 
     // Nessun effetto: solo lo screenshot autorizzato ha raggiunto il backend.
     let new_calls = &h.backend.calls[calls_before..];
@@ -797,9 +836,15 @@ fn lease_expiry_revokes_and_requests_emergency_stop() {
     assert_eq!(terms[0].emergency_stops.len(), 1);
     assert_eq!(terms[0].emergency_stops[0].run_id, Some(run));
     // Rinnovo tardivo rifiutato: serve una nuova autorizzazione.
-    denied(ErrorCode::SessionExpired, h.core.renew_lease(sid, &token, 10_000));
+    denied(
+        ErrorCode::SessionExpired,
+        h.core.renew_lease(sid, &token, 10_000),
+    );
     denied(ErrorCode::StateConflict, h.core.resume_session(sid));
-    assert!(h.core.tick().unwrap().is_empty(), "nessuna doppia terminazione");
+    assert!(
+        h.core.tick().unwrap().is_empty(),
+        "nessuna doppia terminazione"
+    );
 }
 
 #[test]
@@ -816,7 +861,7 @@ fn client_loss_and_ui_close_terminate_with_stop() {
         let t = h.core.terminate_session_with_stop(sid, cause).unwrap();
         assert_eq!(t.emergency_stops.len(), 1);
         let r = h.req(vm, None, VmAction::Stop);
-        denied(ErrorCode::PermissionDenied, h.core.submit(&agent, r));
+        denied(ErrorCode::Unauthenticated, h.core.submit(&agent, r));
     }
 }
 
@@ -844,13 +889,15 @@ fn session_creation_limits() {
     s.lease_millis = 10_001;
     denied(
         ErrorCode::InvalidArgument,
-        h.core.create_session(s.clone(), SessionToken::from_bytes([2; 32])),
+        h.core
+            .create_session(s.clone(), SessionToken::from_bytes([2; 32])),
     );
     s.lease_millis = 10_000;
     s.vm_allowlist = Default::default();
     denied(
         ErrorCode::InvalidArgument,
-        h.core.create_session(s.clone(), SessionToken::from_bytes([2; 32])),
+        h.core
+            .create_session(s.clone(), SessionToken::from_bytes([2; 32])),
     );
     // VmId inesistente: con fake clock e contatore gli id sono deterministici,
     // quindi `vm` (del primo harness) esisterebbe anche in questo.
@@ -858,7 +905,8 @@ fn session_creation_limits() {
     s.vm_allowlist = [ghost].into_iter().collect();
     denied(
         ErrorCode::NotFound,
-        h.core.create_session(s.clone(), SessionToken::from_bytes([2; 32])),
+        h.core
+            .create_session(s.clone(), SessionToken::from_bytes([2; 32])),
     );
     s.vm_allowlist = [vm2].into_iter().collect();
     s.expires_at = UtcTimestamp::from_unix_millis(T0).unwrap();

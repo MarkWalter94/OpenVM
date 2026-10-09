@@ -5,11 +5,14 @@
 //! usato da UI e adapter MCP; istanza singola per catalogo; percorso
 //! prioritario per revoca ed Emergency Stop indipendente dalla coda.
 //!
-//! Stato F1: skeleton. `Catalog` e `Backend` sono tratti con implementazioni
-//! finte ([`supervisor::fake`]); `vm-storage` e `qemu-backend` li
-//! implementeranno. I tipi di protocollo sono in [`compat`] finché
-//! `lightvm-proto` non li espone. Dettagli e prove:
-//! `docs/verification/F1-04-service-ipc-ci.md`.
+//! Composizione (F1):
+//! - involucro IPC da `lightvm_proto::ipc` (fonte unica con JSON Schema);
+//! - [`engine::CoreEngine`]: `vm_core::Core` con le porte reali di
+//!   [`adapters`] (catalogo SQLite di `vm-storage`, backend `qemu-backend`,
+//!   audit su file, orologio e identificativi di sistema);
+//! - [`fakes`]: stesse porte in memoria e backend finto per i test headless.
+//!
+//! Dettagli e prove: `docs/verification/F1-04-service-ipc-ci.md`.
 
 /// Diagnostica su stderr senza panico: se il genitore è morto e la pipe di
 /// stderr è chiusa, la scrittura fallisce in silenzio invece di interrompere
@@ -22,9 +25,10 @@ macro_rules! diag {
     }};
 }
 
+pub mod adapters;
 pub mod client;
-pub mod compat;
 pub mod credential;
+pub mod engine;
 pub mod frame;
 pub mod lock;
 pub mod parent;
@@ -33,6 +37,8 @@ pub mod server;
 pub mod supervisor;
 pub mod transport;
 
+#[doc(hidden)]
+pub mod fakes;
 #[doc(hidden)]
 pub mod test_support;
 

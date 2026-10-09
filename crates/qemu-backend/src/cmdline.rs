@@ -21,10 +21,10 @@
 
 use std::ffi::OsString;
 
-use crate::compat::{MediaId, RunId};
 use crate::error::{BackendError, Result};
 use crate::paths::{ManagedPath, ManagedPaths, names};
-use crate::validate::check_token;
+use crate::validate::{check_block_protocol, check_token};
+use lightvm_proto::{MediaId, RunId};
 
 /// Acceleratore hardware. Non esiste una variante TCG (ADR-0007).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -141,7 +141,7 @@ pub enum DiskFormat {
 }
 
 impl DiskFormat {
-    fn driver(self) -> &'static str {
+    pub(crate) fn driver(self) -> &'static str {
         match self {
             Self::Qcow2 => "qcow2",
             Self::Raw => "raw",
@@ -195,6 +195,9 @@ pub struct VmLaunchSpec {
 /// Comando QEMU pronto per lo spawn.
 #[derive(Clone, Debug)]
 pub struct QemuCommand {
+    /// Esecuzione a cui appartiene il processo (identità con handle e tempo di
+    /// creazione).
+    pub run_id: RunId,
     /// Eseguibile.
     pub program: ManagedPath,
     /// Argomenti strutturati.
@@ -264,9 +267,11 @@ impl VmLaunchSpec {
         vnc_socket.check_socket_len("vnc_socket")?;
         let fw_code = paths.firmware_code()?;
         let fw_vars = paths.firmware_vars(run)?;
+        // Unico protocollo di blocco ammesso (allowlist, ADR-0004/0010).
+        let proto = check_block_protocol("file")?;
 
         let mut a = Args(Vec::with_capacity(64));
-        a.opt("-name", format!("guest=lightvm-{}", run.as_str()));
+        a.opt("-name", format!("guest=lightvm-{run}"));
         a.flag("-no-user-config");
         a.flag("-nodefaults");
         a.opt(
@@ -283,21 +288,21 @@ impl VmLaunchSpec {
         a.opt(
             "-blockdev",
             format!(
-                "driver=file,node-name=fw-code,filename={},read-only=on",
+                "driver={proto},node-name=fw-code,filename={},read-only=on",
                 fw_code.qemu_value()
             ),
         );
         a.opt(
             "-blockdev",
             format!(
-                "driver=file,node-name=fw-vars,filename={}",
+                "driver={proto},node-name=fw-vars,filename={}",
                 fw_vars.qemu_value()
             ),
         );
         let mut next_boot = 0u32;
         if let Some(media) = &self.install_media {
             let iso = paths.media(media)?;
-            push_cdrom(&mut a, "cd-install", &iso, 0, Some(next_boot));
+            push_cdrom(&mut a, proto, "cd-install", &iso, 0, Some(next_boot));
             next_boot += 1;
         }
         if let Some(spec) = self.disk {
@@ -307,7 +312,7 @@ impl VmLaunchSpec {
             a.opt(
                 "-blockdev",
                 format!(
-                    "driver={},node-name=disk0,file.driver=file,file.filename={}",
+                    "driver={},node-name=disk0,file.driver={proto},file.filename={}",
                     spec.format.driver(),
                     disk.qemu_value()
                 ),
@@ -324,7 +329,7 @@ impl VmLaunchSpec {
         }
         if let Some(media) = &self.data_media {
             let iso = paths.media(media)?;
-            push_cdrom(&mut a, "cd-data", &iso, 1, None);
+            push_cdrom(&mut a, proto, "cd-data", &iso, 1, None);
         }
         a.opt("-nic", "none");
         a.opt("-device", "virtio-vga");
@@ -339,6 +344,7 @@ impl VmLaunchSpec {
         a.flag("-S");
 
         Ok(QemuCommand {
+            run_id: *run,
             program,
             args: a.0,
             qmp_socket,
@@ -350,11 +356,18 @@ impl VmLaunchSpec {
     }
 }
 
-fn push_cdrom(a: &mut Args, node: &str, iso: &ManagedPath, ide_bus: u8, boot: Option<u32>) {
+fn push_cdrom(
+    a: &mut Args,
+    proto: &str,
+    node: &str,
+    iso: &ManagedPath,
+    ide_bus: u8,
+    boot: Option<u32>,
+) {
     a.opt(
         "-blockdev",
         format!(
-            "driver=raw,node-name={node},read-only=on,file.driver=file,file.filename={},file.read-only=on",
+            "driver=raw,node-name={node},read-only=on,file.driver={proto},file.filename={},file.read-only=on",
             iso.qemu_value()
         ),
     );
@@ -378,7 +391,7 @@ pub fn build_probe_command(
     let qmp_socket = private_dir.join_file("probe-qmp.sock")?;
     qmp_socket.check_socket_len("qmp_socket")?;
     let mut a = Args(Vec::with_capacity(24));
-    a.opt("-name", format!("guest=lightvm-probe-{}", tag.as_str()));
+    a.opt("-name", format!("guest=lightvm-probe-{tag}"));
     a.flag("-no-user-config");
     a.flag("-nodefaults");
     a.opt("-machine", format!("type={}", machine.as_str()));
@@ -393,6 +406,7 @@ pub fn build_probe_command(
     );
     a.flag("-S");
     Ok(QemuCommand {
+        run_id: *tag,
         program,
         args: a.0,
         qmp_socket,
@@ -413,7 +427,7 @@ pub(crate) mod tests {
     pub(crate) struct FakePaths {
         pub(crate) root: PathBuf,
         pub(crate) with_disk: bool,
-        pub(crate) media: HashMap<String, PathBuf>,
+        pub(crate) media: HashMap<MediaId, PathBuf>,
     }
 
     impl FakePaths {
@@ -424,8 +438,8 @@ pub(crate) mod tests {
                 PathBuf::from("/lightvm-fake")
             };
             let mut media = HashMap::new();
-            media.insert("ubuntu".to_owned(), root.join("media").join("ubuntu.iso"));
-            media.insert("dati".to_owned(), root.join("media").join("dati.iso"));
+            media.insert(media_ubuntu(), root.join("media").join("ubuntu.iso"));
+            media.insert(media_dati(), root.join("media").join("dati.iso"));
             Self {
                 root,
                 with_disk: true,
@@ -442,7 +456,7 @@ pub(crate) mod tests {
             ManagedPath::verify(self.root.join("fw").join("code.fd"))
         }
         fn firmware_vars(&self, run: &RunId) -> Result<ManagedPath> {
-            ManagedPath::verify(self.root.join("runs").join(run.as_str()).join("vars.fd"))
+            ManagedPath::verify(self.root.join("runs").join(run.to_string()).join("vars.fd"))
         }
         fn disk(&self, run: &RunId) -> Result<Option<ManagedPath>> {
             if !self.with_disk {
@@ -451,7 +465,7 @@ pub(crate) mod tests {
             ManagedPath::verify(
                 self.root
                     .join("runs")
-                    .join(run.as_str())
+                    .join(run.to_string())
                     .join("overlay.qcow2"),
             )
             .map(Some)
@@ -462,21 +476,34 @@ pub(crate) mod tests {
         fn media(&self, media: &MediaId) -> Result<ManagedPath> {
             let p = self
                 .media
-                .get(media.as_str())
+                .get(media)
                 .ok_or_else(|| BackendError::invalid("media", "non registrato"))?;
             ManagedPath::verify(p)
         }
         fn run_dir(&self, run: &RunId) -> Result<ManagedPath> {
-            ManagedPath::verify(self.root.join("runs").join(run.as_str()))
+            ManagedPath::verify(self.root.join("runs").join(run.to_string()))
         }
         fn private_dir(&self, run: &RunId) -> Result<ManagedPath> {
-            ManagedPath::verify(self.root.join("p").join(run.as_str()))
+            ManagedPath::verify(self.root.join("p").join(run.to_string()))
         }
+    }
+
+    /// Identificativo di esecuzione deterministico per i test.
+    pub(crate) fn run_id(n: u8) -> RunId {
+        RunId::from_unix_millis(1_700_000_000_000, [n; 10])
+    }
+
+    pub(crate) fn media_ubuntu() -> MediaId {
+        MediaId::from_unix_millis(1_700_000_000_000, [1; 10])
+    }
+
+    pub(crate) fn media_dati() -> MediaId {
+        MediaId::from_unix_millis(1_700_000_000_000, [2; 10])
     }
 
     pub(crate) fn spec() -> VmLaunchSpec {
         VmLaunchSpec {
-            run_id: RunId::new("r1").unwrap(),
+            run_id: run_id(1),
             machine: MachineType::versioned_q35("pc-q35-11.1").unwrap(),
             accelerator: Accelerator::Whpx,
             cpu: CpuModel::nominal("qemu64").unwrap(),
@@ -485,7 +512,7 @@ pub(crate) mod tests {
             disk: Some(DiskSpec {
                 format: DiskFormat::Qcow2,
             }),
-            install_media: Some(MediaId::new("ubuntu").unwrap()),
+            install_media: Some(media_ubuntu()),
             data_media: None,
         }
     }
@@ -599,6 +626,12 @@ pub(crate) mod tests {
                         if !allowed.contains(&k) {
                             return Err(format!("{opt}: chiave non ammessa {k:?}"));
                         }
+                        if k == "file.driver" && v != "file" {
+                            return Err(format!("protocollo non ammesso {v:?}"));
+                        }
+                        if k == "driver" && !["file", "qcow2", "raw"].contains(&v) {
+                            return Err(format!("driver di blocco non ammesso {v:?}"));
+                        }
                         if v.is_empty() {
                             return Err(format!("{opt}: valore vuoto per {k}"));
                         }
@@ -655,9 +688,13 @@ pub(crate) mod tests {
         assert!(joined.contains("server=on,wait=off"));
         assert!(a.last().unwrap() == "-S");
         assert!(!joined.contains("tcg"));
+        assert!(joined.contains(&format!("-name guest=lightvm-{}", run_id(1))));
         if cfg!(windows) {
-            assert!(joined.contains("-vnc unix:C:/lightvm-fake/p/r1/vnc.sock"));
-            assert!(joined.contains("-qmp unix:C:/lightvm-fake/p/r1/qmp.sock,server=on,wait=off"));
+            let r = run_id(1);
+            assert!(joined.contains(&format!("-vnc unix:C:/lightvm-fake/p/{r}/vnc.sock")));
+            assert!(joined.contains(&format!(
+                "-qmp unix:C:/lightvm-fake/p/{r}/qmp.sock,server=on,wait=off"
+            )));
             assert!(joined.contains("filename=C:/lightvm-fake/fw/code.fd,read-only=on"));
         }
         assert!(cmd.vnc_socket.is_some());
@@ -666,11 +703,11 @@ pub(crate) mod tests {
     #[test]
     fn supporto_dati_senza_boot() {
         let mut s = spec();
-        s.data_media = Some(MediaId::new("dati").unwrap());
+        s.data_media = Some(media_dati());
         let cmd = s.build(&FakePaths::new()).unwrap();
         audit_args(&cmd.args).unwrap();
         assert!(strs(&cmd).contains(&"ide-cd,drive=cd-data,bus=ide.1".to_owned()));
-        s.data_media = s.install_media.clone();
+        s.data_media = s.install_media;
         assert!(s.build(&FakePaths::new()).is_err());
     }
 
@@ -710,7 +747,7 @@ pub(crate) mod tests {
     #[test]
     fn media_non_registrato() {
         let mut s = spec();
-        s.install_media = Some(MediaId::new("sconosciuto").unwrap());
+        s.install_media = Some(MediaId::from_unix_millis(1_700_000_000_000, [9; 10]));
         assert!(s.build(&FakePaths::new()).is_err());
     }
 
@@ -735,19 +772,19 @@ pub(crate) mod tests {
     fn percorso_con_virgola_rifiutato() {
         let mut p = FakePaths::new();
         p.media.insert(
-            "ubuntu".into(),
+            media_ubuntu(),
             p.root.join("media").join("a,file.driver=nbd"),
         );
         assert!(spec().build(&p).is_err());
         let mut p = FakePaths::new();
-        p.media.insert("ubuntu".into(), p.root.join("x:y.iso"));
+        p.media.insert(media_ubuntu(), p.root.join("x:y.iso"));
         assert!(spec().build(&p).is_err());
     }
 
     #[test]
     fn comando_probe() {
         let p = FakePaths::new();
-        let run = RunId::new("probe1").unwrap();
+        let run = run_id(2);
         let cmd = build_probe_command(
             p.qemu_system().unwrap(),
             &MachineType::versioned_q35("pc-q35-11.1").unwrap(),
@@ -764,7 +801,7 @@ pub(crate) mod tests {
 
 #[cfg(test)]
 mod proptests {
-    use super::tests::{FakePaths, audit_args, spec};
+    use super::tests::{FakePaths, audit_args, media_dati, media_ubuntu, spec};
     use super::*;
     use proptest::prelude::*;
 
@@ -800,10 +837,10 @@ mod proptests {
     }
 
     fn check(cmd: &Result<QemuCommand>) -> std::result::Result<(), TestCaseError> {
-        if let Ok(c) = cmd {
-            if let Err(e) = audit_args(&c.args) {
-                return Err(TestCaseError::fail(format!("iniezione: {e}\n{:?}", c.args)));
-            }
+        if let Ok(c) = cmd
+            && let Err(e) = audit_args(&c.args)
+        {
+            return Err(TestCaseError::fail(format!("iniezione: {e}\n{:?}", c.args)));
         }
         Ok(())
     }
@@ -811,19 +848,25 @@ mod proptests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(2000))]
 
+        /// Gli identificativi sono UUID v7 tipizzati (`lightvm-proto`): non
+        /// possono contenere separatori. Si provano UUID arbitrari, inclusi
+        /// rifiuti da stringhe ostili.
         #[test]
-        fn identificativi_ostili(run in hostile(), media in hostile(), data in hostile()) {
+        fn identificativi_qualsiasi(
+            ms in any::<u64>(),
+            r in any::<[u8; 10]>(),
+            m in any::<[u8; 10]>(),
+            text in hostile(),
+        ) {
+            prop_assert!(text.parse::<RunId>().is_err() || text.len() == 36);
+            prop_assert!(text.parse::<MediaId>().is_err() || text.len() == 36);
+            let ms = ms % (1u64 << 48);
             let mut s = spec();
-            if let Ok(r) = RunId::new(run) { s.run_id = r; }
+            s.run_id = RunId::from_unix_millis(ms, r);
             let mut p = FakePaths::new();
-            if let Ok(m) = MediaId::new(media.clone()) {
-                p.media.insert(media.clone(), p.root.join("media").join("x.iso"));
-                s.install_media = Some(m);
-            }
-            if let Ok(d) = MediaId::new(data.clone()) {
-                p.media.entry(data.clone()).or_insert_with(|| p.root.join("media").join("d.iso"));
-                s.data_media = Some(d);
-            }
+            let install = MediaId::from_unix_millis(ms, m);
+            p.media.insert(install, p.root.join("media").join("x.iso"));
+            s.install_media = Some(install);
             check(&s.build(&p))?;
         }
 
@@ -838,10 +881,10 @@ mod proptests {
         #[test]
         fn percorsi_ostili(a in hostile(), b in hostile(), c in hostile()) {
             let mut p = FakePaths::new();
-            p.media.insert("ubuntu".into(), p.root.join(&a).join(&b));
+            p.media.insert(media_ubuntu(), p.root.join(&a).join(&b));
             let mut s = spec();
-            s.data_media = Some(MediaId::new("dati").unwrap());
-            p.media.insert("dati".into(), p.root.join(&c));
+            s.data_media = Some(media_dati());
+            p.media.insert(media_dati(), p.root.join(&c));
             check(&s.build(&p))?;
             // percorso radice arbitrario (anche relativo, UNC o dispositivo)
             p.root = std::path::PathBuf::from(&a);

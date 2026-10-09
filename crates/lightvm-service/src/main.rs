@@ -2,7 +2,10 @@
 //!
 //! Contratto con il genitore (nessun segreto negli argomenti, ROADMAP 9):
 //! - argomenti strutturati: `--catalog <dir>` (obbligatorio),
-//!   `--runtime-dir <dir>` (solo Unix), `--parent-watch stdin|none`,
+//!   `--qemu-dir <dir>` (distribuzione QEMU approvata; senza, l'avvio delle VM
+//!   è rifiutato con `unsupported`), `--audit-log <file>` (predefinito nel
+//!   profilo utente), `--runtime-dir <dir>` (socket IPC su Unix e directory
+//!   private dei socket QEMU), `--parent-watch stdin|none`,
 //!   `--orphan-policy shutdown|keep-manual-vms`;
 //! - stdout: una sola riga JSON `{"event":"ready",...}` con endpoint e
 //!   credenziale iniziale della UI; stdout è una pipe anonima posseduta dal
@@ -11,6 +14,10 @@
 //!   controllato;
 //! - stderr: diagnostica, senza segreti.
 //!
+//! Composition root (ROADMAP 6.1): `vm_core::Core` con catalogo SQLite di
+//! `vm-storage`, backend `qemu-backend`, audit su file, orologio e
+//! identificativi di sistema (vedi `lightvm_service::adapters`).
+//!
 //! Codici di uscita: 0 arresto regolare, 2 uso errato, 3 catalogo già in uso da
 //! un'altra istanza, 4 altri errori di avvio.
 
@@ -18,19 +25,30 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use lightvm_service::compat::SUPPORTED_PROTOCOL_VERSIONS;
+use lightvm_proto::ipc::SUPPORTED_PROTOCOL_VERSIONS;
+use lightvm_service::adapters::audit::{AUDIT_FILE, FileAuditSink, default_state_dir};
+use lightvm_service::adapters::backend::{
+    self, QemuSetup, UnavailableBackend, UnavailableHost, unavailable_capacity,
+};
+use lightvm_service::adapters::catalog::{ManagedMediaInspector, SqliteStore};
+use lightvm_service::engine::{CoreEngine, VmEngine, core_config};
 use lightvm_service::parent::{self, ParentSignal};
 use lightvm_service::server::StartError;
-use lightvm_service::supervisor::OrphanPolicy;
-use lightvm_service::supervisor::fake::{FakeBackend, FakeCatalog};
+use lightvm_service::supervisor::{Backend, OrphanPolicy};
 use lightvm_service::{ServiceConfig, start};
 
-const USAGE: &str = "uso: lightvm-service --catalog <dir> [--runtime-dir <dir>] \
-[--parent-watch stdin|none] [--orphan-policy shutdown|keep-manual-vms]";
+const USAGE: &str = "uso: lightvm-service --catalog <dir> [--qemu-dir <dir>] \
+[--audit-log <file>] [--runtime-dir <dir>] [--parent-watch stdin|none] \
+[--orphan-policy shutdown|keep-manual-vms]";
+
+/// Messaggio per un catalogo già in uso (stesso testo del lock del servizio).
+const ALREADY_RUNNING: &str = "un'altra istanza di lightvm-service sta già usando questo catalogo";
 
 #[derive(Debug)]
 struct Args {
     catalog: PathBuf,
+    qemu_dir: Option<PathBuf>,
+    audit_log: Option<PathBuf>,
     runtime_dir: Option<PathBuf>,
     parent_watch: bool,
     orphan_policy: OrphanPolicy,
@@ -39,6 +57,8 @@ struct Args {
 fn parse_args() -> Result<Args, String> {
     let mut it = std::env::args_os().skip(1);
     let mut catalog = None;
+    let mut qemu_dir = None;
+    let mut audit_log = None;
     let mut runtime_dir = None;
     let mut parent_watch = true;
     let mut orphan_policy = OrphanPolicy::ShutdownService;
@@ -49,6 +69,8 @@ fn parse_args() -> Result<Args, String> {
         let mut value = || it.next().ok_or_else(|| format!("{a}: valore mancante"));
         match a.as_str() {
             "--catalog" => catalog = Some(PathBuf::from(value()?)),
+            "--qemu-dir" => qemu_dir = Some(PathBuf::from(value()?)),
+            "--audit-log" => audit_log = Some(PathBuf::from(value()?)),
             "--runtime-dir" => runtime_dir = Some(PathBuf::from(value()?)),
             "--parent-watch" => {
                 parent_watch = match value()?.to_str() {
@@ -78,10 +100,67 @@ fn parse_args() -> Result<Args, String> {
     let catalog = catalog.ok_or("--catalog obbligatorio")?;
     Ok(Args {
         catalog,
+        qemu_dir,
+        audit_log,
         runtime_dir,
         parent_watch,
         orphan_policy,
     })
+}
+
+/// Motore e host composti dagli adattatori reali.
+type Composed = (Box<dyn VmEngine>, Box<dyn Backend>);
+
+/// Composizione sincrona, fuori dal runtime tokio del servizio: il probe di
+/// QEMU usa il runtime proprio del backend.
+fn compose(args: &Args) -> Result<Composed, (u8, String)> {
+    let store = match SqliteStore::open(&args.catalog) {
+        Ok(s) => s,
+        Err(vm_storage::StorageError::CatalogLocked(p)) => {
+            return Err((3, format!("{ALREADY_RUNNING} (lock: {})", p.display())));
+        }
+        Err(e) => return Err((4, format!("catalogo: {e}"))),
+    };
+    let root = store.root();
+    let audit_path = match &args.audit_log {
+        Some(p) => p.clone(),
+        None => default_state_dir()
+            .ok_or((
+                4,
+                "directory di stato del profilo utente non determinabile".to_string(),
+            ))?
+            .join(AUDIT_FILE),
+    };
+    let audit = FileAuditSink::open(&audit_path)
+        .map_err(|e| (4, format!("audit {}: {e}", audit_path.display())))?;
+    let inspector = ManagedMediaInspector::new(root.clone());
+    let private_root = args.runtime_dir.clone().unwrap_or_else(|| root.join("p"));
+    match &args.qemu_dir {
+        Some(dir) => {
+            let setup = QemuSetup::new(dir.clone(), root, private_root);
+            let (host, vm_backend, capacity) =
+                backend::probe(setup).map_err(|e| (4, format!("backend QEMU: {e}")))?;
+            let engine =
+                CoreEngine::new(store, audit, vm_backend, inspector, core_config(capacity))
+                    .map_err(|e| (4, format!("core: {e}")))?;
+            Ok((Box::new(engine), Box::new(host)))
+        }
+        None => {
+            lightvm_service::diag!(
+                "lightvm-service: --qemu-dir assente: avvio delle VM non disponibile"
+            );
+            let capacity = unavailable_capacity(256);
+            let engine = CoreEngine::new(
+                store,
+                audit,
+                UnavailableBackend,
+                inspector,
+                core_config(capacity),
+            )
+            .map_err(|e| (4, format!("core: {e}")))?;
+            Ok((Box::new(engine), Box::new(UnavailableHost)))
+        }
+    }
 }
 
 fn main() -> ExitCode {
@@ -90,6 +169,13 @@ fn main() -> ExitCode {
         Err(e) => {
             lightvm_service::diag!("lightvm-service: {e}\n{USAGE}");
             return ExitCode::from(2);
+        }
+    };
+    let (engine, host) = match compose(&args) {
+        Ok(x) => x,
+        Err((code, msg)) => {
+            lightvm_service::diag!("lightvm-service: {msg}");
+            return ExitCode::from(code);
         }
     };
     let rt = match tokio::runtime::Builder::new_multi_thread()
@@ -103,21 +189,14 @@ fn main() -> ExitCode {
             return ExitCode::from(4);
         }
     };
-    rt.block_on(run(args))
+    rt.block_on(run(args, engine, host))
 }
 
-async fn run(args: Args) -> ExitCode {
+async fn run(args: Args, engine: Box<dyn VmEngine>, host: Box<dyn Backend>) -> ExitCode {
     let mut cfg = ServiceConfig::new(&args.catalog);
     cfg.runtime_dir = args.runtime_dir;
     cfg.orphan_policy = args.orphan_policy;
-    // TODO(F1): sostituire con vm-storage e qemu-backend.
-    let (handle, ui_credential) = match start(
-        cfg,
-        Box::new(FakeCatalog::sample()),
-        Box::<FakeBackend>::default(),
-    )
-    .await
-    {
+    let (handle, ui_credential) = match start(cfg, engine, host).await {
         Ok(x) => x,
         Err(e @ StartError::Lock(lightvm_service::lock::LockError::AlreadyRunning { .. })) => {
             lightvm_service::diag!("lightvm-service: {e}");

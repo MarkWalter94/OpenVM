@@ -106,7 +106,7 @@ policy_effettiva = limiti_globali ∩ policy_VM ∩ grant_sessione ∩ capacità
 - Nessun livello amplia i precedenti; un'assenza di capacità host restringe, non viene ignorata.
 - La stessa policy vale per UI e MCP; la UI non è un livello fidato aggiuntivo.
 - La revisione della policy applicata è registrata in ogni report di sessione (sezione 9).
-- Errori pubblici: `permission_denied`, `session_expired`, `vm_busy`, `unsupported`, `resource_limit`, `state_conflict`.
+- Errori pubblici: `unauthenticated`, `permission_denied`, `session_expired`, `vm_busy`, `unsupported`, `resource_limit`, `state_conflict` (semantica dei codici di autenticazione in ADR-0026).
 
 ## 7. Console
 

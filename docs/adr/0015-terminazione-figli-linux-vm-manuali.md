@@ -36,7 +36,7 @@ Da prendere, in due parti.
 3. Un cgroup v2 per VM dentro uno scope utente systemd con `Delegate=yes`, con `memory.max`, `cpu.max`, `pids.max` e `cgroup.kill` (kernel ≥ 5.14): unico meccanismo provato che termina anche i discendenti usciti con `setsid` (p95 0,420 ms, 30 campioni, 0 orfani); è lo stesso strumento dei limiti di ADR-0017.
 4. Gruppo di processi come ripiego dove la delega cgroup manca, con il limite dichiarato (non contiene discendenti che cambiano gruppo); in quel caso i limiti CPU/memoria sull'albero mancano e AI Mode resta disabilitato su quell'host (sezione 7.2).
 
-Da decidere ancora: creazione dello scope delegato (`systemd-run --user --scope -p Delegate=yes` all'avvio, oppure `StartTransientUnit` via D-Bus dal supervisor) e scope per VM o sotto-cgroup dello scope del supervisor (provato il secondo). La conferma con QEMU reale e KVM su host fisico è rinviata a R2a (ADR-0016).
+Da decidere ancora: creazione dello scope delegato (`systemd-run --user --scope -p Delegate=yes` all'avvio, oppure `StartTransientUnit` via D-Bus dal supervisor) e scope per VM o sotto-cgroup dello scope del supervisor (provato il secondo). Prova successiva in WSL2 (`docs/verification/F1-08-ci.md` §3, valida solo per i processi): lo scope delegato si crea con `StartTransientUnit` via D-Bus senza `systemd-run`; se lo scope contiene solo la VM, systemd lo rimuove alla sua uscita, quindi supervisor e foglie VM devono stare nello stesso scope; senza sessione utente systemd il bus non è raggiungibile, si ripiega sul gruppo di processi e la modalità agente resta disabilitata. La parte A resta Proposta fino alla scelta esplicita. La conferma con QEMU reale e KVM su host fisico è rinviata a R2a (ADR-0016).
 
 **B. VM manuali dopo crash della UI — aperta.**
 

@@ -62,6 +62,32 @@ pub fn check_option_value(field: &'static str, s: &str) -> Result<()> {
     Ok(())
 }
 
+/// Protocolli di blocco ammessi nel comando QEMU (ADR-0004, ADR-0010): solo
+/// file locali.
+pub const ALLOWED_BLOCK_PROTOCOLS: &[&str] = &["file"];
+
+/// Driver di blocco remoti presenti nella build QEMU 11.1.0 per Windows
+/// (F0-02 §3) e sempre rifiutati.
+pub const REMOTE_BLOCK_PROTOCOLS: &[&str] = &["http", "https", "ftp", "ftps", "nfs", "ssh", "nbd"];
+
+/// Verifica che `name` sia un protocollo di blocco ammesso e restituisce il
+/// nome canonico. I driver remoti hanno un messaggio dedicato.
+pub fn check_block_protocol(name: &str) -> Result<&'static str> {
+    if let Some(p) = ALLOWED_BLOCK_PROTOCOLS.iter().find(|p| **p == name) {
+        return Ok(p);
+    }
+    if REMOTE_BLOCK_PROTOCOLS.contains(&name) {
+        return Err(BackendError::invalid(
+            "block_protocol",
+            format!("protocollo remoto `{name}` escluso dal profilo offline"),
+        ));
+    }
+    Err(BackendError::invalid(
+        "block_protocol",
+        "protocollo di blocco non in allowlist (ammesso solo `file`)",
+    ))
+}
+
 /// Lunghezza massima del percorso di un socket Unix (`sun_path`, 108 byte con
 /// il terminatore su Windows e Linux).
 pub const UNIX_SOCKET_PATH_MAX: usize = 107;
@@ -77,7 +103,10 @@ const PATH_FORBIDDEN: &[char] = &[',', '=', ':', '"', '\'', '?', '*', '<', '>', 
 /// e ogni carattere di [`PATH_FORBIDDEN`] fuori dalla lettera di unità.
 pub fn qemu_path_value(field: &'static str, raw: &str) -> Result<String> {
     if raw.chars().any(char::is_control) {
-        return Err(BackendError::invalid(field, "carattere di controllo nel percorso"));
+        return Err(BackendError::invalid(
+            field,
+            "carattere di controllo nel percorso",
+        ));
     }
     let unified = raw.replace('\\', "/");
     let (prefix, rest) = split_root(field, &unified)?;
@@ -167,6 +196,18 @@ mod tests {
             &"x".repeat(65),
         ] {
             assert!(check_token("t", bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn protocolli_di_blocco() {
+        assert_eq!(check_block_protocol("file").unwrap(), "file");
+        for p in REMOTE_BLOCK_PROTOCOLS {
+            let e = check_block_protocol(p).unwrap_err().to_string();
+            assert!(e.contains("remoto"), "{p}: {e}");
+        }
+        for p in ["vvfat", "host_device", "FILE", "file,x", "", "iscsi"] {
+            assert!(check_block_protocol(p).is_err(), "{p:?}");
         }
     }
 

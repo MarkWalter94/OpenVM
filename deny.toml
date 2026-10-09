@@ -1,9 +1,9 @@
 # cargo-deny: licenze, advisory, sorgenti e duplicati (ROADMAP 6.0, 6.3; ADR-0023).
 # Eseguito in CI (job `cargo-deny` in .github/workflows/ci.yml) e in locale con
-# `cargo deny check`. La politica delle licenze resta una proposta finché
-# ADR-0023 non è accettata: l'elenco riflette l'inventario osservato in F1
-# (docs/verification/F1-04-service-ipc-ci.md) e non sostituisce la revisione
-# umana delle licenze non standard.
+# `cargo deny --locked check`. Inventario e motivazioni:
+# docs/verification/F1-07-licenze-packaging.md (il primo controllo è in
+# docs/verification/F1-04-service-ipc-ci.md). Lo strumento non sostituisce la
+# revisione umana delle licenze non standard (ADR-0023).
 
 [graph]
 # Target dichiarati o in osservazione (macOS solo portabilità).
@@ -24,7 +24,11 @@ feature-depth = 1
 ignore = []
 
 [licenses]
-# Licenze permissive compatibili con la distribuzione MIT del binario.
+# Solo licenze permissive compatibili con la distribuzione MIT del binario.
+# Tutto ciò che non è elencato è negato: in particolare GPL, LGPL, AGPL, MPL,
+# EPL, CDDL, SSPL, licenze "source available" e licenze sconosciute. Le
+# espressioni `OR` con un'opzione copyleft (per esempio `self_cell`:
+# `Apache-2.0 OR GPL-2.0-only`) passano perché si usa il ramo permissivo.
 allow = [
     "0BSD",
     "Apache-2.0",
@@ -40,7 +44,7 @@ allow = [
 ]
 confidence-threshold = 0.8
 # Font incorporati da egui: licenze specifiche dei font, ammesse solo per
-# questo crate. Da riportare nell'inventario delle licenze di terze parti (F6).
+# questo crate. Testi da includere nell'inventario di terze parti (F6).
 exceptions = [
     { crate = "epaint_default_fonts", allow = ["OFL-1.1", "Ubuntu-font-1.0"] },
 ]
@@ -58,10 +62,45 @@ highlight = "all"
 workspace-default-features = "allow"
 external-default-features = "allow"
 allow-wildcard-paths = true
+# Profilo offline (ADR-0004) e build senza strumenti esterni: nessun client
+# HTTP, nessuno stack TLS di sistema, nessun provider crittografico che
+# richieda CMake/NASM (rfb-client usa `ring`, F0-04).
+deny = [
+    { crate = "reqwest", reason = "nessun client HTTP nel prodotto MVP offline (ADR-0004)" },
+    { crate = "hyper", reason = "nessuno stack HTTP nel prodotto MVP offline (ADR-0004)" },
+    { crate = "oauth2", reason = "MCP su stdio senza OAuth HTTP (ROADMAP 9)" },
+    { crate = "openssl-sys", reason = "TLS solo tramite rustls (ADR-0013)" },
+    { crate = "native-tls", reason = "TLS solo tramite rustls (ADR-0013)" },
+    { crate = "aws-lc-sys", reason = "richiede CMake/NASM sull'host di build (F0-04)" },
+]
+# SDK MCP (ADR-0021): solo server su stdio. Le feature di trasporto HTTP,
+# OAuth e client sono negate anche se in futuro una dipendenza le attivasse.
+features = [
+    { crate = "rmcp", deny = [
+        "auth",
+        "auth-client-credentials-jwt",
+        "auth-enterprise-managed",
+        "client-side-sse",
+        "reqwest",
+        "reqwest-native-tls",
+        "reqwest-tls-no-provider",
+        "server-side-http",
+        "transport-streamable-http-client",
+        "transport-streamable-http-client-reqwest",
+        "transport-streamable-http-client-unix-socket",
+        "transport-streamable-http-server",
+        "transport-streamable-http-server-session",
+    ] },
+]
 
 [sources]
-# Solo crates.io; nessuna dipendenza git (ROADMAP 6.3).
+# Solo crates.io; nessuna dipendenza git né registri alternativi (ROADMAP 6.3).
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = []
+
+[sources.allow-org]
+github = []
+gitlab = []
+bitbucket = []

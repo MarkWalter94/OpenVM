@@ -11,7 +11,9 @@ use serde::{Deserialize, Serialize};
 use crate::{RunId, UtcTimestamp};
 
 /// Stato del ciclo di vita di una VM.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum VmState {
     /// Processo assente e file rilasciati. Unico stato per operazioni su dischi, NVRAM e media.
@@ -79,7 +81,10 @@ impl VmState {
     /// `true` se esiste (o può esistere) un processo QEMU di questa VM.
     #[must_use]
     pub const fn has_process(self) -> bool {
-        matches!(self, VmState::Starting | VmState::Running | VmState::Stopping)
+        matches!(
+            self,
+            VmState::Starting | VmState::Running | VmState::Stopping
+        )
     }
 
     /// Nome stabile in `snake_case` (uguale alla serializzazione).
@@ -103,7 +108,9 @@ impl std::fmt::Display for VmState {
 }
 
 /// Origine di un'osservazione di stato.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ObservationSource {
     /// Handle del processo QEMU (vivo, terminato, codice d'uscita).

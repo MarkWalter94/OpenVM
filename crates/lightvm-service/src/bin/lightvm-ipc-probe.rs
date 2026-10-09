@@ -11,8 +11,8 @@
 use std::io::BufRead;
 use std::process::ExitCode;
 
+use lightvm_proto::ipc::{Request, ResponseBody, ServerMessage};
 use lightvm_service::client::Client;
-use lightvm_service::compat::{Request, ResponseBody, ServerMessage};
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);

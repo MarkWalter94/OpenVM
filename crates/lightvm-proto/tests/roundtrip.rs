@@ -48,7 +48,11 @@ fn ids_roundtrip_and_reject_non_v7() {
         "550e8400-e29b-41d4-a716-446655440000".parse::<VmId>(),
         Err(IdParseError::NotVersion7)
     );
-    assert!("00000000-0000-0000-0000-000000000000".parse::<RunId>().is_err());
+    assert!(
+        "00000000-0000-0000-0000-000000000000"
+            .parse::<RunId>()
+            .is_err()
+    );
     assert!(format!("{{{s}}}").parse::<VmId>().is_err());
     assert!(s.replace('-', "").parse::<VmId>().is_err());
     assert!(serde_json::from_value::<VmId>(json!("../etc/passwd")).is_err());
@@ -184,7 +188,10 @@ fn session_types_roundtrip() {
     let v = serde_json::to_value(&grant).unwrap();
     assert_eq!(v["capabilities"], json!(["vm.screenshot", "vm.input"]));
     rt(&Lease::new(sid, ts(0), 10_000).unwrap());
-    for cause in [TerminationCause::LeaseExpired, TerminationCause::EmergencyStop] {
+    for cause in [
+        TerminationCause::LeaseExpired,
+        TerminationCause::EmergencyStop,
+    ] {
         rt(&cause);
     }
     let outcomes: Vec<_> = [

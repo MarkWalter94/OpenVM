@@ -84,7 +84,9 @@ fn upgrade_from_v1_creates_dated_backup_and_keeps_data() {
         .unwrap();
     assert_eq!(v, 1);
     let n: i64 = b
-        .query_row("SELECT count(*) FROM vms WHERE name = 'legacy'", [], |r| r.get(0))
+        .query_row("SELECT count(*) FROM vms WHERE name = 'legacy'", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(n, 1);
 
@@ -126,7 +128,10 @@ fn newer_schema_is_refused_without_changes() {
                 .contains("backup")
         })
         .count();
-    assert_eq!(backups, 0, "nessun backup né migrazione su schema più nuovo");
+    assert_eq!(
+        backups, 0,
+        "nessun backup né migrazione su schema più nuovo"
+    );
 }
 
 #[test]
@@ -144,4 +149,125 @@ fn tampered_migration_is_detected() {
         Catalog::open(dir.path()),
         Err(StorageError::MigrationMismatch { version: 1 })
     ));
+}
+
+/// Schema (tabelle, indici, trigger) come testo SQL normalizzato, per
+/// confrontare un catalogo migrato con uno creato da zero.
+fn schema_of(conn: &rusqlite::Connection) -> Vec<(String, String, String)> {
+    let mut st = conn
+        .prepare(
+            "SELECT type, name, coalesce(sql, '') FROM sqlite_master
+             WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
+        )
+        .unwrap();
+    st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .map(|r| {
+            let (t, n, s): (String, String, String) = r.unwrap();
+            // `ALTER TABLE ... RENAME` cita il nome tra virgolette: irrilevante.
+            (
+                t,
+                n,
+                s.replace('"', "")
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn upgrade_from_every_previous_version_matches_a_fresh_schema() {
+    let fresh_dir = common::tempdir();
+    drop(Catalog::open(fresh_dir.path()).unwrap());
+    let fresh = schema_of(&migrate::open_connection(&fresh_dir.path().join(DB_FILE)).unwrap());
+
+    for from in 1..LATEST_VERSION {
+        let dir = common::tempdir();
+        let db = dir.path().join(DB_FILE);
+        {
+            let mut conn = migrate::open_connection(&db).unwrap();
+            let r = migrate::migrate_to(&mut conn, &db, from).unwrap();
+            assert_eq!(r.to_version, from);
+            conn.execute(
+                "INSERT INTO vms(vm_id, name, guest_os, config_version, config_json, created_at, updated_at)
+                 VALUES ('0190f7a4-0000-7000-8000-000000000001', 'legacy', 'ubuntu', 1, '{}', 'x', 'x')",
+                [],
+            )
+            .unwrap();
+            // Intenti già conclusi e uno aperto senza effetti su disco: devono
+            // sopravvivere alla migrazione e l'aperto va riconciliato.
+            for (id, state) in [(5, "committed"), (9, "pending")] {
+                conn.execute(
+                    "INSERT INTO journal(intent_id, kind, state, vm_id, target_kind, target_id,
+                                         temp_path, final_path, created_at, updated_at)
+                     VALUES (?1, 'create_disk', ?2, '0190f7a4-0000-7000-8000-000000000001', 'disk',
+                             '0190f7a4-0000-7000-8000-0000000000aa', ?3,
+                             'vms/0190f7a4-0000-7000-8000-000000000001/primary.qcow2', 'x', 'x')",
+                    params![id, state, format!("tmp/create_disk-{id}.part")],
+                )
+                .unwrap();
+            }
+        }
+        let mut cat = Catalog::open(dir.path()).unwrap();
+        let rep = cat.open_report().unwrap().clone();
+        assert_eq!(rep.migration.from_version, from, "da v{from}");
+        assert_eq!(rep.migration.to_version, LATEST_VERSION);
+        let backup = rep.migration.backup.expect("backup prima della migrazione");
+        let name = backup.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            name.starts_with(&format!("catalog.sqlite3.backup-v{from}-")),
+            "{name}"
+        );
+        // Intento aperto riconciliato dopo la migrazione.
+        assert_eq!(rep.recovery.intents.len(), 1, "v{from}: {:?}", rep.recovery);
+        assert_eq!(rep.recovery.intents[0].intent_id, 9);
+        assert_eq!(
+            cat.intent_state(5).unwrap(),
+            vm_storage::IntentState::Committed
+        );
+        // Dati conservati.
+        let vms = cat.read(|tx| tx.vm_ids()).unwrap();
+        assert_eq!(vms.len(), 1);
+        // La sequenza degli intenti prosegue oltre gli identificativi migrati.
+        let i = cat
+            .begin_intent(vm_storage::IntentSpec {
+                kind: vm_storage::IntentKind::CreateDisk,
+                vm_id: Some(vms[0]),
+                operation_id: None,
+                target_kind: vm_storage::TargetKind::Disk,
+                target_id: Some(vm_storage::DiskId::new_v7().to_string()),
+                final_path: Some(vm_storage::CatalogLayout::primary_disk(&vms[0])),
+                read_only: false,
+            })
+            .unwrap();
+        assert!(i.id > 9, "v{from}: nuovo intento {}", i.id);
+        cat.abort(&i).unwrap();
+        drop(cat);
+        let upgraded = schema_of(&migrate::open_connection(&db).unwrap());
+        assert_eq!(
+            upgraded, fresh,
+            "schema migrato da v{from} diverso da quello nuovo"
+        );
+    }
+}
+
+#[test]
+fn needs_review_state_requires_the_latest_schema() {
+    // Lo stato `needs_review` non esiste prima della v3: il CHECK lo rifiuta.
+    let dir = common::tempdir();
+    let db = dir.path().join(DB_FILE);
+    let mut conn = migrate::open_connection(&db).unwrap();
+    migrate::migrate_to(&mut conn, &db, 2).unwrap();
+    let insert = |c: &rusqlite::Connection| {
+        c.execute(
+            "INSERT INTO journal(kind, state, target_kind, temp_path, created_at, updated_at)
+             VALUES ('export', 'needs_review', 'none', 'tmp/x.part', 'x', 'x')",
+            [],
+        )
+    };
+    assert!(insert(&conn).is_err());
+    migrate::migrate(&mut conn, &db).unwrap();
+    insert(&conn).unwrap();
 }

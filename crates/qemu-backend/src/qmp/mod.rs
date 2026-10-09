@@ -28,26 +28,13 @@ use serde_json::{Value, json};
 use socket2::{Domain, SockAddr, Socket, Type};
 use tokio::sync::{broadcast, oneshot, watch};
 
-use crate::compat::{DisplayGeometry, InputEvent};
 use crate::paths::ManagedPath;
+use lightvm_proto::InputEvent;
 
 pub use types::{
     AcceleratorsInfo, CurrentMachine, EventKind, Greeting, PciNetworkDevice, QmpError, QmpEvent,
     QmpVersion, RunState, StatusInfo, VersionInfo,
 };
-
-/// Valore massimo degli assi assoluti di QEMU (`INPUT_EVENT_ABS_MAX`).
-pub const ABS_MAX: u32 = 0x7fff;
-
-/// Scala una coordinata in pixel (0..size-1) su 0..=32767 con la formula del
-/// server VNC di QEMU (`qemu_input_scale_axis`), come in F0-04.
-pub fn scale_abs(px: u32, size: u32) -> u32 {
-    if size <= 1 {
-        return 0;
-    }
-    let px = px.min(size - 1);
-    (u64::from(px) * u64::from(ABS_MAX) / u64::from(size - 1)) as u32
-}
 
 /// Configurazione del client.
 #[derive(Clone, Debug)]
@@ -174,7 +161,10 @@ fn read_json_line<R: BufRead>(r: &mut R, max: usize) -> Result<Option<Value>, Qm
     let mut buf = Vec::new();
     loop {
         buf.clear();
-        let n = r.by_ref().take(max as u64 + 1).read_until(b'\n', &mut buf)?;
+        let n = r
+            .by_ref()
+            .take(max as u64 + 1)
+            .read_until(b'\n', &mut buf)?;
         if n == 0 {
             return Ok(None);
         }
@@ -219,8 +209,8 @@ impl QmpClient {
             events_tx,
         });
         let mut reader = BufReader::new(SockReader(shared.clone()));
-        let greeting_v = read_json_line(&mut reader, cfg.max_line_bytes)?
-            .ok_or(QmpError::Disconnected)?;
+        let greeting_v =
+            read_json_line(&mut reader, cfg.max_line_bytes)?.ok_or(QmpError::Disconnected)?;
         let greeting = types::parse_greeting(&greeting_v)?;
         let oob = greeting.capabilities.iter().any(|c| c == "oob");
         let mut neg = if oob {
@@ -232,8 +222,8 @@ impl QmpClient {
         neg.push('\n');
         (&shared.sock).write_all(neg.as_bytes())?;
         loop {
-            let v = read_json_line(&mut reader, cfg.max_line_bytes)?
-                .ok_or(QmpError::Disconnected)?;
+            let v =
+                read_json_line(&mut reader, cfg.max_line_bytes)?.ok_or(QmpError::Disconnected)?;
             match types::classify(v)? {
                 types::Incoming::Return { id: Some(0), .. } => break,
                 types::Incoming::Error { class, desc, .. } => {
@@ -356,6 +346,11 @@ impl QmpClient {
         types::parse_status(self.execute(Cmd::QueryStatus, None).await?)
     }
 
+    /// `query-status` con timeout esplicito (riconciliazione dello stato).
+    pub async fn query_status_within(&self, timeout: Duration) -> Result<StatusInfo, QmpError> {
+        types::parse_status(self.execute(Cmd::QueryStatus, Some(timeout)).await?)
+    }
+
     /// `query-accelerators` (verifica dell'acceleratore attivo, ADR-0007).
     pub async fn query_accelerators(&self) -> Result<AcceleratorsInfo, QmpError> {
         types::parse_accelerators(self.execute(Cmd::QueryAccelerators, None).await?)
@@ -415,6 +410,21 @@ impl QmpClient {
         }
     }
 
+    /// `system_powerdown` con timeout esplicito (scalata dell'arresto).
+    pub async fn system_powerdown_within(&self, timeout: Duration) -> Result<(), QmpError> {
+        self.execute(Cmd::SystemPowerdown, Some(timeout))
+            .await
+            .map(drop)
+    }
+
+    /// `quit` con timeout esplicito (scalata dell'arresto).
+    pub async fn quit_within(&self, timeout: Duration) -> Result<(), QmpError> {
+        match self.execute(Cmd::Quit, Some(timeout)).await {
+            Ok(_) | Err(QmpError::Disconnected) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
     /// `cont`: avvia le vCPU dopo `-S` (usato dal backend dopo le verifiche).
     pub(crate) async fn cont(&self) -> Result<(), QmpError> {
         self.execute(Cmd::Cont, None).await.map(drop)
@@ -437,18 +447,14 @@ impl QmpClient {
         .map(drop)
     }
 
-    /// `input-send-event` con eventi tipizzati; le coordinate assolute sono
-    /// scalate dalla geometria dichiarata. Nessuna ripetizione automatica dopo
-    /// un timeout (ROADMAP 6.3).
-    pub async fn input_send_event(
-        &self,
-        geometry: DisplayGeometry,
-        events: &[InputEvent],
-    ) -> Result<(), QmpError> {
+    /// `input-send-event` con eventi tipizzati già validati da
+    /// [`crate::input::validate_events`] (coordinate assolute 0..=32767).
+    /// Nessuna ripetizione automatica dopo un timeout (ROADMAP 6.3).
+    pub(crate) async fn input_send_event(&self, events: &[InputEvent]) -> Result<(), QmpError> {
         if events.is_empty() {
             return Ok(());
         }
-        let list = input_events_json(geometry, events);
+        let list = crate::input::events_json(events);
         self.execute(Cmd::InputSendEvent { events: list }, None)
             .await
             .map(drop)
@@ -491,25 +497,6 @@ impl Drop for QmpClient {
     }
 }
 
-fn input_events_json(geometry: DisplayGeometry, events: &[InputEvent]) -> Vec<Value> {
-    let mut list = Vec::with_capacity(events.len() * 2);
-    for e in events {
-        match *e {
-            InputEvent::PointerAbs { x, y } => {
-                list.push(json!({"type": "abs", "data": {"axis": "x", "value": scale_abs(x, geometry.width)}}));
-                list.push(json!({"type": "abs", "data": {"axis": "y", "value": scale_abs(y, geometry.height)}}));
-            }
-            InputEvent::Button { button, down } => {
-                list.push(json!({"type": "btn", "data": {"down": down, "button": button.qapi_name()}}));
-            }
-            InputEvent::Key { key, down } => {
-                list.push(json!({"type": "key", "data": {"down": down, "key": {"type": "qcode", "data": key.name()}}}));
-            }
-        }
-    }
-    list
-}
-
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
@@ -525,7 +512,10 @@ fn reader_loop<R: BufRead>(shared: &Shared, reader: &mut R, max: usize) -> Strin
             Ok(types::Incoming::Event(e)) => {
                 let _ = shared.events_tx.send(e);
             }
-            Ok(types::Incoming::Return { id: Some(id), value }) => {
+            Ok(types::Incoming::Return {
+                id: Some(id),
+                value,
+            }) => {
                 if let Some((_, tx)) = lock(&shared.pending).remove(&id) {
                     let _ = tx.send(Ok(value));
                 }
@@ -552,7 +542,9 @@ fn reader_loop<R: BufRead>(shared: &Shared, reader: &mut R, max: usize) -> Strin
 
 fn finish(shared: &Shared, reason: String) {
     let closing = shared.closing.load(Ordering::SeqCst);
-    shared.state_tx.send_replace(ConnectionState::Closed { reason });
+    shared
+        .state_tx
+        .send_replace(ConnectionState::Closed { reason });
     let drained: Vec<_> = lock(&shared.pending).drain().collect();
     for (_, (_, tx)) in drained {
         let _ = tx.send(Err(if closing {
@@ -566,43 +558,6 @@ fn finish(shared: &Shared, reason: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compat::{InputButton, QKeyCode};
-
-    #[test]
-    fn scala_assi_come_qemu() {
-        assert_eq!(scale_abs(0, 1280), 0);
-        assert_eq!(scale_abs(1279, 1280), 32767);
-        assert_eq!(scale_abs(5000, 1280), 32767);
-        assert_eq!(scale_abs(640, 1281), 16383);
-        assert_eq!(scale_abs(10, 1), 0);
-    }
-
-    #[test]
-    fn json_degli_eventi() {
-        let g = DisplayGeometry {
-            width: 1280,
-            height: 800,
-        };
-        let v = input_events_json(
-            g,
-            &[
-                InputEvent::Key {
-                    key: QKeyCode::from_name("a").unwrap(),
-                    down: true,
-                },
-                InputEvent::Button {
-                    button: InputButton::WheelUp,
-                    down: false,
-                },
-                InputEvent::PointerAbs { x: 1279, y: 0 },
-            ],
-        );
-        assert_eq!(v[0]["data"]["key"]["data"], "a");
-        assert_eq!(v[1]["data"]["button"], "wheel-up");
-        assert_eq!(v[2]["data"]["value"], 32767);
-        assert_eq!(v[3]["data"]["axis"], "y");
-        assert_eq!(v.len(), 4);
-    }
 
     #[test]
     fn righe_json() {

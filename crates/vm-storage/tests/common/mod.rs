@@ -1,9 +1,9 @@
 //! Supporto comune ai test di integrazione (directory temporanee, dati finti).
-#![allow(dead_code)]
+#![allow(dead_code, unreachable_pub)]
 
 use std::path::Path;
 
-use vm_storage::compat::{BaselineId, VmId};
+use vm_storage::{BaselineId, VmId};
 use vm_storage::{Catalog, NewVm, PromoteBaseline, Result, RunRecord, StorageError};
 
 pub fn tempdir() -> tempfile::TempDir {

@@ -53,7 +53,8 @@ impl UtcTimestamp {
     /// Millisecondi trascorsi da `earlier` a `self` (negativo se `earlier` è successivo).
     #[must_use]
     pub fn millis_since(&self, earlier: UtcTimestamp) -> i64 {
-        self.as_unix_millis().saturating_sub(earlier.as_unix_millis())
+        self.as_unix_millis()
+            .saturating_sub(earlier.as_unix_millis())
     }
 
     /// Istante corrente dall'orologio di sistema (solo supervisor; il core usa la porta `Clock`).

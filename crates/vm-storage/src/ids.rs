@@ -1,12 +1,12 @@
 //! Identificativi.
 //!
 //! `VmId`, `RunId`, `OperationId`, `BaselineId`, `MediaId`, `SessionId` e
-//! `GrantId` sono quelli di `lightvm-proto` (UUID v7). Gli identificativi
-//! propri dello storage (`DiskId`, `FirmwareId`, `ArtifactId`) non compaiono nel
-//! protocollo e hanno la stessa forma. Nel DB tutti sono conservati come testo
-//! canonico (minuscolo, con trattini) tramite i tratti interni [`IdSql`] e
-//! [`IdCol`]: la regola di orfanità impedisce di implementare i tratti di
-//! `rusqlite` sui tipi di `lightvm-proto`.
+//! `GrantId` sono quelli di `lightvm-proto` (UUID v7), riesportati dalla radice
+//! del crate. Gli identificativi propri dello storage (`DiskId`, `FirmwareId`,
+//! `ArtifactId`) non compaiono nel protocollo e hanno la stessa forma testuale.
+//! Nel DB tutti sono conservati come testo canonico (minuscolo, con trattini)
+//! tramite i tratti interni [`IdSql`] e [`IdCol`]: la regola di orfanità
+//! impedisce di implementare i tratti di `rusqlite` sui tipi di `lightvm-proto`.
 
 use std::fmt;
 use std::str::FromStr;

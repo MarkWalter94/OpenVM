@@ -11,7 +11,9 @@ use crate::{
 
 /// Sistema operativo guest dichiarato. Nel MVP il riferimento è Ubuntu LTS
 /// x86_64 con versione e checksum fissati in F0 (ROADMAP 4).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum GuestOs {
     /// Ubuntu LTS x86_64 (guest di riferimento del MVP).
@@ -22,7 +24,20 @@ pub enum GuestOs {
 
 /// Profilo di rete. Nel MVP l'unico valore ammesso è `offline` (ADR-0004): nessuna
 /// NIC guest, periferiche di rete predefinite escluse, nessun forwarding.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum NetworkProfile {
     /// Nessuna NIC.
@@ -31,7 +46,20 @@ pub enum NetworkProfile {
 }
 
 /// Firmware del guest. Nel MVP solo UEFI con stato NVRAM gestito (ROADMAP 8).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Firmware {
     /// UEFI (OVMF) con NVRAM per VM.
@@ -84,7 +112,9 @@ pub struct VmRecord {
 }
 
 /// Tipo di supporto nel registro media.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum MediaKind {
     /// ISO di installazione del guest.
@@ -135,7 +165,9 @@ pub struct MediaEntry {
 }
 
 /// Origine di una baseline (ROADMAP 8).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum BaselineOrigin {
     /// Registrata dopo arresto corretto osservato.
@@ -169,7 +201,9 @@ pub struct BaselineRecord {
 }
 
 /// Motivo della fine di un'esecuzione.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum RunEndReason {
     /// Arresto ordinario completato (fine processo osservata).
@@ -209,7 +243,9 @@ pub struct RunRecord {
 }
 
 /// Tipo di operazione della coda per VM.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationKind {
     /// Creazione della VM nel catalogo.
@@ -267,7 +303,9 @@ impl OperationKind {
 }
 
 /// Stato di un'operazione.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationStatus {
     /// Accettata, in coda, non ancora inoltrata al backend.
@@ -398,9 +436,17 @@ impl HostCapacity {
     pub fn as_limits(&self) -> ResourceLimits {
         ResourceLimits {
             max_vcpus: self.logical_cpus,
-            max_memory_mib: self.total_memory_mib.saturating_sub(self.reserved_memory_mib),
-            max_disk_gib: self.free_storage_gib.saturating_sub(self.reserved_storage_gib),
-            max_running_vms: if self.accelerator_available { u32::MAX } else { 0 },
+            max_memory_mib: self
+                .total_memory_mib
+                .saturating_sub(self.reserved_memory_mib),
+            max_disk_gib: self
+                .free_storage_gib
+                .saturating_sub(self.reserved_storage_gib),
+            max_running_vms: if self.accelerator_available {
+                u32::MAX
+            } else {
+                0
+            },
             max_agent_sessions: u32::MAX,
         }
     }

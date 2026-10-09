@@ -1,14 +1,27 @@
 # Strategia di test
 
-Ultimo aggiornamento: 2026-10-09 (riesame di F0; completamento entro F1, sezione 10)
+Ultimo aggiornamento: 2026-10-09 (riesame di F0; lavoro F1 in corso: CI, SDK MCP, licenze)
 
-Traduzione operativa della sezione 13 di `docs/ROADMAP.md`. Nessun test del prodotto è stato eseguito; le prove di fattibilità F0 (spike) sono registrate in `docs/verification/F0-*` e riassunte in `F0-09-riesame-prove.md`. Le procedure e gli esiti vanno registrati in `docs/verification/` secondo il template di `docs/verification/README.md`.
+Traduzione operativa della sezione 13 di `docs/ROADMAP.md`. Le prove di fattibilità F0 (spike) sono registrate in `docs/verification/F0-*` e riassunte in `F0-09-riesame-prove.md`; i primi test dei crate F1 (con backend, catalogo o QMP simulati, dichiarati) sono in `docs/verification/F1-*`. Nessuna capacità di prodotto è verificata su hardware. Le procedure e gli esiti vanno registrati in `docs/verification/` secondo il template di `docs/verification/README.md`. Questo documento non riporta conteggi di test: i numeri stanno nei file di verifica che li hanno misurati.
+
+## 0. Livelli di test
+
+| Livello | Che cosa contiene | Dove si trova | Che cosa non dimostra | Esempi attuali |
+| --- | --- | --- | --- | --- |
+| Unitari | logica pura, stati, policy, validazione, parser con fixture | moduli `#[cfg(test)]` dei crate | integrazione tra processi, OS, QEMU | `vm-core`, `vm-storage`, `lightvm-proto`, `qemu-backend` (parser `probe`, `cmdline`, `validate`) |
+| Integrazione headless | più componenti o processi reali senza UI né acceleratore: IPC del servizio, server MCP su stdio come processo figlio, SQLite su file temporanei | `crates/*/tests/` | QEMU reale, rendering, accelerazione | `lightvm-service/tests/ipc.rs` (`F1-04`), `lightvm-mcp/tests/stdio.rs` (`F1-06`) |
+| Test UI strumentati | interfaccia egui pilotata via AccessKit con egui_kittest, supervisor simulato | `apps/desktop/tests/` | IPC reale, rendering nativo, accelerazione | `kittest_ui.rs`; istantanee in corso (§4) |
+| Mock dichiarati | QMP, QEMU, backend o catalogo simulati, fixture di stderr/help registrate da QEMU reale | `crates/qemu-backend/tests/qmp_mock.rs`, `tests/fixtures/`; backend e catalogo finti di `lightvm-service` | avvio reale, dispositivi, latenze (§2) | classificazione dell'errore senza acceleratore da fixture (job `acceleratore-assente`) |
+| Processi senza acceleratore | Job Object su Windows; pidfd, gruppi, cgroup delegato su Linux, con figli di prova | test dei crate e spike; job `processi-windows`, `processi-linux` | QEMU con KVM/WHPX, limiti sul guest | `F0-06`, `F0-07` §4, `F1-08` §3 (**[processi]** in WSL2) |
+| Prove reali | QEMU con provenienza verificata e acceleratore su host fisico; test `#[ignore]` lanciati a mano o da runner fisici | `apps/desktop/tests/console_reale.rs`, `crates/qemu-backend/tests/real_qemu.rs` (ignorati per default), script in `lab/` | combinazioni diverse da quella provata | prove F0 su Windows (`F0-02`…`F0-06`) |
+
+I file di verifica classificano ogni esito come mock/simulazione o hardware (sezione 16, punto 6).
 
 ## 1. Pipeline di verifica
 
 | Livello | Quando | Contenuto | Dove gira | Evidenza |
 | --- | --- | --- | --- | --- |
-| Per modifica | A ogni modifica | Unit test significativi, validazione degli schemi JSON generati, lint, build dei target configurati | CI senza segreti (Windows, Linux) | Log CI |
+| Per modifica | A ogni modifica | Unit test significativi, validazione degli schemi JSON generati, lint, build dei target configurati, licenze e advisory | CI senza segreti, `.github/workflows/ci.yml`: `lint`, `build-test-windows`, `build-test-linux`, `processi-windows`, `processi-linux`, `smoke-render-software`, `acceleratore-assente`, `schema`, `cargo-deny`, `macos-check` (`F1-08`; **non ancora eseguita**: repository non pubblicato) | Log CI |
 | Proprietà e input avversari | A ogni modifica sulle aree interessate | Test di proprietà sulle transizioni VM e sul registro storage; input avversari e fuzzing mirato dei parser esposti (IPC, MCP, RFB, manifest) | CI | Log CI, corpus di fuzzing |
 | Runner fisici controllati | Su modifiche a backend, console, storage, supervisor; prima di ogni milestone | Probe, boot accelerato, QMP, console, ripristino, test negativi che richiedono una VM reale | Host fisici di laboratorio con acceleratore | File in `docs/verification/` |
 | Pre-release | Prima di ogni release | Installazione pulita, upgrade, regressione E2E, test negativi sull'artefatto finale | Host puliti del target | File in `docs/verification/` |
@@ -34,23 +47,27 @@ Regole:
 
 | Directory | Contenuto |
 | --- | --- |
-| `crates/*/` (test di unità) | Logica pura, stati, policy, validazione |
-| `tests/integration/` | Supervisor headless, IPC, backend con QEMU reale o simulato (dichiarato) |
-| `tests/security/` | Test negativi della sezione 7.4 (checklist in `docs/SECURITY.md`) |
-| `tests/e2e/` | Scenari completi con VM reale e, da F5, client MCP |
+| `crates/*/src` (moduli `#[cfg(test)]`) | Logica pura, stati, policy, validazione |
+| `crates/*/tests/`, `apps/desktop/tests/` | Integrazione per crate: IPC del servizio, server MCP su stdio, storage, QMP simulato, UI con egui_kittest; test con QEMU reale marcati `#[ignore]` |
+| `tests/integration/` | Integrazione tra più crate (supervisor headless con backend reale o simulato, dichiarato); oggi solo `README.md` |
+| `tests/security/` | Test negativi della sezione 7.4 (checklist in `docs/SECURITY.md`); oggi solo `README.md` |
+| `tests/e2e/` | Scenari completi con VM reale e, da F5, client MCP; oggi solo `README.md` |
+
+Convenzioni di nome usate dalla CI: `acceleratore_assente` per i test del rilevamento capacità senza acceleratore (F1-03, job `acceleratore-assente`; già presenti in `qemu-backend`) e `cgroup_delegato` per i test `#[ignore]` della delega cgroup che il supervisor aggiungerà (F1-15, job `processi-linux`). Il job segnala con un avviso quando il filtro non trova test.
 
 La fixture grafica deterministica è definita in ADR-0019 e realizzata entro F3.
 
 ## 4. Framework di test UI
 
-**egui_kittest 0.36.2**, che pilota l'interfaccia attraverso l'albero AccessKit (ADR-0022, chiusura entro F1). Provato in F0, senza GPU e senza finestra nativa:
+**egui_kittest 0.36.2** è il framework scelto (ADR-0022; versione allineata a egui/eframe 0.36.2 di ADR-0014): pilota l'interfaccia attraverso l'albero AccessKit e, con la feature `snapshot`, confronta istantanee grafiche. L'ADR resta da chiudere con la prova delle istantanee (criterio 4) e dell'esclusione dei ganci dall'artefatto pubblico (criterio 5). Provato in F0, senza GPU e senza finestra nativa:
 
 | Prova | Host | Esito | Evidenza |
 | --- | --- | --- | --- |
 | Navigazione e cambio tema tramite ruolo ed etichetta AccessKit (3 test) | Windows 11 | verificato | `F0-01` §7 |
 | Assenza di campi di testo nelle sezioni; console reale configurata; percorso UI → tabella tasti → QMP → guest con QEMU reale (test `console_reale`, ignorato per default) | Windows 11 | verificato | `F0-04` Risultati §4, §6 |
 | `cargo test --workspace` inclusi 4 test `kittest_ui` | Linux in WSL2 (**[build]**) | verificato | `F0-07` §2 |
-| Istantanee grafiche (feature `snapshot`) | — | non eseguito | backlog F1-19 |
+| Istantanee grafiche (feature `snapshot`) | — | in corso in un altro flusso (`apps/desktop/tests/istantanee.rs`); nessun esito registrato in `docs/verification/` al momento di questo aggiornamento | backlog F1-19 |
+| Esecuzione in CI (Windows e Ubuntu, runner senza GPU) | runner GitHub | non eseguito | `F1-08` |
 
 - Usare ruolo più etichetta per individuare i nodi (`get_by_role_and_label`): l'etichetta da sola può corrispondere a più nodi (`F0-01` §7).
 - I test UI sono affiancati dai test headless del core e, quando usano un supervisor simulato, sono etichettati come tali: non verificano IPC, rendering nativo o accelerazione.
@@ -97,5 +114,7 @@ Regole di misura (sezione 13):
 - Profilo offline anche sui runner: il guest di test non ha NIC.
 - Log e artefatti dei runner ripuliti da segreti prima dell'archiviazione in `docs/verification/`; i log grezzi restano fuori dal repository (`lab/`).
 - WSL2, VM annidate o runner senza accelerazione verificabile servono solo per build e test indipendenti dall'acceleratore (sezione 10 F0); le prove di questo tipo sono etichettate **[build]** o **[processi]** come in `F0-07`.
-- Proposta di job CI per F1 (lint, build e test Windows/Linux, processi, rendering software, acceleratore assente, licenze, laboratorio fisico): `F0-07`, sezione "Proposta: CI minima per F1"; backlog F1-02 in `docs/RELEASE_PLAN.md`.
-- Build macOS su runner adeguato entro F2, senza dichiarare supporto operativo; se il runner manca, rischio registrato in `docs/STATUS.md` (sezione 10 F1).
+- CI F1 (F1-02): workflow in `.github/workflows/ci.yml`, descritto e validato in locale in `F1-08` (proposta di partenza in `F0-07`, "Proposta: CI minima per F1"). Nessun runner della CI ha un acceleratore verificabile né il QEMU approvato: i job di laboratorio fisico (`lab-fisico-windows`, `lab-fisico-linux`) restano fuori dalla CI pubblica e non sono attivati da PR non fidate.
+- Licenze e advisory a ogni modifica con `cargo-deny` (`deny.toml`, ADR-0023, `F1-07`).
+- SDK MCP provato con un client di prova su stdio (`F1-06`); i test con client MCP reali sono di F5 e appartengono a `tests/e2e/`.
+- Build macOS su runner adeguato entro F2, senza dichiarare supporto operativo: job `macos-check` non bloccante; se il runner manca, rischio registrato in `docs/STATUS.md` (sezione 10 F1).
