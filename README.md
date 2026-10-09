@@ -1,33 +1,73 @@
 # LightVM
 
-LightVM è un gestore locale di macchine virtuali per test ripetibili, basato su QEMU.
-Offre una UI desktop nativa in Rust (egui/eframe) con console integrata e baseline ripristinabili a VM spenta.
-Il controllo può essere delegato ad agenti esterni tramite MCP (stdio), con autorizzazioni applicate dal backend.
-Ogni sessione agente è limitata a VM, strumenti, durata e quote approvate dall'utente, ed è revocabile in ogni momento.
-Primo host di prodotto: Windows 11 x86_64 con guest Ubuntu LTS; nessun servizio cloud, telemetria o account obbligatorio.
+LightVM is a local virtual machine manager for repeatable tests, built on QEMU.
+It ships a native Rust desktop UI (egui/eframe) with a built-in console and baselines that can be restored while the VM is off.
+Control can be delegated to external agents over MCP (stdio), with authorization enforced by the backend, never by the UI.
+Every agent session is confined to the VMs, tools, duration and quotas the user approved, and can be revoked at any time.
+First supported host: Windows 11 x86_64 with Ubuntu LTS guests. No cloud service, telemetry or account is required.
 
-## Stato
+## Status
 
-**F0 — Fattibilità e decisioni: in riesame.** Le prove di fattibilità sul primo host (Windows 11 con WHPX, guest Ubuntu 26.04.1 LTS) hanno dimostrato boot accelerato, console RFB nativa, input, canali di controllo su socket privati, ripristino da baseline e supervisione dei processi, con deviazioni pubblicate (per esempio modello CPU `qemu64` invece di `host`). Esito proposto: "verificato solo Windows", in attesa della conferma dell'utente e di alcuni pendenti; F0 non è ancora chiusa. Nessuna funzionalità di prodotto è implementata o verificata. Riesame in [`docs/verification/F0-09-riesame-prove.md`](docs/verification/F0-09-riesame-prove.md), stato in [`docs/STATUS.md`](docs/STATUS.md).
+**Phase F1 (foundations and QEMU control) is in progress; F0 (feasibility) is under review.**
 
-## Documenti
+Feasibility work on the first host (Windows 11 with WHPX, Ubuntu 26.04.1 LTS guest) demonstrated accelerated boot, a native RFB console, input, control channels on private sockets, baseline restore and process supervision, with published deviations (for example CPU model `qemu64` instead of `host`). The proposed F0 outcome is "verified on Windows only" and still awaits user confirmation.
 
-| Documento | Contenuto |
+F1 streams delivered so far, each with its evidence file under `docs/verification/`:
+
+- Shared types and JSON Schemas (`lightvm-proto`), VM state machine, resource validation, sessions and audit (`vm-core`).
+- SQLite catalog with versioned migrations, journal of intents, approved-media registry and disk guards (`vm-storage`).
+- Supervisor service with authenticated local IPC, real composition root and a headless end-to-end run against real QEMU (`lightvm-service`).
+- MCP server spike on the official Rust SDK pinned to protocol revision 2025-11-25 (`lightvm-mcp`), licence inventory, CI workflow validated locally.
+
+Still open in F1: the QEMU backend evidence (20 real start/stop cycles), the desktop UI evidence (clipboard isolation, renderer selection, first measurements), and the consolidation of `docs/STATUS.md`. CI has not run on GitHub yet. No product feature is considered verified until its evidence file says so.
+
+## Repository layout
+
+| Path | Content |
 | --- | --- |
-| [`docs/ROADMAP.md`](docs/ROADMAP.md) | Riferimento congelato: perimetro, controlli obbligatori, fasi e criteri di uscita. Non si modifica durante l'esecuzione; integrità in `docs/ROADMAP.sha256`. |
-| [`docs/STATUS.md`](docs/STATUS.md) | Fase corrente, avanzamento, impedimenti |
-| [`docs/RELEASE_PLAN.md`](docs/RELEASE_PLAN.md) | Backlog, ordine di esecuzione, decisioni aperte |
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Componenti, confini, modello di processo, console |
-| [`docs/SECURITY.md`](docs/SECURITY.md) | Threat model, controlli, test negativi, rischi residui |
-| [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) | Matrice delle combinazioni effettivamente provate |
-| [`docs/TESTING.md`](docs/TESTING.md) | Pipeline di verifica e misure di prestazione |
-| [`docs/adr/`](docs/adr/README.md) | Decisioni architetturali (accettate e proposte) |
-| [`docs/verification/`](docs/verification/README.md) | Prove eseguite |
+| `apps/desktop` | Native desktop UI (`lightvm-desktop`), console texture fed by the RFB client |
+| `crates/lightvm-proto` | Identifiers, states, public errors, IPC envelope, generated JSON Schemas |
+| `crates/vm-core` | VM model, state machine, resource limits, agent sessions, audit |
+| `crates/vm-storage` | SQLite catalog, migrations, journal, media registry, disk guards |
+| `crates/qemu-backend` | QEMU process control, QMP client, Job Object, screenshots, input |
+| `crates/lightvm-service` | Supervisor process: IPC server, composition root, audit sink |
+| `crates/lightvm-mcp` | MCP stdio server spike |
+| `crates/rfb-client` | Read-only RFB 3.8 client used by the UI |
+| `spikes/` | F0 feasibility probes, kept for reference |
+| `docs/` | Roadmap, status, architecture, security, ADRs, verification evidence |
 
-## Come leggere `docs/verification/`
+## Building
 
-Ogni file `F<fase>-<nn>-<argomento>.md` documenta una prova: scopo, ambiente, procedura con i comandi esatti, risultati e limiti. Ogni voce è marcata `verificato`, `fallito` o `non eseguito`. Solo un file di verifica può dimostrare che qualcosa funziona: un'affermazione in altri documenti senza rimando a una verifica non vale come prova.
+Requirements: Rust 1.99.0 (pinned in `rust-toolchain.toml`). On Windows the MSVC linker needs the Visual Studio 2022 Build Tools environment loaded (`vcvars64.bat`) before running cargo.
 
-## Licenza
+```
+cargo build --workspace --locked
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+```
 
-Codice originale distribuito con licenza MIT: vedi [`LICENSE`](LICENSE). QEMU, firmware, immagini guest e dipendenze di terzi hanno licenze proprie, che la licenza di LightVM non sostituisce.
+Tests that need a real QEMU are marked `#[ignore]` and enabled through environment variables documented in the corresponding verification file. QEMU, firmware and guest images are not part of the repository.
+
+## Documents
+
+| Document | Content |
+| --- | --- |
+| [`docs/ROADMAP.md`](docs/ROADMAP.md) | Frozen reference: scope, mandatory controls, phases and exit criteria. Not edited during execution; integrity in `docs/ROADMAP.sha256`. |
+| [`docs/STATUS.md`](docs/STATUS.md) | Current phase, progress, impediments |
+| [`docs/RELEASE_PLAN.md`](docs/RELEASE_PLAN.md) | Backlog, execution order, open decisions |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Components, boundaries, process model, console |
+| [`docs/SECURITY.md`](docs/SECURITY.md) | Threat model, controls, negative tests, residual risks |
+| [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) | Matrix of the combinations actually tested |
+| [`docs/TESTING.md`](docs/TESTING.md) | Verification pipeline and performance measurements |
+| [`docs/adr/`](docs/adr/README.md) | Architecture decision records (accepted and proposed) |
+| [`docs/verification/`](docs/verification/README.md) | Evidence of the tests that were run |
+
+Project documentation is written in Italian.
+
+## How to read `docs/verification/`
+
+Each file `F<phase>-<nn>-<topic>.md` documents one test: purpose, environment, procedure with exact commands, results and limits. Every item is marked `verificato` (verified), `fallito` (failed) or `non eseguito` (not run). Only a verification file can show that something works: a claim elsewhere without a reference to one does not count as evidence.
+
+## License
+
+Original code is released under the MIT License, see [`LICENSE`](LICENSE). QEMU, firmware, guest images and third-party dependencies carry their own licences, which the LightVM licence does not replace.
