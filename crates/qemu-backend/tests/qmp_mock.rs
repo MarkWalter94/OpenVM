@@ -50,8 +50,10 @@ fn serve(path: &ManagedPath, f: impl FnOnce(Conn) + Send + 'static) -> std::thre
             r: BufReader::new(s),
             w,
         };
-        c.send(json!({"QMP": {"version": {"qemu": {"micro": 0, "minor": 1, "major": 11},
-                "package": "mock"}, "capabilities": ["oob"]}}));
+        c.send(
+            json!({"QMP": {"version": {"qemu": {"micro": 0, "minor": 1, "major": 11},
+                "package": "mock"}, "capabilities": ["oob"]}}),
+        );
         let neg = c.recv().unwrap();
         assert_eq!(neg["execute"], "qmp_capabilities");
         assert_eq!(neg["arguments"]["enable"], json!(["oob"]));
@@ -81,7 +83,9 @@ fn risposte_fuori_ordine_eventi_e_errori() {
         } else {
             (b, a)
         };
-        c.send(json!({"return": {"enabled": "whpx", "present": ["tcg", "whpx"]}, "id": accel["id"]}));
+        c.send(
+            json!({"return": {"enabled": "whpx", "present": ["tcg", "whpx"]}, "id": accel["id"]}),
+        );
         c.send(json!({"return": {"status": "running", "running": true}, "id": status["id"]}));
         let r = c.recv().unwrap();
         assert_eq!(r["execute"], "system_reset");
@@ -91,12 +95,16 @@ fn risposte_fuori_ordine_eventi_e_errori() {
         c.send(json!({"return": {}, "id": 999_999}));
         let q = c.recv().unwrap();
         assert_eq!(q["execute"], "quit");
-        c.send(json!({"event": "SHUTDOWN", "data": {"guest": false, "reason": "host-qmp-quit"},
-                      "timestamp": {"seconds": 3, "microseconds": 0}}));
+        c.send(
+            json!({"event": "SHUTDOWN", "data": {"guest": false, "reason": "host-qmp-quit"},
+                      "timestamp": {"seconds": 3, "microseconds": 0}}),
+        );
         c.send(json!({"return": {}, "id": q["id"]}));
     });
     rt().block_on(async {
-        let c = QmpClient::connect(&path, QmpConfig::default()).await.unwrap();
+        let c = QmpClient::connect(&path, QmpConfig::default())
+            .await
+            .unwrap();
         assert!(c.oob_enabled());
         assert_eq!(c.greeting().version.major, 11);
         let mut ev = c.subscribe_events();
@@ -192,7 +200,9 @@ fn chiusura_locale() {
         }
     });
     rt().block_on(async {
-        let c = QmpClient::connect(&path, QmpConfig::default()).await.unwrap();
+        let c = QmpClient::connect(&path, QmpConfig::default())
+            .await
+            .unwrap();
         c.query_status().await.unwrap();
         c.close(Duration::from_secs(2)).await;
         assert!(matches!(c.query_status().await, Err(QmpError::Closed)));

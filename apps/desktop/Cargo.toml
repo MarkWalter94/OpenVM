@@ -13,15 +13,21 @@ name = "lightvm-desktop"
 path = "src/main.rs"
 
 [features]
-# Backend di rendering: wgpu predefinito, glow opzionale. Se entrambi sono
-# attivi si sceglie a runtime con `--renderer wgpu|glow`.
-default = ["wgpu"]
+# Backend di rendering (ADR-0014, F1-16): la build predefinita include glow e
+# wgpu, così la selezione automatica può ripiegare glow → wgpu (DX12 su
+# hardware) → wgpu su rasterizzatore software (WARP). Con un solo backend
+# compilato (`--no-default-features --features glow|wgpu`) il ripiego si
+# limita ai tentativi disponibili.
+default = ["wgpu", "glow"]
 wgpu = ["eframe/wgpu"]
 glow = ["eframe/glow"]
 
 [dependencies]
 # `links` (apertura automatica di URL) è escluso di proposito: ROADMAP 6.0 vieta
 # link apribili automaticamente. `persistence` non serve allo spike.
+# Nota F1-13: eframe 0.36.2 abilita sempre `egui-winit/clipboard` sui target
+# nativi (dipendenza non opzionale nel suo Cargo.toml), quindi la lettura degli
+# appunti host non si può disattivare dalle feature: vedi `src/appunti.rs`.
 eframe = { workspace = true, features = ["accesskit", "default_fonts", "wayland", "x11"] }
 egui = { workspace = true, features = ["default_fonts"] }
 egui_extras = { workspace = true }
@@ -30,7 +36,9 @@ rfb-client = { path = "../../crates/rfb-client" }
 f0-console = { path = "../../spikes/f0-console" }
 
 [dev-dependencies]
-egui_kittest = { workspace = true }
+# `snapshot` + `wgpu`: istantanee grafiche confrontate con i file in
+# `tests/snapshots/` (F1-19, ADR-0022); tolleranza in `kittest.toml`.
+egui_kittest = { workspace = true, features = ["snapshot", "wgpu"] }
 
 [lints]
 workspace = true

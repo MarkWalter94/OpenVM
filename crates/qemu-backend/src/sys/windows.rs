@@ -32,9 +32,9 @@ use windows_sys::Win32::System::Threading::{
     CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DETACHED_PROCESS,
     DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess,
     GetExitCodeProcess, GetProcessTimes, INFINITE, InitializeProcThreadAttributeList,
-    LPPROC_THREAD_ATTRIBUTE_LIST, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-    PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW,
-    UpdateProcThreadAttribute,
+    LPPROC_THREAD_ATTRIBUTE_LIST, OpenProcess, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+    PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
+    PROCESS_SYNCHRONIZE, STARTF_USESTDHANDLES, STARTUPINFOEXW, UpdateProcThreadAttribute,
     WaitForSingleObject,
 };
 
@@ -175,7 +175,10 @@ pub(crate) const KILL_ON_JOB_CLOSE: u32 = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConsoleMode {
     /// Console senza finestra: Windows crea un `conhost.exe` figlio (nel job).
-    #[allow(dead_code, reason = "alternativa verificata in F0-06, non usata per default")]
+    #[allow(
+        dead_code,
+        reason = "alternativa verificata in F0-06, non usata per default"
+    )]
     NoWindow,
     /// Nessuna console: nessun `conhost.exe` (raccomandazione F0-06).
     Detached,
@@ -365,7 +368,6 @@ pub(crate) fn spawn(spec: &SpawnSpec<'_>) -> io::Result<Spawned> {
     result
 }
 
-
 /// Attende la fine di un processo. `Some(codice)` se è terminato entro il
 /// timeout (`None` = attesa infinita).
 pub(crate) fn wait_process(h: &OwnedHandle, timeout_ms: Option<u32>) -> io::Result<Option<u32>> {
@@ -395,9 +397,98 @@ pub(crate) fn creation_time(h: &OwnedHandle) -> io::Result<u64> {
     Ok(filetime_u64(c))
 }
 
+/// Memoria fisica dell'host: `(totale, disponibile)` in byte.
+pub(crate) fn physical_memory() -> io::Result<(u64, u64)> {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    // SAFETY: struttura POD di soli interi; lo zero è un valore valido.
+    let mut m: MEMORYSTATUSEX = unsafe { zeroed() };
+    m.dwLength = size_of::<MEMORYSTATUSEX>() as u32;
+    // SAFETY: `m` è una struttura locale valida con `dwLength` impostato come
+    // richiesto dall'API.
+    check(unsafe { GlobalMemoryStatusEx(&mut m) })?;
+    Ok((m.ullTotalPhys, m.ullAvailPhys))
+}
+
+/// Spazio libero disponibile all'utente corrente sul volume di `dir`, in byte.
+pub(crate) fn free_disk_bytes(dir: &Path) -> io::Result<u64> {
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    let w = wide(dir.as_os_str());
+    let mut avail = 0u64;
+    // SAFETY: stringa UTF-16 terminata da zero valida per la durata della
+    // chiamata; puntatori a variabili locali o nulli (parametri facoltativi).
+    check(unsafe { GetDiskFreeSpaceExW(w.as_ptr(), &mut avail, null_mut(), null_mut()) })?;
+    Ok(avail)
+}
+
+/// Esito della ricerca di un processo per PID e tempo di creazione.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PidStatus {
+    /// Nessun processo con quel PID.
+    NotFound,
+    /// Il PID appartiene a un altro processo (tempo di creazione diverso, o
+    /// processo non apribile dall'utente corrente: un figlio creato da noi lo
+    /// sarebbe).
+    Reused,
+    /// Stesso processo, terminato (qualcuno tiene ancora un handle).
+    Exited,
+    /// Stesso processo, ancora in esecuzione.
+    Alive,
+}
+
+/// Cerca il processo `pid` e lo confronta con il tempo di creazione atteso
+/// (identità del processo, F0-06 §3). Non termina né modifica nulla.
+pub(crate) fn pid_status(pid: u32, expected_creation_time: u64) -> io::Result<PidStatus> {
+    // SAFETY: OpenProcess accetta qualunque PID; in caso di errore restituisce
+    // un handle nullo, gestito subito sotto. Nessun puntatore è passato.
+    let h = unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            0,
+            pid,
+        )
+    };
+    if h.is_null() {
+        let e = io::Error::last_os_error();
+        let code = e.raw_os_error().map(|c| c as u32);
+        return match code {
+            Some(windows_sys::Win32::Foundation::ERROR_INVALID_PARAMETER) => {
+                Ok(PidStatus::NotFound)
+            }
+            Some(windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED) => Ok(PidStatus::Reused),
+            _ => Err(e),
+        };
+    }
+    let h = owned(h)?;
+    if creation_time(&h)? != expected_creation_time {
+        return Ok(PidStatus::Reused);
+    }
+    Ok(match wait_process(&h, Some(0))? {
+        Some(_) => PidStatus::Exited,
+        None => PidStatus::Alive,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identita_del_processo_corrente() {
+        let pid = std::process::id();
+        // SAFETY: pseudo-handle del processo corrente, non va chiuso; lo si
+        // duplica in un handle reale posseduto.
+        let cur = unsafe { GetCurrentProcess() };
+        let mut dup: HANDLE = null_mut();
+        // SAFETY: duplicazione dello pseudo-handle corrente in un handle reale.
+        check(unsafe { DuplicateHandle(cur, cur, cur, &mut dup, 0, 0, DUPLICATE_SAME_ACCESS) })
+            .unwrap();
+        let h = owned(dup).unwrap();
+        let ct = creation_time(&h).unwrap();
+        assert_eq!(pid_status(pid, ct).unwrap(), PidStatus::Alive);
+        assert_eq!(pid_status(pid, ct + 1).unwrap(), PidStatus::Reused);
+        // PID 0 (System Idle): OpenProcess fallisce con ERROR_INVALID_PARAMETER.
+        assert_eq!(pid_status(0, 0).unwrap(), PidStatus::NotFound);
+    }
 
     fn q(s: &str) -> String {
         let mut v = Vec::new();

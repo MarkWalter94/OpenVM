@@ -3,10 +3,13 @@
 //!
 //! Sequenza di [`QemuRun::start`]:
 //!
-//! 1. validazione della specifica contro le capacità rilevate;
+//! 1. validazione della specifica contro le capacità rilevate (acceleratore
+//!    verificato dal probe e uguale a quello richiesto, macchina, CPU,
+//!    dispositivi);
 //! 2. apertura protettiva dei file ([`crate::storage_guard`]);
-//! 3. spawn nel contenitore dell'esecuzione (Job Object), QEMU con `-S`;
-//! 4. connessione QMP (unico client);
+//! 3. rimozione dei socket orfani, spawn nel contenitore dell'esecuzione (Job
+//!    Object), QEMU con `-S`;
+//! 4. connessione QMP (unico client, socket nella directory privata);
 //! 5. verifica dell'acceleratore attivo (`query-accelerators`) e dell'assenza
 //!    di NIC (`info network` vuoto e nessun dispositivo PCI di classe rete);
 //!    in caso di esito negativo il processo viene terminato;
@@ -15,32 +18,36 @@
 //! Stato del processo: `Starting → Running → Stopping → Exited { code, cause }`,
 //! osservato dall'attesa sull'handle del processo (thread dedicato) e dagli
 //! eventi QMP `SHUTDOWN`. L'[`EmergencyStop`] termina il contenitore con
-//! primitive OS senza passare dalla coda QMP.
+//! primitive OS senza passare dalla coda QMP. [`QemuRun::reconcile`] confronta
+//! processo e QMP; [`QemuRun::close`] chiude il Job Object dopo l'uscita.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use lightvm_proto::{
+    BackendObservation, DisplayGeometry, InputEvent, ObservationSource, ObservedState, RunId,
+    UtcTimestamp, VmState,
+};
 use tokio::sync::{broadcast, watch};
 
 use crate::cmdline::{QemuCommand, VmLaunchSpec};
-use crate::compat::{DisplayGeometry, InputEvent, RunId, Screenshot, validate_input};
 use crate::error::{BackendError, Result};
+use crate::input::{PressedInput, validate_events};
 use crate::paths::{ManagedPath, ManagedPaths};
 use crate::probe::{AcceleratorStatus, HostCapabilities, UnavailableReason, stderr_excerpt};
 use crate::process::{
-    ChildProcess, ProcessContainer, ProcessIdentity, SpawnRequest, minimal_environment,
-    new_container,
+    ChildProcess, ExitCodeClass, ProcessContainer, ProcessIdentity, SpawnRequest,
+    classify_exit_code, minimal_environment, new_container,
 };
 use crate::qmp::{
     AcceleratorsInfo, ConnectionState, CurrentMachine, EventKind, PciNetworkDevice, QmpClient,
-    QmpConfig, QmpEvent, StatusInfo, VersionInfo,
+    QmpConfig, QmpEvent, RunState, StatusInfo, VersionInfo,
 };
+use crate::screenshot::{CapturedScreenshot, RgbImage};
 use crate::storage_guard::StorageGuards;
 
-/// Codice d'uscita passato a `TerminateJobObject` dall'Emergency Stop
-/// (stesso valore dello spike F0-06).
-pub const EMERGENCY_EXIT_CODE: u32 = 0xE5E5;
+pub use crate::process::EMERGENCY_EXIT_CODE;
 
 /// Causa dell'uscita del processo QEMU.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,6 +91,8 @@ pub struct RunConfig {
     pub startup_timeout: Duration,
     /// Timeout di `screendump`.
     pub screendump_timeout: Duration,
+    /// Dimensione massima del PNG di uno screenshot.
+    pub max_screenshot_bytes: u64,
     /// Lascia le vCPU in pausa dopo le verifiche (nessun `cont`).
     pub leave_paused: bool,
 }
@@ -94,12 +103,14 @@ impl Default for RunConfig {
             qmp: QmpConfig::default(),
             startup_timeout: Duration::from_secs(20),
             screendump_timeout: Duration::from_secs(10),
+            max_screenshot_bytes: 32 * 1024 * 1024,
             leave_paused: false,
         }
     }
 }
 
-/// Politica di arresto gentile con scalata (F0-06, 2d).
+/// Politica di arresto gentile con scalata (F0-06, 2d): ogni timeout è
+/// configurabile.
 #[derive(Clone, Copy, Debug)]
 pub struct ShutdownPolicy {
     /// Attesa dopo `system_powerdown` (zero = salta il powerdown).
@@ -138,6 +149,8 @@ pub enum StopPhase {
 pub struct ExitReport {
     /// Codice d'uscita.
     pub code: Option<u32>,
+    /// Classe del codice d'uscita.
+    pub class: ExitCodeClass,
     /// Causa.
     pub cause: ExitCause,
     /// Fase conclusiva.
@@ -146,11 +159,51 @@ pub struct ExitReport {
     pub elapsed: Duration,
     /// Processi ancora attivi nel contenitore dopo l'uscita (atteso 0).
     pub active_after: u32,
+    /// Fasi della scalata non riuscite (comando QMP rifiutato o scaduto,
+    /// nessuna uscita entro il timeout), senza testo di QEMU.
+    pub notes: Vec<String>,
+}
+
+/// Esito di [`QemuRun::close`].
+#[derive(Clone, Debug)]
+pub struct CloseReport {
+    /// Identità del processo dell'esecuzione chiusa.
+    pub identity: ProcessIdentity,
+    /// `true` se il processo era vivo ed è stato terminato con l'Emergency Stop.
+    pub forced: bool,
+    /// Processi attivi nel contenitore al momento della chiusura (atteso 0).
+    pub active_at_close: u32,
+    /// `true` se l'handle del Job Object è stato chiuso qui; `false` se un
+    /// [`EmergencyStop`] clonato lo tiene ancora aperto.
+    pub job_closed: bool,
+    /// `true` se alla chiusura il backend non teneva altri handle del processo
+    /// oltre a quello dell'esecuzione, rilasciato qui.
+    pub process_handle_released: bool,
+    /// File del socket QMP ancora presente dopo la chiusura (atteso `false`).
+    pub qmp_socket_left: bool,
+}
+
+/// Riconciliazione dello stato dell'esecuzione da processo e QMP.
+#[derive(Clone, Debug)]
+pub struct Reconciliation {
+    /// Stato del processo secondo l'handle (autoritativo sulla vita).
+    pub process: ProcessState,
+    /// Codice d'uscita letto direttamente dall'handle, se terminato.
+    pub handle_exit_code: Option<u32>,
+    /// Stato della connessione QMP.
+    pub qmp: ConnectionState,
+    /// Stato delle vCPU secondo `query-status`, se QMP ha risposto.
+    pub qmp_status: Option<RunState>,
+    /// Stato pubblico derivato.
+    pub observed: ObservedState,
+    /// Anomalia rilevata (processo vivo ma QMP perso, guest fermo, ...).
+    pub anomaly: Option<String>,
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct RunFlags {
     quit_requested: AtomicBool,
+    stop_requested: AtomicBool,
     emergency: AtomicBool,
 }
 
@@ -186,6 +239,8 @@ impl Launched {
     }
 }
 
+/// Rimuove i socket orfani (QEMU non li cancella dopo un arresto forzato o un
+/// errore di avvio, F0-02 §4.3).
 fn remove_sockets(cmd: &QemuCommand) {
     let _ = std::fs::remove_file(cmd.qmp_socket.as_path());
     if let Some(v) = &cmd.vnc_socket {
@@ -206,9 +261,16 @@ pub(crate) async fn launch(
     qmp_cfg: &QmpConfig,
     timeout: Duration,
 ) -> Result<Launched> {
+    if !cmd.private_dir.as_path().is_dir() {
+        return Err(BackendError::invalid(
+            "private_dir",
+            "la directory privata dell'esecuzione non esiste",
+        ));
+    }
     remove_sockets(cmd);
     let container = new_container()?;
     let req = SpawnRequest {
+        run_id: cmd.run_id,
         program: cmd.program.clone(),
         args: cmd.args.clone(),
         env: minimal_environment(),
@@ -249,8 +311,9 @@ pub(crate) async fn launch(
                     flags.emergency.store(true, Ordering::SeqCst);
                     let _ = container.kill_all(EMERGENCY_EXIT_CODE);
                     let c = child.clone();
-                    let _ = tokio::task::spawn_blocking(move || c.wait(Some(Duration::from_secs(10))))
-                        .await;
+                    let _ =
+                        tokio::task::spawn_blocking(move || c.wait(Some(Duration::from_secs(10))))
+                            .await;
                     remove_sockets(cmd);
                     return Err(BackendError::StartupFailed {
                         exit_code: child.try_exit_code().ok().flatten(),
@@ -297,6 +360,9 @@ fn spawn_waiter(
         .name("qemu-waiter".into())
         .spawn(move || {
             let code = child.wait(None).ok().flatten();
+            // L'handle serve solo per l'attesa: rilasciarlo subito evita che il
+            // processo terminato resti referenziato oltre la chiusura.
+            drop(child);
             let t0 = Instant::now();
             while matches!(*qmp_state.borrow(), ConnectionState::Ready)
                 && t0.elapsed() < Duration::from_millis(500)
@@ -372,6 +438,33 @@ impl EmergencyStop {
         }
         Ok((code, t0.elapsed()))
     }
+
+    /// Identità del processo controllato.
+    pub fn identity(&self) -> ProcessIdentity {
+        self.child.identity()
+    }
+}
+
+/// `true` se la causa d'uscita è un arresto ordinato (vedi
+/// [`QemuRun::observation`]): `quit`, Emergency Stop o spegnimento del guest
+/// segnalato da QMP. Avvio fallito e uscita inattesa non lo sono.
+pub fn exit_cause_expected(cause: ExitCause) -> bool {
+    match cause {
+        ExitCause::EmergencyStop | ExitCause::QmpQuit | ExitCause::GuestShutdown => true,
+        ExitCause::StartupFailed | ExitCause::Unexpected => false,
+    }
+}
+
+/// Verifica di assenza di NIC sui dati di `info network` e `query-pci`
+/// (F0-02 §5: `query-rx-filter` non è un indicatore affidabile).
+pub fn check_no_nic(info_network: &str, pci_network: &[PciNetworkDevice]) -> Result<()> {
+    let info = info_network.trim();
+    if !info.is_empty() || !pci_network.is_empty() {
+        return Err(BackendError::UnexpectedNetwork(format!(
+            "info network={info:?}, PCI di classe rete={pci_network:?}"
+        )));
+    }
+    Ok(())
 }
 
 /// Esecuzione di una VM.
@@ -385,21 +478,48 @@ pub struct QemuRun {
     private_dir: ManagedPath,
     command: QemuCommand,
     geometry: Mutex<Option<DisplayGeometry>>,
+    pressed: Mutex<PressedInput>,
     accelerator: AcceleratorsInfo,
     cfg: RunConfig,
     guards: StorageGuards,
 }
 
 impl QemuRun {
-    /// Avvia una VM secondo `spec`, con percorsi da `paths`.
+    /// Avvia una VM secondo `spec`, con percorsi da `paths`. Ritorna solo con
+    /// processo vivo, QMP pronto, acceleratore e assenza di NIC verificati.
     pub async fn start(
         caps: &HostCapabilities,
         spec: &VmLaunchSpec,
         paths: &dyn ManagedPaths,
         cfg: RunConfig,
     ) -> Result<Self> {
-        if let AcceleratorStatus::Unavailable { .. } = &caps.accelerator {
-            return Err(BackendError::AcceleratorUnavailable(caps.accelerator.clone()));
+        match &caps.accelerator {
+            AcceleratorStatus::Available { accelerator, .. }
+                if *accelerator == spec.accelerator => {}
+            AcceleratorStatus::Available { accelerator, .. } => {
+                return Err(BackendError::AcceleratorUnavailable(
+                    AcceleratorStatus::Unavailable {
+                        accelerator: spec.accelerator,
+                        reason: UnavailableReason::ProbeFailed {
+                            detail: format!(
+                                "il probe ha verificato {} e non {}",
+                                accelerator.qemu_name(),
+                                spec.accelerator.qemu_name()
+                            ),
+                        },
+                    },
+                ));
+            }
+            AcceleratorStatus::Unavailable { .. } => {
+                return Err(BackendError::AcceleratorUnavailable(
+                    caps.accelerator.clone(),
+                ));
+            }
+            AcceleratorStatus::NotProbed => {
+                return Err(BackendError::StateConflict(
+                    "acceleratore non verificato: eseguire prima il probe".into(),
+                ));
+            }
         }
         caps.machine(spec.machine.as_str())?;
         caps.cpu_model(spec.cpu.as_str())?;
@@ -410,6 +530,11 @@ impl QemuRun {
             });
         }
         let command = spec.build(paths)?;
+        if command.program != caps.qemu_system {
+            return Err(BackendError::StateConflict(
+                "il binario QEMU dell'esecuzione non è quello verificato dal probe".into(),
+            ));
+        }
         let run = &spec.run_id;
         let readonly = paths.protected_readonly(run)?;
         let mut no_delete = vec![paths.firmware_vars(run)?];
@@ -426,7 +551,7 @@ impl QemuRun {
             flags: launched.flags.clone(),
         };
         let run = Self {
-            run_id: spec.run_id.clone(),
+            run_id: spec.run_id,
             identity,
             qmp: launched.qmp,
             state_tx: launched.state_tx,
@@ -434,6 +559,7 @@ impl QemuRun {
             private_dir: command.private_dir.clone(),
             command,
             geometry: Mutex::new(None),
+            pressed: Mutex::new(PressedInput::default()),
             accelerator: AcceleratorsInfo {
                 enabled: String::new(),
                 present: vec![],
@@ -465,7 +591,6 @@ impl QemuRun {
                 Ok(run)
             }
             Err(e) => {
-                let _ = run.emergency.trigger();
                 let em = run.emergency.clone();
                 let _ = tokio::task::spawn_blocking(move || {
                     em.trigger_and_wait(Duration::from_secs(10))
@@ -493,26 +618,19 @@ impl QemuRun {
     }
 
     /// Verifica che il guest non abbia interfacce di rete: `info network`
-    /// vuoto e nessun dispositivo PCI di classe rete (F0-02 5: `query-rx-filter`
-    /// non è un indicatore affidabile).
+    /// vuoto e nessun dispositivo PCI di classe rete.
     pub async fn verify_no_nic(&self) -> Result<()> {
         let info = self.qmp.network_diagnostics().await?;
-        let pci: Vec<PciNetworkDevice> = self.qmp.pci_network_devices().await?;
-        if !info.trim().is_empty() || !pci.is_empty() {
-            return Err(BackendError::StateConflict(format!(
-                "interfaccia di rete inattesa nel guest: info network={:?}, PCI={pci:?}",
-                info.trim()
-            )));
-        }
-        Ok(())
+        let pci = self.qmp.pci_network_devices().await?;
+        check_no_nic(&info, &pci)
     }
 
     /// Identificativo dell'esecuzione.
-    pub fn run_id(&self) -> &RunId {
-        &self.run_id
+    pub fn run_id(&self) -> RunId {
+        self.run_id
     }
 
-    /// Identità del processo QEMU.
+    /// Identità del processo QEMU (PID, tempo di creazione, `run_id`).
     pub fn identity(&self) -> ProcessIdentity {
         self.identity
     }
@@ -552,6 +670,101 @@ impl QemuRun {
         self.emergency.clone()
     }
 
+    /// Processi attivi nel contenitore dell'esecuzione.
+    pub fn active_processes(&self) -> Result<u32> {
+        self.emergency.container.active_count()
+    }
+
+    /// Osservazione per il core (`vm-core`) corrispondente allo stato corrente.
+    pub fn observation(&self) -> BackendObservation {
+        let run_id = self.run_id;
+        match self.state() {
+            ProcessState::Starting => BackendObservation::ProcessSpawned { run_id },
+            ProcessState::Running | ProcessState::Stopping => {
+                BackendObservation::QmpReady { run_id }
+            }
+            ProcessState::Exited {
+                cause: ExitCause::StartupFailed,
+                ..
+            } => BackendObservation::StartFailed { run_id },
+            ProcessState::Exited { cause, .. } => BackendObservation::ProcessExited {
+                run_id,
+                expected: self.exit_expected(cause),
+            },
+        }
+    }
+
+    /// Uscita attesa: richiesta dal backend (quit, Emergency Stop) oppure
+    /// spegnimento avviato dal guest e segnalato da QMP (`SHUTDOWN` con
+    /// `guest: true`), anche senza una richiesta di arresto del backend: è uno
+    /// spegnimento ordinato, non un guasto (proposta di `vm-core`).
+    fn exit_expected(&self, cause: ExitCause) -> bool {
+        exit_cause_expected(cause)
+    }
+
+    /// Riconcilia lo stato da handle del processo e QMP. L'handle è
+    /// autoritativo sulla vita del processo; QMP sullo stato delle vCPU.
+    pub async fn reconcile(&self, qmp_timeout: Duration) -> Result<Reconciliation> {
+        let handle_exit_code = self.emergency.child.try_exit_code()?;
+        let qmp = self.qmp.state();
+        let qmp_status = if handle_exit_code.is_none() && qmp == ConnectionState::Ready {
+            self.qmp
+                .query_status_within(qmp_timeout)
+                .await
+                .ok()
+                .map(|s| s.status)
+        } else {
+            None
+        };
+        let process = self.state();
+        let mut anomaly = None;
+        let (state, source) = if handle_exit_code.is_some() {
+            let cause = match &process {
+                ProcessState::Exited { cause, .. } => Some(*cause),
+                _ => None,
+            };
+            match cause {
+                Some(c) if self.exit_expected(c) => (VmState::Stopped, ObservationSource::Process),
+                Some(_) => (VmState::Failed, ObservationSource::Process),
+                // Uscita già osservata sull'handle, classificazione in corso.
+                None => (VmState::Stopping, ObservationSource::Process),
+            }
+        } else {
+            match (&process, &qmp, &qmp_status) {
+                (ProcessState::Starting, ..) => (VmState::Starting, ObservationSource::Process),
+                (ProcessState::Stopping, ..) => (VmState::Stopping, ObservationSource::Process),
+                (_, ConnectionState::Closed { reason }, _) => {
+                    anomaly = Some(format!("processo vivo ma canale QMP chiuso: {reason}"));
+                    (VmState::Failed, ObservationSource::Qmp)
+                }
+                (_, _, None) => {
+                    anomaly = Some("processo vivo ma QMP non risponde".into());
+                    (VmState::Failed, ObservationSource::Qmp)
+                }
+                (_, _, Some(s)) => {
+                    match s {
+                        RunState::Running | RunState::Paused | RunState::Prelaunch => {}
+                        other => anomaly = Some(format!("stato delle vCPU {other:?}")),
+                    }
+                    (VmState::Running, ObservationSource::Qmp)
+                }
+            }
+        };
+        Ok(Reconciliation {
+            process,
+            handle_exit_code,
+            qmp,
+            qmp_status,
+            observed: ObservedState {
+                state,
+                source,
+                run_id: Some(self.run_id),
+                observed_at: UtcTimestamp::now(),
+            },
+            anomaly,
+        })
+    }
+
     fn ensure_running(&self) -> Result<()> {
         match self.state() {
             ProcessState::Running => Ok(()),
@@ -559,6 +772,16 @@ impl QemuRun {
                 "operazione non ammessa nello stato {s:?}"
             ))),
         }
+    }
+
+    fn ensure_run(&self, run_id: RunId) -> Result<()> {
+        if run_id != self.run_id {
+            return Err(BackendError::StateConflict(format!(
+                "richiesta riferita all'esecuzione {run_id}, attiva {}",
+                self.run_id
+            )));
+        }
+        Ok(())
     }
 
     /// `query-status`.
@@ -592,51 +815,58 @@ impl QemuRun {
         Ok(self.qmp.system_reset().await?)
     }
 
-    /// Screenshot via `screendump` (file temporaneo nella directory privata).
-    pub async fn screenshot(&self) -> Result<Screenshot> {
-        self.ensure_running()?;
-        let (shot, _) = crate::screenshot::capture(
-            &self.qmp,
-            &self.private_dir,
-            &self.run_id,
-            self.cfg.screendump_timeout,
-        )
-        .await?;
-        *lock(&self.geometry) = Some(shot.geometry);
-        Ok(shot)
+    /// Screenshot via `screendump` (file deciso dal backend nella directory
+    /// privata, rimosso in ogni caso) con il limite di [`RunConfig`].
+    pub async fn screenshot(&self) -> Result<CapturedScreenshot> {
+        self.screenshot_limited(self.cfg.max_screenshot_bytes).await
+    }
+
+    /// Screenshot con limite esplicito sulla dimensione del PNG.
+    pub async fn screenshot_limited(&self, max_png_bytes: u64) -> Result<CapturedScreenshot> {
+        Ok(self.screenshot_rgb_limited(max_png_bytes).await?.0)
     }
 
     /// Screenshot con l'immagine RGB decodificata (diagnostica e test).
-    pub async fn screenshot_rgb(&self) -> Result<(Screenshot, crate::screenshot::RgbImage)> {
+    pub async fn screenshot_rgb(&self) -> Result<(CapturedScreenshot, RgbImage)> {
+        self.screenshot_rgb_limited(self.cfg.max_screenshot_bytes)
+            .await
+    }
+
+    async fn screenshot_rgb_limited(
+        &self,
+        max_png_bytes: u64,
+    ) -> Result<(CapturedScreenshot, RgbImage)> {
         self.ensure_running()?;
         let r = crate::screenshot::capture(
             &self.qmp,
             &self.private_dir,
-            &self.run_id,
+            self.run_id,
             self.cfg.screendump_timeout,
+            max_png_bytes,
         )
         .await?;
         *lock(&self.geometry) = Some(r.0.geometry);
         Ok(r)
     }
 
+    /// Geometria dell'ultimo screenshot, se nota.
+    pub fn current_geometry(&self) -> Option<DisplayGeometry> {
+        *lock(&self.geometry)
+    }
+
     /// Inoltra eventi di input. La richiesta deve riferirsi a questa
-    /// esecuzione e alla geometria dell'ultimo screenshot, se noto, per
-    /// rifiutare coordinate obsolete (ROADMAP 6.4).
+    /// esecuzione e alla geometria dell'ultimo screenshot, se nota, per
+    /// rifiutare coordinate obsolete (ROADMAP 6.4). Nessuna ripetizione
+    /// automatica.
     pub async fn send_input(
         &self,
-        run_id: &RunId,
+        run_id: RunId,
         geometry: DisplayGeometry,
         events: &[InputEvent],
     ) -> Result<()> {
-        if run_id != &self.run_id {
-            return Err(BackendError::StateConflict(format!(
-                "richiesta riferita all'esecuzione {run_id}, attiva {}",
-                self.run_id
-            )));
-        }
+        self.ensure_run(run_id)?;
         self.ensure_running()?;
-        validate_input(geometry, events)?;
+        validate_events(geometry, events)?;
         if let Some(g) = *lock(&self.geometry)
             && g != geometry
         {
@@ -645,7 +875,33 @@ impl QemuRun {
                 geometry.width, geometry.height, g.width, g.height
             )));
         }
-        Ok(self.qmp.input_send_event(geometry, events).await?)
+        lock(&self.pressed).apply(events);
+        Ok(self.qmp.input_send_event(events).await?)
+    }
+
+    /// Lotto di input di `lightvm-proto` (validazione strutturale inclusa).
+    pub async fn send_input_batch(&self, batch: &lightvm_proto::InputBatch) -> Result<()> {
+        batch.validate()?;
+        self.send_input(batch.run_id, batch.geometry, &batch.events)
+            .await
+    }
+
+    /// `true` se risultano tasti o pulsanti premuti.
+    pub fn has_pressed_input(&self) -> bool {
+        !lock(&self.pressed).is_empty()
+    }
+
+    /// Rilascia tutti i tasti e pulsanti risultanti premuti (perdita di focus,
+    /// disconnessione, cambio proprietario dell'input: ROADMAP 6.4).
+    /// Restituisce il numero di eventi di rilascio inviati.
+    pub async fn release_all_input(&self, run_id: RunId) -> Result<usize> {
+        self.ensure_run(run_id)?;
+        let events = lock(&self.pressed).take_release_events();
+        if events.is_empty() || !matches!(self.state(), ProcessState::Running) {
+            return Ok(0);
+        }
+        self.qmp.input_send_event(&events).await?;
+        Ok(events.len())
     }
 
     /// Attende l'uscita del processo fino a `timeout`.
@@ -666,6 +922,10 @@ impl QemuRun {
     }
 
     fn mark_stopping(&self) {
+        self.emergency
+            .flags
+            .stop_requested
+            .store(true, Ordering::SeqCst);
         self.state_tx.send_if_modified(|s| {
             if matches!(s, ProcessState::Starting | ProcessState::Running) {
                 *s = ProcessState::Stopping;
@@ -677,43 +937,67 @@ impl QemuRun {
     }
 
     fn report(&self, phase: StopPhase, t0: Instant) -> Result<ExitReport> {
+        self.report_with(phase, t0, Vec::new())
+    }
+
+    fn report_with(&self, phase: StopPhase, t0: Instant, notes: Vec<String>) -> Result<ExitReport> {
         match self.state() {
             ProcessState::Exited { code, cause } => Ok(ExitReport {
                 code,
+                class: classify_exit_code(code),
                 cause,
                 phase,
                 elapsed: t0.elapsed(),
                 active_after: self.emergency.container.active_count()?,
+                notes,
             }),
             _ => Err(BackendError::Timeout("uscita di QEMU")),
         }
     }
 
     /// Arresto gentile con scalata: `system_powerdown` → attesa → `quit` →
-    /// attesa → terminazione del contenitore.
+    /// attesa → terminazione del contenitore (`TerminateJobObject`). Ritorna
+    /// solo dopo l'uscita osservata sull'handle.
     pub async fn shutdown(&self, policy: ShutdownPolicy) -> Result<ExitReport> {
         let t0 = Instant::now();
         if matches!(self.state(), ProcessState::Exited { .. }) {
             return self.report(StopPhase::AlreadyExited, t0);
         }
         self.mark_stopping();
+        let mut notes = Vec::new();
+        // Ogni fase dura al massimo il proprio timeout, comando QMP compreso:
+        // un QEMU che non risponde non allunga la scalata.
         if !policy.powerdown_timeout.is_zero() {
-            let _ = self.qmp.system_powerdown().await;
-            if self.wait_exit(policy.powerdown_timeout).await.is_some() {
-                return self.report(StopPhase::Powerdown, t0);
+            let deadline = Instant::now() + policy.powerdown_timeout;
+            if let Err(e) = self
+                .qmp
+                .system_powerdown_within(policy.powerdown_timeout)
+                .await
+            {
+                notes.push(format!("system_powerdown: {}", e.public_summary()));
             }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if self.wait_exit(left).await.is_some() {
+                return self.report_with(StopPhase::Powerdown, t0, notes);
+            }
+            notes.push("nessuna uscita dopo system_powerdown".into());
         }
         self.emergency
             .flags
             .quit_requested
             .store(true, Ordering::SeqCst);
-        let _ = self.qmp.quit().await;
-        if self.wait_exit(policy.quit_timeout).await.is_some() {
-            return self.report(StopPhase::Quit, t0);
+        let deadline = Instant::now() + policy.quit_timeout;
+        if let Err(e) = self.qmp.quit_within(policy.quit_timeout).await {
+            notes.push(format!("quit: {}", e.public_summary()));
         }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if self.wait_exit(left).await.is_some() {
+            return self.report_with(StopPhase::Quit, t0, notes);
+        }
+        notes.push("nessuna uscita dopo quit: terminazione del Job Object".into());
         self.emergency.trigger()?;
         if self.wait_exit(policy.kill_timeout).await.is_some() {
-            return self.report(StopPhase::Kill, t0);
+            return self.report_with(StopPhase::Kill, t0, notes);
         }
         Err(BackendError::Timeout("arresto di QEMU"))
     }
@@ -732,6 +1016,38 @@ impl QemuRun {
         }
         self.report(StopPhase::Kill, t0)
     }
+
+    /// Chiude l'esecuzione: client QMP, socket, handle dei file protetti e, se
+    /// nessun [`EmergencyStop`] clonato è ancora vivo, il Job Object. Se il
+    /// processo è ancora vivo viene prima eseguito l'Emergency Stop
+    /// (`forced = true` nel rapporto): chiudere significa perdere il controllo.
+    pub async fn close(self) -> Result<CloseReport> {
+        let forced = !matches!(self.state(), ProcessState::Exited { .. });
+        if forced {
+            self.emergency_stop(Duration::from_secs(10)).await?;
+        }
+        let active_at_close = self.emergency.container.active_count()?;
+        self.qmp.close(Duration::from_millis(500)).await;
+        let identity = self.identity;
+        let qmp_socket = self.command.qmp_socket.clone();
+        remove_sockets(&self.command);
+        // L'unico riferimento rimasto all'handle del processo è quello dell'esecuzione
+        // (il thread di attesa lo rilascia prima di pubblicare l'uscita).
+        let process_handle_released = Arc::strong_count(&self.emergency.child) == 1;
+        let container = self.emergency.container.clone();
+        drop(self);
+        // Unico riferimento rimasto: rilasciarlo chiude l'handle del Job Object.
+        let job_closed = Arc::strong_count(&container) == 1;
+        drop(container);
+        Ok(CloseReport {
+            identity,
+            forced,
+            active_at_close,
+            job_closed,
+            process_handle_released,
+            qmp_socket_left: qmp_socket.as_path().exists(),
+        })
+    }
 }
 
 impl Drop for QemuRun {
@@ -742,5 +1058,33 @@ impl Drop for QemuRun {
         if !matches!(self.state(), ProcessState::Exited { .. }) {
             let _ = self.emergency.trigger();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verifica_nic() {
+        assert!(check_no_nic("", &[]).is_ok());
+        assert!(check_no_nic("  \r\n", &[]).is_ok());
+        let e = check_no_nic("hub 0\r\n \\ net0: index=0,type=user", &[]).unwrap_err();
+        assert!(matches!(e, BackendError::UnexpectedNetwork(_)));
+        let pci = [PciNetworkDevice {
+            bus: 0,
+            slot: 2,
+            description: "Ethernet controller".into(),
+        }];
+        assert!(check_no_nic("", &pci).is_err());
+    }
+
+    #[test]
+    fn uscite_attese() {
+        assert!(exit_cause_expected(ExitCause::GuestShutdown));
+        assert!(exit_cause_expected(ExitCause::QmpQuit));
+        assert!(exit_cause_expected(ExitCause::EmergencyStop));
+        assert!(!exit_cause_expected(ExitCause::Unexpected));
+        assert!(!exit_cause_expected(ExitCause::StartupFailed));
     }
 }

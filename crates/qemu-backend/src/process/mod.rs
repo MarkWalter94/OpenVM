@@ -17,6 +17,8 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
+use lightvm_proto::RunId;
+
 use crate::error::Result;
 use crate::paths::ManagedPath;
 
@@ -37,15 +39,103 @@ pub enum ContainmentMechanism {
 /// l'handle posseduto da [`ChildProcess`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ProcessIdentity {
+    /// Esecuzione a cui appartiene il processo.
+    pub run_id: RunId,
     /// PID (informativo).
     pub pid: u32,
     /// Tempo di creazione (Windows: FILETIME in unità da 100 ns).
     pub creation_time: u64,
 }
 
+/// Stato di un processo cercato per identità (PID + tempo di creazione).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IdentityStatus {
+    /// Nessun processo con quel PID.
+    NotFound,
+    /// Il PID è stato riassegnato a un altro processo.
+    Reused,
+    /// Stesso processo, terminato ma ancora referenziato da un handle.
+    Exited,
+    /// Stesso processo, in esecuzione.
+    Alive,
+}
+
+impl IdentityStatus {
+    /// `true` se il processo con questa identità è ancora in esecuzione.
+    pub fn is_alive(self) -> bool {
+        matches!(self, Self::Alive)
+    }
+}
+
+impl ProcessIdentity {
+    /// Cerca il processo con questa identità senza toccarlo (verifica di
+    /// assenza di orfani, riconciliazione dopo un riavvio del supervisor).
+    pub fn status(&self) -> Result<IdentityStatus> {
+        #[cfg(windows)]
+        {
+            use crate::sys::windows::{PidStatus, pid_status};
+            Ok(match pid_status(self.pid, self.creation_time)? {
+                PidStatus::NotFound => IdentityStatus::NotFound,
+                PidStatus::Reused => IdentityStatus::Reused,
+                PidStatus::Exited => IdentityStatus::Exited,
+                PidStatus::Alive => IdentityStatus::Alive,
+            })
+        }
+        #[cfg(not(windows))]
+        {
+            Err(crate::error::BackendError::Unsupported {
+                what: "verifica dell'identità del processo su questo sistema".into(),
+                hint: "implementazione Linux (pidfd) non ancora presente".into(),
+            })
+        }
+    }
+}
+
+/// Codice d'uscita usato dall'Emergency Stop con `TerminateJobObject`.
+pub const EMERGENCY_EXIT_CODE: u32 = 0xE5E5;
+
+/// Classe del codice d'uscita di QEMU su Windows (F0-06 §2b, F0-08).
+///
+/// Il codice da solo non distingue sempre la causa (`taskkill /F` produce 1,
+/// come un errore di QEMU): la causa definitiva combina codice e azioni del
+/// backend (vedi [`crate::run::ExitCause`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExitCodeClass {
+    /// 0: uscita ordinata (`quit`, spegnimento del guest, chiusura del job).
+    Clean,
+    /// 1: errore di QEMU (riga di comando, acceleratore) o `taskkill /F`.
+    QemuErrorOrForcedKill,
+    /// [`EMERGENCY_EXIT_CODE`]: terminazione del job richiesta dal backend.
+    EmergencyStop,
+    /// `0xFFFFFFFF`: `TerminateProcess(-1)` esterno (per esempio `Stop-Process`).
+    ExternalTermination,
+    /// NTSTATUS di errore (`0xC0000000` e oltre): eccezione o crash, compreso
+    /// il superamento del limite di memoria del job (F0-08).
+    Exception(u32),
+    /// Altro codice.
+    Other(u32),
+    /// Codice non disponibile.
+    Unknown,
+}
+
+/// Classifica un codice d'uscita.
+pub fn classify_exit_code(code: Option<u32>) -> ExitCodeClass {
+    match code {
+        None => ExitCodeClass::Unknown,
+        Some(0) => ExitCodeClass::Clean,
+        Some(1) => ExitCodeClass::QemuErrorOrForcedKill,
+        Some(EMERGENCY_EXIT_CODE) => ExitCodeClass::EmergencyStop,
+        Some(0xFFFF_FFFF) => ExitCodeClass::ExternalTermination,
+        Some(c) if c >= 0xC000_0000 => ExitCodeClass::Exception(c),
+        Some(c) => ExitCodeClass::Other(c),
+    }
+}
+
 /// Richiesta di avvio di un processo nel contenitore.
 #[derive(Clone, Debug)]
 pub struct SpawnRequest {
+    /// Esecuzione a cui apparterrà il processo.
+    pub run_id: RunId,
     /// Eseguibile approvato.
     pub program: ManagedPath,
     /// Argomenti strutturati.
@@ -146,5 +236,33 @@ impl ChildProcess {
     /// Codice d'uscita se il processo è già terminato.
     pub fn try_exit_code(&self) -> Result<Option<u32>> {
         self.wait(Some(Duration::ZERO))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classi_dei_codici_di_uscita() {
+        assert_eq!(classify_exit_code(None), ExitCodeClass::Unknown);
+        assert_eq!(classify_exit_code(Some(0)), ExitCodeClass::Clean);
+        assert_eq!(
+            classify_exit_code(Some(1)),
+            ExitCodeClass::QemuErrorOrForcedKill
+        );
+        assert_eq!(
+            classify_exit_code(Some(0xE5E5)),
+            ExitCodeClass::EmergencyStop
+        );
+        assert_eq!(
+            classify_exit_code(Some(0xFFFF_FFFF)),
+            ExitCodeClass::ExternalTermination
+        );
+        assert_eq!(
+            classify_exit_code(Some(0xC000_0409)),
+            ExitCodeClass::Exception(0xC000_0409)
+        );
+        assert_eq!(classify_exit_code(Some(3)), ExitCodeClass::Other(3));
     }
 }

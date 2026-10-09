@@ -1,22 +1,25 @@
 //! Test headless dell'IPC e del ciclo di vita del servizio, senza UI.
-//! Trasporto reale (named pipe su Windows, socket Unix su Linux); backend e
-//! catalogo finti (nessun QEMU).
+//! Trasporto reale (named pipe su Windows, socket Unix su Linux); core reale
+//! (`vm_core::Core`) con catalogo e audit in memoria, backend e host finti
+//! (nessun QEMU). Il percorso con catalogo SQLite è in `tests/core_path.rs`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use lightvm_service::client::Client;
-use lightvm_service::compat::{
-    CloseReason, ErrorCode, ProtocolErrorCode, Request, ResponseBody, Role, ServerMessage,
-    ServiceEvent, StopReason, operational_code, protocol_code,
+use lightvm_proto::ipc::{
+    CloseReason, Request, ResponseBody, Role, ServerMessage, ServiceEvent, StopReason,
 };
+use lightvm_proto::{ErrorCode, ProtocolErrorCode, ReplyError};
+use lightvm_service::client::Client;
 use lightvm_service::credential::Credential;
+use lightvm_service::engine::VmEngine;
+use lightvm_service::fakes::{Calls, FakeHost, FakeVmBackend, Gate, MemoryAudit, sample_engine};
 use lightvm_service::frame::FrameError;
 use lightvm_service::lock::{InstanceLock, LockError};
 use lightvm_service::ratelimit::RateLimit;
 use lightvm_service::server::StartError;
-use lightvm_service::supervisor::fake::{Calls, FakeBackend, FakeCatalog, Gate};
+use lightvm_service::supervisor::Backend;
 use lightvm_service::test_support::temp_dir;
 use lightvm_service::{ServiceConfig, ServiceHandle, start};
 
@@ -35,19 +38,45 @@ fn config(dir: &std::path::Path) -> ServiceConfig {
     cfg
 }
 
+/// Motore (core reale, porte in memoria) e host finti con registro condiviso.
+fn fakes(gate: Option<Arc<Gate>>) -> (Box<dyn VmEngine>, Box<dyn Backend>, Calls) {
+    let calls = Calls::default();
+    let vm_backend = FakeVmBackend {
+        calls: calls.clone(),
+        gate,
+        ..FakeVmBackend::default()
+    };
+    let engine = sample_engine(vm_backend, MemoryAudit::default());
+    let host = FakeHost {
+        calls: calls.clone(),
+    };
+    (Box::new(engine), Box::new(host), calls)
+}
+
+fn operational_code(e: &ReplyError) -> Option<ErrorCode> {
+    match e {
+        ReplyError::Operational(p) => Some(p.code),
+        ReplyError::Protocol(_) => None,
+    }
+}
+
+fn protocol_code(e: &ReplyError) -> Option<ProtocolErrorCode> {
+    match e {
+        ReplyError::Operational(_) => None,
+        ReplyError::Protocol(p) => Some(p.code),
+    }
+}
+
 async fn start_with(
     name: &str,
     tweak: impl FnOnce(&mut ServiceConfig),
-    catalog: FakeCatalog,
+    gate: Option<Arc<Gate>>,
 ) -> Svc {
     let dir = temp_dir(name);
     let mut cfg = config(&dir);
     tweak(&mut cfg);
-    let backend = FakeBackend::default();
-    let calls = backend.calls.clone();
-    let (handle, ui) = start(cfg, Box::new(catalog), Box::new(backend))
-        .await
-        .expect("avvio del servizio");
+    let (engine, host, calls) = fakes(gate);
+    let (handle, ui) = start(cfg, engine, host).await.expect("avvio del servizio");
     Svc {
         handle,
         ui,
@@ -57,7 +86,7 @@ async fn start_with(
 }
 
 async fn start_default(name: &str) -> Svc {
-    start_with(name, |_| {}, FakeCatalog::sample()).await
+    start_with(name, |_| {}, None).await
 }
 
 async fn connect(svc: &Svc) -> Client {
@@ -120,13 +149,8 @@ async fn acquire_eventually(dir: &std::path::Path) {
 /// Riavvio sullo stesso catalogo, con lo stesso margine di `acquire_eventually`.
 async fn restart(dir: &std::path::Path) -> (ServiceHandle, Credential) {
     for _ in 0..40 {
-        match start(
-            config(dir),
-            Box::new(FakeCatalog::sample()),
-            Box::<FakeBackend>::default(),
-        )
-        .await
-        {
+        let (engine, host, _) = fakes(None);
+        match start(config(dir), engine, host).await {
             Ok(x) => return x,
             Err(StartError::Lock(LockError::AlreadyRunning { .. })) => {
                 tokio::time::sleep(Duration::from_millis(50)).await;
@@ -180,12 +204,12 @@ async fn invalid_credential_is_denied_and_closed() {
     let mut c = connect(&svc).await;
     let wrong = Credential::generate().unwrap();
     let m = c.hello(&wrong).await.unwrap();
-    assert_eq!(public_error(&m), Some(ErrorCode::PermissionDenied));
+    assert_eq!(public_error(&m), Some(ErrorCode::Unauthenticated));
     expect_closed(&mut c).await;
     // Formato non valido: stesso esito.
     let mut c = connect(&svc).await;
     let m = c.hello_with(vec![1], Some("zz".repeat(32))).await.unwrap();
-    assert_eq!(public_error(&m), Some(ErrorCode::PermissionDenied));
+    assert_eq!(public_error(&m), Some(ErrorCode::Unauthenticated));
     expect_closed(&mut c).await;
     assert!(svc.handle.connections().is_empty());
     assert!(calls(&svc).is_empty(), "nessun effetto sul backend");
@@ -197,12 +221,12 @@ async fn missing_credential_and_request_before_hello_are_denied() {
     let svc = start_default("missing").await;
     let mut c = connect(&svc).await;
     let m = c.hello_with(vec![1], None).await.unwrap();
-    assert_eq!(public_error(&m), Some(ErrorCode::PermissionDenied));
+    assert_eq!(public_error(&m), Some(ErrorCode::Unauthenticated));
     expect_closed(&mut c).await;
 
     let mut c = connect(&svc).await;
     let m = c.request(Request::EmergencyStop).await.unwrap();
-    assert_eq!(public_error(&m), Some(ErrorCode::PermissionDenied));
+    assert_eq!(public_error(&m), Some(ErrorCode::Unauthenticated));
     expect_closed(&mut c).await;
     assert!(calls(&svc).is_empty(), "nessun Emergency Stop eseguito");
     assert!(svc.handle.connections().is_empty());
@@ -240,7 +264,7 @@ async fn unsupported_protocol_version_is_rejected() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn oversized_frame_is_rejected_before_and_after_handshake() {
-    let svc = start_with("frame", |c| c.max_frame = 4096, FakeCatalog::sample()).await;
+    let svc = start_with("frame", |c| c.max_frame = 4096, None).await;
     // Prima dell'handshake: solo l'intestazione, il payload non viene letto.
     let mut c = connect(&svc).await;
     c.send_raw(&(1u32 << 20).to_be_bytes()).await.unwrap();
@@ -393,7 +417,7 @@ async fn revoking_a_connection_closes_it_and_invalidates_the_credential() {
     // La credenziale revocata non è più accettata.
     let mut p2 = connect(&svc).await;
     let m = p2.hello(&pairing).await.unwrap();
-    assert_eq!(public_error(&m), Some(ErrorCode::PermissionDenied));
+    assert_eq!(public_error(&m), Some(ErrorCode::Unauthenticated));
     // Revoca di una connessione inesistente.
     let m = ui
         .request(Request::RevokeConnection {
@@ -408,13 +432,8 @@ async fn revoking_a_connection_closes_it_and_invalidates_the_credential() {
 #[tokio::test(flavor = "multi_thread")]
 async fn second_instance_on_same_catalog_is_rejected() {
     let svc = start_default("single").await;
-    let backend = FakeBackend::default();
-    let r = start(
-        config(&svc.dir),
-        Box::new(FakeCatalog::sample()),
-        Box::new(backend),
-    )
-    .await;
+    let (engine, host, _) = fakes(None);
+    let r = start(config(&svc.dir), engine, host).await;
     match r {
         Err(StartError::Lock(LockError::AlreadyRunning { .. })) => {}
         other => panic!("attesa AlreadyRunning: {other:?}"),
@@ -435,7 +454,7 @@ async fn credential_is_not_valid_after_restart() {
     let (h, _new) = restart(&dir).await;
     let mut c = Client::connect(h.endpoint()).await.unwrap();
     let m = c.hello(&old).await.unwrap();
-    assert_eq!(public_error(&m), Some(ErrorCode::PermissionDenied));
+    assert_eq!(public_error(&m), Some(ErrorCode::Unauthenticated));
     h.shutdown().await;
 }
 
@@ -449,7 +468,7 @@ async fn rate_limit_per_connection() {
                 per_second: 0.5,
             }
         },
-        FakeCatalog::sample(),
+        None,
     )
     .await;
     let (mut c, _) = connect_ui(&svc).await;
@@ -478,12 +497,8 @@ async fn rate_limit_per_connection() {
 #[tokio::test(flavor = "multi_thread")]
 async fn bounded_queue_and_emergency_stop_does_not_wait_for_it() {
     let gate = Gate::closed();
-    let catalog = FakeCatalog {
-        gate: Some(gate.clone()),
-        ..FakeCatalog::sample()
-    };
-    let svc = Arc::new(start_with("queue", |c| c.queue_capacity = 1, catalog).await);
-    // A blocca il supervisor dentro `list_vms` e occupa l'unico posto in coda.
+    let svc = Arc::new(start_with("queue", |c| c.queue_capacity = 1, Some(gate.clone())).await);
+    // A blocca il supervisor dentro `list_vms` (lettura delle osservazioni del backend) e occupa l'unico posto in coda.
     let (mut a, _) = connect_ui(&svc).await;
     let a_task = tokio::spawn(async move { a.request(Request::ListVms).await.unwrap() });
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -548,7 +563,7 @@ async fn connection_limit_and_handshake_timeout() {
             c.max_connections = 1;
             c.handshake_timeout = Duration::from_millis(300);
         },
-        FakeCatalog::sample(),
+        None,
     )
     .await;
     let (_a, _) = connect_ui(&svc).await;
@@ -647,6 +662,8 @@ mod binary {
         let mut child = Command::new(env!("CARGO_BIN_EXE_lightvm-service"))
             .arg("--catalog")
             .arg(dir)
+            .arg("--audit-log")
+            .arg(dir.join("audit.jsonl"))
             .arg("--runtime-dir")
             .arg(dir.join("run"))
             .stdin(Stdio::piped())
@@ -678,6 +695,8 @@ mod binary {
         let out = Command::new(env!("CARGO_BIN_EXE_lightvm-service"))
             .arg("--catalog")
             .arg(&dir)
+            .arg("--audit-log")
+            .arg(dir.join("audit2.jsonl"))
             .arg("--runtime-dir")
             .arg(dir.join("run"))
             .stdin(Stdio::piped())

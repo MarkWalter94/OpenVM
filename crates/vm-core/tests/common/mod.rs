@@ -51,6 +51,8 @@ pub struct MemStoreInner {
     pub media: BTreeMap<MediaId, MediaEntry>,
     pub ops: BTreeMap<OperationId, OperationRecord>,
     pub runs: BTreeMap<RunId, RunRecord>,
+    /// Sequenza degli stati persistiti, per verificare le transizioni.
+    pub state_log: Vec<(VmId, VmState)>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -68,9 +70,11 @@ impl CatalogStore for MemStore {
         Ok(self.0.borrow().vms.values().cloned().collect())
     }
     fn set_persisted_state(&mut self, id: VmId, state: VmState) -> Result<(), PublicError> {
-        if let Some(v) = self.0.borrow_mut().vms.get_mut(&id) {
+        let mut inner = self.0.borrow_mut();
+        if let Some(v) = inner.vms.get_mut(&id) {
             v.persisted_state = state;
         }
+        inner.state_log.push((id, state));
         Ok(())
     }
     fn insert_media(&mut self, entry: &MediaEntry) -> Result<(), PublicError> {
@@ -108,11 +112,16 @@ impl CatalogStore for MemStore {
     }
 }
 
+/// Audit in memoria. Con il secondo campo a `true` ogni scrittura fallisce
+/// (destinazione dell'audit non disponibile).
 #[derive(Clone, Debug, Default)]
-pub struct MemAudit(pub Rc<RefCell<Vec<AuditEvent>>>);
+pub struct MemAudit(pub Rc<RefCell<Vec<AuditEvent>>>, pub Rc<Cell<bool>>);
 
 impl AuditSink for MemAudit {
     fn append(&mut self, event: &AuditEvent) -> Result<(), PublicError> {
+        if self.1.get() {
+            return Err(PublicError::infrastructure("audit non disponibile"));
+        }
         self.0.borrow_mut().push(event.clone());
         Ok(())
     }
@@ -209,20 +218,39 @@ impl VmBackend for FakeBackend {
 /// Ispettore che restituisce i fatti registrati, salvo sostituzioni simulate.
 #[derive(Debug, Default)]
 pub struct FakeInspector {
+    /// Contenuto sostituito (hash diverso).
     pub replaced: BTreeSet<MediaId>,
+    /// Copia gestita trovata scrivibile.
+    pub writable: BTreeSet<MediaId>,
+    /// Identità OS diversa (file sostituito con stesso contenuto).
+    pub moved: BTreeSet<MediaId>,
+    /// Ispezione impossibile (file mancante o illeggibile).
+    pub unreadable: BTreeSet<MediaId>,
 }
 
 impl MediaInspector for FakeInspector {
     fn inspect(&mut self, entry: &MediaEntry) -> Result<ObservedMediaFacts, PublicError> {
+        let id = entry.record.id;
+        if self.unreadable.contains(&id) {
+            return Err(PublicError::infrastructure("copia gestita non leggibile"));
+        }
         let mut sha = entry.record.sha256;
-        if self.replaced.contains(&entry.record.id) {
+        if self.replaced.contains(&id) {
             sha = Sha256Digest::from_bytes([0xee; 32]);
         }
+        let file_identity = if self.moved.contains(&id) {
+            Some(FileIdentity {
+                volume: 2,
+                file_id: [8; 16],
+            })
+        } else {
+            entry.file_identity
+        };
         Ok(ObservedMediaFacts {
             sha256: sha,
             size_bytes: entry.record.size_bytes,
-            file_identity: entry.file_identity,
-            read_only: true,
+            file_identity,
+            read_only: !self.writable.contains(&id),
         })
     }
 }

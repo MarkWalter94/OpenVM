@@ -8,10 +8,10 @@ mod common;
 
 use std::path::Path;
 
-use vm_storage::compat::{BaselineId, DiskId, OperationId, RunId, VmId};
+use vm_storage::{BaselineId, DiskId, OperationId, RunId, VmId};
 use vm_storage::{
-    Catalog, CatalogLayout, DiskRecord, DiskRole, DiskStatus, Intent, IntentKind, IntentSpec,
-    IntentState, IntegrityIssue, Lifecycle, RecoveryOutcome, RecoveryReport, RunRecord, RunState,
+    Catalog, CatalogLayout, DiskRecord, DiskRole, DiskStatus, IntegrityIssue, Intent, IntentKind,
+    IntentSpec, IntentState, Lifecycle, RecoveryOutcome, RecoveryReport, RunRecord, RunState,
     StorageError, TargetKind, now_rfc3339,
 };
 
@@ -54,7 +54,10 @@ impl Fixture {
 
     /// Proprietà comuni a ogni esito della riconciliazione (7.4, riga "Crash").
     fn assert_safe(&self, cat: &mut Catalog) {
-        assert!(cat.open_intents().unwrap().is_empty(), "nessun intento aperto");
+        assert!(
+            cat.open_intents().unwrap().is_empty(),
+            "nessun intento aperto"
+        );
         assert_eq!(
             common::base_hash(cat, &self.baseline),
             self.base_hash,
@@ -62,8 +65,14 @@ impl Fixture {
         );
         let b = cat.read(|tx| tx.baseline(&self.baseline)).unwrap();
         assert_eq!(b.base_disk_id, self.base_disk, "baseline intatta nel DB");
-        assert!(cat.verify_baseline_manifest(&self.baseline, true).unwrap().is_empty());
-        let tmp_entries = std::fs::read_dir(self.dir.path().join("tmp")).unwrap().count();
+        assert!(
+            cat.verify_baseline_manifest(&self.baseline, true)
+                .unwrap()
+                .is_empty()
+        );
+        let tmp_entries = std::fs::read_dir(self.dir.path().join("tmp"))
+            .unwrap()
+            .count();
         assert_eq!(tmp_entries, 0, "tmp/ vuota");
     }
 
@@ -116,7 +125,10 @@ fn crash_after_begin_nothing_to_undo() {
     let (fx, mut cat) = fixture();
     let (i, _, _) = fx.overlay_intent(&mut cat);
     let (mut cat, rep) = fx.crash_and_reopen(cat);
-    assert_eq!(single(&rep), (RecoveryOutcome::RolledBack, "nothing_to_undo"));
+    assert_eq!(
+        single(&rep),
+        (RecoveryOutcome::RolledBack, "nothing_to_undo")
+    );
     assert_eq!(cat.intent_state(i.id).unwrap(), IntentState::Aborted);
     fx.assert_safe(&mut cat);
 }
@@ -184,7 +196,10 @@ fn failed_db_update_is_rolled_back() {
         .unwrap_err();
     assert!(matches!(err, StorageError::Constraint(_)));
     assert_eq!(cat.intent_state(i.id).unwrap(), IntentState::Applied);
-    assert!(cat.read(|tx| tx.disk(&disk)).is_err(), "transazione annullata");
+    assert!(
+        cat.read(|tx| tx.disk(&disk)).is_err(),
+        "transazione annullata"
+    );
     let (mut cat, rep) = fx.crash_and_reopen(cat);
     assert_eq!(single(&rep).0, RecoveryOutcome::RolledBack);
     fx.assert_safe(&mut cat);
@@ -235,7 +250,10 @@ fn row_and_file_present_is_rolled_forward() {
     let row = fx.overlay_row(disk, &run);
     cat.with_tx(|tx| tx.insert_disk(&row)).unwrap();
     let (mut cat, rep) = fx.crash_and_reopen(cat);
-    assert_eq!(single(&rep), (RecoveryOutcome::RolledForward, "rolled_forward"));
+    assert_eq!(
+        single(&rep),
+        (RecoveryOutcome::RolledForward, "rolled_forward")
+    );
     assert_eq!(cat.intent_state(i.id).unwrap(), IntentState::Committed);
     fx.assert_safe(&mut cat);
 }
@@ -369,10 +387,11 @@ fn crash_during_restore_after_vars_copy() {
     common::write_bytes(&vi.temp_path, b"vars").unwrap();
     let (mut cat, rep) = fx.crash_and_reopen(cat);
     assert_eq!(rep.intents.len(), 2);
-    assert!(rep
-        .intents
-        .iter()
-        .all(|r| r.outcome == RecoveryOutcome::RolledBack));
+    assert!(
+        rep.intents
+            .iter()
+            .all(|r| r.outcome == RecoveryOutcome::RolledBack)
+    );
     assert!(!oi.final_path.as_ref().unwrap().exists());
     fx.assert_safe(&mut cat);
     // Dopo la riconciliazione un nuovo ripristino riesce.
@@ -384,9 +403,7 @@ fn concurrent_operations_on_same_vm_are_refused() {
     let (fx, mut cat) = fixture();
     let (_i, _, _) = fx.overlay_intent(&mut cat);
     let err = cat
-        .prepare_run_from_baseline(&fx.vm, &fx.baseline, |t, _| {
-            common::write_bytes(t, b"x")
-        })
+        .prepare_run_from_baseline(&fx.vm, &fx.baseline, |t, _| common::write_bytes(t, b"x"))
         .unwrap_err();
     assert!(matches!(err, StorageError::VmBusy(_)), "{err:?}");
     assert_eq!(err.public_code(), Some("vm_busy"));
@@ -412,7 +429,12 @@ fn crash_during_baseline_promotion_removes_partial_baseline() {
     common::write_bytes(&i.temp_path, b"nuova base").unwrap();
     cat.mark_applied(&i).unwrap();
     let final_path = i.final_path.clone().unwrap();
-    assert!(std::fs::metadata(&final_path).unwrap().permissions().readonly());
+    assert!(
+        std::fs::metadata(&final_path)
+            .unwrap()
+            .permissions()
+            .readonly()
+    );
     // Manifest scritto accanto, prima del commit.
     let manifest = final_path.with_file_name("manifest.json");
     common::write_bytes(&manifest, b"{}").unwrap();
@@ -420,7 +442,10 @@ fn crash_during_baseline_promotion_removes_partial_baseline() {
     assert_eq!(single(&rep).0, RecoveryOutcome::RolledBack);
     assert!(!final_path.exists());
     assert!(!manifest.exists());
-    assert!(!final_path.parent().unwrap().exists(), "directory vuota rimossa");
+    assert!(
+        !final_path.parent().unwrap().exists(),
+        "directory vuota rimossa"
+    );
     fx.assert_safe(&mut cat);
 }
 
@@ -461,7 +486,10 @@ fn crash_before_delete_rename_restores_ready() {
     let (fx, mut cat) = fixture();
     let (i, disk) = delete_overlay_intent(&fx, &mut cat);
     let (mut cat, rep) = fx.crash_and_reopen(cat);
-    assert_eq!(single(&rep), (RecoveryOutcome::RolledBack, "delete_not_started"));
+    assert_eq!(
+        single(&rep),
+        (RecoveryOutcome::RolledBack, "delete_not_started")
+    );
     assert!(i.final_path.as_ref().unwrap().is_file());
     assert_eq!(
         cat.read(|tx| tx.disk(&disk)).unwrap().status,
@@ -483,7 +511,10 @@ fn crash_after_delete_rename_rolls_forward() {
         let (mut cat, rep) = fx.crash_and_reopen(cat);
         assert_eq!(
             single(&rep),
-            (RecoveryOutcome::RolledForward, "rolled_forward+temp_removed")
+            (
+                RecoveryOutcome::RolledForward,
+                "rolled_forward+temp_removed"
+            )
         );
         assert!(cat.read(|tx| tx.disk(&disk)).is_err());
         assert!(!i.final_path.as_ref().unwrap().exists());

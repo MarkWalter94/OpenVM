@@ -53,8 +53,14 @@ fn committed_schemas_match_generated() {
 
 #[test]
 fn schema_names_are_unique_and_generation_is_deterministic() {
-    let a: Vec<_> = public_schemas().into_iter().map(|(n, s)| (n, render(&s))).collect();
-    let b: Vec<_> = public_schemas().into_iter().map(|(n, s)| (n, render(&s))).collect();
+    let a: Vec<_> = public_schemas()
+        .into_iter()
+        .map(|(n, s)| (n, render(&s)))
+        .collect();
+    let b: Vec<_> = public_schemas()
+        .into_iter()
+        .map(|(n, s)| (n, render(&s)))
+        .collect();
     assert_eq!(a, b);
     let names: BTreeSet<_> = a.iter().map(|(n, _)| *n).collect();
     assert_eq!(names.len(), a.len());
@@ -65,7 +71,13 @@ fn internal_types_have_no_public_schema() {
     for (name, schema) in public_schemas() {
         let text = render(&schema);
         assert!(!text.contains("managed_path"), "{name} espone managed_path");
-        assert!(!text.contains("ManagedRelPath"), "{name} espone ManagedRelPath");
-        assert!(!text.contains("file_identity"), "{name} espone file_identity");
+        assert!(
+            !text.contains("ManagedRelPath"),
+            "{name} espone ManagedRelPath"
+        );
+        assert!(
+            !text.contains("file_identity"),
+            "{name} espone file_identity"
+        );
     }
 }

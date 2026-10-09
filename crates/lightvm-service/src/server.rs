@@ -11,17 +11,21 @@ use std::time::Duration;
 use tokio::io::{AsyncWrite, ReadHalf, WriteHalf};
 use tokio::sync::{Semaphore, broadcast, oneshot, watch};
 
-use crate::compat::{
-    ClientMessage, CloseReason, ConnectionInfo, EmergencyStopReport, ErrorCode, ProtocolErrorCode,
-    ReplyError, Request, RequestId, ResponseBody, Role, SUPPORTED_PROTOCOL_VERSIONS, ServerMessage,
-    ServiceEvent, StopReason, op_error, protocol_error,
+use lightvm_proto::ipc::{
+    ClientMessage, CloseReason, ConnectionInfo, EmergencyStopReport, Request, RequestId,
+    ResponseBody, Role, SUPPORTED_PROTOCOL_VERSIONS, ServerMessage, ServiceEvent, ServiceState,
+    StopReason,
 };
+use lightvm_proto::{Caller, ErrorCode, ProtocolError, ProtocolErrorCode, PublicError, ReplyError};
+
 use crate::credential::{Credential, CredentialId, CredentialStore};
+use crate::engine::VmEngine;
 use crate::frame::{self, FrameError};
 use crate::lock::{InstanceLock, LockError};
 use crate::ratelimit::{RateLimit, TokenBucket};
 use crate::supervisor::{
-    Backend, Catalog, Command, EmergencyStop, OrphanPolicy, SupervisorRequest, SupervisorThread,
+    Backend, Command, EmergencyStop, OrphanPolicy, SupervisorRequest, SupervisorThread,
+    unauthenticated,
 };
 use crate::transport::{Accepted, BoxedStream, EndpointOptions, Listener, PeerInfo};
 
@@ -112,10 +116,26 @@ struct Shared {
     shutdown_trigger: watch::Sender<bool>,
     closing: watch::Sender<bool>,
     stopping: AtomicBool,
+    /// Generazione dell'Emergency Stop: le mutazioni accodate prima di un
+    /// Emergency Stop vengono scartate dal supervisor.
+    emergency_epoch: Arc<AtomicU64>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Errore operativo pubblico con codice stabile.
+fn op_error(code: ErrorCode, message: impl Into<String>) -> ReplyError {
+    ReplyError::Operational(PublicError::new(code, message))
+}
+
+/// Errore di protocollo: nessun effetto tentato.
+fn protocol_error(code: ProtocolErrorCode, message: impl Into<String>) -> ReplyError {
+    ReplyError::Protocol(ProtocolError {
+        code,
+        message: message.into(),
+    })
 }
 
 impl Shared {
@@ -185,10 +205,15 @@ impl Shared {
         // viene accettata. Poi terminazione tramite il gestore del backend,
         // fuori dalla coda e fuori dal thread del supervisor.
         let revoked = self.revoke_non_ui();
+        // Le mutazioni già accodate verso il supervisor non vengono eseguite.
+        self.emergency_epoch.fetch_add(1, Ordering::SeqCst);
         let handle = self.emergency.clone();
         let outcome = tokio::task::spawn_blocking(move || handle.emergency_stop_all())
             .await
             .unwrap_or_default();
+        // Registrazione nel core (audit, stato delle VM) senza attenderla: il
+        // supervisor può essere occupato e il percorso prioritario non aspetta.
+        self.send_cmd(Command::EmergencyReconcile);
         let _ = self.events.send(ServiceEvent::AgentSessionsStopped {
             reason: StopReason::EmergencyStop,
         });
@@ -290,7 +315,7 @@ impl ServiceHandle {
 /// da consegnare al genitore su un canale privato (mai negli argomenti).
 pub async fn start(
     cfg: ServiceConfig,
-    catalog: Box<dyn Catalog>,
+    engine: Box<dyn VmEngine>,
     backend: Box<dyn Backend>,
 ) -> Result<(ServiceHandle, Credential), StartError> {
     let instance_lock = InstanceLock::acquire(&cfg.catalog_dir).map_err(StartError::Lock)?;
@@ -307,12 +332,19 @@ pub async fn start(
     let (events, _) = broadcast::channel(256);
     let (cmd_tx, cmd_rx) = mpsc::channel();
     let emergency = backend.emergency_handle();
+    let emergency_epoch = Arc::new(AtomicU64::new(0));
     let sup = SupervisorThread {
-        catalog,
+        engine,
         backend,
         events: events.clone(),
         max_frame: cfg.max_frame,
+        emergency_epoch: emergency_epoch.clone(),
     };
+    // Pubblicato prima di qualunque iscrizione possibile: nessun client lo
+    // riceve in ritardo, dopo eventi successivi (corsa con `subscribe`).
+    let _ = events.send(ServiceEvent::ServiceState {
+        state: ServiceState::Running,
+    });
     let sup_thread = std::thread::Builder::new()
         .name("lightvm-supervisor".into())
         .spawn(move || sup.run(cmd_rx))
@@ -335,6 +367,7 @@ pub async fn start(
         shutdown_trigger,
         closing,
         stopping: AtomicBool::new(false),
+        emergency_epoch,
     });
 
     // Ciclo di accettazione.
@@ -530,11 +563,10 @@ async fn handshake(
         Ok(ClientMessage::Request { request_id, .. }) => {
             let _ = send(
                 wr,
-                &err(
-                    Some(request_id),
-                    ErrorCode::PermissionDenied,
-                    "handshake con credenziale richiesto",
-                ),
+                &ServerMessage::Error {
+                    request_id: Some(request_id),
+                    error: unauthenticated("handshake con credenziale richiesto"),
+                },
                 max,
             )
             .await;
@@ -575,11 +607,10 @@ async fn handshake(
     let Some((credential_id, role)) = verified else {
         let _ = send(
             wr,
-            &err(
-                Some(request_id),
-                ErrorCode::PermissionDenied,
-                "credenziale assente o non valida",
-            ),
+            &ServerMessage::Error {
+                request_id: Some(request_id),
+                error: unauthenticated("credenziale assente o non valida"),
+            },
             max,
         )
         .await;
@@ -759,6 +790,15 @@ fn requires_ui(req: &Request) -> bool {
     !matches!(req, Request::Ping | Request::GetCapabilities)
 }
 
+/// Chiamante verso il core: la UI è l'utente locale; il pairing non ha
+/// alcun permesso sulle VM (il grant di sessione agente arriva in F4).
+fn caller_for(role: Role) -> Option<Caller> {
+    match role {
+        Role::Ui => Some(Caller::User),
+        Role::Pairing => None,
+    }
+}
+
 async fn dispatch(
     ctx: ReqCtx<'_>,
     events: &mut Option<broadcast::Receiver<ServiceEvent>>,
@@ -776,6 +816,9 @@ async fn dispatch(
         Request::Ping => SupervisorRequest::Ping,
         Request::GetCapabilities => SupervisorRequest::GetCapabilities,
         Request::ListVms => SupervisorRequest::ListVms,
+        Request::VmStatus { vm_id } => SupervisorRequest::VmStatus(vm_id),
+        Request::CreateVm { config } => SupervisorRequest::CreateVm(Box::new(config)),
+        Request::SubmitVm { request } => SupervisorRequest::SubmitVm(Box::new(request)),
         Request::Subscribe => {
             if events.is_none() {
                 *events = Some(shared.events.subscribe());
@@ -828,7 +871,9 @@ async fn dispatch(
     let (reply_tx, reply_rx) = oneshot::channel();
     let sent = shared.send_cmd(Command::Request {
         req: sup_req,
+        caller: caller_for(ctx.role),
         revoked: ctx.revoke_rx.clone(),
+        epoch: shared.emergency_epoch.load(Ordering::SeqCst),
         reply: reply_tx,
         _permit: permit,
     });

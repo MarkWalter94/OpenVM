@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::time::{Duration, Instant};
 
-use crate::compat::Role;
+use lightvm_proto::ipc::Role;
 
 /// Lunghezza della credenziale in byte.
 pub const CREDENTIAL_LEN: usize = 32;

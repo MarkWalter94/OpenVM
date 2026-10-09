@@ -281,6 +281,9 @@ str_enum!(
         Committed => "committed",
         /// Annullato (dall'applicazione o dalla riconciliazione).
         Aborted => "aborted",
+        /// Riconciliazione non riuscita: da verificare. La VM resta occupata e
+        /// la riconciliazione ritenta a ogni apertura o chiamata di `recover`.
+        NeedsReview => "needs_review",
     }
 );
 

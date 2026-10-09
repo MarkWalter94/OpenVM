@@ -6,12 +6,13 @@
 
 use std::path::Path;
 
+use crate::budget::{BudgetCheck, RunBudgetRequest};
 use crate::catalog::{Catalog, Intent, IntentSpec};
-use crate::compat::{BaselineId, DiskId, FirmwareId, OperationId, RunId, VmId};
 use crate::enums::{
     DiskRole, DiskStatus, FirmwareScope, IntentKind, Lifecycle, RunState, TargetKind,
 };
 use crate::error::{Result, StorageError};
+use crate::ids::{BaselineId, DiskId, FirmwareId, OperationId, RunId, VmId};
 use crate::layout::CatalogLayout;
 use crate::manifest::{self, BaselineManifest, MANIFEST_FORMAT_VERSION, ManifestFile};
 use crate::records::{BaselineRecord, DiskRecord, FirmwareRecord, RunRecord};
@@ -217,6 +218,11 @@ impl Catalog {
                 "baseline non utilizzabile per questa VM".into(),
             ));
         }
+        // Rilevatore di scrittori e protezione della baseline per tutta la
+        // preparazione (ADR-0025 punto 2): base e vars aperti con il solo
+        // `FILE_SHARE_READ`. La verifica completa dell'hash avviene in
+        // `guard_run`, prima dell'avvio.
+        let _baseline_guard = self.baseline_guard(baseline_id, false)?;
         let op = OperationId::new_v7();
         let run_id = RunId::new_v7();
         let overlay_id = DiskId::new_v7();
@@ -317,6 +323,27 @@ impl Catalog {
                 Err(e)
             }
         }
+    }
+
+    /// Come [`Self::prepare_run_from_baseline`], preceduta dal controllo del
+    /// budget ([`Self::check_new_run`]): se il budget della VM o del catalogo o
+    /// la riserva host non lo consentono, l'esecuzione è rifiutata con
+    /// [`StorageError::ResourceLimit`] prima di qualunque intento o file.
+    pub fn prepare_run_within_budget(
+        &mut self,
+        vm_id: &VmId,
+        baseline_id: &BaselineId,
+        budget: &RunBudgetRequest,
+        write_overlay: impl FnOnce(&Path, &Path) -> Result<()>,
+    ) -> Result<(RunRecord, BudgetCheck)> {
+        let check = self.check_new_run(
+            vm_id,
+            budget.requested_bytes,
+            budget.host_free_bytes,
+            budget.enforcement,
+        )?;
+        let run = self.prepare_run_from_baseline(vm_id, baseline_id, write_overlay)?;
+        Ok((run, check))
     }
 
     /// Annulla, in ordine inverso, gli intenti ancora aperti. Gli errori sono

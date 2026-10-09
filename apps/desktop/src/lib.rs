@@ -10,15 +10,41 @@
 //! il pannello Console mostra il framebuffer ricevuto dal client RFB in sola
 //! lettura e inoltra tastiera e mouse soltanto via QMP.
 //!
+//! F1-05 (backlog F1-13, F1-14, F1-16, F1-19): blocco del testo degli appunti
+//! host (`appunti`), diagnostica delle librerie Linux caricate a runtime
+//! (`librerie`), selezione automatica del backend con barra di stato
+//! (`render`), elenco VM e istantanee egui_kittest.
+//!
 //! La UI è separata dal ciclo eframe (`main.rs`) per poterla pilotare headless
 //! con `egui_kittest` attraverso l'albero AccessKit.
 
 use std::time::{Duration, Instant};
 
+pub mod appunti;
 pub mod console;
 pub mod keymap;
+pub mod librerie;
+pub mod render;
 
 use console::{ConsoleConfig, LiveConsole};
+use render::InfoRendering;
+
+/// Riga dell'elenco delle VM mostrato nella Dashboard.
+///
+/// In F1 non esiste ancora un catalogo: nel percorso di prodotto l'elenco è
+/// vuoto e la Dashboard lo dichiara. Le righe arrivano dal catalogo in F2; i
+/// test possono impostarle con [`LightVmApp::set_elenco_vm`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VmRiga {
+    /// Nome della VM.
+    pub nome: String,
+    /// Sistema operativo dichiarato.
+    pub os: String,
+    /// Stato leggibile (testo, non solo colore).
+    pub stato: String,
+    /// La VM è in esecuzione.
+    pub attiva: bool,
+}
 
 /// Larghezza del framebuffer simulato, in texel (riferimento ROADMAP 13: 1280×720).
 pub const FB_WIDTH: usize = 1280;
@@ -85,8 +111,10 @@ pub struct LightVmApp {
     fb_updates: u64,
     frames: u64,
     live: Option<LiveConsole>,
-    /// Descrizione del backend di rendering, impostata dal ciclo eframe.
-    pub renderer_info: String,
+    elenco_vm: Vec<VmRiga>,
+    appunti_scartati: u64,
+    /// Backend di rendering effettivo, impostato dal ciclo eframe (F1-16).
+    pub rendering: InfoRendering,
 }
 
 impl Default for LightVmApp {
@@ -111,8 +139,38 @@ impl LightVmApp {
             fb_updates: 0,
             frames: 0,
             live: None,
-            renderer_info: String::from("non determinato"),
+            elenco_vm: Vec::new(),
+            appunti_scartati: 0,
+            rendering: InfoRendering::default(),
         }
+    }
+
+    /// Crea la UI con una console già costruita (per esempio
+    /// [`LiveConsole::sintetica`] nei test).
+    pub fn with_live_console(console: LiveConsole) -> Self {
+        let mut app = Self::new(false);
+        app.live = Some(console);
+        app
+    }
+
+    /// Sostituisce l'elenco delle VM mostrato nella Dashboard.
+    pub fn set_elenco_vm(&mut self, righe: Vec<VmRiga>) {
+        self.elenco_vm = righe;
+    }
+
+    /// Imposta la sezione visibile.
+    pub fn set_section(&mut self, section: Section) {
+        self.section = section;
+    }
+
+    /// Eventi `Paste` (appunti host) scartati finora (F1-13).
+    pub fn appunti_scartati(&self) -> u64 {
+        self.appunti_scartati
+    }
+
+    /// Registra gli eventi `Paste` scartati da `raw_input_hook`.
+    pub fn conta_appunti_scartati(&mut self, n: u32) {
+        self.appunti_scartati += u64::from(n);
     }
 
     /// Crea la UI con la console reale (RFB in sola lettura + input QMP).
@@ -151,6 +209,9 @@ impl LightVmApp {
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         self.frames += 1;
         let ctx = ui.ctx().clone();
+        // F1-13: prima di qualsiasi widget nessun `Paste` resta nell'input.
+        let filtro = appunti::filtra_contesto(&ctx);
+        self.conta_appunti_scartati(filtro.scartati);
         if self.applied_theme != Some(self.theme) {
             ctx.set_theme(egui::Theme::from(self.theme));
             self.applied_theme = Some(self.theme);
@@ -166,10 +227,11 @@ impl LightVmApp {
                 for s in Section::ALL {
                     ui.selectable_value(&mut self.section, s, s.label());
                 }
-                ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-                    ui.small(format!("Rendering: {}", self.renderer_info));
-                });
             });
+
+        egui::Panel::bottom("lightvm_stato")
+            .resizable(false)
+            .show(ui, |ui| barra_di_stato_ui(ui, &self.rendering));
 
         if self.section != Section::Console
             && let Some(live) = &mut self.live
@@ -180,7 +242,7 @@ impl LightVmApp {
         egui::CentralPanel::default_margins().show(ui, |ui| match self.section {
             Section::Dashboard => {
                 ui.heading("Dashboard");
-                ui.label("Spike F0: nessuna VM gestita. Il catalogo arriva in F2.");
+                elenco_vm_ui(ui, &self.elenco_vm);
             }
             Section::Console => self.console_ui(ui, &ctx),
             Section::Settings => {
@@ -291,7 +353,66 @@ impl std::fmt::Debug for LightVmApp {
             .field("animate", &self.animate)
             .field("frames", &self.frames)
             .field("fb_updates", &self.fb_updates)
-            .field("renderer_info", &self.renderer_info)
+            .field("rendering", &self.rendering)
+            .field("appunti_scartati", &self.appunti_scartati)
             .finish_non_exhaustive()
     }
+}
+
+/// Pannello "Macchine virtuali": tabella con nome, sistema e stato, oppure
+/// lo stato vuoto dichiarato.
+pub fn elenco_vm_ui(ui: &mut egui::Ui, righe: &[VmRiga]) {
+    ui.label(egui::RichText::new("Macchine virtuali").strong());
+    if righe.is_empty() {
+        ui.label("Nessuna VM registrata. Il catalogo e la creazione guidata arrivano in F2.");
+        return;
+    }
+    egui::Grid::new("lightvm_elenco_vm")
+        .num_columns(3)
+        .striped(true)
+        .spacing([24.0, 6.0])
+        .show(ui, |ui| {
+            ui.label(egui::RichText::new("Nome").strong());
+            ui.label(egui::RichText::new("Sistema").strong());
+            ui.label(egui::RichText::new("Stato").strong());
+            ui.end_row();
+            for r in righe {
+                ui.label(&r.nome);
+                ui.label(&r.os);
+                // Stato distinguibile anche senza colore: simbolo e testo.
+                let (simbolo, colore) = if r.attiva {
+                    ("▶", egui::Color32::from_rgb(60, 180, 90))
+                } else {
+                    ("■", ui.visuals().weak_text_color())
+                };
+                ui.horizontal(|ui| {
+                    ui.colored_label(colore, simbolo);
+                    ui.label(&r.stato);
+                });
+                ui.end_row();
+            }
+        });
+}
+
+/// Barra di stato: backend di rendering effettivo e modalità degradata
+/// (F1-16). Il testo dice tutto anche senza colore.
+pub fn barra_di_stato_ui(ui: &mut egui::Ui, info: &InfoRendering) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(info.etichetta()).on_hover_text(info.spiegazione());
+        if info.degradato() {
+            ui.separator();
+            let testo = format!(
+                "⚠ Modalità degradata (software): console a {} agg./s",
+                render::FPS_CONSOLE_DEGRADATA
+            );
+            ui.colored_label(ui.visuals().warn_fg_color, testo)
+                .on_hover_text(info.spiegazione());
+        }
+        if !info.falliti.is_empty() {
+            ui.separator();
+            let nomi: Vec<&str> = info.falliti.iter().map(|(t, _)| t.nome()).collect();
+            ui.label(format!("non disponibili: {}", nomi.join(", ")))
+                .on_hover_text(info.spiegazione());
+        }
+    });
 }

@@ -1,0 +1,4 @@
+# File prodotti da egui_kittest in caso di differenza o aggiornamento: non si versionano.
+*.new.png
+*.diff.png
+*.old.png

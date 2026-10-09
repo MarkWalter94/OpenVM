@@ -22,6 +22,7 @@ mod audit;
 mod error;
 mod ids;
 mod input;
+pub mod ipc;
 mod model;
 mod request;
 pub mod schema;
@@ -38,10 +39,10 @@ pub use input::{
     PointerButton, PointerMove,
 };
 pub use model::{
-    BaselineOrigin, BaselineRecord, DisplayGeometry, FileIdentity, Firmware, GuestOs,
-    HostCapacity, ImageFormat, MediaEntry, MediaKind, MediaRecord, NetworkProfile,
-    OperationKind, OperationRecord, OperationStatus, ResourceLimits, RunEndReason, RunRecord,
-    Screenshot, VmConfig, VmRecord,
+    BaselineOrigin, BaselineRecord, DisplayGeometry, FileIdentity, Firmware, GuestOs, HostCapacity,
+    ImageFormat, MediaEntry, MediaKind, MediaRecord, NetworkProfile, OperationKind,
+    OperationRecord, OperationStatus, ResourceLimits, RunEndReason, RunRecord, Screenshot,
+    VmConfig, VmRecord,
 };
 pub use request::{Actor, Admission, Caller, VmAction, VmRequest};
 pub use session::{

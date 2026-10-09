@@ -29,7 +29,7 @@
           "$ref": "#/$defs/SessionId"
         },
         "token": {
-          "description": "Segreto di sessione; assente = diniego.",
+          "description": "Segreto di sessione; assente = diniego `unauthenticated`.",
           "anyOf": [
             {
               "$ref": "#/$defs/SessionToken"

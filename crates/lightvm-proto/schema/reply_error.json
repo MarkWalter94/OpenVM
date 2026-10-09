@@ -37,7 +37,7 @@
       "description": "Codice stabile di un errore operativo. I nomi serializzati non cambiano mai;\nnuovi codici si aggiungono soltanto.",
       "oneOf": [
         {
-          "description": "Identità o grant non autorizzano l'azione (incluso token assente o errato,\nVM fuori allowlist, capability mancante, sessione revocata o in pausa).",
+          "description": "Chiamante identificato (credenziale valida) ma non autorizzato all'azione:\nVM fuori allowlist, capability mancante, sessione in pausa, ruolo\ninsufficiente. Credenziali assenti o non valide: [`ErrorCode::Unauthenticated`].",
           "type": "string",
           "const": "permission_denied"
         },
@@ -80,6 +80,11 @@
           "description": "Guasto dell'infrastruttura (QEMU, QMP, storage, OS) non imputabile al chiamante.",
           "type": "string",
           "const": "infrastructure_error"
+        },
+        {
+          "description": "Nessuna credenziale valida: credenziale IPC o token di sessione assente,\nmalformato, sconosciuto, revocato o riusato dopo un riavvio del supervisor.\nServe una nuova autorizzazione nell'app. Aggiunto in coda ai primi nove\ncodici, che restano invariati.",
+          "type": "string",
+          "const": "unauthenticated"
         }
       ]
     },
@@ -125,7 +130,7 @@
           "const": "message_too_large"
         },
         {
-          "description": "Canale non autenticato (credenziale IPC assente o non valida).",
+          "description": "Mantenuto per compatibilità del contratto ma **non emesso**: una credenziale\nassente o non valida produce l'errore operativo [`ErrorCode::Unauthenticated`]\n(vedi la documentazione del modulo).",
           "type": "string",
           "const": "unauthenticated"
         }

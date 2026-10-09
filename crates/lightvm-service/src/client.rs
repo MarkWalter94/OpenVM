@@ -6,10 +6,10 @@ use std::io;
 
 use tokio::io::{ReadHalf, WriteHalf};
 
-use crate::compat::{ClientMessage, Request, RequestId, ServerMessage, ServiceEvent};
 use crate::credential::Credential;
 use crate::frame::{self, FrameError};
 use crate::transport::{self, BoxedStream};
+use lightvm_proto::ipc::{ClientMessage, Request, RequestId, ServerMessage, ServiceEvent};
 
 /// Connessione client.
 pub struct Client {

@@ -3,18 +3,54 @@
 //! Il file temporaneo è scelto soltanto dal backend nella directory privata
 //! dell'esecuzione; il PPM viene letto con un limite di dimensione, validato,
 //! convertito in PNG in memoria e cancellato in ogni caso.
+//!
+//! [`CapturedScreenshot`] è locale perché porta i byte dell'immagine;
+//! [`CapturedScreenshot::metadata`] produce i metadati di `lightvm-proto`
+//! ([`lightvm_proto::Screenshot`]) che viaggiano su IPC/MCP.
 
 use std::io::Read;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
-use crate::compat::{DisplayGeometry, RunId, Screenshot};
+use lightvm_proto::{DisplayGeometry, ImageFormat, RunId, Sha256Digest, UtcTimestamp, VmId};
+use sha2::{Digest, Sha256};
+
 use crate::error::{BackendError, Result};
 use crate::paths::ManagedPath;
 use crate::qmp::QmpClient;
 
-/// Lato massimo accettato in pixel.
-pub const MAX_SIDE: u32 = 8192;
+/// Lato massimo accettato in pixel (uguale a [`DisplayGeometry::MAX_SIDE`]).
+pub const MAX_SIDE: u32 = DisplayGeometry::MAX_SIDE;
+
+/// Screenshot catturato dal backend: PNG in memoria più metadati.
+#[derive(Clone, Debug)]
+pub struct CapturedScreenshot {
+    /// Esecuzione a cui appartiene.
+    pub run_id: RunId,
+    /// Geometria del display al momento della cattura.
+    pub geometry: DisplayGeometry,
+    /// Immagine PNG RGB a 8 bit.
+    pub png: Vec<u8>,
+    /// SHA-256 del PNG.
+    pub sha256: Sha256Digest,
+    /// Istante della cattura.
+    pub captured_at: UtcTimestamp,
+}
+
+impl CapturedScreenshot {
+    /// Metadati pubblici (senza byte né percorsi).
+    pub fn metadata(&self, vm_id: VmId) -> lightvm_proto::Screenshot {
+        lightvm_proto::Screenshot {
+            vm_id,
+            run_id: self.run_id,
+            geometry: self.geometry,
+            format: ImageFormat::Png,
+            sha256: self.sha256,
+            byte_len: self.png.len() as u64,
+            captured_at: self.captured_at,
+        }
+    }
+}
 
 /// Dimensione massima del file PPM accettata (lato massimo al quadrato × 3
 /// più intestazione).
@@ -67,16 +103,17 @@ pub fn parse_ppm(bytes: &[u8], max_side: u32) -> Result<RgbImage> {
         if start == pos {
             return Err(bad("intestazione PPM troncata".into()));
         }
-        fields.push(
-            std::str::from_utf8(&bytes[start..pos]).map_err(|e| bad(format!("PPM: {e}")))?,
-        );
+        fields.push(std::str::from_utf8(&bytes[start..pos]).map_err(|e| bad(format!("PPM: {e}")))?);
     }
     if pos >= bytes.len() || !bytes[pos].is_ascii_whitespace() {
         return Err(bad("intestazione PPM non terminata".into()));
     }
     pos += 1;
     if fields[0] != "P6" {
-        return Err(bad(format!("formato {} non supportato (atteso P6)", fields[0])));
+        return Err(bad(format!(
+            "formato {} non supportato (atteso P6)",
+            fields[0]
+        )));
     }
     let num = |s: &str| s.parse::<u32>().map_err(|e| bad(format!("PPM {s}: {e}")));
     let (w, h, max) = (num(fields[1])?, num(fields[2])?, num(fields[3])?);
@@ -130,12 +167,14 @@ impl Drop for TempFile<'_> {
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Esegue `screendump` nella directory privata e restituisce PNG e immagine.
+/// Il PNG oltre `max_png_bytes` è rifiutato con `resource_limit`.
 pub(crate) async fn capture(
     qmp: &QmpClient,
     private_dir: &ManagedPath,
-    run_id: &RunId,
+    run_id: RunId,
     timeout: Duration,
-) -> Result<(Screenshot, RgbImage)> {
+    max_png_bytes: u64,
+) -> Result<(CapturedScreenshot, RgbImage)> {
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let file = private_dir.join_file(&format!("screendump-{n}.ppm"))?;
     let _ = std::fs::remove_file(file.as_path());
@@ -160,16 +199,22 @@ pub(crate) async fn capture(
     let img = tokio::task::spawn_blocking(move || parse_ppm(&bytes, MAX_SIDE))
         .await
         .map_err(|e| BackendError::Io(std::io::Error::other(e.to_string())))??;
+    let geometry = DisplayGeometry::new(img.width, img.height)?;
     let png = encode_png(&img)?;
+    if png.len() as u64 > max_png_bytes {
+        return Err(BackendError::ResourceLimit(format!(
+            "screenshot PNG di {} byte (massimo {max_png_bytes})",
+            png.len()
+        )));
+    }
+    let sha256 = Sha256Digest::from_bytes(Sha256::digest(&png).into());
     Ok((
-        Screenshot {
-            run_id: run_id.clone(),
-            geometry: DisplayGeometry {
-                width: img.width,
-                height: img.height,
-            },
+        CapturedScreenshot {
+            run_id,
+            geometry,
             png,
-            captured_at: SystemTime::now(),
+            sha256,
+            captured_at: UtcTimestamp::now(),
         },
         img,
     ))
@@ -188,6 +233,25 @@ mod tests {
         assert!((img.non_black_percent() - 50.0).abs() < 1e-9);
         let png = encode_png(&img).unwrap();
         assert_eq!(&png[1..4], b"PNG");
+    }
+
+    #[test]
+    fn metadati_pubblici() {
+        let png = vec![1u8, 2, 3];
+        let s = CapturedScreenshot {
+            run_id: RunId::from_unix_millis(1_700_000_000_000, [1; 10]),
+            geometry: DisplayGeometry::new(2, 1).unwrap(),
+            sha256: Sha256Digest::from_bytes(Sha256::digest(&png).into()),
+            png,
+            captured_at: UtcTimestamp::from_unix_millis(1_700_000_000_000).unwrap(),
+        };
+        let vm = VmId::from_unix_millis(1_700_000_000_000, [2; 10]);
+        let m = s.metadata(vm);
+        assert_eq!(m.vm_id, vm);
+        assert_eq!(m.run_id, s.run_id);
+        assert_eq!(m.byte_len, 3);
+        assert_eq!(m.format, ImageFormat::Png);
+        assert_eq!(m.sha256, s.sha256);
     }
 
     #[test]

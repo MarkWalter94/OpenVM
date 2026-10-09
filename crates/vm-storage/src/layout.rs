@@ -18,8 +18,8 @@
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 
-use crate::compat::{BaselineId, RunId, VmId};
 use crate::error::{PathRejection, Result, StorageError};
+use crate::ids::{BaselineId, MediaId, RunId, VmId};
 use crate::paths::{ManagedPath, is_link, resolve_checked};
 use crate::time::UtcMillis;
 
@@ -72,6 +72,49 @@ impl CatalogLayout {
     /// Risolve un percorso gestito verificando l'assenza di collegamenti.
     pub fn resolve(&self, rel: &ManagedPath) -> Result<PathBuf> {
         resolve_checked(&self.root, rel)
+    }
+
+    /// Converte un percorso assoluto (per esempio restituito da un altro
+    /// componente) nel percorso gestito corrispondente, rifiutando:
+    /// percorsi non assoluti o fuori dalla radice
+    /// ([`PathRejection::OutsideArea`]), componenti `..`/`.` o nomi non validi
+    /// (regole di [`ManagedPath::parse`]) e componenti esistenti che siano
+    /// collegamenti o reparse point ([`PathRejection::Link`]).
+    ///
+    /// Il confronto con la radice è per componenti e sensibile alle maiuscole:
+    /// una grafia diversa della radice è rifiutata (rifiuto in eccesso, mai
+    /// un'accettazione in eccesso).
+    pub fn managed_from_absolute(&self, abs: &Path) -> Result<ManagedPath> {
+        let label = abs.display().to_string();
+        let outside = || StorageError::invalid_path(label.clone(), PathRejection::OutsideArea);
+        if !abs.is_absolute() {
+            return Err(outside());
+        }
+        let rest = abs.strip_prefix(&self.root).map_err(|_| outside())?;
+        let mut parts = Vec::new();
+        for c in rest.components() {
+            match c {
+                std::path::Component::Normal(s) => {
+                    let s = s.to_str().ok_or_else(|| {
+                        StorageError::invalid_path(label.clone(), PathRejection::InvalidCharacter)
+                    })?;
+                    parts.push(s);
+                }
+                std::path::Component::ParentDir | std::path::Component::CurDir => {
+                    return Err(StorageError::invalid_path(
+                        label.clone(),
+                        PathRejection::Traversal,
+                    ));
+                }
+                _ => return Err(outside()),
+            }
+        }
+        if parts.is_empty() {
+            return Err(StorageError::invalid_path(label, PathRejection::Empty));
+        }
+        let rel = ManagedPath::parse(&parts.join("/"))?;
+        self.resolve(&rel)?;
+        Ok(rel)
     }
 
     /// Crea (se manca) una directory gestita, componente per componente,
@@ -157,7 +200,7 @@ impl CatalogLayout {
         mp(format!("runs/{run}/logs"))
     }
     /// `media/<media_id>.<ext>`.
-    pub fn media_file(media: &crate::compat::MediaId, ext: &str) -> Result<ManagedPath> {
+    pub fn media_file(media: &MediaId, ext: &str) -> Result<ManagedPath> {
         ManagedPath::parse(&format!("media/{media}.{ext}"))
     }
 

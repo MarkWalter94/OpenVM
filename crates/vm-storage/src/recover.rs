@@ -13,18 +13,21 @@
 //! | cancellazione | file nel temporaneo, riga presente | completa la cancellazione della riga; se un riferimento la impedisce ripristina il file → `committed`/`aborted` |
 //! | cancellazione | nessun file, riga presente | come "riga presente, nessun file" della creazione → `aborted` |
 //! | export | qualunque | rimuove il temporaneo → `aborted` (la destinazione esterna non è mai toccata) |
+//! | qualunque | errore durante la riconciliazione (file in uso, collegamento, I/O) | intento `needs_review` ("da verificare"), VM `recovering` e occupata; nuovo tentativo alla prossima riconciliazione |
 //!
 //! Poi rimuove i temporanei rimasti di cancellazioni ed export già confermati
-//! e verifica che i file di dischi, firmware e media registrati esistano.
+//! e verifica che i file di dischi, firmware e media registrati esistano (un
+//! percorso non verificabile è segnalato come [`IntegrityIssue::Unverifiable`]).
 //! Un file di base mancante viene solo segnalato: la riconciliazione non
 //! modifica mai righe o file di una baseline.
 
 use rusqlite::params;
 
 use crate::catalog::{Catalog, Intent, exists_no_follow, remove_temp, target_exists};
-use crate::compat::{ArtifactId, BaselineId, DiskId, FirmwareId, MediaId, VmId, parse_id};
 use crate::enums::{DiskRole, DiskStatus, IntentKind, IntentState, Lifecycle, TargetKind};
 use crate::error::{Result, SqlResultExt, StorageError};
+use crate::fsx;
+use crate::ids::{ArtifactId, BaselineId, DiskId, FirmwareId, MediaId, VmId, parse_id};
 use crate::records::Tx;
 use crate::time::now_rfc3339;
 
@@ -63,6 +66,10 @@ pub enum RecoveryOutcome {
     RolledForward,
     /// DB presente e file assente: VM in `recovering`, nessuna modifica alla baseline.
     MarkedRecovering,
+    /// Riconciliazione non riuscita (errore di I/O, file in uso, percorso
+    /// rifiutato): intento `needs_review`, VM `recovering` e occupata; nuovo
+    /// tentativo alla prossima riconciliazione.
+    NeedsReview,
 }
 
 /// Incoerenza rilevata dalla verifica di integrità.
@@ -94,6 +101,14 @@ pub enum IntegrityIssue {
         /// Media.
         media_id: String,
     },
+    /// Presenza non verificabile (percorso dietro un collegamento o errore di
+    /// I/O): da verificare, VM in `recovering` se il file è di una VM.
+    Unverifiable {
+        /// Percorso gestito.
+        path: String,
+        /// Errore osservato.
+        detail: String,
+    },
 }
 
 impl Catalog {
@@ -101,13 +116,28 @@ impl Catalog {
     /// registrati. Idempotente.
     pub fn recover(&mut self) -> Result<RecoveryReport> {
         let mut report = RecoveryReport::default();
-        for intent in self.open_intents()? {
-            let prior = self.intent_state(intent.id)?;
-            let (outcome, detail, state) = self.recover_one(&intent, prior)?;
-            self.set_intent_state(intent.id, state, Some(&detail))?;
+        for id in self.intent_ids_in("'pending','applied','needs_review'")? {
+            let prior = self.intent_state(id)?;
+            let kind = self.intent_kind(id)?;
+            // Un errore su un intento non blocca l'apertura del catalogo:
+            // l'intento resta "da verificare" e la VM occupata.
+            let attempt = self
+                .intent_row(id)
+                .and_then(|intent| self.recover_one(&intent, prior));
+            let (outcome, detail) = match attempt {
+                Ok((outcome, detail, state)) => {
+                    self.set_intent_state(id, state, Some(&detail))?;
+                    (outcome, detail)
+                }
+                Err(e) => {
+                    let detail = format!("needs_review: {e}");
+                    self.mark_needs_review(id, &detail)?;
+                    (RecoveryOutcome::NeedsReview, detail)
+                }
+            };
             report.intents.push(IntentRecovery {
-                intent_id: intent.id,
-                kind: intent.kind,
+                intent_id: id,
+                kind,
                 prior_state: prior,
                 outcome,
                 detail,
@@ -116,6 +146,37 @@ impl Catalog {
         report.leftover_temps_removed = self.remove_committed_leftovers()?;
         report.integrity = self.integrity_scan()?;
         Ok(report)
+    }
+
+    fn intent_kind(&self, id: i64) -> Result<IntentKind> {
+        self.conn
+            .query_row(
+                "SELECT kind FROM journal WHERE intent_id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .db()
+    }
+
+    /// Intento non risolto: stato `needs_review` e VM in `recovering`.
+    fn mark_needs_review(&mut self, id: i64, detail: &str) -> Result<()> {
+        self.with_tx(|tx| {
+            tx.conn()
+                .execute(
+                    "UPDATE journal SET state = 'needs_review', resolution = ?1, updated_at = ?2
+                     WHERE intent_id = ?3",
+                    params![detail, now_rfc3339(), id],
+                )
+                .db()?;
+            tx.conn()
+                .execute(
+                    "UPDATE vms SET lifecycle = 'recovering', updated_at = ?1
+                     WHERE vm_id = (SELECT vm_id FROM journal WHERE intent_id = ?2)",
+                    params![now_rfc3339(), id],
+                )
+                .db()?;
+            Ok(())
+        })
     }
 
     fn recover_one(
@@ -141,6 +202,7 @@ impl Catalog {
                     if temp_exists {
                         remove_temp(&self.layout, &i.temp_rel)?;
                     }
+                    restore_readonly(i)?;
                     return Ok((
                         RolledForward,
                         "rolled_forward".into(),
@@ -149,7 +211,8 @@ impl Catalog {
                 }
                 if temp_exists && let (Some(dest), Some(rel)) = (&i.final_path, &i.final_rel) {
                     self.layout.resolve(rel)?;
-                    std::fs::rename(&i.temp_path, dest).map_err(|e| StorageError::io(dest, e))?;
+                    fsx::publish_no_replace(&i.temp_path, dest, rel)?;
+                    restore_readonly(i)?;
                     return Ok((
                         RolledForward,
                         "rename_completed".into(),
@@ -274,9 +337,18 @@ impl Catalog {
         };
         let mut removed = Vec::new();
         for id in ids {
-            let i = self.intent_row(id)?;
-            if exists_no_follow(&i.temp_path)? {
-                remove_temp(&self.layout, &i.temp_rel)?;
+            // Un temporaneo non rimovibile (in uso, dietro un collegamento) resta
+            // e sarà ritentato: non impedisce l'apertura del catalogo.
+            let Ok(i) = self.intent_row(id) else { continue };
+            let removed_now = match exists_no_follow(&i.temp_path) {
+                Ok(true) => match remove_temp(&self.layout, &i.temp_rel) {
+                    Ok(()) => true,
+                    Err(_) => continue,
+                },
+                Ok(false) => false,
+                Err(_) => continue,
+            };
+            if removed_now {
                 removed.push(id);
             }
             self.set_resolution(id, "temp_removed")?;
@@ -292,8 +364,13 @@ impl Catalog {
                 if d.status != DiskStatus::Ready {
                     continue;
                 }
-                if exists_no_follow(&layout.resolve(&d.managed_path)?)? {
-                    continue;
+                match presence(&layout, &d.managed_path, &mut issues)? {
+                    Some(true) => continue,
+                    None => {
+                        tx.set_vm_lifecycle(&d.vm_id, Lifecycle::Recovering)?;
+                        continue;
+                    }
+                    Some(false) => {}
                 }
                 tx.set_vm_lifecycle(&d.vm_id, Lifecycle::Recovering)?;
                 if d.role == DiskRole::Base {
@@ -311,8 +388,13 @@ impl Catalog {
                 }
             }
             for f in tx.all_firmware()? {
-                if exists_no_follow(&layout.resolve(&f.managed_path)?)? {
-                    continue;
+                match presence(&layout, &f.managed_path, &mut issues)? {
+                    Some(true) => continue,
+                    None => {
+                        tx.set_vm_lifecycle(&f.vm_id, Lifecycle::Recovering)?;
+                        continue;
+                    }
+                    Some(false) => {}
                 }
                 tx.set_vm_lifecycle(&f.vm_id, Lifecycle::Recovering)?;
                 fail_runs_using(tx, "vars_fw_id", &f.fw_id.to_string())?;
@@ -331,7 +413,7 @@ impl Catalog {
             };
             for (id, path) in media {
                 let rel = crate::paths::ManagedPath::parse(&path)?;
-                if !exists_no_follow(&layout.resolve(&rel)?)? {
+                if presence(&layout, &rel, &mut issues)? == Some(false) {
                     tx.conn()
                         .execute(
                             "UPDATE media SET status = 'missing' WHERE media_id = ?1",
@@ -343,6 +425,26 @@ impl Catalog {
             }
             Ok(issues)
         })
+    }
+}
+
+/// Presenza di un file gestito: `None` se il percorso non è verificabile
+/// (collegamento rifiutato, errore di I/O), con l'incoerenza registrata.
+fn presence(
+    layout: &crate::layout::CatalogLayout,
+    rel: &crate::paths::ManagedPath,
+    issues: &mut Vec<IntegrityIssue>,
+) -> Result<Option<bool>> {
+    match layout.resolve(rel).and_then(|p| exists_no_follow(&p)) {
+        Ok(b) => Ok(Some(b)),
+        Err(e @ (StorageError::InvalidPath { .. } | StorageError::Io { .. })) => {
+            issues.push(IntegrityIssue::Unverifiable {
+                path: rel.to_string(),
+                detail: e.to_string(),
+            });
+            Ok(None)
+        }
+        Err(e) => Err(e),
     }
 }
 
@@ -372,4 +474,22 @@ fn delete_target_rows(tx: &Tx<'_>, kind: TargetKind, id: &str) -> Result<()> {
         TargetKind::Media => tx.delete_media(&parse_id::<MediaId>(id)?),
         TargetKind::None => Ok(()),
     }
+}
+
+/// Dopo un completamento in avanti: i file che nascono in sola lettura (basi,
+/// vars delle baseline, copie dei media) riprendono l'attributo, che la
+/// rimozione di un temporaneo collegato allo stesso file può aver tolto.
+fn restore_readonly(i: &Intent) -> Result<()> {
+    let readonly = match i.kind {
+        IntentKind::PromoteBaseline | IntentKind::ImportMedia => true,
+        IntentKind::CopyVars => i
+            .final_rel
+            .as_ref()
+            .is_some_and(|r| r.components().any(|c| c == "base")),
+        _ => false,
+    };
+    if readonly && let Some(dest) = &i.final_path {
+        fsx::ensure_readonly(dest)?;
+    }
+    Ok(())
 }

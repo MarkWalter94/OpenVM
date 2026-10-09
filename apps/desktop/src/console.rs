@@ -107,7 +107,9 @@ impl InputState {
                 }
                 // egui-winit trasforma Ctrl+C/X/V in eventi dedicati senza `Key`:
                 // si ricostruisce la pressione del tasto (Ctrl è già premuto).
-                // Il contenuto di `Paste` (appunti host) è scartato.
+                // Il contenuto di `Paste` (appunti host) è scartato. Di norma
+                // `Paste` non arriva qui: `crate::appunti` lo sostituisce prima
+                // con i tasti fisici; questo ramo resta come seconda difesa.
                 egui::Event::Copy if keyboard => tap(&mut out, "c"),
                 egui::Event::Cut if keyboard => tap(&mut out, "x"),
                 egui::Event::Paste(_) if keyboard => tap(&mut out, "v"),
@@ -250,6 +252,8 @@ pub struct LiveConsole {
     connected: bool,
     input: InputState,
     had_focus: bool,
+    /// Frame sintetico da caricare (solo test: nessuna connessione a QEMU).
+    sintetico: Option<egui::ColorImage>,
     /// Contatori.
     pub stats: ConsoleStats,
 }
@@ -283,8 +287,42 @@ impl LiveConsole {
             connected: false,
             input: InputState::default(),
             had_focus: false,
+            sintetico: None,
             stats: ConsoleStats::default(),
         }
+    }
+
+    /// Console senza QEMU con un frame fisso, per i test headless (istantanee
+    /// e inoltro dei tasti). Non apre socket né thread: gli eventi che la UI
+    /// invierebbe via QMP arrivano sul `Receiver` restituito. Non è
+    /// raggiungibile da riga di comando (ADR-0022, criterio 5).
+    #[doc(hidden)]
+    pub fn sintetica(layout: KeyboardLayout, frame: egui::ColorImage) -> (Self, Receiver<QmpCmd>) {
+        let dir = std::env::temp_dir().join("lightvm-console-sintetica");
+        let mut c = Self::new(ConsoleConfig {
+            vnc: Transport::Unix {
+                path: dir.join("nessun-socket"),
+                imp: rfb_client::UnixImpl::Socket2,
+            },
+            qmp_socket: dir.join("nessun-socket"),
+            capture_dir: dir.clone(),
+            tmp_dir: dir,
+            layout,
+            max_fps: 30,
+        });
+        let (tx, rx) = channel();
+        c.qmp_tx = Some(tx);
+        c.connected = true;
+        c.geometry = (
+            u16::try_from(frame.size[0]).unwrap_or(u16::MAX),
+            u16::try_from(frame.size[1]).unwrap_or(u16::MAX),
+        );
+        if let Ok(mut s) = c.status.lock() {
+            s.rfb = "frame sintetico (test, nessun QEMU)".into();
+            s.qmp = "canale di test".into();
+        }
+        c.sintetico = Some(frame);
+        (c, rx)
     }
 
     /// Layout dichiarato.
@@ -451,7 +489,11 @@ impl LiveConsole {
 
     /// Disegna il pannello Console.
     pub fn ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        if self.session.is_none() {
+        if let Some(frame) = self.sintetico.take() {
+            self.texture =
+                Some(ctx.load_texture("console-sintetica", frame, egui::TextureOptions::LINEAR));
+            self.stats.texture_uploads += 1;
+        } else if self.session.is_none() && self.texture.is_none() {
             self.start(ctx);
         }
         self.pump_updates(ctx);
@@ -460,9 +502,9 @@ impl LiveConsole {
         ui.heading("Console");
         ui.horizontal_wrapped(|ui| {
             let (dot, color) = if self.connected {
-                ("●", egui::Color32::from_rgb(60, 180, 90))
+                ("■", egui::Color32::from_rgb(60, 180, 90))
             } else {
-                ("●", egui::Color32::from_rgb(200, 70, 60))
+                ("■", egui::Color32::from_rgb(200, 70, 60))
             };
             ui.colored_label(color, dot);
             ui.label(format!("RFB: {}", status.rfb));

@@ -1,12 +1,11 @@
 //! Stabilità dei codici d'errore pubblici (ROADMAP 6.3).
 
-use lightvm_proto::{
-    ErrorCode, ProtocolError, ProtocolErrorCode, PublicError, ReplyError,
-};
+use lightvm_proto::{ErrorCode, ProtocolError, ProtocolErrorCode, PublicError, ReplyError};
 use serde_json::json;
 
-/// Elenco congelato: modificare questa tabella è un cambiamento incompatibile.
-const FROZEN: [(ErrorCode, &str, bool); 9] = [
+/// Elenco congelato: modificare o riordinare le righe esistenti è un cambiamento
+/// incompatibile; i nuovi codici si aggiungono soltanto in coda.
+const FROZEN: [(ErrorCode, &str, bool); 10] = [
     (ErrorCode::PermissionDenied, "permission_denied", false),
     (ErrorCode::SessionExpired, "session_expired", false),
     (ErrorCode::VmBusy, "vm_busy", true),
@@ -16,7 +15,84 @@ const FROZEN: [(ErrorCode, &str, bool); 9] = [
     (ErrorCode::InvalidArgument, "invalid_argument", false),
     (ErrorCode::NotFound, "not_found", false),
     (ErrorCode::InfrastructureError, "infrastructure_error", true),
+    (ErrorCode::Unauthenticated, "unauthenticated", false),
 ];
+
+/// Codici presenti nello schema committato `schema/error_code.json`: la tabella
+/// congelata, il tipo Rust e lo schema devono coincidere.
+#[test]
+fn committed_error_code_schema_lists_every_code() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("schema/error_code.json");
+    let text = std::fs::read_to_string(path).expect("schema error_code.json");
+    let schema: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let mut in_schema: Vec<String> = Vec::new();
+    collect_consts(&schema, &mut in_schema);
+    in_schema.sort();
+    let mut expected: Vec<String> = FROZEN.iter().map(|(_, n, _)| (*n).to_owned()).collect();
+    expected.sort();
+    assert_eq!(in_schema, expected);
+}
+
+fn collect_consts(v: &serde_json::Value, out: &mut Vec<String>) {
+    match v {
+        serde_json::Value::Object(m) => {
+            if let Some(serde_json::Value::String(s)) = m.get("const") {
+                out.push(s.clone());
+            }
+            if let Some(serde_json::Value::Array(a)) = m.get("enum") {
+                out.extend(a.iter().filter_map(|x| x.as_str().map(str::to_owned)));
+            }
+            for (k, child) in m {
+                if k != "const" && k != "enum" {
+                    collect_consts(child, out);
+                }
+            }
+        }
+        serde_json::Value::Array(a) => a.iter().for_each(|x| collect_consts(x, out)),
+        _ => {}
+    }
+}
+
+/// Semantica di autenticazione e autorizzazione (documentata nel modulo
+/// `error` e in `docs/verification/F1-01-proto-core.md`): tre codici distinti,
+/// nessuno ritentabile automaticamente, e il codice operativo `unauthenticated`
+/// non è un codice di protocollo serializzato nella stessa famiglia.
+#[test]
+fn authentication_codes_are_distinct_and_not_retryable() {
+    let codes = [
+        ErrorCode::Unauthenticated,
+        ErrorCode::SessionExpired,
+        ErrorCode::PermissionDenied,
+    ];
+    for c in codes {
+        assert!(!c.default_retryable(), "{c}");
+    }
+    let e = PublicError::unauthenticated("credenziale non valida");
+    assert_eq!(
+        serde_json::to_value(&e).unwrap(),
+        json!({"code": "unauthenticated", "message": "credenziale non valida", "retryable": false})
+    );
+    let reply: ReplyError = e.into();
+    assert_eq!(
+        serde_json::to_value(&reply).unwrap()["kind"],
+        json!("operational")
+    );
+    // Lo stesso nome esiste anche tra i codici di protocollo (mantenuto per
+    // compatibilità, non emesso): le due famiglie restano separate dal `kind`.
+    assert_eq!(
+        ProtocolErrorCode::Unauthenticated.as_str(),
+        "unauthenticated"
+    );
+    let proto: ReplyError = ProtocolError {
+        code: ProtocolErrorCode::Unauthenticated,
+        message: "x".into(),
+    }
+    .into();
+    assert_eq!(
+        serde_json::to_value(&proto).unwrap()["kind"],
+        json!("protocol")
+    );
+}
 
 #[test]
 fn error_codes_are_frozen() {
@@ -41,7 +117,10 @@ fn roadmap_codes_present() {
         "resource_limit",
         "state_conflict",
     ] {
-        assert!(serde_json::from_value::<ErrorCode>(json!(name)).is_ok(), "{name}");
+        assert!(
+            serde_json::from_value::<ErrorCode>(json!(name)).is_ok(),
+            "{name}"
+        );
     }
     assert!(serde_json::from_value::<ErrorCode>(json!("PermissionDenied")).is_err());
 }
@@ -55,7 +134,10 @@ fn public_error_wire_shape() {
         json!({"code": "vm_busy", "message": "operazione in corso", "details": {"vm": "x"}, "retryable": true})
     );
     let plain = serde_json::to_value(PublicError::permission_denied("no")).unwrap();
-    assert_eq!(plain, json!({"code": "permission_denied", "message": "no", "retryable": false}));
+    assert_eq!(
+        plain,
+        json!({"code": "permission_denied", "message": "no", "retryable": false})
+    );
     let back: PublicError = serde_json::from_value(v).unwrap();
     assert_eq!(back, e);
 }
@@ -68,14 +150,26 @@ fn operational_and_protocol_errors_are_distinct() {
         message: "json".into(),
     }
     .into();
-    assert_eq!(serde_json::to_value(&op).unwrap()["kind"], json!("operational"));
-    assert_eq!(serde_json::to_value(&proto).unwrap()["kind"], json!("protocol"));
+    assert_eq!(
+        serde_json::to_value(&op).unwrap()["kind"],
+        json!("operational")
+    );
+    assert_eq!(
+        serde_json::to_value(&proto).unwrap()["kind"],
+        json!("protocol")
+    );
     // Un codice operativo non è accettato come codice di protocollo e viceversa.
     assert!(serde_json::from_value::<ProtocolErrorCode>(json!("vm_busy")).is_err());
     assert!(serde_json::from_value::<ErrorCode>(json!("malformed_message")).is_err());
     let names: Vec<_> = ProtocolErrorCode::ALL.iter().map(|c| c.as_str()).collect();
     assert_eq!(
         names,
-        ["malformed_message", "unsupported_version", "unknown_method", "message_too_large", "unauthenticated"]
+        [
+            "malformed_message",
+            "unsupported_version",
+            "unknown_method",
+            "message_too_large",
+            "unauthenticated"
+        ]
     );
 }

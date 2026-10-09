@@ -1,32 +1,36 @@
-//! Avvio di `lightvm-desktop` (spike F0, passo 1).
+//! Avvio di `lightvm-desktop`.
 //!
-//! Opzioni da riga di comando (solo per lo spike e le misure di F0):
+//! Opzioni da riga di comando (spike e misure):
 //! - `--smoke SECONDI`: chiude l'app dopo N secondi e stampa su stdout backend,
 //!   versioni, dimensione finestra e numero di frame.
-//! - `--renderer wgpu|glow`: sceglie il backend se la build li include entrambi.
+//! - `--renderer auto|glow|wgpu|warp|ELENCO`: `auto` (predefinito) prova glow,
+//!   poi wgpu su adattatore hardware (DX12 su Windows), poi wgpu su
+//!   rasterizzatore software (WARP). Un nome forza quel backend senza ripiego;
+//!   un elenco separato da virgole (per esempio `glow,warp`) fissa l'ordine.
 //! - `--static`: framebuffer statico, nessun repaint periodico (misura dell'idle).
-//! - `--wgpu-adapter cpu|auto`: con `cpu` forza un adattatore wgpu di tipo CPU
-//!   (rasterizzatore software, per esempio WARP su DX12); fallisce se assente.
-//! - `--glow-hw preferred|required|off`: accelerazione hardware richiesta a glutin.
+//! - `--wgpu-adapter cpu|auto`: con `cpu` usa un adattatore wgpu di tipo CPU
+//!   (WARP su DX12) al posto di quello hardware; da solo equivale a `--renderer warp`.
+//! - `--glow-hw preferred|required|off`: accelerazione hardware richiesta a glutin
+//!   (`off` su Windows fa fallire glow: serve a provare il ripiego).
+//! - `--salta-controllo-librerie` (solo Linux): non esegue il controllo
+//!   preventivo delle librerie caricate con `dlopen` (F1-14).
 
+use std::cell::Cell;
 use std::io::Write as _;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use lightvm_desktop::LightVmApp;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RendererChoice {
-    Wgpu,
-    Glow,
-}
+use lightvm_desktop::render::{FPS_CONSOLE_DEGRADATA, InfoRendering, Piano, Tentativo};
 
 #[derive(Debug)]
 struct Args {
     smoke: Option<Duration>,
-    renderer: Option<RendererChoice>,
+    renderer: Option<String>,
     animate: bool,
     wgpu_cpu: bool,
     glow_hw: String,
+    salta_controllo_librerie: bool,
     console: ConsoleArgs,
 }
 
@@ -50,6 +54,7 @@ fn parse_args() -> Result<Args, String> {
     let mut args = Args {
         smoke: None,
         renderer: None,
+        salta_controllo_librerie: false,
         animate: true,
         wgpu_cpu: false,
         glow_hw: "preferred".to_owned(),
@@ -67,13 +72,12 @@ fn parse_args() -> Result<Args, String> {
                 args.smoke = Some(Duration::from_secs_f64(secs));
             }
             "--renderer" => {
-                let v = it.next().ok_or("--renderer richiede wgpu o glow")?;
-                args.renderer = Some(match v.as_str() {
-                    "wgpu" => RendererChoice::Wgpu,
-                    "glow" => RendererChoice::Glow,
-                    _ => return Err(format!("renderer sconosciuto: {v}")),
-                });
+                args.renderer = Some(
+                    it.next()
+                        .ok_or("--renderer richiede auto, glow, wgpu, warp o un elenco")?,
+                );
             }
+            "--salta-controllo-librerie" => args.salta_controllo_librerie = true,
             "--static" => args.animate = false,
             "--wgpu-adapter" => {
                 let v = it.next().ok_or("--wgpu-adapter richiede cpu o auto")?;
@@ -132,7 +136,7 @@ fn parse_args() -> Result<Args, String> {
             }
             "--help" | "-h" => {
                 println!(
-                    "uso: lightvm-desktop [--smoke SECONDI] [--renderer wgpu|glow] [--static] \
+                    "uso: lightvm-desktop [--smoke SECONDI] [--renderer auto|glow|wgpu|warp|glow,warp...] [--static] \
                      [--wgpu-adapter cpu|auto] [--glow-hw preferred|required|off] \n                     [--vnc-socket S [--vnc-impl socket2|uds] | --vnc-tls 127.0.0.1:P --tls-dir D] \n                     --qmp-socket S [--capture-dir D] [--tmp-dir D] [--layout us|it] [--max-fps N] [--dump-fb PNG]"
                 );
                 std::process::exit(0);
@@ -153,9 +157,17 @@ struct DesktopApp {
     last_frame: Option<Instant>,
     intervals: [u64; 4],
     dump_fb: Option<String>,
+    filtro_appunti: lightvm_desktop::appunti::FiltroAppunti,
 }
 
 impl eframe::App for DesktopApp {
+    /// F1-13: primo punto dell'app in cui l'input è visibile, prima che il
+    /// contesto egui lo elabori. Nessun `Paste` prosegue oltre questo gancio.
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        let esito = self.filtro_appunti.filtra_raw_input(raw_input);
+        self.ui.conta_appunti_scartati(esito.scartati);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let now = Instant::now();
         if let Some(prev) = self.last_frame.replace(now) {
@@ -202,9 +214,27 @@ impl DesktopApp {
         let ppp = ctx.pixels_per_point();
         let rect = ctx.content_rect();
         let inner = ctx.input(|i| i.viewport().inner_rect);
+        let r = &self.ui.rendering;
         let mut out = std::io::stdout().lock();
         let _ = writeln!(out, "SMOKE esito=ok");
-        let _ = writeln!(out, "SMOKE renderer={}", self.ui.renderer_info);
+        let _ = writeln!(out, "SMOKE renderer={}", r.dettaglio);
+        let falliti: Vec<String> = r
+            .falliti
+            .iter()
+            .map(|(t, e)| format!("{}:{e}", t.nome()))
+            .collect();
+        let _ = writeln!(
+            out,
+            "SMOKE backend={} degradato={} forzato={} tentativi_falliti={} indicatore=\"{}\"",
+            r.attivo.map_or("?", Tentativo::nome),
+            r.degradato(),
+            r.forzato,
+            falliti.len(),
+            r.etichetta(),
+        );
+        for f in &falliti {
+            let _ = writeln!(out, "SMOKE tentativo_fallito {f}");
+        }
         #[allow(unused_mut, reason = "i backend presenti dipendono dalle feature")]
         let mut backends = String::new();
         #[cfg(feature = "wgpu")]
@@ -227,11 +257,12 @@ impl DesktopApp {
         );
         let _ = writeln!(
             out,
-            "SMOKE frame={} aggiornamenti_fb={} durata_s={:.2} primo_frame_ms={}",
+            "SMOKE frame={} aggiornamenti_fb={} durata_s={:.2} primo_frame_ms={} appunti_scartati={}",
             self.ui.frames(),
             self.ui.fb_updates(),
             elapsed.as_secs_f64(),
             self.first_frame.map_or(-1, |d| d.as_millis() as i64),
+            self.ui.appunti_scartati(),
         );
         let _ = writeln!(
             out,
@@ -267,33 +298,135 @@ impl DesktopApp {
     }
 }
 
+/// Descrizione dell'adattatore wgpu e indicazione "adattatore di tipo CPU".
 #[cfg(feature = "wgpu")]
-fn wgpu_info(rs: &eframe::egui_wgpu::RenderState) -> String {
+fn wgpu_info(rs: &eframe::egui_wgpu::RenderState) -> (String, bool) {
     let i = rs.adapter.get_info();
-    format!(
-        "wgpu backend={:?} adapter=\"{}\" tipo={:?} driver=\"{}\" driver_info=\"{}\"",
-        i.backend, i.name, i.device_type, i.driver, i.driver_info
+    (
+        format!(
+            "wgpu backend={:?} adapter=\"{}\" tipo={:?} driver=\"{}\" driver_info=\"{}\"",
+            i.backend, i.name, i.device_type, i.driver, i.driver_info
+        ),
+        i.device_type == eframe::egui_wgpu::wgpu::DeviceType::Cpu,
     )
 }
 
+/// Versione GL dal contesto glow, senza `unsafe` (`HasContext::version`).
+/// Il nome del renderer GL (`glGetString(GL_RENDERER)`) richiederebbe una
+/// chiamata `unsafe` e non è riportato.
 #[cfg(feature = "glow")]
-#[expect(
-    unsafe_code,
-    reason = "glow espone le query di stringhe GL solo come fn unsafe"
-)]
-fn glow_info(gl: &eframe::glow::Context) -> String {
+fn glow_info(gl: &eframe::glow::Context) -> (String, bool) {
     use eframe::glow::HasContext as _;
-    // SAFETY: il contesto GL è corrente sul thread della UI durante la creazione
-    // dell'app (eframe lo rende corrente prima di invocare l'app creator) e le
-    // costanti passate sono enumerazioni valide per glGetString.
-    let (vendor, renderer, version) = unsafe {
-        (
-            gl.get_parameter_string(eframe::glow::VENDOR),
-            gl.get_parameter_string(eframe::glow::RENDERER),
-            gl.get_parameter_string(eframe::glow::VERSION),
-        )
+    let v = gl.version();
+    let software = ["llvmpipe", "softpipe", "GDI Generic", "SwiftShader"]
+        .iter()
+        .any(|s| v.vendor_info.contains(s));
+    (
+        format!(
+            "glow versione_gl={}.{}{} driver=\"{}\"",
+            v.major,
+            v.minor,
+            if v.is_embedded { " ES" } else { "" },
+            v.vendor_info
+        ),
+        software,
+    )
+}
+
+/// Opzioni eframe per un tentativo.
+fn opzioni(t: Tentativo, args: &Args) -> eframe::NativeOptions {
+    #[allow(unused_mut, reason = "i campi modificati dipendono dalle feature")]
+    let mut options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_title("LightVM")
+            .with_inner_size([1460.0, 860.0])
+            .with_min_inner_size([640.0, 400.0]),
+        // Lo stesso event loop serve a più tentativi: senza `run_and_return`
+        // winit non permette di ricrearlo dopo un errore di inizializzazione.
+        run_and_return: true,
+        ..Default::default()
     };
-    format!("glow vendor=\"{vendor}\" renderer=\"{renderer}\" versione_gl=\"{version}\"")
+    match t {
+        #[cfg(feature = "glow")]
+        Tentativo::Glow => {
+            options.renderer = eframe::Renderer::Glow;
+            options.glow_options.hardware_acceleration = match args.glow_hw.as_str() {
+                "required" => eframe::egui_glow::HardwareAcceleration::Required,
+                "off" => eframe::egui_glow::HardwareAcceleration::Off,
+                _ => eframe::egui_glow::HardwareAcceleration::Preferred,
+            };
+        }
+        #[cfg(feature = "wgpu")]
+        Tentativo::WgpuHardware | Tentativo::WgpuSoftware => {
+            use eframe::egui_wgpu::{WgpuSetup, wgpu};
+            options.renderer = eframe::Renderer::Wgpu;
+            let software = t == Tentativo::WgpuSoftware;
+            if let WgpuSetup::CreateNew(create) = &mut options.wgpu_options.wgpu_setup {
+                // ADR-0014: su Windows wgpu usa DX12 (hardware e WARP).
+                if cfg!(windows) {
+                    create.instance_descriptor.backends = wgpu::Backends::DX12;
+                }
+                create.native_adapter_selector =
+                    Some(std::sync::Arc::new(move |adapters, _surface| {
+                        for a in adapters {
+                            let i = a.get_info();
+                            eprintln!(
+                                "wgpu adattatore disponibile: {:?} \"{}\" {:?}",
+                                i.backend, i.name, i.device_type
+                            );
+                        }
+                        adapters
+                            .iter()
+                            .find(|a| {
+                                (a.get_info().device_type == wgpu::DeviceType::Cpu) == software
+                            })
+                            .cloned()
+                            .ok_or_else(|| {
+                                if software {
+                                    "nessun adattatore wgpu di tipo CPU (WARP) disponibile"
+                                        .to_owned()
+                                } else {
+                                    "nessun adattatore wgpu hardware disponibile".to_owned()
+                                }
+                            })
+                    }));
+            }
+        }
+        #[allow(unreachable_patterns, reason = "dipende dalle feature compilate")]
+        _ => {}
+    }
+    let _ = &args.glow_hw;
+    options
+}
+
+/// Testo di un panico catturato.
+fn testo_panico(p: &(dyn std::any::Any + Send)) -> String {
+    p.downcast_ref::<&str>()
+        .map(|s| (*s).to_owned())
+        .or_else(|| p.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "panico senza messaggio".to_owned())
+}
+
+/// Messaggio per un panico durante l'avvio del rendering o della finestra.
+fn errore_da_panico(msg: &str) -> String {
+    use lightvm_desktop::librerie::{Sessione, mancanti, messaggio, panico_da_libreria};
+    if !(cfg!(target_os = "linux") || panico_da_libreria(msg)) {
+        return format!("LightVM si è interrotto durante l'avvio della finestra: {msg}");
+    }
+    let sessione = Sessione::rileva(
+        std::env::var("WAYLAND_DISPLAY").ok().as_deref(),
+        std::env::var("DISPLAY").ok().as_deref(),
+    );
+    #[cfg(target_os = "linux")]
+    let m = {
+        let cache = std::fs::read("/etc/ld.so.cache").unwrap_or_default();
+        mancanti(sessione, |f| {
+            lightvm_desktop::librerie::presente_nel_sistema(&cache, f)
+        })
+    };
+    #[cfg(not(target_os = "linux"))]
+    let m = mancanti(sessione, |_| true);
+    messaggio(sessione, &m, Some(msg))
 }
 
 fn main() -> std::process::ExitCode {
@@ -305,72 +438,26 @@ fn main() -> std::process::ExitCode {
             return std::process::ExitCode::from(2);
         }
     };
-
-    #[allow(unused_mut, reason = "i campi modificati dipendono dalle feature")]
-    let mut options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("LightVM")
-            .with_inner_size([1460.0, 860.0])
-            .with_min_inner_size([640.0, 400.0]),
-        ..Default::default()
-    };
-
-    #[cfg(all(feature = "wgpu", feature = "glow"))]
-    {
-        options.renderer = match args.renderer.unwrap_or(RendererChoice::Wgpu) {
-            RendererChoice::Wgpu => eframe::Renderer::Wgpu,
-            RendererChoice::Glow => eframe::Renderer::Glow,
-        };
-    }
-    #[cfg(not(all(feature = "wgpu", feature = "glow")))]
-    if let Some(r) = args.renderer {
-        let compiled = if cfg!(feature = "wgpu") {
-            RendererChoice::Wgpu
-        } else {
-            RendererChoice::Glow
-        };
-        if r != compiled {
-            eprintln!("errore: renderer {r:?} non incluso in questa build (feature cargo)");
+    let piano = match Piano::da_argomenti(args.renderer.as_deref(), args.wgpu_cpu) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("errore: {e}");
             return std::process::ExitCode::from(2);
         }
-    }
+    };
 
-    #[cfg(feature = "wgpu")]
-    if args.wgpu_cpu {
-        use eframe::egui_wgpu::{WgpuSetup, wgpu};
-        if let WgpuSetup::CreateNew(create) = &mut options.wgpu_options.wgpu_setup {
-            create.native_adapter_selector = Some(std::sync::Arc::new(|adapters, _surface| {
-                for a in adapters {
-                    let i = a.get_info();
-                    eprintln!(
-                        "wgpu adattatore disponibile: {:?} \"{}\" {:?}",
-                        i.backend, i.name, i.device_type
-                    );
-                }
-                adapters
-                    .iter()
-                    .find(|a| a.get_info().device_type == wgpu::DeviceType::Cpu)
-                    .cloned()
-                    .ok_or_else(|| "nessun adattatore wgpu di tipo CPU disponibile".to_owned())
-            }));
-        }
-    }
-    #[cfg(not(feature = "wgpu"))]
-    if args.wgpu_cpu {
-        eprintln!("errore: --wgpu-adapter richiede la feature wgpu");
-        return std::process::ExitCode::from(2);
-    }
-
-    #[cfg(feature = "glow")]
+    // F1-14: su Linux, prima di creare la finestra, controlla le librerie che
+    // winit/glutin/wgpu aprono con `dlopen`.
+    #[cfg(target_os = "linux")]
+    if !args.salta_controllo_librerie
+        && let Err(msg) = lightvm_desktop::librerie::controllo_preventivo()
     {
-        options.glow_options.hardware_acceleration = match args.glow_hw.as_str() {
-            "required" => eframe::egui_glow::HardwareAcceleration::Required,
-            "off" => eframe::egui_glow::HardwareAcceleration::Off,
-            _ => eframe::egui_glow::HardwareAcceleration::Preferred,
-        };
+        eprintln!("errore: {msg}");
+        println!("SMOKE esito=errore dettaglio=\"librerie di sistema mancanti\"");
+        return std::process::ExitCode::from(3);
     }
-    #[cfg(not(feature = "glow"))]
-    let _ = &args.glow_hw;
+    #[cfg(not(target_os = "linux"))]
+    let _ = args.salta_controllo_librerie;
 
     let console = match console_config(&args.console) {
         Ok(c) => c,
@@ -379,49 +466,115 @@ fn main() -> std::process::ExitCode {
             return std::process::ExitCode::from(2);
         }
     };
-    let dump_fb = args.console.dump_fb.clone();
-    let animate = args.animate;
-    let smoke = args.smoke;
-    let result = eframe::run_native(
-        "LightVM",
-        options,
-        Box::new(move |cc| {
-            #[allow(unused_mut, reason = "renderer_info dipende dalle feature")]
-            let mut ui = match console {
-                Some(cfg) => LightVmApp::with_console(cfg),
-                None => LightVmApp::new(animate),
-            };
-            #[cfg(feature = "wgpu")]
-            if let Some(rs) = &cc.wgpu_render_state {
-                ui.renderer_info = wgpu_info(rs);
-            }
-            #[cfg(feature = "glow")]
-            if let Some(gl) = &cc.gl {
-                ui.renderer_info = glow_info(gl);
-            }
-            let _ = cc;
-            Ok(Box::new(DesktopApp {
-                ui,
-                started,
-                first_frame: None,
-                smoke,
-                reported: false,
-                repaint_causes: Default::default(),
-                last_frame: None,
-                intervals: [0; 4],
-                dump_fb,
-            }))
-        }),
-    );
 
-    match result {
-        Ok(()) => std::process::ExitCode::SUCCESS,
-        Err(e) => {
-            println!("SMOKE esito=errore dettaglio=\"{e}\"");
-            eprintln!("errore eframe: {e}");
-            std::process::ExitCode::FAILURE
+    // I panici dovuti a librerie mancanti diventano un messaggio utilizzabile
+    // (sotto): il gancio predefinito resta per tutti gli altri.
+    let gancio_predefinito = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let msg = testo_panico(info.payload());
+        if !lightvm_desktop::librerie::panico_da_libreria(&msg) {
+            gancio_predefinito(info);
+        }
+    }));
+
+    let mut falliti: Vec<(Tentativo, String)> = Vec::new();
+    let n = piano.tentativi.len();
+    for (indice, &t) in piano.tentativi.iter().enumerate() {
+        let creata = Rc::new(Cell::new(false));
+        let info_base = InfoRendering {
+            attivo: Some(t),
+            dettaglio: String::new(),
+            adattatore_cpu: false,
+            falliti: falliti.clone(),
+            forzato: piano.forzato,
+        };
+        let console = console.clone();
+        let dump_fb = args.console.dump_fb.clone();
+        let animate = args.animate;
+        let smoke = args.smoke;
+        let creata_app = creata.clone();
+        let options = opzioni(t, &args);
+        let esito = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            eframe::run_native(
+                "LightVM",
+                options,
+                Box::new(move |cc| {
+                    creata_app.set(true);
+                    let mut info = info_base;
+                    #[cfg(feature = "wgpu")]
+                    if let Some(rs) = &cc.wgpu_render_state {
+                        (info.dettaglio, info.adattatore_cpu) = wgpu_info(rs);
+                    }
+                    #[cfg(feature = "glow")]
+                    if let Some(gl) = &cc.gl {
+                        (info.dettaglio, info.adattatore_cpu) = glow_info(gl);
+                    }
+                    let _ = cc;
+                    let mut ui = match console {
+                        Some(mut cfg) => {
+                            if info.degradato() {
+                                cfg.max_fps = cfg.max_fps.min(FPS_CONSOLE_DEGRADATA);
+                            }
+                            LightVmApp::with_console(cfg)
+                        }
+                        None => LightVmApp::new(animate),
+                    };
+                    eprintln!("rendering: {}", info.spiegazione().replace('\n', "; "));
+                    ui.rendering = info;
+                    Ok(Box::new(DesktopApp {
+                        ui,
+                        started,
+                        first_frame: None,
+                        smoke,
+                        reported: false,
+                        repaint_causes: Default::default(),
+                        last_frame: None,
+                        intervals: [0; 4],
+                        dump_fb,
+                        filtro_appunti: Default::default(),
+                    }))
+                }),
+            )
+        }));
+        match esito {
+            Ok(Ok(())) => return std::process::ExitCode::SUCCESS,
+            Ok(Err(e)) if !creata.get() && indice + 1 < n => {
+                let e = e.to_string();
+                eprintln!(
+                    "rendering: tentativo {} fallito ({e}); ripiego su {}",
+                    t.nome(),
+                    piano.tentativi[indice + 1].nome()
+                );
+                falliti.push((t, e));
+            }
+            Ok(Err(e)) => {
+                falliti.push((t, e.to_string()));
+                let elenco: Vec<String> = falliti
+                    .iter()
+                    .map(|(t, e)| format!("{}: {e}", t.nome()))
+                    .collect();
+                println!(
+                    "SMOKE esito=errore dettaglio=\"{}\"",
+                    elenco.join(" | ").replace('"', "'")
+                );
+                eprintln!(
+                    "errore: nessun backend di rendering utilizzabile ({})",
+                    elenco.join("; ")
+                );
+                return std::process::ExitCode::FAILURE;
+            }
+            Err(p) => {
+                let msg = testo_panico(p.as_ref());
+                eprintln!("errore: {}", errore_da_panico(&msg));
+                println!(
+                    "SMOKE esito=errore dettaglio=\"panico all'avvio: {}\"",
+                    msg.replace('"', "'")
+                );
+                return std::process::ExitCode::from(3);
+            }
         }
     }
+    std::process::ExitCode::FAILURE
 }
 
 fn save_png(fb: &rfb_client::Framebuffer, path: &str) -> Result<f64, String> {

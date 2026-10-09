@@ -8,15 +8,15 @@
 use rusqlite::{OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 
-use crate::compat::{
-    ArtifactId, BaselineId, DiskId, FirmwareId, GrantId, IdSql, MediaId, OperationId, RunId,
-    SessionId, VmId, idc,
-};
 use crate::enums::{
     ArtifactKind, AuditOutcome, DiskRole, DiskStatus, FirmwareScope, Lifecycle, MediaKind,
     MediaSlot, MediaStatus, OperationState, RunState, SessionState, TerminationCause,
 };
 use crate::error::{Result, SqlResultExt, StorageError};
+use crate::ids::{
+    ArtifactId, BaselineId, DiskId, FirmwareId, GrantId, IdSql, MediaId, OperationId, RunId,
+    SessionId, VmId, idc,
+};
 use crate::paths::ManagedPath;
 use crate::time::now_rfc3339;
 

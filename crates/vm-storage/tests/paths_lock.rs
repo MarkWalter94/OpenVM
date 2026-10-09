@@ -4,11 +4,11 @@ mod common;
 
 use std::time::{Duration, SystemTime};
 
-use vm_storage::compat::{DiskId, RunId};
 use vm_storage::{
     Catalog, CatalogLayout, IntentKind, IntentSpec, ManagedPath, PathRejection, StorageError,
     TargetKind, UtcMillis,
 };
+use vm_storage::{DiskId, RunId};
 
 fn rejection(err: StorageError) -> PathRejection {
     match err {
@@ -80,7 +80,10 @@ fn junction_inside_catalog_is_refused() {
     let outside = common::tempdir();
     let mut cat = Catalog::open(dir.path()).unwrap();
     let vm = common::new_vm(&mut cat, "vm");
-    let vm_dir = cat.layout().ensure_dir(&CatalogLayout::vm_dir(&vm)).unwrap();
+    let vm_dir = cat
+        .layout()
+        .ensure_dir(&CatalogLayout::vm_dir(&vm))
+        .unwrap();
     let link = vm_dir.join("overlays");
     if !common::make_junction(&link, outside.path()) {
         eprintln!("junction non disponibile: prova saltata");
@@ -223,4 +226,46 @@ fn tmp_cleanup_is_prudent() {
     let rep = &cat.open_report().unwrap().tmp_cleanup;
     assert!(rep.removed.contains(&"recent.part".to_owned()), "{rep:?}");
     assert!(dir.path().join("vms").join("keep.txt").exists());
+}
+
+#[test]
+fn absolute_paths_are_accepted_only_inside_the_root() {
+    let dir = common::tempdir();
+    let outside = common::tempdir();
+    let cat = Catalog::open(dir.path()).unwrap();
+    let layout = cat.layout();
+    let ok = layout
+        .managed_from_absolute(&dir.path().join("media").join("a.iso"))
+        .unwrap();
+    assert_eq!(ok.as_str(), "media/a.iso");
+    let cases: Vec<(std::path::PathBuf, PathRejection)> = vec![
+        (outside.path().join("x.iso"), PathRejection::OutsideArea),
+        (
+            std::path::PathBuf::from("media/a.iso"),
+            PathRejection::OutsideArea,
+        ),
+        (
+            dir.path().join("media").join("..").join("..").join("x"),
+            PathRejection::Traversal,
+        ),
+        (dir.path().to_path_buf(), PathRejection::Empty),
+        (
+            dir.path().join("media").join("CON"),
+            PathRejection::ReservedName,
+        ),
+    ];
+    for (p, want) in cases {
+        let err = layout.managed_from_absolute(&p).unwrap_err();
+        assert_eq!(rejection(err), want, "{}", p.display());
+    }
+    // Junction sotto la radice verso l'esterno: rifiutata anche se il prefisso
+    // testuale è dentro la radice.
+    let link = dir.path().join("runs").join("jl");
+    if common::make_junction(&link, outside.path()) {
+        let err = layout
+            .managed_from_absolute(&link.join("x.log"))
+            .unwrap_err();
+        assert_eq!(rejection(err), PathRejection::Link);
+        std::fs::remove_dir(&link).unwrap();
+    }
 }

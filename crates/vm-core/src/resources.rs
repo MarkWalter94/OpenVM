@@ -1,4 +1,16 @@
 //! Validazione delle risorse richieste (ROADMAP 7.2, 7.4 riga "Risorse").
+//!
+//! I limiti effettivi sono l'intersezione di due livelli:
+//! - **utente**: limiti globali configurati nell'app (`CoreConfig::global_limits`,
+//!   predefiniti [`ResourceLimits::MVP_DEFAULT`]);
+//! - **host**: capacità rilevate dal probe ([`lightvm_proto::HostCapacity::as_limits`]:
+//!   vCPU ≤ processori logici, memoria ≤ totale meno riserva, disco ≤ libero
+//!   meno riserva, nessuna VM in esecuzione senza acceleratore).
+//!
+//! La validazione per VM avviene alla creazione e di nuovo a ogni avvio; all'avvio
+//! il core verifica anche il numero di VM in esecuzione e la memoria guest
+//! complessiva rispetto alla memoria host meno la riserva. Il budget di storage
+//! complessivo (overlay, log, screenshot) non è contabilizzato qui (ADR-0017).
 
 use lightvm_proto::{PublicError, ResourceLimits, VmConfig};
 
@@ -39,11 +51,7 @@ pub fn validate_config(config: &VmConfig, limits: &ResourceLimits) -> Result<(),
         ));
     }
     if config.memory_mib > limits.max_memory_mib {
-        return Err(over(
-            "memory_mib",
-            config.memory_mib,
-            limits.max_memory_mib,
-        ));
+        return Err(over("memory_mib", config.memory_mib, limits.max_memory_mib));
     }
     if config.disk_gib > limits.max_disk_gib {
         return Err(over("disk_gib", config.disk_gib, limits.max_disk_gib));

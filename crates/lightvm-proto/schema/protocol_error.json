@@ -42,7 +42,7 @@
           "const": "message_too_large"
         },
         {
-          "description": "Canale non autenticato (credenziale IPC assente o non valida).",
+          "description": "Mantenuto per compatibilità del contratto ma **non emesso**: una credenziale\nassente o non valida produce l'errore operativo [`ErrorCode::Unauthenticated`]\n(vedi la documentazione del modulo).",
           "type": "string",
           "const": "unauthenticated"
         }

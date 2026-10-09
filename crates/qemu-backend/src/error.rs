@@ -1,46 +1,17 @@
-//! Errori del backend e corrispondenza con gli errori pubblici stabili
-//! (ROADMAP 6.3: `permission_denied`, `session_expired`, `vm_busy`,
-//! `unsupported`, `resource_limit`, `state_conflict`).
+//! Errori del backend e corrispondenza con gli errori pubblici stabili di
+//! `lightvm-proto` ([`ErrorCode`], [`PublicError`]; ROADMAP 6.3).
+//!
+//! Il messaggio pubblico non contiene percorsi host né estratti di stderr che
+//! potrebbero contenerli: il dettaglio completo resta nel `Display` di
+//! [`BackendError`], destinato ai log locali del supervisor.
 
 use std::fmt;
 use std::io;
 
+use lightvm_proto::{ErrorCode, PublicError};
+
 use crate::probe::AcceleratorStatus;
 use crate::qmp::QmpError;
-
-/// Categoria pubblica stabile di un errore.
-///
-/// TODO(F1): sostituire con il tipo di `lightvm-proto` quando sarà
-/// disponibile (vedi `compat`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum PublicErrorKind {
-    /// Operazione non autorizzata o percorso/parametro rifiutato.
-    PermissionDenied,
-    /// Sessione scaduta (non prodotto da questo crate, presente per completezza).
-    SessionExpired,
-    /// Risorsa occupata, per esempio file della VM aperto da un altro processo.
-    VmBusy,
-    /// Capacità non disponibile sull'host (acceleratore, dispositivo, firmware).
-    Unsupported,
-    /// Limite di risorse superato.
-    ResourceLimit,
-    /// Stato incompatibile con l'operazione.
-    StateConflict,
-}
-
-impl PublicErrorKind {
-    /// Codice stabile in `snake_case`.
-    pub fn code(self) -> &'static str {
-        match self {
-            Self::PermissionDenied => "permission_denied",
-            Self::SessionExpired => "session_expired",
-            Self::VmBusy => "vm_busy",
-            Self::Unsupported => "unsupported",
-            Self::ResourceLimit => "resource_limit",
-            Self::StateConflict => "state_conflict",
-        }
-    }
-}
 
 /// Errore del backend QEMU.
 #[derive(Debug)]
@@ -60,6 +31,13 @@ pub enum BackendError {
         /// Suggerimento per l'utente.
         hint: String,
     },
+    /// Binario QEMU con hash SHA-256 assente dalla lista approvata (ADR-0010).
+    UnapprovedBinary {
+        /// Binario (`qemu-system-x86_64` o `qemu-img`).
+        binary: &'static str,
+        /// SHA-256 calcolato.
+        sha256: String,
+    },
     /// Acceleratore non disponibile: nessun fallback TCG (ADR-0007).
     AcceleratorUnavailable(AcceleratorStatus),
     /// Probe non riuscito (binario non eseguibile, output non riconosciuto).
@@ -73,6 +51,8 @@ pub enum BackendError {
         /// Ultime righe di stderr.
         stderr_tail: String,
     },
+    /// Interfaccia di rete inattesa nel guest (profilo offline, ADR-0004).
+    UnexpectedNetwork(String),
     /// Errore del canale QMP.
     Qmp(QmpError),
     /// Stato incompatibile con l'operazione richiesta.
@@ -96,22 +76,58 @@ impl BackendError {
         }
     }
 
-    /// Categoria pubblica stabile.
-    pub fn public_kind(&self) -> PublicErrorKind {
+    /// Codice pubblico stabile.
+    pub fn code(&self) -> ErrorCode {
         match self {
-            Self::InvalidArgument { .. } => PublicErrorKind::PermissionDenied,
-            Self::Unsupported { .. } | Self::AcceleratorUnavailable(_) | Self::Probe(_) => {
-                PublicErrorKind::Unsupported
-            }
-            Self::VmBusy(_) => PublicErrorKind::VmBusy,
-            Self::ResourceLimit(_) => PublicErrorKind::ResourceLimit,
-            Self::StateConflict(_)
-            | Self::Spawn(_)
+            Self::InvalidArgument { .. } => ErrorCode::InvalidArgument,
+            Self::Unsupported { .. }
+            | Self::UnapprovedBinary { .. }
+            | Self::AcceleratorUnavailable(_)
+            | Self::Probe(_) => ErrorCode::Unsupported,
+            Self::VmBusy(_) => ErrorCode::VmBusy,
+            Self::ResourceLimit(_) => ErrorCode::ResourceLimit,
+            Self::StateConflict(_) => ErrorCode::StateConflict,
+            Self::Spawn(_)
             | Self::StartupFailed { .. }
+            | Self::UnexpectedNetwork(_)
             | Self::Qmp(_)
             | Self::Timeout(_)
-            | Self::Io(_) => PublicErrorKind::StateConflict,
+            | Self::Io(_) => ErrorCode::InfrastructureError,
         }
+    }
+
+    /// Errore pubblico stabile, senza percorsi host né estratti di stderr.
+    pub fn to_public(&self) -> PublicError {
+        let code = self.code();
+        let msg = match self {
+            Self::InvalidArgument { field, reason } => {
+                format!("parametro `{field}` rifiutato: {reason}")
+            }
+            Self::Unsupported { what, hint } => format!("non supportato: {what}. {hint}"),
+            Self::UnapprovedBinary { binary, .. } => format!(
+                "il binario {binary} non corrisponde a una build QEMU approvata (hash SHA-256 \
+                 diverso da quelli registrati): avvio rifiutato"
+            ),
+            Self::AcceleratorUnavailable(status) => status.public_message(),
+            Self::Probe(_) => "rilevamento delle capacità QEMU non riuscito".to_owned(),
+            Self::Spawn(_) => "avvio del processo QEMU non riuscito".to_owned(),
+            Self::StartupFailed { exit_code, .. } => match exit_code {
+                Some(c) => format!("QEMU è terminato durante l'avvio (codice {c:#x})"),
+                None => "QEMU non ha completato l'avvio".to_owned(),
+            },
+            Self::UnexpectedNetwork(_) => {
+                "interfaccia di rete inattesa nel guest: avvio interrotto (profilo offline)"
+                    .to_owned()
+            }
+            Self::Qmp(e) => format!("canale di controllo QEMU: {}", e.public_summary()),
+            Self::StateConflict(m) => format!("stato incompatibile: {m}"),
+            Self::VmBusy(_) => "file della VM in uso da un altro processo".to_owned(),
+            Self::ResourceLimit(m) => format!("limite superato: {m}"),
+            Self::Timeout(what) => format!("tempo scaduto: {what}"),
+            Self::Io(_) => "errore di I/O del backend QEMU".to_owned(),
+        };
+        let retryable = matches!(self, Self::VmBusy(_) | Self::Timeout(_));
+        PublicError::new(code, msg).with_retryable(retryable)
     }
 }
 
@@ -122,6 +138,10 @@ impl fmt::Display for BackendError {
                 write!(f, "parametro `{field}` rifiutato: {reason}")
             }
             Self::Unsupported { what, hint } => write!(f, "non supportato: {what}. {hint}"),
+            Self::UnapprovedBinary { binary, sha256 } => write!(
+                f,
+                "binario {binary} non approvato: SHA-256 {sha256} assente dalla lista approvata"
+            ),
             Self::AcceleratorUnavailable(status) => write!(f, "{status}"),
             Self::Probe(m) => write!(f, "rilevamento delle capacità QEMU non riuscito: {m}"),
             Self::Spawn(e) => write!(f, "avvio di QEMU non riuscito: {e}"),
@@ -138,6 +158,7 @@ impl fmt::Display for BackendError {
                 }
                 Ok(())
             }
+            Self::UnexpectedNetwork(m) => write!(f, "interfaccia di rete inattesa: {m}"),
             Self::Qmp(e) => write!(f, "{e}"),
             Self::StateConflict(m) => write!(f, "stato incompatibile: {m}"),
             Self::VmBusy(m) => write!(f, "risorsa occupata: {m}"),
@@ -170,31 +191,84 @@ impl From<io::Error> for BackendError {
     }
 }
 
+impl From<PublicError> for BackendError {
+    /// Errori di validazione dei tipi di `lightvm-proto` (geometria, coordinate).
+    fn from(e: PublicError) -> Self {
+        match e.code {
+            ErrorCode::ResourceLimit => Self::ResourceLimit(e.message),
+            ErrorCode::StateConflict => Self::StateConflict(e.message),
+            _ => Self::invalid("input", e.message),
+        }
+    }
+}
+
+impl From<&BackendError> for PublicError {
+    fn from(e: &BackendError) -> Self {
+        e.to_public()
+    }
+}
+
 /// Risultato del backend.
 pub type Result<T, E = BackendError> = std::result::Result<T, E>;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cmdline::Accelerator;
+    use crate::probe::UnavailableReason;
 
     #[test]
     fn codici_pubblici_stabili() {
         assert_eq!(
-            BackendError::invalid("x", "y").public_kind().code(),
-            "permission_denied"
+            BackendError::invalid("x", "y").code().as_str(),
+            "invalid_argument"
         );
-        assert_eq!(
-            BackendError::VmBusy("a".into()).public_kind().code(),
-            "vm_busy"
-        );
+        assert_eq!(BackendError::VmBusy("a".into()).code().as_str(), "vm_busy");
         assert_eq!(
             BackendError::Unsupported {
                 what: "w".into(),
                 hint: "h".into()
             }
-            .public_kind()
-            .code(),
+            .code()
+            .as_str(),
             "unsupported"
         );
+        assert_eq!(
+            BackendError::Timeout("t").code(),
+            ErrorCode::InfrastructureError
+        );
+    }
+
+    #[test]
+    fn messaggio_pubblico_senza_percorsi() {
+        let e = BackendError::VmBusy(r"`E:\segreto\disco.qcow2` aperto".into());
+        let p = e.to_public();
+        assert_eq!(p.code, ErrorCode::VmBusy);
+        assert!(!p.message.contains("segreto"));
+        assert!(p.retryable);
+        let e = BackendError::StartupFailed {
+            exit_code: Some(1),
+            stderr_tail: r"C:\Users\x\qemu.exe: errore".into(),
+        };
+        assert!(!e.to_public().message.contains("Users"));
+        let e = BackendError::UnapprovedBinary {
+            binary: "qemu-system-x86_64",
+            sha256: "00".repeat(32),
+        };
+        assert_eq!(e.to_public().code, ErrorCode::Unsupported);
+    }
+
+    #[test]
+    fn acceleratore_assente_errore_chiaro() {
+        let e = BackendError::AcceleratorUnavailable(AcceleratorStatus::Unavailable {
+            accelerator: Accelerator::Whpx,
+            reason: UnavailableReason::NotCompiled {
+                available: vec!["tcg".into()],
+            },
+        });
+        let p = e.to_public();
+        assert_eq!(p.code, ErrorCode::Unsupported);
+        assert!(p.message.contains("WHPX"), "{}", p.message);
+        assert!(p.message.contains("TCG"), "{}", p.message);
     }
 }

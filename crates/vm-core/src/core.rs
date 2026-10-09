@@ -29,10 +29,12 @@ use lightvm_proto::{
 };
 
 use crate::media::{check_media_kind, verify_media};
-use crate::policy::{effective_policy, effective_resource_limits, effective_user_policy, host_layer};
+use crate::policy::{
+    effective_policy, effective_resource_limits, effective_user_policy, host_layer,
+};
 use crate::ports::{AuditSink, CatalogStore, Clock, IdGenerator, MediaInspector, VmBackend};
 use crate::resources::validate_config;
-use crate::session::{SessionRegistry, SessionSpec};
+use crate::session::{SessionRegistry, SessionSpec, discard_code_for};
 
 /// Limite rigido di operazioni in coda per VM, indipendente dalle quote.
 pub const MAX_QUEUE_LEN: usize = 256;
@@ -524,7 +526,11 @@ where
     }
 
     /// Crea una VM nel catalogo. Solo l'utente: nessuna creazione da MCP nel MVP.
-    pub fn create_vm(&mut self, caller: &Caller, config: VmConfig) -> Result<VmRecord, PublicError> {
+    pub fn create_vm(
+        &mut self,
+        caller: &Caller,
+        config: VmConfig,
+    ) -> Result<VmRecord, PublicError> {
         let actor = caller.actor();
         let ev = || Ev {
             session_id: match actor {
@@ -534,7 +540,8 @@ where
             ..Ev::default()
         };
         if matches!(caller, Caller::Agent { .. }) {
-            let err = PublicError::permission_denied("creazione VM non disponibile alle sessioni agente");
+            let err =
+                PublicError::permission_denied("creazione VM non disponibile alle sessioni agente");
             return Err(self.deny(actor, AuditAction::VmCreate, ev(), err));
         }
         let checks = validate_config(&config, &self.effective_limits())
@@ -580,13 +587,19 @@ where
     pub fn list_vms(&mut self, caller: &Caller) -> Result<Vec<VmStatus>, PublicError> {
         let now = self.clock.now();
         if let Err(err) = self.authorize(caller, None, Capability::VmList, now) {
-            return Err(self.deny(caller.actor(), AuditAction::VmStateObserved, Ev::default(), err));
+            return Err(self.deny(
+                caller.actor(),
+                AuditAction::VmStateObserved,
+                Ev::default(),
+                err,
+            ));
         }
         let allow = match caller {
             Caller::User => None,
-            Caller::Agent { session_id, .. } => {
-                self.sessions.get(*session_id).map(|s| s.grant.vm_allowlist.clone())
-            }
+            Caller::Agent { session_id, .. } => self
+                .sessions
+                .get(*session_id)
+                .map(|s| s.grant.vm_allowlist.clone()),
         };
         Ok(self
             .vms
@@ -653,16 +666,38 @@ where
     fn check_start_resources(&self, vm_id: VmId) -> Result<(), PublicError> {
         let limits = self.effective_limits();
         if self.running_vm_count(vm_id) >= limits.max_running_vms {
-            return Err(
-                PublicError::resource_limit("numero massimo di VM in esecuzione raggiunto")
-                    .with_detail("limit", limits.max_running_vms.to_string()),
-            );
+            return Err(PublicError::resource_limit(
+                "numero massimo di VM in esecuzione raggiunto",
+            )
+            .with_detail("limit", limits.max_running_vms.to_string()));
         }
         let rt = self
             .vms
             .get(&vm_id)
             .ok_or_else(|| PublicError::not_found("VM inesistente"))?;
-        validate_config(&rt.record.config, &limits)
+        // Limiti per VM ricalcolati all'avvio: la capacità host può essere cambiata
+        // dopo la creazione (nuovo probe, riserva aumentata).
+        validate_config(&rt.record.config, &limits)?;
+        // Memoria guest complessiva delle VM con processo, più quella richiesta,
+        // entro la memoria host meno la riserva. Le vCPU possono essere
+        // sovrallocate tra VM diverse e non sono sommate.
+        let host_memory = self.config.host.as_limits().max_memory_mib;
+        let committed: u64 = self
+            .vms
+            .values()
+            .filter(|o| o.record.id != vm_id && o.state.has_process())
+            .map(|o| o.record.config.memory_mib)
+            .fold(0, u64::saturating_add);
+        let requested = committed.saturating_add(rt.record.config.memory_mib);
+        if requested > host_memory {
+            return Err(PublicError::resource_limit(
+                "memoria host insufficiente per le VM in esecuzione",
+            )
+            .with_detail("field", "memory_mib_total")
+            .with_detail("requested", requested.to_string())
+            .with_detail("limit", host_memory.to_string()));
+        }
+        Ok(())
     }
 
     /// Accetta una richiesta e la accoda (verifica al ricevimento).
@@ -705,7 +740,12 @@ where
                     updated_at: now,
                 };
                 // L'audit di accettazione precede l'effetto: se fallisce, nessun accodamento.
-                self.emit(actor, audit_action, AuditOutcome::Accepted, ev(req.expected_run_id))?;
+                self.emit(
+                    actor,
+                    audit_action,
+                    AuditOutcome::Accepted,
+                    ev(req.expected_run_id),
+                )?;
                 self.store.upsert_operation(&record)?;
                 self.consume_quota(session_id, &req.action);
                 let pending = Pending {
@@ -805,8 +845,10 @@ where
 
         // Stato.
         if !action_allowed_in(kind, rt.state) {
-            return Err(PublicError::state_conflict("azione non ammessa nello stato corrente")
-                .with_detail("state", rt.state.as_str()));
+            return Err(
+                PublicError::state_conflict("azione non ammessa nello stato corrente")
+                    .with_detail("state", rt.state.as_str()),
+            );
         }
 
         // Occupazione: una mutazione del ciclo di vita alla volta.
@@ -815,7 +857,9 @@ where
                 return Err(PublicError::vm_busy("arresto forzato già in corso"));
             }
         } else if rt.lifecycle_pending() {
-            return Err(PublicError::vm_busy("un'altra mutazione è in corso sulla VM"));
+            return Err(PublicError::vm_busy(
+                "un'altra mutazione è in corso sulla VM",
+            ));
         }
 
         // Limiti di coda e quote.
@@ -840,8 +884,7 @@ where
                     return Err(PublicError::resource_limit("quota di input esaurita"));
                 }
             }
-            if kind == OperationKind::Screenshot && over(u.screenshots, 1, quotas.max_screenshots)
-            {
+            if kind == OperationKind::Screenshot && over(u.screenshots, 1, quotas.max_screenshots) {
                 return Err(PublicError::resource_limit("quota di screenshot esaurita"));
             }
         }
@@ -881,7 +924,12 @@ where
             ..Ev::default()
         };
         let actor = p.caller.actor();
-        self.emit_after(actor, AuditAction::OperationDiscard, AuditOutcome::Discarded, ev);
+        self.emit_after(
+            actor,
+            AuditAction::OperationDiscard,
+            AuditOutcome::Discarded,
+            ev,
+        );
         let id = p.record.id;
         if let Some(rt) = self.vms.get_mut(&vm_id) {
             rt.remember(p);
@@ -1063,7 +1111,12 @@ where
                 session_id: p.session_id(),
                 ..Ev::default()
             };
-            self.emit_after(p.caller.actor(), audit_action_for(kind), AuditOutcome::Forwarded, ev);
+            self.emit_after(
+                p.caller.actor(),
+                audit_action_for(kind),
+                AuditOutcome::Forwarded,
+                ev,
+            );
             let dispatch = Dispatch {
                 operation_id: p.record.id,
                 vm_id,
@@ -1212,12 +1265,16 @@ where
             VmAction::ForceStop => backend
                 .force_stop(vm_id, d.run_id)
                 .map(|()| DispatchOutcome::Done),
-            VmAction::Reset => backend.reset(vm_id, d.run_id).map(|()| DispatchOutcome::Done),
+            VmAction::Reset => backend
+                .reset(vm_id, d.run_id)
+                .map(|()| DispatchOutcome::Done),
             VmAction::Screenshot => backend
                 .screenshot(vm_id, d.run_id, d.max_screenshot_bytes)
                 .and_then(|s| {
                     if s.byte_len > d.max_screenshot_bytes {
-                        Err(PublicError::resource_limit("screenshot oltre il limite di byte"))
+                        Err(PublicError::resource_limit(
+                            "screenshot oltre il limite di byte",
+                        ))
                     } else {
                         Ok(DispatchOutcome::Screenshot(s))
                     }
@@ -1226,7 +1283,8 @@ where
                 .send_input(vm_id, d.run_id, batch.geometry, &batch.events)
                 .map(|()| DispatchOutcome::Done),
         };
-        self.finish_dispatch(vm_id, d.operation_id, result).map(Some)
+        self.finish_dispatch(vm_id, d.operation_id, result)
+            .map(Some)
     }
 
     // ----- osservazioni e riconciliazione ---------------------------------
@@ -1285,13 +1343,16 @@ where
 
     /// `failed → recovering`: avvio della riconciliazione.
     pub fn begin_recovery(&mut self, vm_id: VmId) -> Result<(), PublicError> {
-        let state = rt_state(&self.vms, vm_id).ok_or_else(|| PublicError::not_found("VM inesistente"))?;
+        let state =
+            rt_state(&self.vms, vm_id).ok_or_else(|| PublicError::not_found("VM inesistente"))?;
         if state == VmState::Recovering {
             return Ok(());
         }
         if !self.set_state(vm_id, VmState::Recovering) {
-            return Err(PublicError::state_conflict("riconciliazione non ammessa nello stato corrente")
-                .with_detail("state", state.as_str()));
+            return Err(PublicError::state_conflict(
+                "riconciliazione non ammessa nello stato corrente",
+            )
+            .with_detail("state", state.as_str()));
         }
         Ok(())
     }
@@ -1299,7 +1360,8 @@ where
     /// `recovering → stopped`: riconciliazione completata dal supervisor
     /// (processi assenti verificati, journal applicato).
     pub fn finish_recovery(&mut self, vm_id: VmId) -> Result<(), PublicError> {
-        let state = rt_state(&self.vms, vm_id).ok_or_else(|| PublicError::not_found("VM inesistente"))?;
+        let state =
+            rt_state(&self.vms, vm_id).ok_or_else(|| PublicError::not_found("VM inesistente"))?;
         if state != VmState::Recovering {
             return Err(PublicError::state_conflict("VM non in riconciliazione"));
         }
@@ -1325,10 +1387,14 @@ where
         let live = u32::try_from(self.sessions.live().count()).unwrap_or(u32::MAX);
         let result = (|| {
             if live >= limits.max_agent_sessions {
-                return Err(PublicError::resource_limit("numero massimo di sessioni agente raggiunto"));
+                return Err(PublicError::resource_limit(
+                    "numero massimo di sessioni agente raggiunto",
+                ));
             }
             if spec.expires_at <= now {
-                return Err(PublicError::invalid_argument("scadenza del grant nel passato"));
+                return Err(PublicError::invalid_argument(
+                    "scadenza del grant nel passato",
+                ));
             }
             if spec.vm_allowlist.is_empty() {
                 return Err(PublicError::invalid_argument("allowlist VM vuota"));
@@ -1451,7 +1517,7 @@ where
             for p in mine {
                 report
                     .discarded
-                    .push(self.discard(vm_id, p, ErrorCode::PermissionDenied));
+                    .push(self.discard(vm_id, p, discard_code_for(cause)));
             }
         }
         self.emit_after(
@@ -1554,14 +1620,20 @@ where
                 report.already_forwarded.push(p.record.id);
             }
         }
-        let run_id = if rt.state.has_process() { rt.run_id } else { None };
+        let run_id = if rt.state.has_process() {
+            rt.run_id
+        } else {
+            None
+        };
         if run_id.is_some() {
             rt.pending_end = Some(RunEndReason::EmergencyStop);
         }
+        // Operazioni rimaste (dell'utente o di sessioni non legate alla VM): la VM
+        // va in arresto, quindi `state_conflict` come per la fine di un'esecuzione.
         for p in queued {
             report
                 .discarded
-                .push(self.discard(vm_id, p, ErrorCode::PermissionDenied));
+                .push(self.discard(vm_id, p, ErrorCode::StateConflict));
         }
         if run_id.is_some() {
             self.set_state(vm_id, VmState::Stopping);

@@ -8,6 +8,23 @@
 //!
 //! I messaggi sono per persone e non contengono segreti né percorsi host; i
 //! client devono decidere in base a `code` e `retryable`, mai al testo.
+//!
+//! # Autenticazione e autorizzazione
+//!
+//! Tre codici operativi distinti, valutati in quest'ordine:
+//!
+//! | Codice | Significato | Esempi |
+//! | --- | --- | --- |
+//! | [`ErrorCode::Unauthenticated`] | nessuna credenziale valida: il chiamante non è identificato | credenziale IPC o token di sessione assente, malformato, sconosciuto, revocato o riusato dopo un riavvio del supervisor; richiesta prima dell'handshake |
+//! | [`ErrorCode::SessionExpired`] | credenziale riconosciuta ma scaduta (grant o lease) | lease non rinnovato entro 10 s, grant oltre la scadenza |
+//! | [`ErrorCode::PermissionDenied`] | chiamante identificato ma non autorizzato | VM fuori allowlist, capability mancante nella policy effettiva, sessione in pausa per le mutazioni, ruolo IPC insufficiente, creazione VM da agente, supporto diverso da quello approvato |
+//!
+//! Dentro `unauthenticated` i motivi non sono distinti verso il client (stesso
+//! codice e stesso messaggio per token assente, errato o revocato), per non
+//! rivelare quali sessioni esistono. Il codice di protocollo
+//! [`ProtocolErrorCode::Unauthenticated`] resta nel contratto per compatibilità
+//! ma non si emette per le credenziali: una credenziale rifiutata è l'esito
+//! operativo di una richiesta compresa, quindi si usa [`ErrorCode::Unauthenticated`].
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -17,11 +34,14 @@ use serde::{Deserialize, Serialize};
 
 /// Codice stabile di un errore operativo. I nomi serializzati non cambiano mai;
 /// nuovi codici si aggiungono soltanto.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
-    /// Identità o grant non autorizzano l'azione (incluso token assente o errato,
-    /// VM fuori allowlist, capability mancante, sessione revocata o in pausa).
+    /// Chiamante identificato (credenziale valida) ma non autorizzato all'azione:
+    /// VM fuori allowlist, capability mancante, sessione in pausa, ruolo
+    /// insufficiente. Credenziali assenti o non valide: [`ErrorCode::Unauthenticated`].
     PermissionDenied,
     /// Sessione o lease scaduti: serve una nuova autorizzazione nell'app.
     SessionExpired,
@@ -39,11 +59,16 @@ pub enum ErrorCode {
     NotFound,
     /// Guasto dell'infrastruttura (QEMU, QMP, storage, OS) non imputabile al chiamante.
     InfrastructureError,
+    /// Nessuna credenziale valida: credenziale IPC o token di sessione assente,
+    /// malformato, sconosciuto, revocato o riusato dopo un riavvio del supervisor.
+    /// Serve una nuova autorizzazione nell'app. Aggiunto in coda ai primi nove
+    /// codici, che restano invariati.
+    Unauthenticated,
 }
 
 impl ErrorCode {
-    /// Tutti i codici, nell'ordine congelato.
-    pub const ALL: [ErrorCode; 9] = [
+    /// Tutti i codici, nell'ordine congelato (i nuovi codici si aggiungono in coda).
+    pub const ALL: [ErrorCode; 10] = [
         ErrorCode::PermissionDenied,
         ErrorCode::SessionExpired,
         ErrorCode::VmBusy,
@@ -53,6 +78,7 @@ impl ErrorCode {
         ErrorCode::InvalidArgument,
         ErrorCode::NotFound,
         ErrorCode::InfrastructureError,
+        ErrorCode::Unauthenticated,
     ];
 
     /// Nome stabile (uguale alla serializzazione).
@@ -68,6 +94,7 @@ impl ErrorCode {
             ErrorCode::InvalidArgument => "invalid_argument",
             ErrorCode::NotFound => "not_found",
             ErrorCode::InfrastructureError => "infrastructure_error",
+            ErrorCode::Unauthenticated => "unauthenticated",
         }
     }
 
@@ -175,6 +202,11 @@ impl PublicError {
     pub fn infrastructure(message: impl Into<String>) -> Self {
         Self::new(ErrorCode::InfrastructureError, message)
     }
+    /// Scorciatoia per `unauthenticated`.
+    #[must_use]
+    pub fn unauthenticated(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::Unauthenticated, message)
+    }
 }
 
 impl fmt::Display for PublicError {
@@ -186,7 +218,9 @@ impl fmt::Display for PublicError {
 impl std::error::Error for PublicError {}
 
 /// Codice di un errore di protocollo (richiesta non compresa, nessun effetto tentato).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ProtocolErrorCode {
     /// Messaggio non decodificabile o non conforme allo schema.
@@ -197,7 +231,9 @@ pub enum ProtocolErrorCode {
     UnknownMethod,
     /// Messaggio oltre la dimensione massima ammessa.
     MessageTooLarge,
-    /// Canale non autenticato (credenziale IPC assente o non valida).
+    /// Mantenuto per compatibilità del contratto ma **non emesso**: una credenziale
+    /// assente o non valida produce l'errore operativo [`ErrorCode::Unauthenticated`]
+    /// (vedi la documentazione del modulo).
     Unauthenticated,
 }
 

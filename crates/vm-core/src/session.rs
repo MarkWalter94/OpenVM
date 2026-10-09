@@ -3,6 +3,15 @@
 //! Il grant e il lease sono verificati dal core (cioè dal supervisor), mai dal
 //! client. Una sessione terminata non torna attiva: la ripresa dell'agente
 //! richiede una nuova autorizzazione.
+//!
+//! Codici dei dinieghi (semantica in `lightvm_proto::ErrorCode`):
+//! - `unauthenticated`: token assente, sessione sconosciuta, token errato,
+//!   sessione terminata per revoca, Emergency Stop, perdita del client, chiusura
+//!   UI, ripresa dell'host, ripristino o qualunque causa diversa dalla scadenza;
+//!   token riusato dopo un riavvio del supervisor (nessuna sessione sopravvive);
+//! - `session_expired`: grant o lease scaduti (anche dopo la terminazione per scadenza);
+//! - `permission_denied`: sessione valida ma VM fuori allowlist, capability non
+//!   concessa o mutazione durante la pausa.
 
 use std::collections::BTreeMap;
 
@@ -10,6 +19,21 @@ use lightvm_proto::{
     Capability, Grant, LEASE_MAX_MILLIS, Lease, PublicError, Quotas, SessionId, SessionState,
     SessionToken, TerminationCause, UtcTimestamp, VmId,
 };
+
+/// Messaggio unico per ogni diniego `unauthenticated` di una sessione agente.
+pub const UNAUTHENTICATED_MESSAGE: &str = "credenziale di sessione non valida";
+
+/// Codice con cui si scartano le operazioni non inoltrate di una sessione
+/// terminata con la causa data: lo stesso che darebbe la seconda verifica.
+#[must_use]
+pub fn discard_code_for(cause: TerminationCause) -> lightvm_proto::ErrorCode {
+    match cause {
+        TerminationCause::GrantExpired | TerminationCause::LeaseExpired => {
+            lightvm_proto::ErrorCode::SessionExpired
+        }
+        _ => lightvm_proto::ErrorCode::Unauthenticated,
+    }
+}
 
 /// Contatori di consumo delle quote.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -139,36 +163,39 @@ impl SessionRegistry {
         capability: Capability,
         now: UtcTimestamp,
     ) -> Result<(), PublicError> {
+        // Token assente, sessione inesistente, token errato e sessione terminata
+        // (non per scadenza) danno lo stesso codice e lo stesso messaggio: il
+        // client non distingue quali sessioni esistono.
+        let unauthenticated = || PublicError::unauthenticated(UNAUTHENTICATED_MESSAGE);
         let Some(token) = token else {
-            return Err(PublicError::permission_denied("credenziale di sessione assente"));
+            return Err(unauthenticated());
         };
-        // Sessione inesistente e token errato danno lo stesso errore.
         let session = self
             .sessions
             .get(&id)
             .filter(|s| s.token_matches(token))
-            .ok_or_else(|| PublicError::permission_denied("sessione non valida"))?;
-        match session.state {
-            SessionState::Terminated => {
-                return Err(match session.termination {
-                    Some(TerminationCause::GrantExpired | TerminationCause::LeaseExpired) => {
-                        PublicError::session_expired("sessione scaduta")
-                    }
-                    _ => PublicError::permission_denied("sessione terminata"),
-                });
-            }
-            SessionState::Paused if capability.is_mutation() => {
-                return Err(PublicError::permission_denied("sessione in pausa"));
-            }
-            SessionState::Active | SessionState::Paused => {}
+            .ok_or_else(unauthenticated)?;
+        if session.state == SessionState::Terminated {
+            return Err(match session.termination {
+                Some(TerminationCause::GrantExpired | TerminationCause::LeaseExpired) => {
+                    PublicError::session_expired("sessione scaduta")
+                }
+                _ => unauthenticated(),
+            });
         }
+        // La scadenza prevale sulla pausa: una credenziale scaduta non è più valida.
         if session.expiry_at(now).is_some() {
             return Err(PublicError::session_expired("grant o lease scaduto"));
+        }
+        if session.state == SessionState::Paused && capability.is_mutation() {
+            return Err(PublicError::permission_denied("sessione in pausa"));
         }
         if let Some(vm) = vm_id
             && !session.grant.vm_allowlist.contains(&vm)
         {
-            return Err(PublicError::permission_denied("VM non autorizzata dal grant"));
+            return Err(PublicError::permission_denied(
+                "VM non autorizzata dal grant",
+            ));
         }
         Ok(())
     }
