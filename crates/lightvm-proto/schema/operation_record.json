@@ -1,0 +1,239 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OperationRecord",
+  "description": "Registro di un'operazione (consultabile per `operation_id`).",
+  "type": "object",
+  "properties": {
+    "error": {
+      "description": "Codice d'errore se `failed` o `discarded`.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ErrorCode"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "id": {
+      "description": "Identificativo (chiave di idempotenza).",
+      "$ref": "#/$defs/OperationId"
+    },
+    "kind": {
+      "description": "Tipo.",
+      "$ref": "#/$defs/OperationKind"
+    },
+    "requested_at": {
+      "description": "Istante di accettazione.",
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "run_id": {
+      "description": "Esecuzione a cui si riferisce, se pertinente.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RunId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "session_id": {
+      "description": "Sessione richiedente, se agente.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SessionId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "status": {
+      "description": "Stato.",
+      "$ref": "#/$defs/OperationStatus"
+    },
+    "updated_at": {
+      "description": "Istante dell'ultimo cambio di stato.",
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "vm_id": {
+      "description": "VM.",
+      "$ref": "#/$defs/VmId"
+    }
+  },
+  "required": [
+    "id",
+    "vm_id",
+    "kind",
+    "status",
+    "requested_at",
+    "updated_at"
+  ],
+  "$defs": {
+    "ErrorCode": {
+      "description": "Codice stabile di un errore operativo. I nomi serializzati non cambiano mai;\nnuovi codici si aggiungono soltanto.",
+      "oneOf": [
+        {
+          "description": "Identità o grant non autorizzano l'azione (incluso token assente o errato,\nVM fuori allowlist, capability mancante, sessione revocata o in pausa).",
+          "type": "string",
+          "const": "permission_denied"
+        },
+        {
+          "description": "Sessione o lease scaduti: serve una nuova autorizzazione nell'app.",
+          "type": "string",
+          "const": "session_expired"
+        },
+        {
+          "description": "Un'altra mutazione è in corso o in coda sulla stessa VM: ritentabile.",
+          "type": "string",
+          "const": "vm_busy"
+        },
+        {
+          "description": "Capacità non disponibile su questo host, build o fase.",
+          "type": "string",
+          "const": "unsupported"
+        },
+        {
+          "description": "L'azione non è ammessa nello stato corrente (o riferisce un `run_id` superato).",
+          "type": "string",
+          "const": "state_conflict"
+        },
+        {
+          "description": "Limite di risorse, quota o dimensione superato.",
+          "type": "string",
+          "const": "resource_limit"
+        },
+        {
+          "description": "Argomento non valido (formato, intervallo, nome, percorso rifiutato).",
+          "type": "string",
+          "const": "invalid_argument"
+        },
+        {
+          "description": "Oggetto inesistente o non visibile al chiamante.",
+          "type": "string",
+          "const": "not_found"
+        },
+        {
+          "description": "Guasto dell'infrastruttura (QEMU, QMP, storage, OS) non imputabile al chiamante.",
+          "type": "string",
+          "const": "infrastructure_error"
+        }
+      ]
+    },
+    "OperationId": {
+      "description": "OperationId: UUID versione 7 in minuscolo con trattini.",
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "OperationKind": {
+      "description": "Tipo di operazione della coda per VM.",
+      "oneOf": [
+        {
+          "description": "Creazione della VM nel catalogo.",
+          "type": "string",
+          "const": "create"
+        },
+        {
+          "description": "Avvio.",
+          "type": "string",
+          "const": "start"
+        },
+        {
+          "description": "Arresto ordinario.",
+          "type": "string",
+          "const": "stop"
+        },
+        {
+          "description": "Arresto forzato.",
+          "type": "string",
+          "const": "force_stop"
+        },
+        {
+          "description": "Reset del guest.",
+          "type": "string",
+          "const": "reset"
+        },
+        {
+          "description": "Cattura dello schermo.",
+          "type": "string",
+          "const": "screenshot"
+        },
+        {
+          "description": "Input tipizzato.",
+          "type": "string",
+          "const": "input"
+        },
+        {
+          "description": "Checkpoint a VM spenta (da F3).",
+          "type": "string",
+          "const": "snapshot"
+        },
+        {
+          "description": "Ripristino di una baseline a VM spenta (da F3).",
+          "type": "string",
+          "const": "restore"
+        },
+        {
+          "description": "Emergency Stop (percorso prioritario, fuori coda).",
+          "type": "string",
+          "const": "emergency_stop"
+        }
+      ]
+    },
+    "OperationStatus": {
+      "description": "Stato di un'operazione.",
+      "oneOf": [
+        {
+          "description": "Accettata, in coda, non ancora inoltrata al backend.",
+          "type": "string",
+          "const": "queued"
+        },
+        {
+          "description": "Inoltrata al backend: può produrre effetti anche dopo una revoca.",
+          "type": "string",
+          "const": "forwarded"
+        },
+        {
+          "description": "Completata con successo.",
+          "type": "string",
+          "const": "succeeded"
+        },
+        {
+          "description": "Inoltrata e fallita.",
+          "type": "string",
+          "const": "failed"
+        },
+        {
+          "description": "Scartata prima dell'inoltro (revoca, Emergency Stop, `run_id` superato): nessun effetto.",
+          "type": "string",
+          "const": "discarded"
+        }
+      ]
+    },
+    "RunId": {
+      "description": "RunId: UUID versione 7 in minuscolo con trattini.",
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "SessionId": {
+      "description": "SessionId: UUID versione 7 in minuscolo con trattini.",
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "UtcTimestamp": {
+      "description": "Istante UTC RFC 3339 con suffisso Z, precisione al millisecondo.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "VmId": {
+      "description": "VmId: UUID versione 7 in minuscolo con trattini.",
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    }
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "UtcTimestamp",
+  "description": "Istante UTC RFC 3339 con suffisso Z, precisione al millisecondo.",
+  "type": "string",
+  "format": "date-time"
+}

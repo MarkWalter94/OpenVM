@@ -1,0 +1,27 @@
+[package]
+name = "rfb-client"
+description = "LightVM: client RFB 3.8 minimo in sola lettura per la console (spike F0-04)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Dipendenze con versione esatta e nessuna sorgente git (ADR-0023).
+# Sono dichiarate qui e non in [workspace.dependencies] per non modificare il
+# Cargo.toml di radice durante F0.
+[dependencies]
+# ZRLE: flusso zlib persistente per connessione. Backend Rust puro (miniz_oxide).
+flate2 = { version = "=1.1.10", default-features = false, features = ["rust_backend"] }
+# Socket AF_UNIX (anche su Windows) e TCP per VeNCrypt.
+socket2 = { version = "=0.6.5", features = ["all"] }
+# TLS per VeNCrypt X.509 con certificato client. Provider `ring`: aws-lc-rs
+# richiederebbe CMake/NASM sull'host di build.
+rustls = { version = "=0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+
+[target.'cfg(windows)'.dependencies]
+# Implementazione alternativa AF_UNIX, provata contro socket2 in F0-04.
+uds_windows = "=1.2.1"
+
+[lints]
+workspace = true

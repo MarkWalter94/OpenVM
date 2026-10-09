@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "EffectivePolicy",
+  "description": "Policy effettiva risultante dall'intersezione, con la revisione applicata.",
+  "type": "object",
+  "properties": {
+    "capabilities": {
+      "description": "Capability effettive.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Capability"
+      },
+      "uniqueItems": true
+    },
+    "quotas": {
+      "description": "Quote effettive.",
+      "$ref": "#/$defs/Quotas"
+    },
+    "revision": {
+      "description": "Revisione della policy applicata.",
+      "$ref": "#/$defs/PolicyRevision"
+    }
+  },
+  "required": [
+    "capabilities",
+    "quotas",
+    "revision"
+  ],
+  "$defs": {
+    "Capability": {
+      "description": "Azione autorizzabile su una VM. I nomi serializzati seguono il catalogo MCP\n(ROADMAP 9); `vm.input` copre mouse e tastiera.",
+      "oneOf": [
+        {
+          "description": "Elenco filtrato dal grant.",
+          "type": "string",
+          "const": "vm.list"
+        },
+        {
+          "description": "Stato.",
+          "type": "string",
+          "const": "vm.status"
+        },
+        {
+          "description": "Avvio.",
+          "type": "string",
+          "const": "vm.start"
+        },
+        {
+          "description": "Arresto (ordinario o forzato).",
+          "type": "string",
+          "const": "vm.stop"
+        },
+        {
+          "description": "Reset: richiede capability esplicita.",
+          "type": "string",
+          "const": "vm.reset"
+        },
+        {
+          "description": "Screenshot.",
+          "type": "string",
+          "const": "vm.screenshot"
+        },
+        {
+          "description": "Mouse e tastiera.",
+          "type": "string",
+          "const": "vm.input"
+        },
+        {
+          "description": "Checkpoint a VM spenta: richiede capability esplicita.",
+          "type": "string",
+          "const": "vm.snapshot"
+        },
+        {
+          "description": "Ripristino a VM spenta.",
+          "type": "string",
+          "const": "vm.restore"
+        },
+        {
+          "description": "Eventi LightVM e log QEMU autorizzati.",
+          "type": "string",
+          "const": "vm.logs"
+        }
+      ]
+    },
+    "PolicyRevision": {
+      "description": "Revisione monotona della policy applicata (registrata nei report, ROADMAP 9).",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "Quotas": {
+      "description": "Quote di una sessione o di un livello di policy. Ogni campo è un massimo\ninclusivo; l'intersezione prende il minimo.",
+      "type": "object",
+      "properties": {
+        "max_input_events": {
+          "description": "Eventi di input totali ammessi nella sessione.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_operations": {
+          "description": "Operazioni totali ammesse nella sessione.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_queued_operations": {
+          "description": "Operazioni in coda per VM non ancora inoltrate.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_screenshot_bytes": {
+          "description": "Dimensione massima di un singolo screenshot in byte.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_screenshots": {
+          "description": "Screenshot totali ammessi nella sessione.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "max_operations",
+        "max_input_events",
+        "max_screenshots",
+        "max_screenshot_bytes",
+        "max_queued_operations"
+      ]
+    }
+  }
+}

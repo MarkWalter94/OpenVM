@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TestOutcome",
+  "description": "Esito di un test (ROADMAP 9). Il completamento della conversazione non produce\nautomaticamente `passed`.",
+  "oneOf": [
+    {
+      "description": "Criteri verificati.",
+      "type": "string",
+      "const": "passed"
+    },
+    {
+      "description": "Criteri non soddisfatti.",
+      "type": "string",
+      "const": "failed"
+    },
+    {
+      "description": "Nessun verificatore affidabile o evidenze insufficienti.",
+      "type": "string",
+      "const": "inconclusive"
+    },
+    {
+      "description": "Annullato dall'utente.",
+      "type": "string",
+      "const": "cancelled"
+    },
+    {
+      "description": "Tempo esaurito.",
+      "type": "string",
+      "const": "timed_out"
+    },
+    {
+      "description": "Guasto dell'infrastruttura, distinto dal fallimento del modello.",
+      "type": "string",
+      "const": "infrastructure_error"
+    }
+  ]
+}

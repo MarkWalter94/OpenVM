@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Caller",
+  "description": "Chi richiede un'azione.",
+  "oneOf": [
+    {
+      "description": "Utente locale tramite la UI (soggetto a limiti globali, policy VM e capacità host).",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "user"
+        }
+      },
+      "required": [
+        "kind"
+      ]
+    },
+    {
+      "description": "Agente con sessione: soggetto anche al grant. Il token è verificato a ogni\nchiamata e subito prima dell'inoltro.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "agent"
+        },
+        "session_id": {
+          "description": "Sessione dichiarata.",
+          "$ref": "#/$defs/SessionId"
+        },
+        "token": {
+          "description": "Segreto di sessione; assente = diniego.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SessionToken"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "session_id"
+      ]
+    }
+  ],
+  "$defs": {
+    "SessionId": {
+      "description": "SessionId: UUID versione 7 in minuscolo con trattini.",
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "SessionToken": {
+      "description": "Segreto di sessione, solo su IPC autenticato; mai in log o report.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "writeOnly": true
+    }
+  }
+}

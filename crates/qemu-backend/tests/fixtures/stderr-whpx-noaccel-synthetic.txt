@@ -1,0 +1,2 @@
+qemu-system-x86_64.exe: WHPX: No accelerator found, hr=00000000
+qemu-system-x86_64.exe: -accel whpx: failed to initialize whpx: No space left on device

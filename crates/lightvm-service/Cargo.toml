@@ -1,0 +1,50 @@
+[package]
+name = "lightvm-service"
+description = "LightVM: supervisor e IPC locale autenticato (skeleton F1)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+# Binario del supervisor, avviato dalla UI come processo figlio (ROADMAP 6.1).
+[[bin]]
+name = "lightvm-service"
+path = "src/main.rs"
+
+# Client minimo di prova: usato dai test e dalla prova a integrità bassa
+# (docs/verification/F1-04-service-ipc-ci.md). Non è un artefatto di prodotto.
+[[bin]]
+name = "lightvm-ipc-probe"
+path = "src/bin/lightvm-ipc-probe.rs"
+
+# Versioni esatte e lockfile (ROADMAP 6.3); nessuna dipendenza git.
+[dependencies]
+getrandom = { version = "=0.3.4", features = ["std"] }
+lightvm-proto = { path = "../lightvm-proto" }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+tokio = { version = "=1.53.2", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+
+# Named pipe con descrittore di sicurezza tramite API sicure (nessun `unsafe`
+# nel crate): `interprocess` incapsula CreateNamedPipeW e la conversione SDDL;
+# `sysinfo` legge il SID dell'utente di un processo (proprio e del peer).
+[target.'cfg(windows)'.dependencies]
+interprocess = { version = "=2.4.4", features = ["tokio"] }
+sysinfo = { version = "=0.39.6", default-features = false, features = ["system"] }
+widestring = "=1.2.1"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "=1.1.5", features = ["process"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "=1.1.5", features = ["event", "process"] }
+
+[dev-dependencies]
+tokio = { version = "=1.53.2", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+
+[lints]
+workspace = true

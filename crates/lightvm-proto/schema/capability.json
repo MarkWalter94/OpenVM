@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Capability",
+  "description": "Azione autorizzabile su una VM. I nomi serializzati seguono il catalogo MCP\n(ROADMAP 9); `vm.input` copre mouse e tastiera.",
+  "oneOf": [
+    {
+      "description": "Elenco filtrato dal grant.",
+      "type": "string",
+      "const": "vm.list"
+    },
+    {
+      "description": "Stato.",
+      "type": "string",
+      "const": "vm.status"
+    },
+    {
+      "description": "Avvio.",
+      "type": "string",
+      "const": "vm.start"
+    },
+    {
+      "description": "Arresto (ordinario o forzato).",
+      "type": "string",
+      "const": "vm.stop"
+    },
+    {
+      "description": "Reset: richiede capability esplicita.",
+      "type": "string",
+      "const": "vm.reset"
+    },
+    {
+      "description": "Screenshot.",
+      "type": "string",
+      "const": "vm.screenshot"
+    },
+    {
+      "description": "Mouse e tastiera.",
+      "type": "string",
+      "const": "vm.input"
+    },
+    {
+      "description": "Checkpoint a VM spenta: richiede capability esplicita.",
+      "type": "string",
+      "const": "vm.snapshot"
+    },
+    {
+      "description": "Ripristino a VM spenta.",
+      "type": "string",
+      "const": "vm.restore"
+    },
+    {
+      "description": "Eventi LightVM e log QEMU autorizzati.",
+      "type": "string",
+      "const": "vm.logs"
+    }
+  ]
+}

@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Admission",
+  "description": "Esito dell'accettazione di una richiesta (prima dell'inoltro).",
+  "type": "object",
+  "properties": {
+    "duplicate": {
+      "description": "`true` se la richiesta ripete un `operation_id` già noto (nessun nuovo effetto).",
+      "type": "boolean"
+    },
+    "operation_id": {
+      "description": "Operazione.",
+      "$ref": "#/$defs/OperationId"
+    },
+    "status": {
+      "description": "Stato corrente dell'operazione.",
+      "$ref": "#/$defs/OperationStatus"
+    }
+  },
+  "required": [
+    "operation_id",
+    "status",
+    "duplicate"
+  ],
+  "$defs": {
+    "OperationId": {
+      "description": "OperationId: UUID versione 7 in minuscolo con trattini.",
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "OperationStatus": {
+      "description": "Stato di un'operazione.",
+      "oneOf": [
+        {
+          "description": "Accettata, in coda, non ancora inoltrata al backend.",
+          "type": "string",
+          "const": "queued"
+        },
+        {
+          "description": "Inoltrata al backend: può produrre effetti anche dopo una revoca.",
+          "type": "string",
+          "const": "forwarded"
+        },
+        {
+          "description": "Completata con successo.",
+          "type": "string",
+          "const": "succeeded"
+        },
+        {
+          "description": "Inoltrata e fallita.",
+          "type": "string",
+          "const": "failed"
+        },
+        {
+          "description": "Scartata prima dell'inoltro (revoca, Emergency Stop, `run_id` superato): nessun effetto.",
+          "type": "string",
+          "const": "discarded"
+        }
+      ]
+    }
+  }
+}

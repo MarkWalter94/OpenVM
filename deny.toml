@@ -1,0 +1,67 @@
+# cargo-deny: licenze, advisory, sorgenti e duplicati (ROADMAP 6.0, 6.3; ADR-0023).
+# Eseguito in CI (job `cargo-deny` in .github/workflows/ci.yml) e in locale con
+# `cargo deny check`. La politica delle licenze resta una proposta finché
+# ADR-0023 non è accettata: l'elenco riflette l'inventario osservato in F1
+# (docs/verification/F1-04-service-ipc-ci.md) e non sostituisce la revisione
+# umana delle licenze non standard.
+
+[graph]
+# Target dichiarati o in osservazione (macOS solo portabilità).
+targets = [
+    "x86_64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+]
+all-features = false
+no-default-features = false
+
+[output]
+feature-depth = 1
+
+[advisories]
+# Database RustSec; nessuna eccezione. Una versione vulnerabile non si congela
+# per rispettare il testo (ROADMAP 17).
+ignore = []
+
+[licenses]
+# Licenze permissive compatibili con la distribuzione MIT del binario.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.8
+# Font incorporati da egui: licenze specifiche dei font, ammesse solo per
+# questo crate. Da riportare nell'inventario delle licenze di terze parti (F6).
+exceptions = [
+    { crate = "epaint_default_fonts", allow = ["OFL-1.1", "Ubuntu-font-1.0"] },
+]
+
+[licenses.private]
+# I crate del workspace hanno `publish = false` e licenza MIT.
+ignore = true
+registries = []
+
+[bans]
+# Duplicati segnalati, non bloccanti: arrivano dalle dipendenze di eframe/wgpu.
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+allow-wildcard-paths = true
+
+[sources]
+# Solo crates.io; nessuna dipendenza git (ROADMAP 6.3).
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

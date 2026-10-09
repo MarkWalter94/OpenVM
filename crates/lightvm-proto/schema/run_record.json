@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RunRecord",
+  "description": "Esecuzione: un processo QEMU dall'avvio alla fine osservata.",
+  "type": "object",
+  "properties": {
+    "baseline_id": {
+      "description": "Baseline di partenza (da F3).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BaselineId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "config_revision": {
+      "description": "Revisione della configurazione usata per l'avvio.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "end_reason": {
+      "description": "Motivo della fine.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RunEndReason"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "ended_at": {
+      "description": "Istante di fine osservata.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "id": {
+      "description": "Identificativo.",
+      "$ref": "#/$defs/RunId"
+    },
+    "started_at": {
+      "description": "Istante di avvio.",
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "vm_id": {
+      "description": "VM.",
+      "$ref": "#/$defs/VmId"
+    }
+  },
+  "required": [
+    "id",
+    "vm_id",
+    "config_revision",
+    "started_at"
+  ],
+  "$defs": {
+    "BaselineId": {
+      "description": "BaselineId: UUID versione 7 in minuscolo con trattini.",
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "RunEndReason": {
+      "description": "Motivo della fine di un'esecuzione.",
+      "oneOf": [
+        {
+          "description": "Arresto ordinario completato (fine processo osservata).",
+          "type": "string",
+          "const": "stopped"
+        },
+        {
+          "description": "Arresto forzato richiesto (stato non pulito).",
+          "type": "string",
+          "const": "force_stopped"
+        },
+        {
+          "description": "Emergency Stop.",
+          "type": "string",
+          "const": "emergency_stop"
+        },
+        {
+          "description": "Avvio fallito.",
+          "type": "string",
+          "const": "start_failed"
+        },
+        {
+          "description": "Uscita inattesa del processo.",
+          "type": "string",
+          "const": "unexpected_exit"
+        },
+        {
+          "description": "Esecuzione chiusa dalla riconciliazione dopo crash del supervisor.",
+          "type": "string",
+          "const": "reconciled"
+        }
+      ]
+    },
+    "RunId": {
+      "description": "RunId: UUID versione 7 in minuscolo con trattini.",
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "UtcTimestamp": {
+      "description": "Istante UTC RFC 3339 con suffisso Z, precisione al millisecondo.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "VmId": {
+      "description": "VmId: UUID versione 7 in minuscolo con trattini.",
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    }
+  }
+}

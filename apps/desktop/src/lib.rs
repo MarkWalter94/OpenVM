@@ -1,0 +1,297 @@
+//! `lightvm-desktop`: interfaccia desktop nativa di LightVM (egui/eframe).
+//!
+//! Stato: spike di F0, passo 1 (ROADMAP sezione 15). Serve a verificare la build
+//! minima reale di eframe, i backend di rendering e il percorso "console come
+//! texture" (ROADMAP 6.0 e 6.4). Il framebuffer mostrato è un pattern generato in
+//! memoria: non è una console reale e non va usato nel percorso di prodotto
+//! (criterio di uscita F2: nessuna schermata con dati simulati).
+//!
+//! F0-04 aggiunge la console reale (`console`): con `--vnc-socket`/`--qmp-socket`
+//! il pannello Console mostra il framebuffer ricevuto dal client RFB in sola
+//! lettura e inoltra tastiera e mouse soltanto via QMP.
+//!
+//! La UI è separata dal ciclo eframe (`main.rs`) per poterla pilotare headless
+//! con `egui_kittest` attraverso l'albero AccessKit.
+
+use std::time::{Duration, Instant};
+
+pub mod console;
+pub mod keymap;
+
+use console::{ConsoleConfig, LiveConsole};
+
+/// Larghezza del framebuffer simulato, in texel (riferimento ROADMAP 13: 1280×720).
+pub const FB_WIDTH: usize = 1280;
+/// Altezza del framebuffer simulato, in texel.
+pub const FB_HEIGHT: usize = 720;
+/// Intervallo minimo tra due aggiornamenti del framebuffer: al massimo 10 al secondo.
+pub const FB_MIN_INTERVAL: Duration = Duration::from_millis(100);
+/// Anticipo tollerato del risveglio oltre a quello introdotto da egui.
+const FB_WAKE_TOLERANCE: Duration = Duration::from_millis(3);
+
+/// Voci della navigazione laterale.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Section {
+    /// Panoramica (in F0 solo segnaposto).
+    Dashboard,
+    /// Console con il framebuffer simulato.
+    Console,
+    /// Impostazioni (in F0 solo il tema).
+    Settings,
+}
+
+impl Section {
+    /// Tutte le voci, nell'ordine del pannello laterale.
+    pub const ALL: [Self; 3] = [Self::Dashboard, Self::Console, Self::Settings];
+
+    /// Etichetta visibile e accessibile (nome del nodo AccessKit).
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Dashboard => "Dashboard",
+            Self::Console => "Console",
+            Self::Settings => "Settings",
+        }
+    }
+}
+
+/// Tema dell'interfaccia: scuro predefinito (ROADMAP F2), chiaro selezionabile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UiTheme {
+    /// Tema scuro (predefinito).
+    Dark,
+    /// Tema chiaro.
+    Light,
+}
+
+impl From<UiTheme> for egui::Theme {
+    fn from(t: UiTheme) -> Self {
+        match t {
+            UiTheme::Dark => Self::Dark,
+            UiTheme::Light => Self::Light,
+        }
+    }
+}
+
+/// Stato della UI dello spike.
+pub struct LightVmApp {
+    section: Section,
+    theme: UiTheme,
+    applied_theme: Option<UiTheme>,
+    animate: bool,
+    texture: Option<egui::TextureHandle>,
+    pixels: Vec<egui::Color32>,
+    phase: u32,
+    last_fb_update: Option<Instant>,
+    fb_updates: u64,
+    frames: u64,
+    live: Option<LiveConsole>,
+    /// Descrizione del backend di rendering, impostata dal ciclo eframe.
+    pub renderer_info: String,
+}
+
+impl Default for LightVmApp {
+    fn default() -> Self {
+        Self::new(true)
+    }
+}
+
+impl LightVmApp {
+    /// Crea la UI. Con `animate == false` il framebuffer resta statico e non
+    /// vengono richiesti repaint periodici (utile per misurare l'idle reale).
+    pub fn new(animate: bool) -> Self {
+        Self {
+            section: Section::Console,
+            theme: UiTheme::Dark,
+            applied_theme: None,
+            animate,
+            texture: None,
+            pixels: vec![egui::Color32::BLACK; FB_WIDTH * FB_HEIGHT],
+            phase: 0,
+            last_fb_update: None,
+            fb_updates: 0,
+            frames: 0,
+            live: None,
+            renderer_info: String::from("non determinato"),
+        }
+    }
+
+    /// Crea la UI con la console reale (RFB in sola lettura + input QMP).
+    pub fn with_console(config: ConsoleConfig) -> Self {
+        let mut app = Self::new(false);
+        app.live = Some(LiveConsole::new(config));
+        app
+    }
+
+    /// Console reale, se configurata.
+    pub fn live_console(&self) -> Option<&LiveConsole> {
+        self.live.as_ref()
+    }
+
+    /// Voce selezionata.
+    pub fn section(&self) -> Section {
+        self.section
+    }
+
+    /// Tema corrente.
+    pub fn theme(&self) -> UiTheme {
+        self.theme
+    }
+
+    /// Numero di passaggi UI eseguiti (frame disegnati dal ciclo eframe).
+    pub fn frames(&self) -> u64 {
+        self.frames
+    }
+
+    /// Numero di aggiornamenti del framebuffer simulato.
+    pub fn fb_updates(&self) -> u64 {
+        self.fb_updates
+    }
+
+    /// Disegna l'intera interfaccia nella `Ui` radice.
+    pub fn ui(&mut self, ui: &mut egui::Ui) {
+        self.frames += 1;
+        let ctx = ui.ctx().clone();
+        if self.applied_theme != Some(self.theme) {
+            ctx.set_theme(egui::Theme::from(self.theme));
+            self.applied_theme = Some(self.theme);
+        }
+
+        egui::Panel::left("lightvm_nav")
+            .resizable(false)
+            .exact_size(170.0)
+            .show(ui, |ui| {
+                ui.add_space(8.0);
+                ui.heading("LightVM");
+                ui.separator();
+                for s in Section::ALL {
+                    ui.selectable_value(&mut self.section, s, s.label());
+                }
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                    ui.small(format!("Rendering: {}", self.renderer_info));
+                });
+            });
+
+        if self.section != Section::Console
+            && let Some(live) = &mut self.live
+        {
+            live.on_hidden();
+        }
+
+        egui::CentralPanel::default_margins().show(ui, |ui| match self.section {
+            Section::Dashboard => {
+                ui.heading("Dashboard");
+                ui.label("Spike F0: nessuna VM gestita. Il catalogo arriva in F2.");
+            }
+            Section::Console => self.console_ui(ui, &ctx),
+            Section::Settings => {
+                ui.heading("Settings");
+                ui.horizontal(|ui| {
+                    ui.label("Tema:");
+                    ui.selectable_value(&mut self.theme, UiTheme::Dark, "Scuro");
+                    ui.selectable_value(&mut self.theme, UiTheme::Light, "Chiaro");
+                });
+                ui.checkbox(&mut self.animate, "Aggiorna il framebuffer simulato");
+            }
+        });
+    }
+
+    fn console_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        if let Some(live) = &mut self.live {
+            live.ui(ui, ctx);
+            return;
+        }
+        ui.heading("Console");
+        ui.label(format!(
+            "Framebuffer simulato {FB_WIDTH}×{FB_HEIGHT}, al massimo 10 aggiornamenti/s. Non è una console reale."
+        ));
+
+        let now = Instant::now();
+        // Scadenze su una griglia fissa di 100 ms. egui anticipa ogni
+        // `request_repaint_after` della durata prevista di un frame
+        // (`predicted_dt`, circa 16 ms) e il timer del sistema può aggiungere
+        // altro anticipo: senza questa tolleranza ogni risveglio anticipato
+        // produrrebbe una raffica di frame vuoti fino alla scadenza.
+        let predicted =
+            Duration::try_from_secs_f32(ctx.input(|i| i.predicted_dt)).unwrap_or(Duration::ZERO);
+        let tolerance = (predicted + FB_WAKE_TOLERANCE).min(FB_MIN_INTERVAL / 2);
+        let due = match self.last_fb_update {
+            None => true,
+            Some(t) => self.animate && now + tolerance >= t + FB_MIN_INTERVAL,
+        };
+        if due {
+            self.render_pattern();
+            let image = egui::ColorImage::new([FB_WIDTH, FB_HEIGHT], self.pixels.clone());
+            match &mut self.texture {
+                Some(tex) => tex.set(image, egui::TextureOptions::LINEAR),
+                None => {
+                    self.texture =
+                        Some(ctx.load_texture("console-fb", image, egui::TextureOptions::LINEAR));
+                }
+            }
+            // Avanza sulla griglia; se il ritardo supera un intervallo, riparte da `now`.
+            let next = match self.last_fb_update {
+                Some(t) if now < t + 2 * FB_MIN_INTERVAL => t + FB_MIN_INTERVAL,
+                _ => now,
+            };
+            self.last_fb_update = Some(next);
+            self.fb_updates += 1;
+        }
+        if self.animate {
+            // Repaint solo al prossimo aggiornamento del framebuffer, nessun polling continuo.
+            let target = self.last_fb_update.map_or(now, |t| t + FB_MIN_INTERVAL);
+            ctx.request_repaint_after(target.saturating_duration_since(now));
+        }
+
+        if let Some(tex) = &self.texture {
+            let avail = ui.available_size();
+            let aspect = FB_WIDTH as f32 / FB_HEIGHT as f32;
+            let mut size = egui::vec2(avail.x, avail.x / aspect);
+            if size.y > avail.y {
+                size = egui::vec2(avail.y * aspect, avail.y);
+            }
+            ui.add(egui::Image::new((tex.id(), size)).alt_text("Framebuffer console simulato"));
+        }
+    }
+
+    /// Genera un gradiente animato con griglia nel buffer riusato (costo lineare nei
+    /// pixel). La copia verso `ColorImage` alloca un nuovo buffer per aggiornamento:
+    /// accettabile nello spike, da rivedere con il client display reale.
+    fn render_pattern(&mut self) {
+        self.phase = (self.phase + 8) % (2 * FB_WIDTH as u32);
+        let p = self.phase;
+        for (y, row) in self
+            .pixels
+            .as_chunks_mut::<FB_WIDTH>()
+            .0
+            .iter_mut()
+            .enumerate()
+        {
+            let yy = y as u32;
+            for (x, px) in row.iter_mut().enumerate() {
+                let xx = x as u32;
+                let grid = xx.is_multiple_of(64) || yy.is_multiple_of(64);
+                let r = (((xx + p) % FB_WIDTH as u32) * 255 / FB_WIDTH as u32) as u8;
+                let g = (((yy + p / 2) % FB_HEIGHT as u32) * 255 / FB_HEIGHT as u32) as u8;
+                let b = ((xx ^ yy).wrapping_add(p) & 0xff) as u8;
+                *px = if grid {
+                    egui::Color32::from_gray(230)
+                } else {
+                    egui::Color32::from_rgb(r, g, b)
+                };
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for LightVmApp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LightVmApp")
+            .field("section", &self.section)
+            .field("theme", &self.theme)
+            .field("animate", &self.animate)
+            .field("frames", &self.frames)
+            .field("fb_updates", &self.fb_updates)
+            .field("renderer_info", &self.renderer_info)
+            .finish_non_exhaustive()
+    }
+}

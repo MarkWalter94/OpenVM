@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TerminationCause",
+  "description": "Causa di terminazione di una sessione (registrata nel report, ROADMAP 9).",
+  "oneOf": [
+    {
+      "description": "Chiusura ordinaria dall'app.",
+      "type": "string",
+      "const": "completed"
+    },
+    {
+      "description": "Revoca dell'utente.",
+      "type": "string",
+      "const": "revoked"
+    },
+    {
+      "description": "Emergency Stop.",
+      "type": "string",
+      "const": "emergency_stop"
+    },
+    {
+      "description": "Scadenza del grant.",
+      "type": "string",
+      "const": "grant_expired"
+    },
+    {
+      "description": "Lease non rinnovato entro il limite.",
+      "type": "string",
+      "const": "lease_expired"
+    },
+    {
+      "description": "Perdita del client o dell'adapter.",
+      "type": "string",
+      "const": "client_lost"
+    },
+    {
+      "description": "Chiusura o crash della UI.",
+      "type": "string",
+      "const": "ui_closed"
+    },
+    {
+      "description": "Perdita o riavvio del supervisor.",
+      "type": "string",
+      "const": "supervisor_lost"
+    },
+    {
+      "description": "Ripresa dell'host da sospensione.",
+      "type": "string",
+      "const": "host_resumed"
+    },
+    {
+      "description": "VM fallita o terminata durante la sessione.",
+      "type": "string",
+      "const": "vm_terminated"
+    },
+    {
+      "description": "Ripristino di baseline: la sessione di controllo si chiude (ROADMAP 8).",
+      "type": "string",
+      "const": "restored"
+    }
+  ]
+}

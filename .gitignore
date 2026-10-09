@@ -1,0 +1,16 @@
+# Artefatti di build
+/target/
+**/target/
+# Laboratorio locale: ISO, dischi, firmware scrivibile, log QEMU (mai nel repo)
+/lab/
+# Editor/OS
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+.DS_Store
+# Segreti e credenziali locali
+*.pem
+*.key
+*.p12
+.env

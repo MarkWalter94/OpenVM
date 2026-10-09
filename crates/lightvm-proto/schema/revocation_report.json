@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RevocationReport",
+  "description": "Rapporto di una revoca o di un Emergency Stop: distingue la coda scartata\ndalle richieste già inoltrate (ROADMAP 7.3). Non promette annullamenti.",
+  "type": "object",
+  "properties": {
+    "already_forwarded": {
+      "description": "Operazioni già inoltrate al backend: possono aver prodotto effetti.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/OperationId"
+      }
+    },
+    "discarded": {
+      "description": "Operazioni in coda scartate senza inoltro (nessun effetto).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/OperationId"
+      }
+    }
+  },
+  "required": [
+    "discarded",
+    "already_forwarded"
+  ],
+  "$defs": {
+    "OperationId": {
+      "description": "OperationId: UUID versione 7 in minuscolo con trattini.",
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    }
+  }
+}

@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VmConfig",
+  "description": "Configurazione di una VM richiesta dall'utente. Nessun campo è un percorso o\nun'opzione QEMU: i media sono riferiti per [`MediaId`] del registro approvato.",
+  "type": "object",
+  "properties": {
+    "data_media": {
+      "description": "Supporto dati opzionale in sola lettura (tipo `data_iso`), montato a VM spenta.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/MediaId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "disk_gib": {
+      "description": "Dimensione virtuale del disco principale QCOW2 in GiB.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "firmware": {
+      "description": "Firmware; nel MVP solo `uefi`.",
+      "$ref": "#/$defs/Firmware",
+      "default": "uefi"
+    },
+    "guest_os": {
+      "description": "Sistema operativo guest dichiarato.",
+      "$ref": "#/$defs/GuestOs"
+    },
+    "install_media": {
+      "description": "Supporto di installazione dal registro media (tipo `install_iso`).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/MediaId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "memory_mib": {
+      "description": "Memoria guest in MiB (non è il limite dell'intero processo QEMU).",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "name": {
+      "description": "Nome visibile.",
+      "$ref": "#/$defs/VmName"
+    },
+    "network": {
+      "description": "Profilo di rete; nel MVP solo `offline`.",
+      "$ref": "#/$defs/NetworkProfile",
+      "default": "offline"
+    },
+    "vcpus": {
+      "description": "Numero di vCPU (non è un limite percentuale di CPU: ROADMAP 7.2).",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "name",
+    "guest_os",
+    "vcpus",
+    "memory_mib",
+    "disk_gib"
+  ],
+  "$defs": {
+    "Firmware": {
+      "description": "Firmware del guest. Nel MVP solo UEFI con stato NVRAM gestito (ROADMAP 8).",
+      "oneOf": [
+        {
+          "description": "UEFI (OVMF) con NVRAM per VM.",
+          "type": "string",
+          "const": "uefi"
+        }
+      ]
+    },
+    "GuestOs": {
+      "description": "Sistema operativo guest dichiarato. Nel MVP il riferimento è Ubuntu LTS\nx86_64 con versione e checksum fissati in F0 (ROADMAP 4).",
+      "oneOf": [
+        {
+          "description": "Ubuntu LTS x86_64 (guest di riferimento del MVP).",
+          "type": "string",
+          "const": "ubuntu_lts_x86_64"
+        },
+        {
+          "description": "Altro Linux x86_64: gestibile manualmente, senza garanzie di compatibilità.",
+          "type": "string",
+          "const": "other_linux_x86_64"
+        }
+      ]
+    },
+    "MediaId": {
+      "description": "MediaId: UUID versione 7 in minuscolo con trattini.",
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "NetworkProfile": {
+      "description": "Profilo di rete. Nel MVP l'unico valore ammesso è `offline` (ADR-0004): nessuna\nNIC guest, periferiche di rete predefinite escluse, nessun forwarding.",
+      "oneOf": [
+        {
+          "description": "Nessuna NIC.",
+          "type": "string",
+          "const": "offline"
+        }
+      ]
+    },
+    "VmName": {
+      "description": "Nome VM: etichetta ASCII, non un percorso.",
+      "type": "string",
+      "maxLength": 64,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9_][A-Za-z0-9 ._-]*$"
+    }
+  }
+}

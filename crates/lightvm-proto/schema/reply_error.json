@@ -1,0 +1,168 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ReplyError",
+  "description": "Errore di risposta: operativo oppure di protocollo, mai confusi.\n\nForma JSON: `{\"kind\": \"operational\", ...PublicError}` oppure\n`{\"kind\": \"protocol\", ...ProtocolError}`.",
+  "oneOf": [
+    {
+      "description": "Richiesta compresa ma rifiutata o fallita.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "operational"
+        }
+      },
+      "$ref": "#/$defs/PublicError",
+      "required": [
+        "kind"
+      ]
+    },
+    {
+      "description": "Richiesta non compresa: nessun effetto tentato.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "protocol"
+        }
+      },
+      "$ref": "#/$defs/ProtocolError",
+      "required": [
+        "kind"
+      ]
+    }
+  ],
+  "$defs": {
+    "ErrorCode": {
+      "description": "Codice stabile di un errore operativo. I nomi serializzati non cambiano mai;\nnuovi codici si aggiungono soltanto.",
+      "oneOf": [
+        {
+          "description": "Identità o grant non autorizzano l'azione (incluso token assente o errato,\nVM fuori allowlist, capability mancante, sessione revocata o in pausa).",
+          "type": "string",
+          "const": "permission_denied"
+        },
+        {
+          "description": "Sessione o lease scaduti: serve una nuova autorizzazione nell'app.",
+          "type": "string",
+          "const": "session_expired"
+        },
+        {
+          "description": "Un'altra mutazione è in corso o in coda sulla stessa VM: ritentabile.",
+          "type": "string",
+          "const": "vm_busy"
+        },
+        {
+          "description": "Capacità non disponibile su questo host, build o fase.",
+          "type": "string",
+          "const": "unsupported"
+        },
+        {
+          "description": "L'azione non è ammessa nello stato corrente (o riferisce un `run_id` superato).",
+          "type": "string",
+          "const": "state_conflict"
+        },
+        {
+          "description": "Limite di risorse, quota o dimensione superato.",
+          "type": "string",
+          "const": "resource_limit"
+        },
+        {
+          "description": "Argomento non valido (formato, intervallo, nome, percorso rifiutato).",
+          "type": "string",
+          "const": "invalid_argument"
+        },
+        {
+          "description": "Oggetto inesistente o non visibile al chiamante.",
+          "type": "string",
+          "const": "not_found"
+        },
+        {
+          "description": "Guasto dell'infrastruttura (QEMU, QMP, storage, OS) non imputabile al chiamante.",
+          "type": "string",
+          "const": "infrastructure_error"
+        }
+      ]
+    },
+    "ProtocolError": {
+      "description": "Errore di protocollo: distinto dagli errori operativi (ROADMAP 9).",
+      "type": "object",
+      "properties": {
+        "code": {
+          "description": "Codice stabile.",
+          "$ref": "#/$defs/ProtocolErrorCode"
+        },
+        "message": {
+          "description": "Messaggio per persone, senza segreti.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ]
+    },
+    "ProtocolErrorCode": {
+      "description": "Codice di un errore di protocollo (richiesta non compresa, nessun effetto tentato).",
+      "oneOf": [
+        {
+          "description": "Messaggio non decodificabile o non conforme allo schema.",
+          "type": "string",
+          "const": "malformed_message"
+        },
+        {
+          "description": "Versione di protocollo non supportata.",
+          "type": "string",
+          "const": "unsupported_version"
+        },
+        {
+          "description": "Metodo o tipo di richiesta sconosciuto.",
+          "type": "string",
+          "const": "unknown_method"
+        },
+        {
+          "description": "Messaggio oltre la dimensione massima ammessa.",
+          "type": "string",
+          "const": "message_too_large"
+        },
+        {
+          "description": "Canale non autenticato (credenziale IPC assente o non valida).",
+          "type": "string",
+          "const": "unauthenticated"
+        }
+      ]
+    },
+    "PublicError": {
+      "description": "Errore operativo pubblico.\n\nForma JSON: `{\"code\": \"...\", \"message\": \"...\", \"details\": {..}?, \"retryable\": bool}`.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "description": "Codice stabile.",
+          "$ref": "#/$defs/ErrorCode"
+        },
+        "details": {
+          "description": "Dettagli strutturati opzionali (chiavi e valori testuali, senza segreti).",
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "message": {
+          "description": "Messaggio per persone, senza segreti né percorsi host.",
+          "type": "string"
+        },
+        "retryable": {
+          "description": "`true` se ritentare la stessa richiesta idempotente può riuscire.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "retryable"
+      ]
+    }
+  }
+}

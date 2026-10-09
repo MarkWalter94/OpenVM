@@ -1,0 +1,146 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "InputEvent",
+  "description": "Evento di input elementare.",
+  "oneOf": [
+    {
+      "description": "Tasto.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "key"
+        }
+      },
+      "$ref": "#/$defs/KeyAction",
+      "required": [
+        "type"
+      ]
+    },
+    {
+      "description": "Movimento assoluto.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "pointer_move"
+        }
+      },
+      "$ref": "#/$defs/PointerMove",
+      "required": [
+        "type"
+      ]
+    },
+    {
+      "description": "Pulsante.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "pointer_button"
+        }
+      },
+      "$ref": "#/$defs/PointerButton",
+      "required": [
+        "type"
+      ]
+    }
+  ],
+  "$defs": {
+    "KeyAction": {
+      "description": "Pressione o rilascio di un tasto.",
+      "type": "object",
+      "properties": {
+        "down": {
+          "description": "`true` = premuto, `false` = rilasciato.",
+          "type": "boolean"
+        },
+        "qcode": {
+          "description": "Tasto QEMU.",
+          "$ref": "#/$defs/QCode"
+        }
+      },
+      "required": [
+        "qcode",
+        "down"
+      ]
+    },
+    "MouseButton": {
+      "description": "Pulsante del puntatore (nomi QMP `InputButton` ammessi).",
+      "oneOf": [
+        {
+          "description": "Sinistro.",
+          "type": "string",
+          "const": "left"
+        },
+        {
+          "description": "Centrale.",
+          "type": "string",
+          "const": "middle"
+        },
+        {
+          "description": "Destro.",
+          "type": "string",
+          "const": "right"
+        },
+        {
+          "description": "Rotella su.",
+          "type": "string",
+          "const": "wheel_up"
+        },
+        {
+          "description": "Rotella giù.",
+          "type": "string",
+          "const": "wheel_down"
+        }
+      ]
+    },
+    "PointerButton": {
+      "description": "Pressione o rilascio di un pulsante del puntatore.",
+      "type": "object",
+      "properties": {
+        "button": {
+          "description": "Pulsante.",
+          "$ref": "#/$defs/MouseButton"
+        },
+        "down": {
+          "description": "`true` = premuto, `false` = rilasciato.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "button",
+        "down"
+      ]
+    },
+    "PointerMove": {
+      "description": "Movimento assoluto del puntatore in coordinate QEMU 0..=32767 su ciascun asse.",
+      "type": "object",
+      "properties": {
+        "x": {
+          "description": "Asse X (0..=32767).",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 32767,
+          "minimum": 0
+        },
+        "y": {
+          "description": "Asse Y (0..=32767).",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 32767,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "x",
+        "y"
+      ]
+    },
+    "QCode": {
+      "description": "QKeyCode QEMU.",
+      "type": "string",
+      "pattern": "^[a-z0-9_]{1,32}$"
+    }
+  }
+}

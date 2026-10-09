@@ -1,0 +1,41 @@
+# Aggiornamenti delle dipendenze (ROADMAP 6.3: versioni fissate e lockfile;
+# ADR-0023). Le PR di Dependabot passano dalla stessa CI senza segreti.
+# Le versioni esatte (`=`) nei Cargo.toml vengono aggiornate da Dependabot
+# insieme al lockfile; ogni aggiornamento resta soggetto a revisione umana.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      # UI: egui/eframe e famiglia si aggiornano insieme (ADR-0014).
+      ui:
+        patterns:
+          - "egui*"
+          - "eframe"
+          - "epaint*"
+          - "emath"
+          - "ecolor"
+          - "wgpu*"
+          - "winit"
+      cargo-minor-patch:
+        update-types:
+          - minor
+          - patch
+    commit-message:
+      prefix: "deps"
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "ci"

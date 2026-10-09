@@ -1,0 +1,51 @@
+# Workspace LightVM (ROADMAP sezione 6.2).
+# I crate in `crates/` sono scheletri: le API nascono nelle fasi che le richiedono.
+# `crates/mcp-server` non esiste ancora: viene aggiunto in F5.
+
+[workspace]
+resolver = "3"
+# `spikes/*` contiene le prove di fattibilità di F0: non sono codice di prodotto
+# e non fanno parte dei default-members (si compilano con `-p <nome>`).
+members = [
+    "apps/desktop",
+    "crates/*",
+    "spikes/*",
+]
+default-members = [
+    "apps/desktop",
+    "crates/*",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT"
+publish = false
+
+# Versioni esatte (`=`) per la UI: decisione F0 sulle versioni egui/eframe, vedi
+# docs/verification/F0-01-toolchain-eframe.md. Nessuna dipendenza git.
+[workspace.dependencies]
+eframe = { version = "=0.36.2", default-features = false }
+egui = { version = "=0.36.2", default-features = false }
+egui_extras = { version = "=0.36.2", default-features = false }
+egui_kittest = { version = "=0.36.2", default-features = false }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+print_stderr = "allow"
+undocumented_unsafe_blocks = "deny"
+
+[profile.release]
+# Simboli di debug separati restano utili per la diagnostica dello spike.
+debug = "line-tables-only"

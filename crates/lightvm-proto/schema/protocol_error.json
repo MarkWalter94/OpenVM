@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ProtocolError",
+  "description": "Errore di protocollo: distinto dagli errori operativi (ROADMAP 9).",
+  "type": "object",
+  "properties": {
+    "code": {
+      "description": "Codice stabile.",
+      "$ref": "#/$defs/ProtocolErrorCode"
+    },
+    "message": {
+      "description": "Messaggio per persone, senza segreti.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "code",
+    "message"
+  ],
+  "$defs": {
+    "ProtocolErrorCode": {
+      "description": "Codice di un errore di protocollo (richiesta non compresa, nessun effetto tentato).",
+      "oneOf": [
+        {
+          "description": "Messaggio non decodificabile o non conforme allo schema.",
+          "type": "string",
+          "const": "malformed_message"
+        },
+        {
+          "description": "Versione di protocollo non supportata.",
+          "type": "string",
+          "const": "unsupported_version"
+        },
+        {
+          "description": "Metodo o tipo di richiesta sconosciuto.",
+          "type": "string",
+          "const": "unknown_method"
+        },
+        {
+          "description": "Messaggio oltre la dimensione massima ammessa.",
+          "type": "string",
+          "const": "message_too_large"
+        },
+        {
+          "description": "Canale non autenticato (credenziale IPC assente o non valida).",
+          "type": "string",
+          "const": "unauthenticated"
+        }
+      ]
+    }
+  }
+}

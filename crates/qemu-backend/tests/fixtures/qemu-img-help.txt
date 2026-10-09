@@ -1,0 +1,42 @@
+qemu-img version 11.1.0 (v11.1.0-12130-ge470268ff4)
+Copyright (c) 2003-2026 Fabrice Bellard and the QEMU Project developers
+QEMU disk image utility.  Usage:
+
+  qemu-img [standard options] COMMAND [--help | command options]
+
+Standard options:
+  -h, --help
+     display this help and exit
+  -V, --version
+     display version info and exit
+  -T,--trace TRACE
+     specify tracing options:
+        [[enable=]<pattern>][,events=<file>][,file=<file>]
+
+Recognized commands (run qemu-img COMMAND --help for command-specific help):
+
+  amend - Update format-specific options of the image
+  bench - Run a simple image benchmark
+  bitmap - Perform modifications of the persistent bitmap in the image
+  check - Check basic image integrity
+  commit - Commit image to its backing file
+  compare - Check if two images have the same contents
+  convert - Copy one or more images to another with optional format conversion
+  create - Create and format a new image file
+  dd - Copy input to output with optional format conversion
+  info - Display information about the image
+  map - Dump image metadata
+  measure - Calculate the file size required for a new image
+  rebase - Change the backing file of the image
+  resize - Resize the image
+  snapshot - List or manipulate snapshots in the image
+
+Supported image formats:
+
+  blkdebug blklogwrites blkverify bochs cloop compress copy-before-write
+  copy-on-read dmg file ftp ftps host_device http https luks nbd nfs
+  null-aio null-co parallels preallocate qcow qcow2 qed quorum raw
+  replication snapshot-access ssh throttle vdi vhdx vmdk vpc vvfat
+
+See <https://qemu.org/contribute/report-a-bug> for how to report bugs.
+More information on the QEMU project at <https://qemu.org>.

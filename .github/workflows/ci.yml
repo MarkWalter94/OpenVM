@@ -1,0 +1,163 @@
+# CI LightVM (ROADMAP sezione 10 F1, sezione 13 "a ogni modifica").
+#
+# Cosa verifica: formattazione, lint, test headless (inclusi IPC del servizio e
+# test UI egui_kittest), build release della UI, schemi JSON di lightvm-proto,
+# licenze/advisory delle dipendenze. Cosa NON verifica: nessun runner ha un
+# acceleratore verificabile (WHPX/KVM) né QEMU; boot del guest, QMP reale,
+# console reale, Emergency Stop su QEMU e limiti di risorse restano sui runner
+# fisici controllati (docs/verification/F0-07-linux-kvm.md, "CI minima per F1").
+# I test che richiedono QEMU reale sono `#[ignore]`.
+#
+# Nessun segreto, nessun accesso al laboratorio: il workflow ha solo permessi di
+# lettura e gira anche sulle PR da fork.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_NET_RETRY: "10"
+  RUST_BACKTRACE: "1"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build-test:
+    name: build e test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # La toolchain viene da rust-toolchain.toml (canale esatto, rustfmt e clippy).
+      - name: Toolchain da rust-toolchain.toml
+        run: |
+          channel="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$channel" --profile minimal --component rustfmt,clippy --no-self-update
+          rustup show active-toolchain
+          rustc -Vv
+          cargo -V
+
+      # Librerie di sistema per eframe/winit su Ubuntu (F0-07): X11/Wayland,
+      # xkbcommon (incluso libxkbcommon-x11-0, assente causa panico su X11),
+      # EGL/GL. Il binario le carica con dlopen; i test kittest sono headless e
+      # non richiedono un display virtuale.
+      - name: Dipendenze di sistema (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config \
+            libxkbcommon0 libxkbcommon-x11-0 libwayland-client0 libwayland-cursor0 libwayland-egl1 \
+            libx11-6 libx11-xcb1 libxcursor1 libxrandr2 libxi6 libxcb1 \
+            libegl1 libgl1 libvulkan1 mesa-vulkan-drivers
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: build-test
+
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      # Mantiene compilabile il backend alternativo glow (F0-01, F0-07).
+      - name: cargo clippy (UI con glow)
+        run: cargo clippy -p lightvm-desktop --no-default-features --features glow --all-targets --locked -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace --locked --no-fail-fast
+
+      - name: cargo build --release (UI)
+        run: cargo build --release --locked -p lightvm-desktop
+
+  # Portabilità soltanto: nessun supporto macOS dichiarato (ROADMAP 10, F1).
+  # Il job non blocca la CI; un fallimento segnala un'assunzione di portabilità
+  # da registrare in docs/STATUS.md.
+  macos-portability:
+    name: macOS (portabilità, nessun supporto dichiarato)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Toolchain da rust-toolchain.toml
+        run: |
+          channel="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$channel" --profile minimal --component rustfmt,clippy --no-self-update
+          rustc -Vv
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: macos
+      - name: cargo check --workspace
+        run: cargo check --workspace --locked
+
+  # Gli schemi JSON committati in crates/lightvm-proto/schema/ devono coincidere
+  # con quelli generati dai tipi (ROADMAP 6.3, 13 "validazione schema").
+  # Rigenerazione: LIGHTVM_UPDATE_SCHEMAS=1 cargo test -p lightvm-proto --test schema_snapshot
+  schema:
+    name: schemi JSON aggiornati
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Toolchain da rust-toolchain.toml
+        run: |
+          channel="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$channel" --profile minimal --no-self-update
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: schema
+      - name: Snapshot degli schemi
+        run: cargo test --locked -p lightvm-proto --test schema_snapshot
+      - name: Nessuna modifica non committata agli schemi
+        run: git diff --exit-code -- crates/lightvm-proto/schema
+
+  # Licenze, advisory RustSec, sorgenti e duplicati (deny.toml, ADR-0023).
+  cargo-deny:
+    name: cargo-deny (licenze e advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Stessa versione verificata in locale (docs/verification/F1-04-service-ipc-ci.md);
+      # installazione da crates.io con lockfile, nessuna azione di terze parti.
+      - name: Toolchain da rust-toolchain.toml
+        run: |
+          channel="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$channel" --profile minimal --no-self-update
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: cargo-deny
+      - name: Installazione cargo-deny 0.20.2
+        run: cargo install cargo-deny --version 0.20.2 --locked
+      - name: cargo deny check
+        run: cargo deny --locked check

@@ -1,0 +1,38 @@
+[package]
+name = "qemu-backend"
+description = "LightVM: probe delle capacità, comando QEMU controllato, client QMP e gestione dei processi QEMU"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Versioni esatte, nessuna sorgente git (ADR-0023). Le versioni coincidono con
+# quelle già presenti nel lockfile del workspace (spike F0-04/F0-06).
+[dependencies]
+png = "=0.18.1"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+sha2 = "=0.10.9"
+socket2 = { version = "=0.6.5", features = ["all"] }
+tokio = { version = "=1.53.2", default-features = false, features = ["sync", "time", "rt"] }
+
+# Le API Win32 per Job Object, `CreateProcessW` con lista di handle/job e
+# identità del processo non hanno involucri sicuri equivalenti nella libreria
+# standard: il codice `unsafe` è confinato in `src/sys/windows.rs` (vedi lib.rs).
+[target.'cfg(windows)'.dependencies.windows-sys]
+version = "=0.61.2"
+features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+]
+
+[dev-dependencies]
+proptest = "=1.11.0"
+tokio = { version = "=1.53.2", default-features = false, features = ["sync", "time", "rt", "rt-multi-thread", "macros"] }
+
+[lints]
+workspace = true

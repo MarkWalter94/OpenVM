@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MediaRecord",
+  "description": "Supporto approvato, come visto dai client: nessun percorso host.",
+  "type": "object",
+  "properties": {
+    "approved_at": {
+      "description": "Istante dell'approvazione.",
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "declared_origin": {
+      "description": "Origine dichiarata dall'utente (testo, mai interpretato).",
+      "$ref": "#/$defs/Label"
+    },
+    "id": {
+      "description": "Identificativo.",
+      "$ref": "#/$defs/MediaId"
+    },
+    "kind": {
+      "description": "Tipo di supporto.",
+      "$ref": "#/$defs/MediaKind"
+    },
+    "sha256": {
+      "description": "SHA-256 della copia gestita, calcolato all'approvazione.",
+      "$ref": "#/$defs/Sha256Digest"
+    },
+    "size_bytes": {
+      "description": "Dimensione in byte della copia gestita.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "id",
+    "kind",
+    "sha256",
+    "size_bytes",
+    "declared_origin",
+    "approved_at"
+  ],
+  "$defs": {
+    "Label": {
+      "description": "Testo dichiarato dall'utente, senza caratteri di controllo; mai interpretato.",
+      "type": "string",
+      "maxLength": 256,
+      "minLength": 1
+    },
+    "MediaId": {
+      "description": "MediaId: UUID versione 7 in minuscolo con trattini.",
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "MediaKind": {
+      "description": "Tipo di supporto nel registro media.",
+      "oneOf": [
+        {
+          "description": "ISO di installazione del guest.",
+          "type": "string",
+          "const": "install_iso"
+        },
+        {
+          "description": "ISO dati in sola lettura per portare nel guest il software da testare (ADR-0008).",
+          "type": "string",
+          "const": "data_iso"
+        }
+      ]
+    },
+    "Sha256Digest": {
+      "description": "SHA-256 in esadecimale minuscolo.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "UtcTimestamp": {
+      "description": "Istante UTC RFC 3339 con suffisso Z, precisione al millisecondo.",
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

@@ -1,0 +1,182 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Grant",
+  "description": "Grant emesso dal supervisor dopo l'approvazione dell'utente nell'app (ROADMAP 9).",
+  "type": "object",
+  "properties": {
+    "capabilities": {
+      "description": "Capability concesse.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Capability"
+      },
+      "uniqueItems": true
+    },
+    "expires_at": {
+      "description": "Scadenza assoluta UTC.",
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "id": {
+      "description": "Identificativo.",
+      "$ref": "#/$defs/GrantId"
+    },
+    "policy_revision": {
+      "description": "Revisione della policy con cui il grant è stato emesso.",
+      "$ref": "#/$defs/PolicyRevision"
+    },
+    "quotas": {
+      "description": "Quote concesse.",
+      "$ref": "#/$defs/Quotas"
+    },
+    "session_id": {
+      "description": "Sessione a cui è legato.",
+      "$ref": "#/$defs/SessionId"
+    },
+    "vm_allowlist": {
+      "description": "VM ammesse (allowlist esplicita; vuota = nessuna VM).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/VmId"
+      },
+      "uniqueItems": true
+    }
+  },
+  "required": [
+    "id",
+    "session_id",
+    "vm_allowlist",
+    "capabilities",
+    "expires_at",
+    "quotas",
+    "policy_revision"
+  ],
+  "$defs": {
+    "Capability": {
+      "description": "Azione autorizzabile su una VM. I nomi serializzati seguono il catalogo MCP\n(ROADMAP 9); `vm.input` copre mouse e tastiera.",
+      "oneOf": [
+        {
+          "description": "Elenco filtrato dal grant.",
+          "type": "string",
+          "const": "vm.list"
+        },
+        {
+          "description": "Stato.",
+          "type": "string",
+          "const": "vm.status"
+        },
+        {
+          "description": "Avvio.",
+          "type": "string",
+          "const": "vm.start"
+        },
+        {
+          "description": "Arresto (ordinario o forzato).",
+          "type": "string",
+          "const": "vm.stop"
+        },
+        {
+          "description": "Reset: richiede capability esplicita.",
+          "type": "string",
+          "const": "vm.reset"
+        },
+        {
+          "description": "Screenshot.",
+          "type": "string",
+          "const": "vm.screenshot"
+        },
+        {
+          "description": "Mouse e tastiera.",
+          "type": "string",
+          "const": "vm.input"
+        },
+        {
+          "description": "Checkpoint a VM spenta: richiede capability esplicita.",
+          "type": "string",
+          "const": "vm.snapshot"
+        },
+        {
+          "description": "Ripristino a VM spenta.",
+          "type": "string",
+          "const": "vm.restore"
+        },
+        {
+          "description": "Eventi LightVM e log QEMU autorizzati.",
+          "type": "string",
+          "const": "vm.logs"
+        }
+      ]
+    },
+    "GrantId": {
+      "description": "GrantId: UUID versione 7 in minuscolo con trattini.",
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "PolicyRevision": {
+      "description": "Revisione monotona della policy applicata (registrata nei report, ROADMAP 9).",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "Quotas": {
+      "description": "Quote di una sessione o di un livello di policy. Ogni campo è un massimo\ninclusivo; l'intersezione prende il minimo.",
+      "type": "object",
+      "properties": {
+        "max_input_events": {
+          "description": "Eventi di input totali ammessi nella sessione.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_operations": {
+          "description": "Operazioni totali ammesse nella sessione.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_queued_operations": {
+          "description": "Operazioni in coda per VM non ancora inoltrate.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_screenshot_bytes": {
+          "description": "Dimensione massima di un singolo screenshot in byte.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_screenshots": {
+          "description": "Screenshot totali ammessi nella sessione.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "max_operations",
+        "max_input_events",
+        "max_screenshots",
+        "max_screenshot_bytes",
+        "max_queued_operations"
+      ]
+    },
+    "SessionId": {
+      "description": "SessionId: UUID versione 7 in minuscolo con trattini.",
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "UtcTimestamp": {
+      "description": "Istante UTC RFC 3339 con suffisso Z, precisione al millisecondo.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "VmId": {
+      "description": "VmId: UUID versione 7 in minuscolo con trattini.",
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    }
+  }
+}

@@ -1,0 +1,30 @@
+[package]
+name = "lightvm-proto"
+description = "LightVM: tipi IPC/MCP condivisi e JSON Schema generati da fonte unica (F1)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = ["system-clock"]
+# Generazione di identificativi UUID v7 dall'orologio di sistema e dal generatore
+# casuale del sistema operativo. Usata dal supervisor; `vm-core` non la richiede
+# (riceve gli identificativi tramite la porta `IdGenerator`).
+system-clock = ["uuid/v7", "uuid/std"]
+
+[dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+# Versione esatta: la forma degli schemi generati dipende dalla versione di schemars
+# e gli schemi committati in `schema/` sono confrontati in un test snapshot.
+schemars = { version = "=1.2.2", default-features = false, features = ["derive", "std"] }
+serde_json = "1.0.150"
+uuid = { version = "1.27.0", default-features = false, features = ["serde"] }
+jiff = { version = "0.2.24", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+proptest = "1.11.0"
+
+[lints]
+workspace = true

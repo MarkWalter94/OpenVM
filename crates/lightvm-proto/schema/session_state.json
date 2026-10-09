@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SessionState",
+  "description": "Stato di una sessione agente.",
+  "oneOf": [
+    {
+      "description": "Attiva.",
+      "type": "string",
+      "const": "active"
+    },
+    {
+      "description": "Pausa agente: nessuna nuova mutazione inoltrata; osservazione consentita.",
+      "type": "string",
+      "const": "paused"
+    },
+    {
+      "description": "Terminata (revoca, scadenza, Emergency Stop, perdita del client...). Definitivo.",
+      "type": "string",
+      "const": "terminated"
+    }
+  ]
+}

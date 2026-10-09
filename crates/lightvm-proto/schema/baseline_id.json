@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "BaselineId",
+  "description": "BaselineId: UUID versione 7 in minuscolo con trattini.",
+  "type": "string",
+  "format": "uuid",
+  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+}

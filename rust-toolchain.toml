@@ -1,0 +1,11 @@
+# Toolchain fissata per il workspace LightVM (F0, passo 1).
+# Canale stabile, versione esatta. Il triple host non è fissato qui per non
+# vincolare la build Linux: rustup usa il "default host" configurato.
+# Sull'host F0 il default host è x86_64-pc-windows-msvc, quindi questo file
+# seleziona 1.99.0-x86_64-pc-windows-msvc (non la toolchain GNU predefinita
+# dell'utente). Dettagli e requisiti del linker MSVC in
+# docs/verification/F0-01-toolchain-eframe.md.
+[toolchain]
+channel = "1.99.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

@@ -1,0 +1,213 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "InputBatch",
+  "description": "Lotto di eventi di input riferito a un'esecuzione e a una geometria: il core\nrifiuta lotti riferiti a un `run_id` superato o a una geometria non corrente\n(ROADMAP 6.4). Gli input non vengono mai ripetuti automaticamente.",
+  "type": "object",
+  "properties": {
+    "events": {
+      "description": "Eventi, al massimo [`MAX_INPUT_EVENTS_PER_REQUEST`].",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/InputEvent"
+      }
+    },
+    "geometry": {
+      "description": "Geometria su cui il chiamante ha calcolato le coordinate.",
+      "$ref": "#/$defs/DisplayGeometry"
+    },
+    "run_id": {
+      "description": "Esecuzione attesa.",
+      "$ref": "#/$defs/RunId"
+    },
+    "vm_id": {
+      "description": "VM destinataria.",
+      "$ref": "#/$defs/VmId"
+    }
+  },
+  "required": [
+    "vm_id",
+    "run_id",
+    "geometry",
+    "events"
+  ],
+  "$defs": {
+    "DisplayGeometry": {
+      "description": "Geometria del display guest in pixel.",
+      "type": "object",
+      "properties": {
+        "height": {
+          "description": "Altezza (1..=8192).",
+          "type": "integer",
+          "format": "uint32",
+          "maximum": 8192,
+          "minimum": 1
+        },
+        "width": {
+          "description": "Larghezza (1..=8192).",
+          "type": "integer",
+          "format": "uint32",
+          "maximum": 8192,
+          "minimum": 1
+        }
+      },
+      "required": [
+        "width",
+        "height"
+      ]
+    },
+    "InputEvent": {
+      "description": "Evento di input elementare.",
+      "oneOf": [
+        {
+          "description": "Tasto.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "key"
+            }
+          },
+          "$ref": "#/$defs/KeyAction",
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "Movimento assoluto.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "pointer_move"
+            }
+          },
+          "$ref": "#/$defs/PointerMove",
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "Pulsante.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "pointer_button"
+            }
+          },
+          "$ref": "#/$defs/PointerButton",
+          "required": [
+            "type"
+          ]
+        }
+      ]
+    },
+    "KeyAction": {
+      "description": "Pressione o rilascio di un tasto.",
+      "type": "object",
+      "properties": {
+        "down": {
+          "description": "`true` = premuto, `false` = rilasciato.",
+          "type": "boolean"
+        },
+        "qcode": {
+          "description": "Tasto QEMU.",
+          "$ref": "#/$defs/QCode"
+        }
+      },
+      "required": [
+        "qcode",
+        "down"
+      ]
+    },
+    "MouseButton": {
+      "description": "Pulsante del puntatore (nomi QMP `InputButton` ammessi).",
+      "oneOf": [
+        {
+          "description": "Sinistro.",
+          "type": "string",
+          "const": "left"
+        },
+        {
+          "description": "Centrale.",
+          "type": "string",
+          "const": "middle"
+        },
+        {
+          "description": "Destro.",
+          "type": "string",
+          "const": "right"
+        },
+        {
+          "description": "Rotella su.",
+          "type": "string",
+          "const": "wheel_up"
+        },
+        {
+          "description": "Rotella giù.",
+          "type": "string",
+          "const": "wheel_down"
+        }
+      ]
+    },
+    "PointerButton": {
+      "description": "Pressione o rilascio di un pulsante del puntatore.",
+      "type": "object",
+      "properties": {
+        "button": {
+          "description": "Pulsante.",
+          "$ref": "#/$defs/MouseButton"
+        },
+        "down": {
+          "description": "`true` = premuto, `false` = rilasciato.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "button",
+        "down"
+      ]
+    },
+    "PointerMove": {
+      "description": "Movimento assoluto del puntatore in coordinate QEMU 0..=32767 su ciascun asse.",
+      "type": "object",
+      "properties": {
+        "x": {
+          "description": "Asse X (0..=32767).",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 32767,
+          "minimum": 0
+        },
+        "y": {
+          "description": "Asse Y (0..=32767).",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 32767,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "x",
+        "y"
+      ]
+    },
+    "QCode": {
+      "description": "QKeyCode QEMU.",
+      "type": "string",
+      "pattern": "^[a-z0-9_]{1,32}$"
+    },
+    "RunId": {
+      "description": "RunId: UUID versione 7 in minuscolo con trattini.",
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "VmId": {
+      "description": "VmId: UUID versione 7 in minuscolo con trattini.",
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    }
+  }
+}

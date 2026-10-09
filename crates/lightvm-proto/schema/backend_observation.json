@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "BackendObservation",
+  "description": "Evento elementare osservato dal backend, usato dal core per derivare lo stato.",
+  "oneOf": [
+    {
+      "description": "Processo creato e associato all'esecuzione.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "process_spawned"
+        },
+        "run_id": {
+          "description": "Esecuzione.",
+          "$ref": "#/$defs/RunId"
+        }
+      },
+      "required": [
+        "kind",
+        "run_id"
+      ]
+    },
+    {
+      "description": "QMP pronto (capabilities negoziate) e processo vivo.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "qmp_ready"
+        },
+        "run_id": {
+          "description": "Esecuzione.",
+          "$ref": "#/$defs/RunId"
+        }
+      },
+      "required": [
+        "kind",
+        "run_id"
+      ]
+    },
+    {
+      "description": "Fine processo osservata tramite handle (non tramite PID).",
+      "type": "object",
+      "properties": {
+        "expected": {
+          "description": "`true` se l'uscita era stata richiesta (stop ordinario, force-stop, Emergency Stop).",
+          "type": "boolean"
+        },
+        "kind": {
+          "type": "string",
+          "const": "process_exited"
+        },
+        "run_id": {
+          "description": "Esecuzione.",
+          "$ref": "#/$defs/RunId"
+        }
+      },
+      "required": [
+        "kind",
+        "run_id",
+        "expected"
+      ]
+    },
+    {
+      "description": "Avvio fallito prima che il processo fosse pronto.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "start_failed"
+        },
+        "run_id": {
+          "description": "Esecuzione.",
+          "$ref": "#/$defs/RunId"
+        }
+      },
+      "required": [
+        "kind",
+        "run_id"
+      ]
+    }
+  ],
+  "$defs": {
+    "RunId": {
+      "description": "RunId: UUID versione 7 in minuscolo con trattini.",
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    }
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ErrorCode",
+  "description": "Codice stabile di un errore operativo. I nomi serializzati non cambiano mai;\nnuovi codici si aggiungono soltanto.",
+  "oneOf": [
+    {
+      "description": "Identità o grant non autorizzano l'azione (incluso token assente o errato,\nVM fuori allowlist, capability mancante, sessione revocata o in pausa).",
+      "type": "string",
+      "const": "permission_denied"
+    },
+    {
+      "description": "Sessione o lease scaduti: serve una nuova autorizzazione nell'app.",
+      "type": "string",
+      "const": "session_expired"
+    },
+    {
+      "description": "Un'altra mutazione è in corso o in coda sulla stessa VM: ritentabile.",
+      "type": "string",
+      "const": "vm_busy"
+    },
+    {
+      "description": "Capacità non disponibile su questo host, build o fase.",
+      "type": "string",
+      "const": "unsupported"
+    },
+    {
+      "description": "L'azione non è ammessa nello stato corrente (o riferisce un `run_id` superato).",
+      "type": "string",
+      "const": "state_conflict"
+    },
+    {
+      "description": "Limite di risorse, quota o dimensione superato.",
+      "type": "string",
+      "const": "resource_limit"
+    },
+    {
+      "description": "Argomento non valido (formato, intervallo, nome, percorso rifiutato).",
+      "type": "string",
+      "const": "invalid_argument"
+    },
+    {
+      "description": "Oggetto inesistente o non visibile al chiamante.",
+      "type": "string",
+      "const": "not_found"
+    },
+    {
+      "description": "Guasto dell'infrastruttura (QEMU, QMP, storage, OS) non imputabile al chiamante.",
+      "type": "string",
+      "const": "infrastructure_error"
+    }
+  ]
+}
