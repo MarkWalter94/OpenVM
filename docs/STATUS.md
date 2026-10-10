@@ -1,14 +1,14 @@
 # Stato del progetto
 
-Ultimo aggiornamento: 2026-10-09
+Ultimo aggiornamento: 2026-10-10
 
 Documento operativo previsto dalla sezione 17 di `docs/ROADMAP.md`: fase corrente, impedimenti e avanzamento. **Questo file non modifica la Definition of Done (sezione 11), il perimetro né i criteri di uscita.** Uno stato qui riportato non vale come verifica: le prove stanno in `docs/verification/`.
 
 ## Fase corrente
 
-**F0 — Fattibilità e decisioni: in riesame** (roadmap, sezioni 10 e 15, passo 6). Il riesame `docs/verification/F0-09-riesame-prove.md` conclude che il criterio di uscita è soddisfatto con deviazioni pubblicate sul primo host Windows, ma F0 **non è ancora chiusa**: restano i pendenti elencati sotto. Nessuna funzionalità di prodotto è implementata o verificata; le prove F0 riguardano spike di fattibilità.
+**F0 — Fattibilità e decisioni: in riesame** (roadmap, sezioni 10 e 15, passo 6). Il riesame `docs/verification/F0-09-riesame-prove.md` conclude che il criterio di uscita è soddisfatto con deviazioni pubblicate sul primo host Windows, ma F0 **non è ancora chiusa**: restano i pendenti elencati sotto. Le prove F0 riguardano spike di fattibilità. Il lavoro F1 avviato in parallelo è descritto nella sezione "Lavoro F1 avviato in parallelo"; nessuna capacità di prodotto è `verificato su hardware`.
 
-Classificazione usata per ogni capacità (sezione 16, punto 6): `implementato`, `verificato in simulazione/test`, `verificato su hardware`, `non verificato`. Le capacità di prodotto sono `non verificato`; le prove di fattibilità su hardware sono elencate nei file F0.
+Classificazione usata per ogni capacità (sezione 16, punto 6): `implementato`, `verificato in simulazione/test`, `verificato su hardware`, `non verificato`. Nessuna capacità di prodotto è `verificato su hardware`; alcune sono `verificato in simulazione/test` (file F1); le prove di fattibilità su hardware sono elencate nei file F0.
 
 Regola della sezione 10: F1 parte dopo il criterio di uscita di F0. Il lavoro F1 avviato in parallelo non può essere usato per dichiarare un criterio di uscita F1 prima della chiusura di F0.
 
@@ -42,6 +42,27 @@ La decisione diventa efficace con la conferma dell'utente (U-5) e con la chiusur
 | P-6 | Disponibilità di firma del codice e revisione indipendente (ADR-0020) | utente |
 | P-7 | Dettagli del supporto dati approvato (ADR-0008) | sviluppo |
 
+## Lavoro F1 avviato in parallelo
+
+Avviato prima della chiusura di F0 e quindi **non utilizzabile per il criterio di uscita F1** (sezione 10). Avanzamento per voce di backlog in `docs/RELEASE_PLAN.md`, sezione "Avanzamento F1".
+
+| Flusso | Crate | Evidenza | Esito dichiarato |
+| --- | --- | --- | --- |
+| Tipi condivisi, modello VM, stati, risorse, sessioni, audit | `lightvm-proto`, `vm-core` | `F1-01` | verificato in simulazione/test |
+| Catalogo SQLite, migrazioni, journal, registro media, guardie dei dischi | `vm-storage` | `F1-02` | verificato in simulazione/test (Windows) |
+| Supervisor, IPC autenticato, composition root | `lightvm-service` | `F1-04` | verificato in simulazione/test (Windows, WSL2); end-to-end con QEMU reale su WHPX, 2 esecuzioni, VM ferma nel firmware |
+| SDK MCP su stdio | `lightvm-mcp` | `F1-06` | verificato in simulazione/test; nessun client MCP reale |
+| Licenze e `cargo deny` | workspace | `F1-07` | verificato |
+| CI e delega cgroup | `.github/workflows/ci.yml` | `F1-08` | validata in locale; **mai eseguita su GitHub** |
+| Probe, processi, QMP, input, screenshot, profilo offline, cicli reali | `qemu-backend` | file `F1-03` non scritto | implementato (in parte); non verificato |
+| UI: appunti, backend di rendering, istantanee, misure | `apps/desktop` | file `F1-05` non scritto | implementato (in parte); non verificato |
+
+Punti critici emersi dal riesame del 2026-10-10:
+
+- **Criterio di uscita F1 (F1-12) non eseguito**: il test `reale_cicli_start_stop` esiste ma non ha un'esecuzione registrata; il servizio non crea ancora il disco principale.
+- **La UI apre direttamente il socket QMP** e non avvia il supervisor né usa l'IPC: contrasta con l'unico proprietario QMP (F1-06, ADR-0012) ed è il presupposto mancante di P-2.
+- **Workspace non ritestato** dopo l'ultimo commit di codice (`aa04ccd`); sull'host di sviluppo attuale Rust e QEMU non sono installati (I-10).
+
 ## Esito del laboratorio Linux
 
 **Proposto: "verificato solo Windows"**, in attesa della conferma dell'utente (ADR-0016). Con questo esito Windows è l'unico target del MVP, la cella Ubuntu di `docs/COMPATIBILITY.md` resta "non verificato" e la qualificazione Linux è rinviata a R2a, che non si chiude senza la prova su host fisico. WSL2 è stato usato solo per build e test indipendenti dall'acceleratore (`F0-07`).
@@ -52,10 +73,10 @@ La decisione diventa efficace con la conferma dell'utente (U-5) e con la chiusur
 | --- | --- |
 | `docs/ARCHITECTURE.md` | aggiornato con gli esiti F0 (console, canali, modello di processo) |
 | `docs/SECURITY.md` | controlli "pianificato", con fattibilità provata dove indicato; rischi residui F0 aggiunti |
-| `docs/COMPATIBILITY.md` | riga Windows 11 → Linux "sperimentale" con i dati F0; riga Ubuntu "non verificato" (completamento entro F1) |
-| `docs/TESTING.md` | misure F0 registrate; egui_kittest provato (completamento entro F1) |
-| `docs/RELEASE_PLAN.md` | backlog F0 con esiti; backlog F1 |
-| `docs/adr/` | 19 ADR Accettata (0016 condizionata alla conferma dell'utente), 6 ADR Proposta (0015, 0017, 0020, 0021, 0022, 0023) |
+| `docs/COMPATIBILITY.md` | riga Windows 11 → Linux "sperimentale" con i dati F0; riga Ubuntu "non verificato"; completato nel commit `aa04ccd` |
+| `docs/TESTING.md` | misure F0 registrate; egui_kittest provato; completato nel commit `aa04ccd`; misure F1-18 assenti |
+| `docs/RELEASE_PLAN.md` | backlog F0 con esiti; backlog F1 con avanzamento per voce |
+| `docs/adr/` | 21 ADR Accettata, di cui 0016 condizionata alla conferma dell'utente e 0021, 0023 accettate in parte; 5 ADR Proposta (0015, 0017, 0020, 0022, 0026) |
 
 ## Impedimenti e punti aperti
 
@@ -70,6 +91,7 @@ La decisione diventa efficace con la conferma dell'utente (U-5) e con la chiusur
 | I-7 | Build MSVC richiede l'ambiente di Build Tools 2022 caricato esplicitamente | aperto | sviluppo e CI devono impostare l'ambiente; correzione locale a scelta dell'utente | `F0-01` §4.1 |
 | I-8 | Nessun secondo account locale per i test negativi multiutente | aperto | P-5 | `F0-04` §6 |
 | I-9 | Host condiviso con altri agenti durante le misure | dichiarato | le latenze F0 non sono misure di release | `F0-06`, `F0-08` |
+| I-10 | Host di sviluppo attuale senza toolchain Rust 1.99.0 e senza QEMU 11.1.0 (presente Visual Studio 2022 Community) | aperto | build, test e prove reali impossibili finché la toolchain e il laboratorio non sono installati o si torna all'host F0 | — |
 
 Il silenzio su un impedimento non equivale alla sua risoluzione (sezione 14, ultima riga).
 

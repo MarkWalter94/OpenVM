@@ -39,6 +39,14 @@ Esempi: `F0-01-toolchain-eframe.md`, `F0-02-qemu-whpx-qmp.md`, `F1-04-cicli-star
 | `F0-07-linux-kvm.md` | F0, passo 5 (Linux/KVM) | parziale; smoke su host fisico non eseguito | completo |
 | `F0-08-limiti-risorse-misure.md` | F0, passo 5 (limiti risorse e consumi) | parziale | completo |
 | `F0-09-riesame-prove.md` | F0, passo 6 (riesame, decisione di prosecuzione) | parziale; F0 non ancora chiusa | completo |
+| `F1-01-proto-core.md` | F1 (backlog F1-01, F1-04 come modello, F1-10) | parziale: tutte le voci verificate solo con test sintetici | completo |
+| `F1-02-storage.md` | F1 (backlog F1-01 migrazioni, F1-04 registro media, F1-09 parte storage) | parziale: verificato con test sintetici su Windows; QEMU reale e Linux non eseguiti | completo |
+| `F1-04-service-ipc-ci.md` | F1 (backlog F1-10, F1-11; integrazione del composition root) | parziale: IPC, istanza singola, revoca, morte del genitore verificati (Windows, WSL2); end-to-end con QEMU reale, 2 esecuzioni; secondo utente, perdita del genitore con QEMU reale e CI su GitHub non eseguiti | completo (sezione datata in coda) |
+| `F1-06-mcp-sdk.md` | F1 (backlog F1-19, SDK MCP) | parziale: SDK `rmcp` provato su stdio; nessun client MCP reale | completo |
+| `F1-07-licenze-packaging.md` | F1 (backlog F1-19 licenze, F1-14 packaging) | verificato per inventario e `cargo deny`; SBOM e librerie Linux a runtime non eseguiti | completo |
+| `F1-08-ci.md` | F1 (backlog F1-02, F1-15) | parziale: workflow validato in locale, non eseguito su GitHub; delega cgroup provata in WSL2 | completo |
+
+File F1 non ancora scritti (flussi interrotti nel commit `aa04ccd`, codice presente ma senza evidenza registrata): numeri `F1-03` (`qemu-backend`: probe, processi, QMP, cicli reali del criterio di uscita) e `F1-05` (`apps/desktop`: appunti, backend di rendering, istantanee, misure). Finché questi file mancano, le relative voci sono `non eseguito`.
 
 ## Template
 
