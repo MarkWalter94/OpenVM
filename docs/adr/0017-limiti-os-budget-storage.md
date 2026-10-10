@@ -1,9 +1,8 @@
 # ADR-0017 — Limiti OS e budget storage
 
-- Stato: Proposta
-- Data: 2026-10-09
-- Responsabile: da assegnare
-- Da chiudere entro: F0
+- Stato: Accettata in parte (2026-10-10): **limiti per VM** impostati dall'utente e applicati dal supervisor su Windows; soglie host, contabilità completa dello storage, prove sotto pressione e Linux ancora aperti (F3, R2a)
+- Data: 2026-10-09; decisione parziale: 2026-10-10
+- Responsabile: responsabile del progetto
 
 ## Contesto
 
@@ -38,6 +37,18 @@ Meccanismi **identificati** su Windows (`F0-08`), proposti e non ancora decisi p
 Linux: cgroup v2 delegato (`memory.max`, `cpu.max`, `pids.max`, `cgroup.kill`) verificato in WSL2 solo **[processi]** con figli di prova (`F0-07` §4); su QEMU con KVM rinviato a R2a.
 
 Mancano per chiudere l'ADR: soglie, frequenza massima di controllo, riserva host, limiti per screenshot e log, prove sotto pressione (riempimento del volume, flood di screenshot e log), misura dell'effetto del tasso di I/O.
+
+### Decisione del 2026-10-10 (responsabile del progetto)
+
+**I limiti si impostano nelle impostazioni della VM**, si possono indicare **da riga di comando all'apertura di una VM** e, in F5, **da MCP**. Realizzazione e prove in `docs/verification/F1-10-limiti-vm-impostazioni.md`:
+
+- `VmConfig.limits`: `cpu_max_percent` (5–100, predefinito 100), `memory_margin_mib` (256–16384, predefinito 1024), `storage_budget_gib` (opzionale). Validati dal core; mai applicati dal client.
+- Windows: Job Object per esecuzione con hard cap CPU (`vcpus × percento / processori logici`) e memoria del job (RAM guest + margine), applicati prima dello spawn e riletti; memoria del job sotto la RAM → avvio rifiutato.
+- Budget di storage: verificato a ogni avvio sui file della VM esclusi il disco principale; oltre il budget l'avvio è rifiutato (`resource_limit`). Contabilità completa e soglie host in F3.
+- Modifica: solo a VM spenta, revisione attesa, disco solo in crescita, audit `vm_configure`; le sessioni agente non modificano le VM in F1. In F5 gli strumenti MCP potranno proporre limiti **solo più restrittivi** di quelli dell'utente (la policy dell'utente resta il tetto, sezione 7.2).
+- Riga di comando: `lightvm-desktop --apri-vm NOME [--crea] [--vcpu N] [--ram MIB] [--disco GIB] [--cpu-max %] [--memoria-margine MIB] [--budget-disco GIB|nessuno]`, sullo stesso canale autenticato della UI.
+
+Restano aperti per chiudere l'ADR: riserva dell'host, frequenza di controllo, limiti di screenshot e log, prove sotto pressione (riempimento del volume, flood), effetto misurato del tetto CPU con guest carico; parte Linux (cgroup v2) in R2a.
 
 ## Alternative considerate
 

@@ -131,7 +131,7 @@ ADR in stato Proposta (dettagli in `docs/adr/`):
 | ADR | Decisione | Da chiudere entro | Motivo per cui resta aperta |
 | --- | --- | --- | --- |
 | 0015 | Terminazione dei figli su Linux (parte A) | F0 → R2a | parte B accettata il 2026-10-10; parte A da confermare su host Linux fisico (ADR-0016) |
-| 0017 | Limiti OS e budget storage | F0 | meccanismi identificati; soglie, riserva e prove sotto pressione mancanti; Linux su host fisico in R2a |
+| 0017 | Limiti OS e budget storage | F3 | accettata in parte il 2026-10-10: limiti per VM (`F1-10`); soglie host, contabilità completa, prove sotto pressione in F3; Linux in R2a |
 
 Accettate in parte: ADR-0021 (SDK `rmcp` 3.5.1 accettato; client MCP aperti fino a F5) e ADR-0023 (politica e controlli accettati; SBOM e font di egui aperti fino a F6).
 
