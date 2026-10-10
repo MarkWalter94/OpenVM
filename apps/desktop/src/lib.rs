@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 pub mod appunti;
 pub mod console;
 pub mod impostazioni;
+pub mod impostazioni_vm;
 pub mod keymap;
 pub mod librerie;
 pub mod render;
@@ -142,6 +143,7 @@ pub struct LightVmApp {
     /// Catalogo e cartella QEMU con cui è stato avviato il supervisor.
     servizio_applicato: Option<(std::path::PathBuf, Option<std::path::PathBuf>)>,
     selettore: Option<Selettore>,
+    modifica_vm: Option<impostazioni_vm::ModificaVm>,
     appunti_scartati: u64,
     /// Backend di rendering effettivo, impostato dal ciclo eframe (F1-16).
     pub rendering: InfoRendering,
@@ -178,6 +180,7 @@ impl LightVmApp {
             eseguibile_servizio: None,
             servizio_applicato: None,
             selettore: None,
+            modifica_vm: None,
             appunti_scartati: 0,
             rendering: InfoRendering::default(),
         }
@@ -373,6 +376,31 @@ impl LightVmApp {
         }
     }
 
+    /// Apre una VM per nome con le modifiche indicate (riga di comando).
+    /// Richiede il supervisor; il risultato appare nella Dashboard.
+    pub fn apri_vm(&mut self, nome: String, modifiche: impostazioni_vm::ModificheVm, crea: bool) {
+        self.section = Section::Dashboard;
+        match &self.servizio {
+            Some(s) => {
+                s.invia(Comando::ApriVm {
+                    nome,
+                    modifiche,
+                    crea,
+                });
+            }
+            None => {
+                self.errore_servizio = Some(format!(
+                    "impossibile aprire la VM \"{nome}\": supervisor non avviato"
+                ));
+            }
+        }
+    }
+
+    /// Modifica delle impostazioni di una VM aperta nel pannello, se presente.
+    pub fn modifica_vm(&self) -> Option<&impostazioni_vm::ModificaVm> {
+        self.modifica_vm.as_ref()
+    }
+
     /// Supervisor collegato, se presente.
     pub fn servizio(&self) -> Option<&Servizio> {
         self.servizio.as_ref()
@@ -472,8 +500,43 @@ impl LightVmApp {
                 if let Some(srv) = &mut self.servizio {
                     let vivo = srv.vivo();
                     let stato = srv.stato();
-                    if let Some(c) = servizio_ui(ui, &stato, srv.pid(), vivo) {
-                        srv.invia(c);
+                    match servizio_ui(ui, &stato, srv.pid(), vivo) {
+                        Some(Comando::ApriImpostazioni(id)) => {
+                            self.modifica_vm = stato.vms.iter().find(|v| v.vm_id == id).map(|v| {
+                                impostazioni_vm::ModificaVm::nuova(
+                                    v.vm_id,
+                                    v.config_revision,
+                                    v.config.clone(),
+                                )
+                            });
+                        }
+                        Some(c) => {
+                            srv.invia(c);
+                        }
+                        None => {}
+                    }
+                    if let Some(m) = &mut self.modifica_vm {
+                        ui.separator();
+                        let attuale = stato.vms.iter().find(|v| v.vm_id == m.vm_id);
+                        let spenta = vivo
+                            && stato.connesso
+                            && attuale.is_some_and(|v| v.state == lightvm_proto::VmState::Stopped);
+                        let max_vcpu = std::thread::available_parallelism()
+                            .map_or(1, |n| u32::try_from(n.get()).unwrap_or(u32::MAX));
+                        match impostazioni_vm::impostazioni_vm_ui(ui, m, spenta, max_vcpu) {
+                            Some(impostazioni_vm::EsitoModifica::Salva) => {
+                                srv.invia(Comando::AggiornaVm {
+                                    vm_id: m.vm_id,
+                                    revisione: m.revisione,
+                                    config: Box::new(m.config.clone()),
+                                });
+                                self.modifica_vm = None;
+                            }
+                            Some(impostazioni_vm::EsitoModifica::Annulla) => {
+                                self.modifica_vm = None
+                            }
+                            None => {}
+                        }
                     }
                 } else {
                     if let Some(e) = &self.errore_servizio {
@@ -743,6 +806,13 @@ pub fn servizio_ui(
                         .clicked()
                     {
                         scelta = Some(Comando::Arresta(v.vm_id));
+                    }
+                    if ui
+                        .add_enabled(attivo, egui::Button::new("Impostazioni"))
+                        .on_hover_text("Risorse e limiti della VM (modificabili a VM spenta)")
+                        .clicked()
+                    {
+                        scelta = Some(Comando::ApriImpostazioni(v.vm_id));
                     }
                 });
                 ui.end_row();

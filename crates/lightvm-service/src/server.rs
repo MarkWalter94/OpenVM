@@ -199,6 +199,10 @@ impl Shared {
     }
 
     fn trigger_shutdown(&self) {
+        // Subito, non solo quando il conduttore dell'arresto parte: un EOF
+        // della pipe di vita che segue la richiesta di arresto della UI non è
+        // una perdita del genitore (niente Emergency Stop).
+        self.stopping.store(true, Ordering::SeqCst);
         let _ = self.shutdown_trigger.send(true);
     }
 

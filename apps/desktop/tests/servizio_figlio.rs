@@ -98,6 +98,123 @@ fn ui_avvia_il_supervisor_e_lo_arresta() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Impostazioni della VM e apertura da riga di comando attraverso un
+/// supervisor reale senza QEMU: modifica salvata (revisione 2), `ApriVm`
+/// applica le modifiche e prova l'avvio, rifiutato perché QEMU non è
+/// configurato; VM inesistente segnalata.
+#[test]
+fn impostazioni_vm_e_apri_vm_senza_qemu() {
+    use lightvm_desktop::impostazioni_vm::ModificheVm;
+    use lightvm_proto::{Firmware, GuestOs, NetworkProfile, VmConfig, VmName};
+    let Some(exe) = eseguibile_servizio() else {
+        eprintln!("lightvm-service non compilato: prova saltata (cargo build --workspace)");
+        return;
+    };
+    let dir = catalogo_temporaneo("impostazioni");
+    let cfg = ConfigServizio {
+        eseguibile: exe,
+        catalogo: dir.join("catalogo"),
+        qemu_dir: None,
+        runtime_dir: Some(dir.join("run")),
+        audit_log: Some(dir.join("audit.jsonl")),
+        politica: ParentLossPolicy::default(),
+    };
+    let mut s = Servizio::avvia(&cfg, Arc::new(|| {})).expect("avvio del supervisor");
+    attendi(&s, "connessione", |s| s.stato().connesso);
+    let vm = VmConfig {
+        name: VmName::parse("da-riga-di-comando").unwrap(),
+        guest_os: GuestOs::UbuntuLtsX86_64,
+        vcpus: 2,
+        memory_mib: 2048,
+        disk_gib: 16,
+        network: NetworkProfile::Offline,
+        install_media: None,
+        data_media: None,
+        firmware: Firmware::Uefi,
+        limits: Default::default(),
+    };
+    assert!(s.invia(Comando::Crea(Box::new(vm))));
+    attendi(&s, "creazione", |s| s.stato().vms.len() == 1);
+    let v = s.stato().vms[0].clone();
+    let mut nuova = v.config.clone();
+    nuova.limits.cpu_max_percent = 30;
+    assert!(s.invia(Comando::AggiornaVm {
+        vm_id: v.vm_id,
+        revisione: v.config_revision,
+        config: Box::new(nuova),
+    }));
+    attendi(&s, "revisione 2", |s| {
+        s.stato()
+            .vms
+            .first()
+            .is_some_and(|v| v.config_revision == 2)
+    });
+    assert_eq!(s.stato().vms[0].config.limits.cpu_max_percent, 30);
+
+    // Riga di comando: modifiche applicate, avvio rifiutato senza QEMU.
+    assert!(s.invia(Comando::ApriVm {
+        nome: "da-riga-di-comando".into(),
+        modifiche: ModificheVm {
+            vcpus: Some(1),
+            disk_gib: Some(20),
+            storage_budget_gib: Some(Some(10)),
+            ..ModificheVm::default()
+        },
+        crea: false,
+    }));
+    attendi(&s, "revisione 3", |s| {
+        s.stato()
+            .vms
+            .first()
+            .is_some_and(|v| v.config_revision == 3)
+    });
+    let c = s.stato().vms[0].config.clone();
+    assert_eq!(
+        (c.vcpus, c.disk_gib, c.limits.storage_budget_gib),
+        (1, 20, Some(10))
+    );
+    attendi(&s, "esito dell'avvio", |s| {
+        s.stato()
+            .ultimo_esito
+            .is_some_and(|e| e.starts_with("avvio") || e.contains("unsupported"))
+    });
+    eprintln!("esito: {:?}", s.stato().ultimo_esito);
+
+    // VM inesistente.
+    assert!(s.invia(Comando::ApriVm {
+        nome: "non-esiste".into(),
+        modifiche: ModificheVm::default(),
+        crea: false,
+    }));
+    attendi(&s, "VM non trovata", |s| {
+        s.stato()
+            .ultimo_esito
+            .is_some_and(|e| e.contains("non trovata"))
+    });
+    // `--crea`: VM creata con i valori predefiniti più le modifiche.
+    assert!(s.invia(Comando::ApriVm {
+        nome: "creata".into(),
+        modifiche: ModificheVm {
+            memory_mib: Some(1024),
+            cpu_max_percent: Some(20),
+            ..ModificheVm::default()
+        },
+        crea: true,
+    }));
+    attendi(&s, "VM creata", |s| s.stato().vms.len() == 2);
+    let creata = s
+        .stato()
+        .vms
+        .into_iter()
+        .find(|v| v.name.as_str() == "creata")
+        .unwrap();
+    assert_eq!(creata.config.memory_mib, 1024);
+    assert_eq!(creata.config.limits.cpu_max_percent, 20);
+    let (codice, forzato) = s.arresta(Duration::from_secs(15));
+    assert_eq!((codice, forzato), (Some(0), false));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn eseguibile_assente_e_un_errore_di_avvio() {
     let dir = catalogo_temporaneo("assente");

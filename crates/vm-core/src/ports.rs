@@ -71,6 +71,12 @@ pub trait IdGenerator {
 pub trait CatalogStore {
     /// Inserisce una nuova VM.
     fn insert_vm(&mut self, vm: &VmRecord) -> Result<(), PublicError>;
+    /// `true` se il journal del catalogo ha intenti non conclusi sulla VM
+    /// (file in corso di modifica o "da verificare"): la VM non si riconcilia
+    /// automaticamente.
+    fn has_open_intents(&self, _id: VmId) -> Result<bool, PublicError> {
+        Ok(false)
+    }
     /// Sostituisce configurazione e revisione di una VM esistente se la
     /// revisione salvata è `expected_revision`.
     fn update_vm(&mut self, vm: &VmRecord, expected_revision: u64) -> Result<(), PublicError>;

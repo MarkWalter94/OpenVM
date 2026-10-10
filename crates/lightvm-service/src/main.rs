@@ -304,7 +304,12 @@ async fn run(args: Args, engine: Box<dyn VmEngine>, host: Box<dyn Backend>) -> E
             tokio::select! {
                 _ = handle.wait() => break,
                 s = rx.recv() => match s {
-                    Some(ParentSignal::Shutdown) => handle.trigger_shutdown(),
+                    Some(ParentSignal::Shutdown) => {
+                        // L'EOF che segue la richiesta di arresto non è una
+                        // perdita della UI.
+                        lost_handled = true;
+                        handle.trigger_shutdown();
+                    }
                     Some(ParentSignal::Lost) if lost_handled => {}
                     Some(ParentSignal::Lost) => {
                         lost_handled = true;

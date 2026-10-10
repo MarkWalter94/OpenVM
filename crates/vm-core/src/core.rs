@@ -1430,6 +1430,30 @@ where
         Ok(())
     }
 
+    /// Riconciliazione all'avvio di un supervisor nuovo, quando il chiamante
+    /// garantisce che nessun processo di un'esecuzione precedente sia vivo
+    /// (Windows: il Job Object del supervisor precedente è chiuso e i suoi
+    /// processi terminati). Le VM in `recovering` senza intenti aperti nel
+    /// journal tornano `stopped`; le altre restano in riconciliazione.
+    /// Restituisce le VM riportate a `stopped`.
+    pub fn reconcile_after_restart(&mut self) -> Result<Vec<VmId>, PublicError> {
+        let candidates: Vec<VmId> = self
+            .vms
+            .iter()
+            .filter(|(_, rt)| rt.state == VmState::Recovering)
+            .map(|(id, _)| *id)
+            .collect();
+        let mut done = Vec::new();
+        for id in candidates {
+            if self.store.has_open_intents(id)? {
+                continue;
+            }
+            self.finish_recovery(id)?;
+            done.push(id);
+        }
+        Ok(done)
+    }
+
     /// `recovering → stopped`: riconciliazione completata dal supervisor
     /// (processi assenti verificati, journal applicato).
     pub fn finish_recovery(&mut self, vm_id: VmId) -> Result<(), PublicError> {

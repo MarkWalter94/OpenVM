@@ -124,6 +124,15 @@ where
     ) -> Result<Self, PublicError> {
         let mut core = Core::new(store, SystemClock, SystemIds::default(), audit, config);
         core.load_catalog()?;
+        // Un supervisor appena avviato non possiede processi: quelli di un
+        // supervisor precedente sono terminati con il suo Job Object (ADR-0009).
+        let riconciliate = core.reconcile_after_restart()?;
+        if !riconciliate.is_empty() {
+            crate::diag!(
+                "lightvm-service: {} VM riportate a stopped dopo il riavvio (nessun processo né intento aperto)",
+                riconciliate.len()
+            );
+        }
         let mut e = Self {
             core,
             backend,

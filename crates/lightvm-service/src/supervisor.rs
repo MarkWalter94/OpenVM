@@ -34,6 +34,10 @@ pub trait Backend: Send + 'static {
     /// [`ParentLossPolicy`] (ADR-0015 parte B): con `shutdown_vms` il backend
     /// adotta l'attesa ACPI indicata per l'arresto che segue.
     fn on_parent_lost(&mut self, policy: ParentLossPolicy);
+    /// Chiamato all'inizio dell'arresto controllato del servizio, prima che
+    /// il motore arresti le VM: il backend adotta un arresto ordinato che
+    /// stia nel timeout del servizio (se una politica non ne ha già scelto uno).
+    fn prepare_shutdown(&mut self) {}
     /// Rilascio finale dell'host (chiamato durante lo shutdown, dopo l'arresto
     /// delle VM da parte del motore).
     fn shutdown(&mut self);
@@ -189,6 +193,7 @@ impl SupervisorThread {
                         }
                     }
                     self.backend.stop_agent_sessions(StopReason::Shutdown);
+                    self.backend.prepare_shutdown();
                     self.engine.stop_all();
                     self.publish_state_changes();
                     self.backend.shutdown();
