@@ -106,7 +106,7 @@ Elenco completo con origine in `docs/verification/F0-09-riesame-prove.md` §8.
 | U-1 | Da amministratore: verificare ed eventualmente abilitare la feature `HypervisorPlatform`, poi ripetere il probe e `-cpu host` | facoltativa (D-1, D-6) |
 | U-2 | Fornire un host Linux fisico Ubuntu LTS con KVM, se disponibile | alternativa a U-5 |
 | U-3 | Creare un secondo account locale non amministratore per i test sui socket privati, o decidere di registrare il limite | P-5 (risposta: "in una VM", vedi P-5) |
-| U-4 | Prova con tastiera fisica a sessione sbloccata | P-4 |
+| U-4 | Prova con tastiera fisica a sessione sbloccata | P-4 — pronta: `powershell -ExecutionPolicy Bypass -File apps\desktop\scripts\prova-tastiera-u4.ps1` (istruzioni nello script; prova a vuoto del 2026-10-10: console con desktop Ubuntu dopo circa 100 s) |
 | U-5 | Confermare l'esito "verificato solo Windows" | P-1 — **fatto il 2026-10-10** |
 | U-6 | In WSL: `sudo apt install build-essential pkg-config` (ed eventualmente `libxkbcommon-x11-0`) | build Linux standard (non bloccante) |
 | U-7 | Dichiarare responsabili di firma del codice e revisione indipendente, o la loro indisponibilità | P-6 — **fatto il 2026-10-10**: nessuno |
