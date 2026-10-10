@@ -26,9 +26,9 @@ Legenda tipo: **B** = bloccante per l'uscita da F0; **NB** = avviata in F0, comp
 | F0-B14 | Prima versione di `ARCHITECTURE.md` e `SECURITY.md`; ADR delle decisioni critiche | B | 1, 6 | da assegnare | documenti in `docs/` | tutti | completato |
 | F0-B15 | Verifica della disponibilità di firma e revisione indipendente | B (decisione da chiudere in F0, sez. 17) | 1 | da assegnare | `docs/STATUS.md` | 0020 | aperto: P-6 |
 | F0-B16 | Riesame delle prove; decisione di prosecuzione; backlog F1 | B | 6 | da assegnare | `F0-09-riesame-prove.md`, `docs/STATUS.md`, questo file | — | completato: `F0-09` (proposta in attesa di conferma) |
-| F0-N01 | Selezione e prova dell'SDK MCP e dei client di riferimento | NB | — | da assegnare | file di verifica dedicato | 0021 | aperto (entro F1) |
-| F0-N02 | Inventario packaging e licenze delle dipendenze | NB | — | da assegnare | file di verifica dedicato | 0023 | in parte: dipendenze di `rfb-client` elencate in `F0-04` |
-| F0-N03 | `COMPATIBILITY.md` e `TESTING.md` completi; scelta del framework di test UI | NB | — | da assegnare | documenti in `docs/`; file di verifica | 0022 | in parte: egui_kittest provato (`F0-01`, `F0-07`) |
+| F0-N01 | Selezione e prova dell'SDK MCP e dei client di riferimento | NB | — | da assegnare | file di verifica dedicato | 0021 | in parte: SDK scelto e provato (`F1-06`); client MCP reali rinviati a F5 |
+| F0-N02 | Inventario packaging e licenze delle dipendenze | NB | — | da assegnare | file di verifica dedicato | 0023 | completato per inventario e `cargo deny` (`F1-07`); SBOM aperto fino a F6 |
+| F0-N03 | `COMPATIBILITY.md` e `TESTING.md` completi; scelta del framework di test UI | NB | — | da assegnare | documenti in `docs/`; file di verifica | 0022 | in parte: egui_kittest provato (`F0-01`, `F0-07`); `COMPATIBILITY.md` e `TESTING.md` completati nel commit `aa04ccd`; istantanee senza evidenza |
 | F0-N04 | Realizzazione della fixture nel guest (entro F3, sezione 9) | NB | — | da assegnare | file di verifica in F1–F3 | 0019 | aperto (entro F3) |
 
 ## Ordine di esecuzione
@@ -81,6 +81,34 @@ Derivato dalla sezione 10 F1 e dalle azioni richieste nei file F0 (riesame in `F
 | F1-18 | Prime misure con processi di prodotto: memoria UI + supervisor in private bytes (working set a parte), CPU manager in idle su 5 minuti, 20 avvii UI a freddo e 20 a caldo | sez. 13; limite L-3; `F0-09` §5 | riga in `docs/TESTING.md` | 0014, 0018 |
 | F1-19 | Chiusura delle attività F0 non bloccanti: SDK e client MCP (ADR-0021), inventario packaging e licenze incluse le dipendenze di `rfb-client` (ADR-0023), istantanee egui_kittest (ADR-0022), `COMPATIBILITY.md` e `TESTING.md` completi | sez. 10 F0 e F1 | file di verifica dedicati | 0021, 0022, 0023 |
 
+### Avanzamento F1
+
+Aggiornato il 2026-10-10 dalla lettura dei file di verifica e del codice al commit `8c1f26e`. "Codice presente" non vale come verifica (sezione 16, punto 8): senza un file in `docs/verification/` la voce resta `non eseguito`. Nessuna voce vale per il criterio di uscita F1 finché F0 non è chiusa (sezione 10).
+
+| ID | Stato | Evidenza o motivo |
+| --- | --- | --- |
+| F1-01 | in parte | tipi, schemi, errori e migrazioni verificati con test sintetici (`F1-01`, `F1-02`); build e test in CI su GitHub non eseguiti |
+| F1-02 | in parte | workflow completo validato in locale (`F1-08`); mai eseguito su GitHub |
+| F1-03 | codice presente, evidenza assente | `qemu-backend/src/probe.rs`, test `real_qemu::reale_probe_hash_e_acceleratore_assente` (`#[ignore]`); file `F1-03` non scritto |
+| F1-04 | in parte | modello e registro verificati con test sintetici (`F1-01`, `F1-02`); identità OS del file e apertura protetta contro reparse point non collegate nel servizio (`TODO(F1)` in `lightvm-service/src/adapters/catalog.rs`) |
+| F1-05 | codice presente, evidenza assente | `qemu-backend/src/process/`, `sys/windows.rs`, `run.rs`; end-to-end reale con 2 esecuzioni in `F1-04` (sezione in coda); perdita del genitore con QEMU reale non eseguita |
+| F1-06 | in parte | client QMP in `qemu-backend/src/qmp/` con test simulati (`tests/qmp_mock.rs`), evidenza non registrata; **la UI apre ancora direttamente il socket QMP** (`apps/desktop/src/console.rs`, `qmp_worker`): va portata sull'IPC del supervisor per rispettare l'unico proprietario QMP (ADR-0012) |
+| F1-07 | codice presente, evidenza assente | `qemu-backend/src/input.rs`, `screenshot.rs` |
+| F1-08 | codice presente, evidenza assente | `qemu-backend/src/cmdline.rs`, `run::check_no_nic`, test `real_qemu::reale_rilevatore_nic` (`#[ignore]`) |
+| F1-09 | in parte | parte storage verificata con test sintetici (`F1-02`); `qemu-backend/src/storage_guard.rs` senza evidenza; overlay in uso scrivibile da un altro processo dello stesso utente (decisione aperta) |
+| F1-10 | verificato con test | audit di creazione, avvio, arresto, Emergency Stop e dinieghi (`F1-01`; `F1-04`, `core_path`) |
+| F1-11 | in parte | supervisor headless e IPC con named pipe e ACL verificati (`F1-04`); **la UI non avvia il supervisor e non usa l'IPC**: presupposto di P-2 non realizzato |
+| F1-12 | non eseguito | test `real_qemu::reale_cicli_start_stop` scritto (`LIGHTVM_F1_CYCLES`, predefinito 20) ma senza esecuzione registrata; creazione e registrazione del disco principale mancanti nel servizio (`TODO(F1-12)` in `lightvm-service/src/adapters/backend.rs`) |
+| F1-13 | codice presente, evidenza assente | `apps/desktop/src/appunti.rs`, `tests/appunti_ui.rs`; prova manuale non eseguita |
+| F1-14 | in parte | dipendenze Linux elencate (`F1-07`); job `smoke-render-software` non eseguito su GitHub; verifica a runtime non eseguita |
+| F1-15 | in parte | probe D-Bus `StartTransientUnit` verificato in WSL2 (`F1-08`); non implementato in `qemu-backend` (`TODO(F1/R2a)` in `process/mod.rs`) |
+| F1-16 | codice presente, evidenza assente | `apps/desktop/src/render.rs`; prova in RDP non eseguita |
+| F1-17 | non avviato | `Skylake-Client-v4` accettato dalla validazione, nessuna prova di boot al desktop né installazione su disco |
+| F1-18 | non eseguito | nessuna misura con processi di prodotto |
+| F1-19 | in parte | SDK MCP (`F1-06`, ADR-0021 accettata per l'SDK), licenze (`F1-07`, ADR-0023 accettata in parte); istantanee egui_kittest presenti in `apps/desktop/tests/snapshots/` senza evidenza (ADR-0022 Proposta) |
+
+Stato del workspace: secondo il commit `aa04ccd`, `cargo check --workspace --all-targets` passa; i test completi del workspace non sono stati rieseguiti dopo le ultime modifiche. Sull'host di sviluppo attuale (2026-10-10) Rust e QEMU non sono installati: nessuna build né test eseguiti.
+
 ### Punti aperti da F0 per le fasi successive
 
 | Fase | Attività | Origine |
@@ -105,8 +133,9 @@ ADR in stato Proposta (dettagli in `docs/adr/`):
 | 0015 | Terminazione dei figli su Linux e sorte delle VM manuali senza UI | F0 | parte B in attesa del crash della UI su Windows (P-2) |
 | 0017 | Limiti OS e budget storage | F0 | meccanismi identificati; soglie, riserva e prove sotto pressione mancanti; Linux su host fisico in R2a |
 | 0020 | Responsabilità di firma e revisione indipendente | F0 | dichiarazione dell'utente (P-6) |
-| 0021 | SDK e client MCP | F1 | attività non bloccante |
-| 0022 | Framework di test UI | F1 | istantanee non provate |
-| 0023 | Dipendenze e licenze | F1 | inventario completo da eseguire |
+| 0022 | Framework di test UI | F1 | istantanee scritte, evidenza non registrata |
+| 0026 | Codici pubblici per autenticazione e autorizzazione | F1 | `unauthenticated` adottato nel codice (`F1-01`, `F1-04`), decisione non ancora accettata |
+
+Accettate in parte: ADR-0021 (SDK `rmcp` 3.5.1 accettato; client MCP aperti fino a F5) e ADR-0023 (politica e controlli accettati; SBOM e font di egui aperti fino a F6).
 
 ADR-0016 è Accettata ma diventa efficace solo con la conferma dell'utente (P-1). Dettagli operativi del supporto dati approvato (sezione 17): da registrare in ADR-0008 (P-7).

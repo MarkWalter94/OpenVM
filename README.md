@@ -19,7 +19,7 @@ F1 streams delivered so far, each with its evidence file under `docs/verificatio
 - Supervisor service with authenticated local IPC, real composition root and a headless end-to-end run against real QEMU (`lightvm-service`).
 - MCP server spike on the official Rust SDK pinned to protocol revision 2025-11-25 (`lightvm-mcp`), licence inventory, CI workflow validated locally.
 
-Still open in F1: the QEMU backend evidence (20 real start/stop cycles), the desktop UI evidence (clipboard isolation, renderer selection, first measurements), and the consolidation of `docs/STATUS.md`. CI has not run on GitHub yet. No product feature is considered verified until its evidence file says so.
+Still open in F1: the QEMU backend evidence (20 real start/stop cycles), the desktop UI evidence (clipboard isolation, renderer selection, first measurements), and moving the desktop console off its direct QMP connection onto the supervisor IPC. CI has not run on GitHub yet. Per-item progress is tracked in `docs/RELEASE_PLAN.md` ("Avanzamento F1"). No product feature is considered verified until its evidence file says so.
 
 ## Repository layout
 

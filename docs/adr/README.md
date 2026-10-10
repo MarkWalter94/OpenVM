@@ -78,5 +78,7 @@ Quando un ADR Proposta viene chiuso si aggiornano: lo stato e la sezione Decisio
 | [0022](0022-framework-test-ui.md) | Framework di test UI | Proposta (entro F1) | 13, 17 |
 | [0023](0023-dipendenze-e-licenze.md) | Dipendenze e licenze | Accettata per politica e controlli; SBOM e font di egui aperti fino a F6 | 6.0, 6.3, 17 |
 | [0024](0024-crate-rfb-client-separato.md) | Crate `rfb-client` separato usato dalla UI; `qemu-backend` resta nel supervisor | Accettata | 6.1, 6.2, 6.4 |
+| [0025](0025-esclusione-dischi-nel-supervisor.md) | Esclusione dei dischi garantita dal supervisor, non dal lock di QEMU | Accettata (Windows; Linux in R2a) | 3, 6.3, 7.1, 7.4, 8, 10 |
+| [0026](0026-codici-autenticazione-autorizzazione.md) | Codici pubblici per autenticazione e autorizzazione | Proposta (entro F1) | 6.3, 7.3, 7.4, 9 |
 | [0025](0025-esclusione-dischi-nel-supervisor.md) | Esclusione dei dischi garantita dal supervisor, non dal lock di QEMU | Accettata (Windows; Linux in R2a) | 3, 6.3, 7.1, 8 |
 | [0026](0026-codici-autenticazione-autorizzazione.md) | Codici pubblici `unauthenticated`, `session_expired`, `permission_denied` | Proposta | 6.3, 7, 9 |
