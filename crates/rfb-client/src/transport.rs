@@ -43,6 +43,18 @@ pub enum Transport {
         /// Implementation.
         imp: UnixImpl,
     },
+    /// Per-run display socket of the supervisor (ADR-0013): Unix socket in a
+    /// private directory; the client first writes the display ticket followed
+    /// by `\n`, then speaks RFB. The supervisor forwards to QEMU only after
+    /// checking the ticket.
+    Ticket {
+        /// Socket path from the ticket.
+        path: PathBuf,
+        /// Implementation.
+        imp: UnixImpl,
+        /// Display credential (hexadecimal, never logged).
+        token: String,
+    },
     /// TCP (loopback only) with VeNCrypt X509None and a client certificate.
     VencryptTls {
         /// Server address (must be loopback).
@@ -195,6 +207,21 @@ pub(crate) fn open(t: &Transport) -> Result<Opened, Error> {
     match t {
         Transport::Unix { path, imp } => {
             let (stream, control) = open_unix(path, *imp)?;
+            Ok(Opened {
+                stream,
+                kind: ChannelKind::PrivateUnixSocket,
+                control,
+                tls: None,
+            })
+        }
+        Transport::Ticket { path, imp, token } => {
+            if token.is_empty() || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(Error::Config("invalid display ticket".into()));
+            }
+            let (mut stream, control) = open_unix(path, *imp)?;
+            stream.write_all(token.as_bytes())?;
+            stream.write_all(b"\n")?;
+            stream.flush()?;
             Ok(Opened {
                 stream,
                 kind: ChannelKind::PrivateUnixSocket,

@@ -85,6 +85,7 @@ fn summary(s: VmStatus) -> VmSummary {
         run_id: s.run_id,
         config: s.config,
         config_revision: s.config_revision,
+        disk_used_bytes: None,
     }
 }
 

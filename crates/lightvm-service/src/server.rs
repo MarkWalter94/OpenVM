@@ -896,6 +896,16 @@ async fn dispatch(
             config: Box::new(config),
         },
         Request::SubmitVm { request } => SupervisorRequest::SubmitVm(Box::new(request)),
+        // TODO(F2): implemented by the F2 service work.
+        Request::ListMedia
+        | Request::ImportMedia { .. }
+        | Request::DeleteVm { .. }
+        | Request::OpenConsole { .. } => {
+            return Dispatch::Reply(Err(op_error(
+                ErrorCode::Unsupported,
+                format!("operation {} not implemented yet", req.name()),
+            )));
+        }
         Request::Subscribe => {
             if events.is_none() {
                 *events = Some(shared.events.subscribe());
