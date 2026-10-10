@@ -104,7 +104,7 @@ Aggiornato il 2026-10-10 dalla lettura dei file di verifica e del codice, poi do
 | F1-15 | in parte | probe D-Bus `StartTransientUnit` verificato in WSL2 (`F1-08`); non implementato in `qemu-backend` (`TODO(F1/R2a)` in `process/mod.rs`) |
 | F1-16 | in parte | `F1-05`: auto → glow, ripiego glow → wgpu DX12 e → WARP con indicatore verificati su hardware; prova in RDP non eseguita |
 | F1-17 | verificato su hardware (Windows) | `F1-03` (sezioni del 2026-10-10): `Skylake-Client-v4` fino al desktop live; installazione automatica su disco in 8 min; boot dal disco alla schermata di accesso; arresto ACPI ordinario in 3,6 s |
-| F1-18 | in parte | `F1-05`: idle UI + supervisor 5 min (glow: CPU ≤ 0,14 % di un core, private ≤ 106 MiB; wgpu: CPU ≤ 0,07 %, private ≈ 492 MiB, D-12), 20 avvii a caldo per backend (primo frame p95 139 ms glow, 248 ms wgpu); avvii a freddo non eseguiti |
+| F1-18 | in parte | `F1-05`: idle UI + supervisor 5 min (glow: CPU ≤ 0,14 % di un core, private ≤ 106 MiB; wgpu: CPU ≤ 0,07 %, private ≈ 492 MiB, D-12, poi **189 MiB con `MemoryHints::MemoryUsage`**), 20 avvii a caldo per backend (primo frame p95 139 ms glow, 248 ms wgpu); avvii a freddo non eseguiti |
 | F1-19 | in parte | SDK MCP (`F1-06`, ADR-0021 accettata per l'SDK), licenze (`F1-07`, ADR-0023 accettata in parte); 6 istantanee egui_kittest verificate sullo stesso host (`F1-05`; ADR-0022 Proposta, accettazione proposta) |
 
 Stato del workspace (2026-10-10, host Windows 11 con Rust 1.99.0 MSVC): `cargo fmt --check`, `cargo clippy -D warnings` (workspace, varianti `glow`/`wgpu` della UI, servizio senza `supervisore`) e `cargo test --workspace --locked` verdi: 328 passati, 0 falliti, 7 ignorati (prove con QEMU reale, eseguite a parte in `F1-03` e `F1-09`).

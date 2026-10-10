@@ -485,6 +485,14 @@ fn opzioni(t: Tentativo, args: &Args) -> eframe::NativeOptions {
                 if cfg!(windows) {
                     create.instance_descriptor.backends = wgpu::Backends::DX12;
                 }
+                // D-12: il suggerimento predefinito (`Performance`) prealloca
+                // blocchi di memoria grandi; per una UI con una sola texture
+                // di console conta l'occupazione (obiettivo 250 MiB, sez. 13).
+                let base = create.device_descriptor.clone();
+                create.device_descriptor = Arc::new(move |adapter| wgpu::DeviceDescriptor {
+                    memory_hints: wgpu::MemoryHints::MemoryUsage,
+                    ..base(adapter)
+                });
                 create.native_adapter_selector = Some(Arc::new(move |adapters, _surface| {
                     for a in adapters {
                         let i = a.get_info();
