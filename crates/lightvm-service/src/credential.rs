@@ -117,6 +117,11 @@ impl CredentialStore {
         ttl: Option<Duration>,
     ) -> std::io::Result<(CredentialId, Credential)> {
         let secret = Credential::generate()?;
+        // Le voci scadute o revocate non servono più: non si accumulano con
+        // emissioni ripetute (la verifica le scorre tutte).
+        let now = Instant::now();
+        self.entries
+            .retain(|_, e| !e.revoked && e.expires_at.is_none_or(|t| now < t));
         self.next_id += 1;
         let id = self.next_id;
         self.entries.insert(

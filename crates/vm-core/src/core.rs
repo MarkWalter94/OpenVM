@@ -33,7 +33,7 @@ use crate::policy::{
     effective_policy, effective_resource_limits, effective_user_policy, host_layer,
 };
 use crate::ports::{AuditSink, CatalogStore, Clock, IdGenerator, MediaInspector, VmBackend};
-use crate::resources::validate_config;
+use crate::resources::{existing_disk_limits, validate_config};
 use crate::session::{SessionRegistry, SessionSpec, discard_code_for};
 
 /// Limite rigido di operazioni in coda per VM, indipendente dalle quote.
@@ -292,6 +292,10 @@ pub struct Core<S, C, I, A> {
     revision: PolicyRevision,
     sessions: SessionRegistry,
     vms: BTreeMap<VmId, VmRuntime>,
+    /// VM di ogni `operation_id` mai accettato. Non si riduce con la storia
+    /// delle operazioni: un id uscito dalla finestra di idempotenza resta
+    /// riservato e non può essere riusato per un'altra richiesta (32 byte
+    /// per operazione per la vita del supervisor).
     op_index: BTreeMap<OperationId, VmId>,
     audit_seq: u64,
     audit_failures: u64,
@@ -630,8 +634,11 @@ where
                 "riduzione del disco non supportata: si può solo ingrandire",
             ))
         } else {
-            validate_config(&config, &self.effective_limits())
-                .and_then(|()| self.check_config_media(&config))
+            validate_config(
+                &config,
+                &existing_disk_limits(self.effective_limits(), &current.config),
+            )
+            .and_then(|()| self.check_config_media(&config))
         };
         if let Err(err) = check {
             return Err(self.deny(actor, AuditAction::VmConfigure, ev, err));
@@ -756,8 +763,12 @@ where
             .get(&vm_id)
             .ok_or_else(|| PublicError::not_found("VM inesistente"))?;
         // Limiti per VM ricalcolati all'avvio: la capacità host può essere cambiata
-        // dopo la creazione (nuovo probe, riserva aumentata).
-        validate_config(&rt.record.config, &limits)?;
+        // dopo la creazione (nuovo probe, riserva aumentata). Il disco esiste
+        // già: lo spazio libero conta solo per crearlo o ingrandirlo.
+        validate_config(
+            &rt.record.config,
+            &existing_disk_limits(limits, &rt.record.config),
+        )?;
         // Memoria guest complessiva delle VM con processo, più quella richiesta,
         // entro la memoria host meno la riserva. Le vCPU possono essere
         // sovrallocate tra VM diverse e non sono sommate.
@@ -1094,6 +1105,7 @@ where
             let kind = p.record.kind;
             let state = rt.state;
             let current_run = rt.run_id;
+            let current_end = rt.pending_end;
 
             // Seconda verifica, immediatamente prima dell'inoltro.
             let effective = match self.authorize(&p.caller, Some(vm_id), p.action.capability(), now)
@@ -1129,9 +1141,14 @@ where
                     .into_iter()
                     .flatten()
                 {
-                    match self.store.get_media(id)? {
-                        Some(e) => media.push(e),
-                        None => missing = true,
+                    match self.store.get_media(id) {
+                        Ok(Some(e)) => media.push(e),
+                        Ok(None) => missing = true,
+                        Err(err) => {
+                            // L'operazione non resta persa: scartata con l'errore.
+                            self.discard(vm_id, p, err.code);
+                            return Err(err);
+                        }
                     }
                 }
                 if missing {
@@ -1139,7 +1156,7 @@ where
                     continue;
                 }
                 let run = self.ids.run_id();
-                self.store.insert_run(&RunRecord {
+                if let Err(err) = self.store.insert_run(&RunRecord {
                     id: run,
                     vm_id,
                     config_revision: vm.config_revision,
@@ -1147,7 +1164,10 @@ where
                     started_at: now,
                     ended_at: None,
                     end_reason: None,
-                })?;
+                }) {
+                    self.discard(vm_id, p, err.code);
+                    return Err(err);
+                }
                 if let Some(rt) = self.vms.get_mut(&vm_id) {
                     rt.run_id = Some(run);
                     rt.geometry = None;
@@ -1183,7 +1203,20 @@ where
             p.record.status = OperationStatus::Forwarded;
             p.record.run_id = Some(run_id);
             p.record.updated_at = now;
-            self.store.upsert_operation(&p.record)?;
+            if let Err(err) = self.store.upsert_operation(&p.record) {
+                // Nessun inoltro: la VM torna allo stato precedente invece di
+                // restare in `starting`/`stopping` senza operazioni, e
+                // l'operazione è scartata con l'errore.
+                if let Some(rt) = self.vms.get_mut(&vm_id) {
+                    rt.run_id = current_run;
+                    rt.pending_end = current_end;
+                    rt.state = state;
+                    rt.record.persisted_state = state;
+                }
+                let _ = self.store.set_persisted_state(vm_id, state);
+                self.discard(vm_id, p, err.code);
+                return Err(err);
+            }
             let ev = Ev {
                 vm_id: Some(vm_id),
                 run_id: Some(run_id),
@@ -1267,7 +1300,10 @@ where
         };
         p.record.error = result.as_ref().err().map(|e| e.code);
         p.record.updated_at = now;
-        self.store.upsert_operation(&p.record)?;
+        // Un errore del catalogo qui non annulla ciò che il backend ha già
+        // fatto: lo stato in memoria segue l'esito e l'errore è restituito
+        // dopo.
+        let persisted = self.store.upsert_operation(&p.record);
         let record = p.record.clone();
         let actor = p.caller.actor();
         let session_id = p.session_id();
@@ -1307,6 +1343,7 @@ where
             AuditOutcome::Failed
         };
         self.emit_after(actor, audit_action_for(kind), outcome, ev);
+        persisted?;
         Ok(record)
     }
 

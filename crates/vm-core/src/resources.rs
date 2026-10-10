@@ -26,6 +26,20 @@ fn over(field: &'static str, requested: u64, limit: u64) -> PublicError {
         .with_detail("limit", limit.to_string())
 }
 
+/// Limiti per una VM già creata: il disco esistente e il suo budget restano
+/// ammessi anche se lo spazio libero dell'host è sceso sotto la loro
+/// dimensione (il disco è già allocato); solo una crescita oltre lo spazio
+/// disponibile viene rifiutata.
+pub fn existing_disk_limits(limits: ResourceLimits, current: &VmConfig) -> ResourceLimits {
+    ResourceLimits {
+        max_disk_gib: limits
+            .max_disk_gib
+            .max(current.disk_gib)
+            .max(current.limits.storage_budget_gib.unwrap_or(0)),
+        ..limits
+    }
+}
+
 /// Valida una configurazione contro i limiti effettivi (già intersecati con la
 /// capacità host, vedi [`crate::policy::effective_resource_limits`]).
 ///

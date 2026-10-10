@@ -12,8 +12,11 @@
 
 use std::path::{Path, PathBuf};
 
+use egui::WidgetType;
 use lightvm_proto::ipc::ParentLossPolicy;
 use serde::{Deserialize, Serialize};
+
+use crate::tema::{self, Tono};
 
 /// Nome del file nel profilo utente.
 pub const FILE: &str = "impostazioni-ui.json";
@@ -87,6 +90,8 @@ pub struct Impostazioni {
     /// Distribuzione QEMU approvata; `None` = nessuna (avvio delle VM
     /// rifiutato dal supervisor con un messaggio chiaro).
     pub qemu_dir: Option<PathBuf>,
+    /// Tema dell'interfaccia.
+    pub tema: crate::UiTheme,
 }
 
 impl Default for Impostazioni {
@@ -97,6 +102,7 @@ impl Default for Impostazioni {
             avvio_supervisor: true,
             catalogo: None,
             qemu_dir: None,
+            tema: crate::UiTheme::Dark,
         }
     }
 }
@@ -132,18 +138,25 @@ pub enum AzioneSupervisor {
 }
 
 /// Stato del supervisor mostrato nella sezione.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StatoSupervisorUi {
-    /// Testo dello stato (in esecuzione, non avviato, errore).
+    /// Testo dello stato (connesso, non avviato, errore).
     pub descrizione: String,
+    /// Tono dell'indicatore, uguale a quello della barra laterale.
+    pub tono: Tono,
     /// Il supervisor è in esecuzione.
     pub attivo: bool,
+    /// Riavvio o arresto in corso: azioni disabilitate.
+    pub in_corso: bool,
     /// VM accese che un riavvio arresterebbe.
     pub vm_accese: usize,
     /// Le impostazioni del supervisor differiscono da quelle in uso.
     pub da_applicare: bool,
     /// Il selettore di cartelle è disponibile su questa piattaforma.
     pub selettore: bool,
+    /// Catalogo e QEMU dati da riga di comando (`--catalogo`), in uso al
+    /// posto di quelli scelti qui.
+    pub riga_di_comando: Option<(PathBuf, Option<PathBuf>)>,
 }
 
 fn mostra_percorso(p: Option<&Path>, vuoto: &str) -> String {
@@ -160,94 +173,134 @@ pub fn supervisor_ui(
     stato: &StatoSupervisorUi,
 ) -> (Option<AzioneSupervisor>, bool) {
     let mut azione = None;
-    ui.label(egui::RichText::new("Supervisor").strong());
-    ui.label(format!("Stato: {}", stato.descrizione));
-    egui::Grid::new("lightvm_impostazioni_supervisor")
-        .num_columns(3)
-        .spacing([12.0, 6.0])
-        .show(ui, |ui| {
-            ui.label("Catalogo VM:");
-            ui.label(mostra_percorso(
-                imp.catalogo_effettivo().as_deref(),
-                "non determinabile",
-            ));
+    tema::riga(ui, "Stato", None, |ui| {
+        tema::stato(ui, &stato.descrizione, stato.tono)
+    });
+    if let Some((catalogo, qemu)) = &stato.riga_di_comando {
+        ui.add_space(4.0);
+        tema::avviso(
+            ui,
+            &format!(
+                "In uso da riga di comando: catalogo {}, QEMU {}. Le scelte qui sotto valgono negli avvii senza --catalogo.",
+                catalogo.display(),
+                mostra_percorso(qemu.as_deref(), "nessuna")
+            ),
+            Tono::Accento,
+        );
+    }
+    tema::divisore(ui);
+    tema::riga(
+        ui,
+        "Catalogo delle VM",
+        Some("Configurazioni e dischi delle macchine virtuali."),
+        |ui| {
+            tema::percorso(
+                ui,
+                &mostra_percorso(imp.catalogo_effettivo().as_deref(), "non determinabile"),
+            );
             ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(stato.selettore, egui::Button::new("Sfoglia…"))
-                    .clicked()
-                {
+                let r = ui.add_enabled(stato.selettore, egui::Button::new("Sfoglia…"));
+                tema::nome_accessibile(&r, WidgetType::Button, "Scegli la cartella del catalogo");
+                if r.clicked() {
                     azione = Some(AzioneSupervisor::ScegliCatalogo);
                 }
-                if ui
-                    .add_enabled(imp.catalogo.is_some(), egui::Button::new("Predefinito"))
-                    .clicked()
-                {
+                let r = ui.add_enabled(imp.catalogo.is_some(), tema::discreto("Predefinito"));
+                tema::nome_accessibile(&r, WidgetType::Button, "Torna al catalogo predefinito");
+                if r.clicked() {
                     azione = Some(AzioneSupervisor::CatalogoPredefinito);
                 }
             });
-            ui.end_row();
-            ui.label("Cartella di QEMU:");
-            ui.label(mostra_percorso(
-                imp.qemu_dir.as_deref(),
-                "non impostata: le VM non si possono avviare",
-            ));
+        },
+    );
+    tema::divisore(ui);
+    tema::riga(
+        ui,
+        "Distribuzione QEMU",
+        Some("qemu-system-x86_64 e qemu-img approvati; il supervisor ne verifica gli hash."),
+        |ui| {
+            match imp.qemu_dir.as_deref() {
+                Some(d) => {
+                    tema::percorso(ui, &d.display().to_string());
+                }
+                None => {
+                    tema::stato(
+                        ui,
+                        "non impostata: le VM non si possono avviare",
+                        Tono::Attenzione,
+                    );
+                }
+            }
             ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(stato.selettore, egui::Button::new("Sfoglia… "))
-                    .on_hover_text("Cartella con qemu-system-x86_64 e qemu-img approvati (hash verificati dal supervisor)")
-                    .clicked()
-                {
+                let r = ui.add_enabled(stato.selettore, egui::Button::new("Sfoglia…"));
+                tema::nome_accessibile(&r, WidgetType::Button, "Scegli la cartella di QEMU");
+                if r.clicked() {
                     azione = Some(AzioneSupervisor::ScegliQemu);
                 }
-                if ui
-                    .add_enabled(imp.qemu_dir.is_some(), egui::Button::new("Nessuna"))
-                    .clicked()
-                {
+                let r = ui.add_enabled(imp.qemu_dir.is_some(), tema::discreto("Nessuna"));
+                tema::nome_accessibile(&r, WidgetType::Button, "Nessuna distribuzione QEMU");
+                if r.clicked() {
                     azione = Some(AzioneSupervisor::RimuoviQemu);
                 }
             });
-            ui.end_row();
-        });
-    let cambiato = ui
-        .checkbox(
+        },
+    );
+    tema::divisore(ui);
+    let cambiato = tema::riga(ui, "Avvio", None, |ui| {
+        ui.checkbox(
             &mut imp.avvio_supervisor,
             "Avvia il supervisor all'apertura di LightVM",
         )
-        .changed();
+        .changed()
+    });
     if !stato.selettore {
-        ui.label("Selettore di cartelle non disponibile su questa piattaforma: usare --catalogo e --qemu-dir.");
+        ui.add_space(4.0);
+        tema::avviso(
+            ui,
+            "Selettore di cartelle non disponibile su questa piattaforma: usare --catalogo e --qemu-dir.",
+            Tono::Neutro,
+        );
     }
+    if stato.da_applicare && stato.attivo {
+        ui.add_space(4.0);
+        tema::avviso(
+            ui,
+            "Modifiche non ancora applicate: riavviare il supervisor.",
+            Tono::Attenzione,
+        );
+    }
+    if stato.attivo && stato.vm_accese > 0 {
+        ui.add_space(4.0);
+        let testo = if stato.vm_accese == 1 {
+            "Riavvio o arresto spengono la VM accesa (arresto controllato).".to_owned()
+        } else {
+            format!(
+                "Riavvio o arresto spengono le {} VM accese (arresto controllato).",
+                stato.vm_accese
+            )
+        };
+        tema::avviso(ui, &testo, Tono::Attenzione);
+    }
+    tema::divisore(ui);
     ui.horizontal(|ui| {
         let testo = if stato.attivo {
             "Applica e riavvia il supervisor"
         } else {
             "Avvia il supervisor"
         };
-        if ui.button(testo).clicked() {
+        let avvia = tema::primario(ui, testo);
+        if ui.add_enabled(!stato.in_corso, avvia).clicked() {
             azione = Some(AzioneSupervisor::Riavvia);
         }
         if ui
-            .add_enabled(stato.attivo, egui::Button::new("Arresta il supervisor"))
+            .add_enabled(
+                stato.attivo && !stato.in_corso,
+                egui::Button::new("Arresta il supervisor"),
+            )
             .clicked()
         {
             azione = Some(AzioneSupervisor::Arresta);
         }
     });
-    if stato.da_applicare && stato.attivo {
-        ui.colored_label(
-            ui.visuals().warn_fg_color,
-            "Modifiche non ancora applicate: riavviare il supervisor.",
-        );
-    }
-    if stato.attivo && stato.vm_accese > 0 {
-        ui.colored_label(
-            ui.visuals().warn_fg_color,
-            format!(
-                "Riavvio o arresto spengono le {} VM accese (arresto controllato).",
-                stato.vm_accese
-            ),
-        );
-    }
     (azione, cambiato)
 }
 
@@ -326,13 +379,19 @@ pub fn descrivi(p: ParentLossPolicy) -> String {
     }
 }
 
-/// Riquadro della politica alla perdita della UI. Restituisce `true` se
-/// l'utente ha cambiato la scelta. Solo pulsanti di opzione e un menu: nessun
-/// campo di testo.
+/// Contenuto della scheda sulla politica alla perdita della UI. Restituisce
+/// `true` se l'utente ha cambiato la scelta. Solo pulsanti di opzione e un
+/// menu: nessun campo di testo.
 pub fn politica_ui(ui: &mut egui::Ui, p: &mut ParentLossPolicy) -> bool {
     let prima = *p;
-    ui.label(egui::RichText::new("Se LightVM si chiude in modo anomalo").strong());
-    ui.label("Crash o terminazione forzata della finestra: cosa fare delle VM accese.");
+    let colori = tema::Palette::di(ui);
+    ui.label(
+        egui::RichText::new(
+            "Crash o terminazione forzata della finestra: cosa fare delle VM accese.",
+        )
+        .color(colori.testo_debole),
+    );
+    ui.add_space(4.0);
     let attesa = match *p {
         ParentLossPolicy::ShutdownVms { powerdown_s } => powerdown_s,
         _ => ATTESA_PREDEFINITA_S,
@@ -357,7 +416,8 @@ pub fn politica_ui(ui: &mut egui::Ui, p: &mut ParentLossPolicy) -> bool {
             };
         }
         ui.add_enabled_ui(scelta, |ui| {
-            egui::ComboBox::from_id_salt("lightvm_attesa_spegnimento")
+            let r = egui::ComboBox::from_id_salt("lightvm_attesa_spegnimento")
+                .width(110.0)
                 .selected_text(format!("attesa {attesa} s"))
                 .show_ui(ui, |ui| {
                     for s in ATTESE_SPEGNIMENTO_S {
@@ -366,6 +426,11 @@ pub fn politica_ui(ui: &mut egui::Ui, p: &mut ParentLossPolicy) -> bool {
                         }
                     }
                 });
+            tema::nome_accessibile(
+                &r.response,
+                WidgetType::ComboBox,
+                "Attesa dello spegnimento",
+            );
         });
     });
     // ROADMAP 6.1 e ADR-0015 B4: lasciare le VM accese è ammesso solo con il
@@ -388,19 +453,28 @@ pub fn politica_ui(ui: &mut egui::Ui, p: &mut ParentLossPolicy) -> bool {
     *p != prima
 }
 
-/// Riquadro del backend di rendering. Restituisce `true` se la scelta cambia.
-/// `attivo` è il backend in uso in questa esecuzione.
+/// Contenuto della scheda del backend di rendering. Restituisce `true` se la
+/// scelta cambia. `attivo` è il backend in uso in questa esecuzione.
 pub fn rendering_ui(ui: &mut egui::Ui, p: &mut PreferenzaRendering, attivo: &str) -> bool {
     let prima = *p;
-    ui.label(egui::RichText::new("Backend di rendering").strong());
-    ui.label(format!(
-        "In uso ora: {attivo}. La modifica vale dal prossimo avvio; `--renderer` da riga di comando ha la precedenza."
-    ));
-    for scelta in PreferenzaRendering::TUTTE {
-        if ui.radio(*p == scelta, scelta.etichetta()).clicked() {
-            *p = scelta;
-        }
-    }
+    let colori = tema::Palette::di(ui);
+    tema::riga(ui, "In uso ora", None, |ui| {
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new(attivo).color(colori.testo));
+    });
+    tema::divisore(ui);
+    tema::riga(
+        ui,
+        "Backend preferito",
+        Some("Vale dal prossimo avvio; --renderer da riga di comando ha la precedenza."),
+        |ui| {
+            for scelta in PreferenzaRendering::TUTTE {
+                if ui.radio(*p == scelta, scelta.etichetta()).clicked() {
+                    *p = scelta;
+                }
+            }
+        },
+    );
     *p != prima
 }
 
@@ -435,6 +509,7 @@ mod tests {
             avvio_supervisor: false,
             catalogo: Some(PathBuf::from(r"D:\vm\catalogo")),
             qemu_dir: Some(PathBuf::from(r"D:\qemu")),
+            tema: crate::UiTheme::Light,
         };
         i.salva(&p).unwrap();
         assert_eq!(Impostazioni::carica(&p), (i, None));

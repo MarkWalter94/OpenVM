@@ -159,3 +159,28 @@ Misura: binario release, `lightvm-desktop --renderer <wgpu|warp> --smoke 45 --st
 | **wgpu WARP, `MemoryUsage`** | **188,2 MiB** | entro l'obiettivo (in F0: 376,3 MiB) |
 
 Test della UI verdi (53), smoke `esito=ok`. Non misurati in questa sezione: CPU in idle su 5 minuti e frame rate della console sotto carico con il nuovo suggerimento.
+
+
+## Aggiornamento del 2026-10-10 (sera): nuovo sistema visivo della UI
+
+Sezione aggiunta in coda (regola 8). La UI passa dallo stile predefinito di egui a un sistema visivo proprio (`apps/desktop/src/tema.rs`): palette scura (predefinita) e chiara con un solo colore d'accento, scala tipografica, spaziature, schede, righe di impostazione con descrizione, indicatori di stato (pallino + testo), pastiglie, avvisi, pulsanti principale/pericolo/discreto. Regole mantenute: nessun campo di testo, stato mai affidato al solo colore, nessuna funzione degli appunti.
+
+Cambiamenti visibili: barra laterale con marchio e stato del supervisor; Dashboard con sintesi del supervisor (stato, backend, accelerazione, politica alla chiusura) e righe VM con riassunto della configurazione, stato in italiano e una sola azione principale per riga (Avvia a VM spenta, Arresta altrimenti) più "Modifica"; pannello "Risorse e limiti" della VM raggruppato in Risorse e Limiti; pagina Settings in schede (Aspetto, Supervisor, chiusura anomala, Rendering, Diagnostica); i due "Sfoglia…" hanno nomi accessibili distinti; i cursori hanno un nome accessibile anche senza testo accanto.
+
+Istantanee (`apps/desktop/tests/istantanee.rs`): le 6 esistenti rigenerate con il nuovo tema, 4 nuove (`dashboard_supervisor`, `impostazioni_vm`, `settings`, `settings_chiaro`); i percorsi mostrati nelle istantanee sono fissi, non dipendono dal profilo dell'utente.
+
+Correzioni della UI dal riesame generale del codice (stessa giornata, prima del commit):
+
+| Problema | Correzione | Prova |
+| --- | --- | --- |
+| Il cursore di egui correggeva i valori (intervallo, passo) all'apertura del pannello della VM: modifiche fantasma salvabili | `SliderClamping::Edits` | `impostazioni_vm_ui.rs`: `aprire_il_pannello_non_crea_modifiche` |
+| Etichette selezionabili: Ctrl+C copiava testo verso gli appunti dell'host | `selectable_labels = false` nei due temi | `kittest_ui.rs`: `etichette_non_selezionabili` |
+| Riavvio o arresto del supervisor da Settings sul thread della UI (finestra bloccata fino a ~75 s) | thread dedicato, stato "riavvio in corso", azioni disabilitate nel frattempo | test headless esistenti; smoke |
+| Con `--catalogo` Settings segnalava modifiche da applicare e un riavvio perdeva la configurazione della riga di comando | la configurazione della riga di comando resta in uso nei riavvii ed è mostrata | — |
+| Rotella inoltrata al guest anche con il puntatore fuori dalla console | inoltro solo con il puntatore sopra l'immagine | `console.rs`: `rotella_solo_con_il_puntatore_sopra_la_console` |
+| Tema non salvato; primo frame con lo stile predefinito | tema nel file delle impostazioni; stile installato alla creazione della finestra | `kittest_ui.rs`: `tema_scuro_predefinito_e_passaggio_al_chiaro` |
+| `--apri-vm` sovrascriveva la causa del mancato avvio del supervisor | causa conservata e scritta su stderr | — |
+| Tendine e pulsanti senza nome accessibile utile | nomi accessibili ("Margine di memoria", "Budget di storage", "Nessuna distribuzione QEMU", …) | `impostazioni_vm_ui.rs`, `kittest_ui.rs` |
+| Stato del supervisor diverso tra barra laterale, Dashboard e Settings; pannello della VM aperto dopo un riavvio; "le 1 VM accese" | una sola funzione per testo e tono; pannello chiuso all'arresto; singolare | — |
+
+Esito finale: `cargo fmt --check` e `cargo clippy -D warnings` puliti (workspace, UI solo glow, UI solo wgpu, servizio senza `supervisore`); `cargo test --workspace --locked`: 365 passati, 0 falliti, 16 ignorati; smoke `--renderer glow` e `--renderer warp` con `esito=ok`.

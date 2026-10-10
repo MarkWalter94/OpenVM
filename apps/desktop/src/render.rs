@@ -175,6 +175,11 @@ impl InfoRendering {
 
     /// Testo principale dell'indicatore.
     pub fn etichetta(&self) -> String {
+        format!("Rendering: {}", self.backend())
+    }
+
+    /// Backend in uso e come è stato scelto, senza prefisso.
+    pub fn backend(&self) -> String {
         let base = self.attivo.map_or("non determinato", Tentativo::etichetta);
         let origine = match (self.attivo, self.forzato) {
             (None, _) => "",
@@ -182,7 +187,7 @@ impl InfoRendering {
             (Some(_), false) if self.falliti.is_empty() => " · automatico",
             (Some(_), false) => " · ripiego automatico",
         };
-        format!("Rendering: {base}{origine}")
+        format!("{base}{origine}")
     }
 
     /// Spiegazione completa (suggerimento al passaggio del mouse e log).

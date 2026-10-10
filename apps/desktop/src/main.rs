@@ -695,11 +695,16 @@ fn main() -> std::process::ExitCode {
                     ui.set_impostazioni(impostazioni, percorso_impostazioni, errore_impostazioni);
                     ui.set_eseguibile_servizio(eseguibile_servizio);
                     ui.set_selettore(lightvm_desktop::selettore_nativo());
+                    // Stile e tema prima del primo frame (niente frame con lo
+                    // stile predefinito di egui).
+                    lightvm_desktop::tema::installa(&cc.egui_ctx);
+                    cc.egui_ctx.set_theme(egui::Theme::from(ui.theme()));
                     // Il supervisor parte solo a finestra creata: i tentativi
                     // di rendering falliti non lasciano servizi avviati. Con
                     // `--catalogo` vale la riga di comando, altrimenti la
                     // pagina Settings (avvio automatico predefinito).
                     if let Some(cfg) = &servizio {
+                        ui.set_config_riga_di_comando(cfg.clone());
                         let ctx = cc.egui_ctx.clone();
                         match Servizio::avvia(cfg, Arc::new(move || ctx.request_repaint())) {
                             Ok(s) => {

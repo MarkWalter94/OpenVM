@@ -10,7 +10,7 @@ First supported host: Windows 11 x86_64 with Ubuntu LTS guests. No cloud service
 
 **Phase F1 (foundations and QEMU control) is in progress; F0 (feasibility) is under review, with two items left (P-4, Windows part of P-5).**
 
-Feasibility work on the first host (Windows 11 with WHPX, Ubuntu 26.04.1 LTS guest) demonstrated accelerated boot, a native RFB console, input, control channels on private sockets, baseline restore and process supervision, with published deviations (for example CPU model `qemu64` instead of `host`). The proposed F0 outcome is "verified on Windows only" and still awaits user confirmation.
+Feasibility work on the first host (Windows 11 with WHPX, Ubuntu 26.04.1 LTS guest) demonstrated accelerated boot, a native RFB console, input, control channels on private sockets, baseline restore and process supervision, with published deviations (for example CPU model `qemu64` instead of `host`). The F0 outcome "verified on Windows only" was confirmed on 2026-10-10 (ADR-0016).
 
 F1 streams delivered so far, each with its evidence file under `docs/verification/`:
 

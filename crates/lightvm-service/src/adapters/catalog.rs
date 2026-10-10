@@ -290,7 +290,21 @@ impl CatalogStore for SqliteStore {
                 .map(|sid| tx.vm(sid))
                 .collect::<st::Result<Vec<_>>>()
         })?;
-        rows.into_iter().map(Self::vm_record).collect()
+        // Come in `open`: una riga illeggibile (formato estraneo o più vecchio)
+        // è segnalata e saltata, senza impedire l'avvio del servizio.
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                let id = row.vm_id;
+                Self::vm_record(row)
+                    .inspect_err(|_| {
+                        crate::diag!(
+                            "lightvm-service: VM {id} con configurazione illeggibile: ignorata"
+                        );
+                    })
+                    .ok()
+            })
+            .collect())
     }
 
     fn set_persisted_state(&mut self, id: VmId, state: VmState) -> Result<(), PublicError> {

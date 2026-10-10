@@ -5,14 +5,14 @@
 //! ottenuto dall'host all'avvio e chiamabile da qualunque task (ROADMAP 7.3,
 //! ADR-0009); solo dopo la terminazione il supervisor la registra nel core.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 use lightvm_proto::ipc::{
     Capabilities, ResponseBody, SUPPORTED_PROTOCOL_VERSIONS, ServiceEvent, ServiceState, StopReason,
 };
-use lightvm_proto::{Caller, PublicError, ReplyError, VmConfig, VmId, VmRequest};
+use lightvm_proto::{Actor, Caller, PublicError, ReplyError, VmConfig, VmId, VmRequest};
 use tokio::sync::{OwnedSemaphorePermit, broadcast, oneshot, watch};
 
 use crate::engine::VmEngine;
@@ -104,8 +104,9 @@ pub(crate) enum Command {
         /// Posto in coda: rilasciato quando il comando è servito.
         _permit: OwnedSemaphorePermit,
     },
-    /// L'Emergency Stop ha già terminato i processi: registrazione nel core.
-    EmergencyReconcile,
+    /// L'Emergency Stop ha già terminato i processi: registrazione nel core
+    /// con l'attore che l'ha deciso.
+    EmergencyReconcile(Actor),
     ParentLost {
         policy: ParentLossPolicy,
         done: oneshot::Sender<()>,
@@ -119,7 +120,7 @@ impl std::fmt::Debug for Command {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Request { req, .. } => write!(f, "Request({req:?})"),
-            Self::EmergencyReconcile => write!(f, "EmergencyReconcile"),
+            Self::EmergencyReconcile(a) => write!(f, "EmergencyReconcile({a:?})"),
             Self::ParentLost { policy, .. } => write!(f, "ParentLost({policy:?})"),
             Self::Shutdown { .. } => write!(f, "Shutdown"),
         }
@@ -138,11 +139,26 @@ pub(crate) struct SupervisorThread {
     pub(crate) max_frame: u32,
     pub(crate) emergency_epoch: Arc<AtomicU64>,
     pub(crate) parent_loss_policy: Arc<Mutex<ParentLossPolicy>>,
+    /// VM con processo, letto dal conduttore dell'arresto per il suo budget.
+    pub(crate) vms_with_process: Arc<AtomicUsize>,
 }
+
+/// Intervallo con cui, senza comandi, il supervisor osserva le uscite dei
+/// processi (spegnimento dal guest, crash) e ne pubblica gli eventi.
+const OBSERVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
 impl SupervisorThread {
     pub(crate) fn run(mut self, rx: mpsc::Receiver<Command>) {
-        while let Ok(cmd) = rx.recv() {
+        loop {
+            let cmd = match rx.recv_timeout(OBSERVE_INTERVAL) {
+                Ok(cmd) => cmd,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    self.engine.observe();
+                    self.publish_state_changes();
+                    continue;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            };
             match cmd {
                 Command::Request {
                     req,
@@ -165,7 +181,7 @@ impl SupervisorThread {
                     };
                     let _ = reply.send(res);
                 }
-                Command::EmergencyReconcile => self.engine.after_emergency_stop(),
+                Command::EmergencyReconcile(actor) => self.engine.after_emergency_stop(actor),
                 Command::ParentLost { policy, done } => {
                     self.backend.stop_agent_sessions(StopReason::ParentLost);
                     self.backend.on_parent_lost(policy);
@@ -186,7 +202,9 @@ impl SupervisorThread {
                                     PublicError::state_conflict("servizio in arresto"),
                                 )));
                             }
-                            Command::EmergencyReconcile => self.engine.after_emergency_stop(),
+                            Command::EmergencyReconcile(actor) => {
+                                self.engine.after_emergency_stop(actor);
+                            }
                             Command::ParentLost { done, .. } | Command::Shutdown { done } => {
                                 let _ = done.send(());
                             }
@@ -209,6 +227,8 @@ impl SupervisorThread {
         for (vm_id, state) in self.engine.state_changes() {
             let _ = self.events.send(ServiceEvent::VmState { vm_id, state });
         }
+        self.vms_with_process
+            .store(self.engine.vms_with_process(), Ordering::SeqCst);
     }
 
     fn handle(

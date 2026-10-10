@@ -8,8 +8,14 @@ use egui_kittest::kittest::{NodeT as _, Queryable as _};
 use lightvm_desktop::{LightVmApp, Section, UiTheme};
 
 fn harness(app: LightVmApp) -> Harness<'static, LightVmApp> {
+    harness_di_altezza(app, 800.0)
+}
+
+/// La pagina Settings scorre: i test che ne usano tutti i controlli la
+/// rendono per intero, perché kittest non scorre fino al nodo.
+fn harness_di_altezza(app: LightVmApp, altezza: f32) -> Harness<'static, LightVmApp> {
     Harness::builder()
-        .with_size(egui::vec2(1280.0, 800.0))
+        .with_size(egui::vec2(1280.0, altezza))
         .build_ui_state(|ui, app: &mut LightVmApp| app.ui(ui), app)
 }
 
@@ -47,6 +53,19 @@ fn tema_scuro_predefinito_e_passaggio_al_chiaro() {
     h.run();
     assert_eq!(h.state().theme(), UiTheme::Light);
     assert_eq!(h.ctx.theme(), egui::Theme::Light);
+    // Il tema scelto è un'impostazione salvata.
+    assert_eq!(h.state().impostazioni().tema, UiTheme::Light);
+}
+
+/// Il testo delle etichette non si seleziona: nessuna copia verso gli
+/// appunti dell'host (ROADMAP: nessuna funzione degli appunti).
+#[test]
+fn etichette_non_selezionabili() {
+    let mut h = harness(LightVmApp::new(false));
+    h.run();
+    for tema in [egui::Theme::Dark, egui::Theme::Light] {
+        assert!(!h.ctx.style_of(tema).interaction.selectable_labels);
+    }
 }
 
 /// Test negativo F0-04 (ROADMAP 7.4, righe "Host" e "File"): nessuna sezione
@@ -122,7 +141,7 @@ fn settings_salva_politica_e_rendering() {
     let file = dir.join("impostazioni-ui.json");
     let mut app = LightVmApp::new(false);
     app.set_impostazioni(Impostazioni::default(), Some(file.clone()), None);
-    let mut h = harness(app);
+    let mut h = harness_di_altezza(app, 1600.0);
     h.run();
     h.get_by_role_and_label(Role::Button, "Settings").click();
     h.run();
@@ -168,16 +187,18 @@ fn settings_supervisor_sceglie_cartelle_senza_campi_di_testo() {
     ]));
     let s2 = scelte.clone();
     app.set_selettore(Some(Box::new(move |_titolo: &str| s2.borrow_mut().pop())));
-    let mut h = harness(app);
+    let mut h = harness_di_altezza(app, 1600.0);
     h.run();
     h.get_by_role_and_label(Role::Button, "Settings").click();
     h.run();
-    h.get_by_label("Stato: non avviato");
+    h.get_by_label("non avviato");
     h.get_by_label("non impostata: le VM non si possono avviare");
-    // Primo "Sfoglia…" = catalogo, secondo = QEMU.
-    h.get_by_role_and_label(Role::Button, "Sfoglia…").click();
+    // Due "Sfoglia…" visibili, distinti dal nome accessibile.
+    h.get_by_role_and_label(Role::Button, "Scegli la cartella del catalogo")
+        .click();
     h.run();
-    h.get_by_role_and_label(Role::Button, "Sfoglia… ").click();
+    h.get_by_role_and_label(Role::Button, "Scegli la cartella di QEMU")
+        .click();
     h.run();
     h.get_by_label("Avvia il supervisor all'apertura di LightVM")
         .click();
@@ -190,9 +211,11 @@ fn settings_supervisor_sceglie_cartelle_senza_campi_di_testo() {
     h.get_by_label(r"D:\qemu-11.1.0");
     assert_eq!(Impostazioni::carica(&file), (i, None));
     // "Nessuna" e "Predefinito" riportano ai valori iniziali.
-    h.get_by_role_and_label(Role::Button, "Nessuna").click();
+    h.get_by_role_and_label(Role::Button, "Nessuna distribuzione QEMU")
+        .click();
     h.run();
-    h.get_by_role_and_label(Role::Button, "Predefinito").click();
+    h.get_by_role_and_label(Role::Button, "Torna al catalogo predefinito")
+        .click();
     h.run();
     assert_eq!(h.state().impostazioni().qemu_dir, None);
     assert_eq!(h.state().impostazioni().catalogo, None);

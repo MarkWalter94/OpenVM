@@ -1142,3 +1142,38 @@ fn register_media_rejects_oversized_images() {
         assert!(h.core.register_media(reg(max)).is_ok());
     }
 }
+
+/// Un disco già creato resta avviabile e modificabile anche quando lo spazio
+/// libero dell'host scende sotto la sua dimensione; la crescita oltre lo
+/// spazio disponibile resta rifiutata.
+#[test]
+fn existing_disk_survives_less_free_space() {
+    let mut h = Harness::new();
+    let mut cfg = h.vm_config("grande", None);
+    cfg.disk_gib = 200;
+    let vm = h.core.create_vm(&Caller::User, cfg).unwrap().id;
+
+    // Riavvio con meno spazio libero: 120 GiB liberi meno 50 di riserva.
+    let mut poco = config();
+    poco.host.free_storage_gib = 120;
+    let mut h2 = Harness::with_store(poco, h.store.clone());
+    h2.core.load_catalog().unwrap();
+    h2.start(vm);
+    h2.stop(vm);
+
+    let rec = h2.core.vm_status(&Caller::User, vm).unwrap();
+    let mut piu_cpu = rec.config.clone();
+    piu_cpu.vcpus = 4;
+    let rev = rec.config_revision;
+    let rec = h2
+        .core
+        .update_vm_config(&Caller::User, vm, rev, piu_cpu)
+        .unwrap();
+    let mut crescita = rec.config.clone();
+    crescita.disk_gib = 230;
+    denied(
+        ErrorCode::ResourceLimit,
+        h2.core
+            .update_vm_config(&Caller::User, vm, rec.config_revision, crescita),
+    );
+}

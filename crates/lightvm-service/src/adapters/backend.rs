@@ -11,11 +11,15 @@
 //!   core resta reale e l'avvio è rifiutato (`unsupported`) con audit.
 //!
 //! Lacune dell'API attuale, coperte qui nel modo più sottile possibile e
-//! riportate nel file di verifica F1-04:
-//! - nessuna creazione del disco principale (`qemu-img create`) né sua
-//!   registrazione nello storage: le VM partono senza disco (`disk: None`);
+//! riportate nei file di verifica F1-03/F1-04:
+//! - il disco principale (`vms/<vm_id>/primary.qcow2`) è creato o ingrandito
+//!   qui con `qemu-img` al primo avvio, senza passare dal journal del catalogo
+//!   (F3);
 //! - le directory dell'esecuzione e la directory privata dei socket sono create
-//!   qui con l'ACL ereditata (l'ACL esplicita solo-utente è F1-06/F1-09);
+//!   qui con l'ACL ereditata (l'ACL esplicita solo-utente è F1-06/F1-09); la
+//!   directory privata è rimossa al rilascio dell'esecuzione, quella
+//!   dell'esecuzione (`runs/<run_id>/`, log di QEMU e variabili UEFI) resta
+//!   per la diagnostica e non conta nel budget di storage della VM;
 //! - la copia per esecuzione delle variabili UEFI è fatta qui dal modello del
 //!   firmware della distribuzione QEMU (lo storage non la produce ancora);
 //! - screenshot e input non sono collegati (le capacità host li dichiarano
@@ -100,7 +104,8 @@ pub struct QemuSetup {
     pub probe: ProbeConfig,
     /// Spazio libero per il catalogo in GiB, usato solo se la misura sul
     /// volume del catalogo (`prepare::host_resources`) non riesce. Limita
-    /// soltanto `disk_gib` alla creazione.
+    /// `disk_gib` alla creazione e la crescita del disco; un disco già
+    /// creato resta avviabile anche con meno spazio libero.
     pub free_storage_gib: u64,
 }
 
@@ -276,6 +281,7 @@ pub fn probe(setup: QemuSetup) -> Result<(QemuHost, QemuVmBackend, HostCapacity)
         cpu,
         setup,
         runs: BTreeMap::new(),
+        private_dirs: BTreeMap::new(),
         registry,
         stop_override,
     };
@@ -353,6 +359,8 @@ pub struct QemuVmBackend {
     cpu: CpuModel,
     setup: QemuSetup,
     runs: BTreeMap<VmId, QemuRun>,
+    /// Directory privata (socket) di ciascuna esecuzione, rimossa al rilascio.
+    private_dirs: BTreeMap<VmId, PathBuf>,
     registry: Registry,
     stop_override: StopOverride,
 }
@@ -378,7 +386,8 @@ impl QemuVmBackend {
         }
     }
 
-    /// Rilascia un'esecuzione terminata: QMP, socket, file protetti, Job Object.
+    /// Rilascia un'esecuzione terminata: QMP, socket, file protetti, Job
+    /// Object, directory privata.
     fn release(&mut self, vm_id: VmId) {
         lock(&self.registry).remove(&vm_id);
         if let Some(run) = self.runs.remove(&vm_id) {
@@ -391,6 +400,18 @@ impl QemuVmBackend {
                 Err(e) => crate::diag!("lightvm-service: chiusura dell'esecuzione: {e}"),
             }
         }
+        if let Some(dir) = self.private_dirs.remove(&vm_id) {
+            remove_private_dir(&dir);
+        }
+    }
+
+    /// Esecuzione già uscita (anche per la terminazione finale della scalata
+    /// di arresto, registrata come Emergency Stop dal backend): può essere
+    /// rilasciata senza attendere altro.
+    fn exited(&self, vm_id: VmId) -> bool {
+        self.runs
+            .get(&vm_id)
+            .is_some_and(|r| matches!(r.state(), ProcessState::Exited { .. }))
     }
 
     /// Disco principale della VM (`vms/<vm_id>/primary.qcow2`, disposizione
@@ -494,6 +515,11 @@ impl VmBackend for QemuVmBackend {
         run_id: RunId,
         media: &[VerifiedMedia],
     ) -> Result<(), PublicError> {
+        if self.exited(vm.id) {
+            // Esecuzione precedente uscita ma mai rilasciata (per esempio
+            // un arresto concluso dopo il timeout della scalata).
+            self.release(vm.id);
+        }
         if self.runs.contains_key(&vm.id) {
             return Err(PublicError::state_conflict(
                 "esecuzione già attiva per la VM",
@@ -533,17 +559,22 @@ impl VmBackend for QemuVmBackend {
             data_media: vm.config.data_media,
             limits: job_limits(&vm.config, logical_cpus()),
         };
-        let run = self
-            .rt
-            .block_on(QemuRun::start(
-                &self.caps,
-                &spec,
-                &paths,
-                self.setup.run_config.clone(),
-            ))
-            .map_err(|e| public(&e))?;
+        let private_dir = paths.private_dir.as_path().to_path_buf();
+        let run = match self.rt.block_on(QemuRun::start(
+            &self.caps,
+            &spec,
+            &paths,
+            self.setup.run_config.clone(),
+        )) {
+            Ok(run) => run,
+            Err(e) => {
+                remove_private_dir(&private_dir);
+                return Err(public(&e));
+            }
+        };
         lock(&self.registry).insert(vm.id, run.emergency_stop_handle());
         self.runs.insert(vm.id, run);
+        self.private_dirs.insert(vm.id, private_dir);
         Ok(())
     }
 
@@ -555,6 +586,12 @@ impl VmBackend for QemuVmBackend {
         };
         match r {
             Ok(_) => {
+                self.release(vm_id);
+                Ok(())
+            }
+            // Il processo è uscito anche se la scalata ha superato il tempo:
+            // l'arresto è comunque concluso.
+            Err(_) if self.exited(vm_id) => {
                 self.release(vm_id);
                 Ok(())
             }
@@ -607,6 +644,18 @@ impl VmBackend for QemuVmBackend {
         Err(PublicError::unsupported(
             "input non ancora collegato al servizio",
         ))
+    }
+}
+
+/// Rimuove la directory privata di un'esecuzione (socket già chiusi).
+fn remove_private_dir(dir: &Path) {
+    if let Err(e) = std::fs::remove_dir_all(dir)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        crate::diag!(
+            "lightvm-service: directory privata non rimossa ({}): {e}",
+            dir.display()
+        );
     }
 }
 
@@ -703,8 +752,8 @@ impl Backend for QemuHost {
         // già revocate dal servizio; le sessioni del core arrivano con F4.
     }
     fn prepare_shutdown(&mut self) {
-        // ACPI 15 s → `quit` 5 s → terminazione 5 s: entro i 30 s di
-        // `ServiceConfig::shutdown_timeout`. Un guest che si spegne prima
+        // ACPI 15 s → `quit` 5 s → terminazione 5 s per VM: entro i 30 s per
+        // VM del budget di arresto del servizio. Un guest che si spegne prima
         // termina prima; una politica `shutdown_vms` già impostata resta.
         let mut o = lock(&self.stop_override);
         if o.is_none() {

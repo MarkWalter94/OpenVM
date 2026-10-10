@@ -20,11 +20,11 @@ Legenda tipo: **B** = bloccante per l'uscita da F0; **NB** = avviata in F0, comp
 | F0-B08 | Console nativa con client RFB sul canale protetto, oppure ripiego screendump; input; screenshot | B | 3 | da assegnare | `F0-04-console-rfb-input.md` | 0003, 0013 | completato con pendenti P-4, P-5: `F0-04` |
 | F0-B09 | Ciclo baseline immutabile / overlay / ripristino con firmware persistente; prove di interruzione | B | 4 | da assegnare | `F0-05-baseline-overlay-firmware.md` | 0005, 0011 | completato: `F0-05` |
 | F0-B10 | Modello di processo del supervisor: QEMU figlio, terminazione OS dei figli, crash UI, crash supervisor | B | 4 | da assegnare | `F0-06-supervisore-processi.md` | 0002, 0009, 0015 | completato su Windows: `F0-06`; crash della UI in `F1-09` (ADR-0015 B accettata il 2026-10-10) |
-| F0-B11 | Avvio su Linux/KVM se il laboratorio è disponibile, altrimenti registrazione "non eseguito" | B | 5 | da assegnare | `F0-07-linux-kvm.md` | 0016 | laboratorio assente: `F0-07`; esito proposto "verificato solo Windows" (P-1) |
+| F0-B11 | Avvio su Linux/KVM se il laboratorio è disponibile, altrimenti registrazione "non eseguito" | B | 5 | da assegnare | `F0-07-linux-kvm.md` | 0016 | laboratorio assente: `F0-07`; esito "verificato solo Windows" confermato il 2026-10-10 (P-1 chiuso, ADR-0016) |
 | F0-B12 | Limiti OS per CPU, memoria, storage; prima misura dei consumi | B | 5 | da assegnare | `F0-08-limiti-risorse-misure.md` | 0017, 0018 | completato con limiti: `F0-08` |
 | F0-B13 | Threat model, restrizioni MVP, matrice di supporto iniziale, definizione della fixture | B | 1, 6 | da assegnare | `docs/SECURITY.md`, `docs/COMPATIBILITY.md`, ADR-0019 | 0004, 0019 | completato: fixture in ADR-0019 |
 | F0-B14 | Prima versione di `ARCHITECTURE.md` e `SECURITY.md`; ADR delle decisioni critiche | B | 1, 6 | da assegnare | documenti in `docs/` | tutti | completato |
-| F0-B15 | Verifica della disponibilità di firma e revisione indipendente | B (decisione da chiudere in F0, sez. 17) | 1 | da assegnare | `docs/STATUS.md` | 0020 | aperto: P-6 |
+| F0-B15 | Verifica della disponibilità di firma e revisione indipendente | B (decisione da chiudere in F0, sez. 17) | 1 | da assegnare | `docs/STATUS.md` | 0020 | chiuso il 2026-10-10: firma e revisione non disponibili (P-6, ADR-0020 accettata) |
 | F0-B16 | Riesame delle prove; decisione di prosecuzione; backlog F1 | B | 6 | da assegnare | `F0-09-riesame-prove.md`, `docs/STATUS.md`, questo file | — | completato: `F0-09` (proposta in attesa di conferma) |
 | F0-N01 | Selezione e prova dell'SDK MCP e dei client di riferimento | NB | — | da assegnare | file di verifica dedicato | 0021 | in parte: SDK scelto e provato (`F1-06`); client MCP reali rinviati a F5 |
 | F0-N02 | Inventario packaging e licenze delle dipendenze | NB | — | da assegnare | file di verifica dedicato | 0023 | completato per inventario e `cargo deny` (`F1-07`); SBOM aperto fino a F6 |
@@ -105,9 +105,9 @@ Aggiornato il 2026-10-10 dalla lettura dei file di verifica e del codice, poi do
 | F1-16 | in parte | `F1-05`: auto → glow, ripiego glow → wgpu DX12 e → WARP con indicatore verificati su hardware; prova in RDP non eseguita |
 | F1-17 | verificato su hardware (Windows) | `F1-03` (sezioni del 2026-10-10): `Skylake-Client-v4` fino al desktop live; installazione automatica su disco in 8 min; boot dal disco alla schermata di accesso; arresto ACPI ordinario in 3,6 s |
 | F1-18 | in parte | `F1-05`: idle UI + supervisor 5 min (glow: CPU ≤ 0,14 % di un core, private ≤ 106 MiB; wgpu: CPU ≤ 0,07 %, private ≈ 492 MiB, D-12, poi **189 MiB con `MemoryHints::MemoryUsage`**), 20 avvii a caldo per backend (primo frame p95 139 ms glow, 248 ms wgpu); avvii a freddo non eseguiti |
-| F1-19 | in parte | SDK MCP (`F1-06`, ADR-0021 accettata per l'SDK), licenze (`F1-07`, ADR-0023 accettata in parte); 6 istantanee egui_kittest verificate sullo stesso host (`F1-05`; ADR-0022 Proposta, accettazione proposta) |
+| F1-19 | in parte | SDK MCP (`F1-06`, ADR-0021 accettata per l'SDK), licenze (`F1-07`, ADR-0023 accettata in parte); 10 istantanee egui_kittest verificate sullo stesso host (`F1-05`; ADR-0022 accettata) |
 
-Stato del workspace (2026-10-10, host Windows 11 con Rust 1.99.0 MSVC): `cargo fmt --check`, `cargo clippy -D warnings` (workspace, varianti `glow`/`wgpu` della UI, servizio senza `supervisore`) e `cargo test --workspace --locked` verdi: 328 passati, 0 falliti, 7 ignorati (prove con QEMU reale, eseguite a parte in `F1-03` e `F1-09`).
+Stato del workspace (2026-10-10, host Windows 11 con Rust 1.99.0 MSVC): `cargo fmt --check`, `cargo clippy -D warnings` (workspace, varianti `glow`/`wgpu` della UI, servizio senza `supervisore`) e `cargo test --workspace --locked` verdi; l'ultimo conteggio è nella sezione più recente di `F1-05` (gli ignorati sono prove con QEMU reale o manuali, eseguite a parte in `F1-03`, `F1-09` e seguenti).
 
 ### Punti aperti da F0 per le fasi successive
 
@@ -135,4 +135,4 @@ ADR in stato Proposta (dettagli in `docs/adr/`):
 
 Accettate in parte: ADR-0021 (SDK `rmcp` 3.5.1 accettato; client MCP aperti fino a F5) e ADR-0023 (politica e controlli accettati; SBOM e font di egui aperti fino a F6).
 
-Accettate il 2026-10-10 dal responsabile del progetto: ADR-0016 (verificato solo Windows), ADR-0020 (firma e revisione non disponibili: pubblicazione F6 bloccata), ADR-0022 (egui_kittest), ADR-0026 (codici di autenticazione), ADR-0015 parte B. ADR-0017: direzione indicata dal responsabile (limiti nelle impostazioni della VM, impostabili anche da riga di comando all'apertura di una VM e da MCP), da completare. Dettagli operativi del supporto dati approvato (sezione 17): da registrare in ADR-0008 (P-7).
+Accettate il 2026-10-10 dal responsabile del progetto: ADR-0016 (verificato solo Windows), ADR-0020 (firma e revisione non disponibili: pubblicazione F6 bloccata), ADR-0022 (egui_kittest), ADR-0026 (codici di autenticazione), ADR-0015 parte B. ADR-0017: direzione indicata dal responsabile (limiti nelle impostazioni della VM, impostabili anche da riga di comando all'apertura di una VM e da MCP), da completare. Dettagli operativi del supporto dati approvato (sezione 17): registrati in ADR-0008 (P-7 chiuso il 2026-10-10).

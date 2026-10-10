@@ -2,7 +2,7 @@
 
 Ultimo aggiornamento: 2026-10-09 (riesame di F0; lavoro F1 in corso: CI, SDK MCP, licenze)
 
-Traduzione operativa della sezione 13 di `docs/ROADMAP.md`. Le prove di fattibilità F0 (spike) sono registrate in `docs/verification/F0-*` e riassunte in `F0-09-riesame-prove.md`; i primi test dei crate F1 (con backend, catalogo o QMP simulati, dichiarati) sono in `docs/verification/F1-*`. Nessuna capacità di prodotto è verificata su hardware. Le procedure e gli esiti vanno registrati in `docs/verification/` secondo il template di `docs/verification/README.md`. Questo documento non riporta conteggi di test: i numeri stanno nei file di verifica che li hanno misurati.
+Traduzione operativa della sezione 13 di `docs/ROADMAP.md`. Le prove di fattibilità F0 (spike) sono registrate in `docs/verification/F0-*` e riassunte in `F0-09-riesame-prove.md`; i primi test dei crate F1 (con backend, catalogo o QMP simulati, dichiarati) sono in `docs/verification/F1-*`. Alcune capacità di prodotto F1 sono verificate su hardware sul primo host (`F1-03`, `F1-05`, `F1-09`, `F1-10`), senza valere per il criterio di uscita di F1 finché F0 è aperta (`docs/STATUS.md`). Le procedure e gli esiti vanno registrati in `docs/verification/` secondo il template di `docs/verification/README.md`. Questo documento non riporta conteggi di test: i numeri stanno nei file di verifica che li hanno misurati.
 
 ## 0. Livelli di test
 
@@ -10,7 +10,7 @@ Traduzione operativa della sezione 13 di `docs/ROADMAP.md`. Le prove di fattibil
 | --- | --- | --- | --- | --- |
 | Unitari | logica pura, stati, policy, validazione, parser con fixture | moduli `#[cfg(test)]` dei crate | integrazione tra processi, OS, QEMU | `vm-core`, `vm-storage`, `lightvm-proto`, `qemu-backend` (parser `probe`, `cmdline`, `validate`) |
 | Integrazione headless | più componenti o processi reali senza UI né acceleratore: IPC del servizio, server MCP su stdio come processo figlio, SQLite su file temporanei | `crates/*/tests/` | QEMU reale, rendering, accelerazione | `lightvm-service/tests/ipc.rs` (`F1-04`), `lightvm-mcp/tests/stdio.rs` (`F1-06`) |
-| Test UI strumentati | interfaccia egui pilotata via AccessKit con egui_kittest, supervisor simulato | `apps/desktop/tests/` | IPC reale, rendering nativo, accelerazione | `kittest_ui.rs`; istantanee in corso (§4) |
+| Test UI strumentati | interfaccia egui pilotata via AccessKit con egui_kittest, supervisor simulato | `apps/desktop/tests/` | IPC reale, rendering nativo, accelerazione | `kittest_ui.rs`, `servizio_ui.rs`, `impostazioni_vm_ui.rs`, istantanee in `istantanee.rs` (§4) |
 | Mock dichiarati | QMP, QEMU, backend o catalogo simulati, fixture di stderr/help registrate da QEMU reale | `crates/qemu-backend/tests/qmp_mock.rs`, `tests/fixtures/`; backend e catalogo finti di `lightvm-service` | avvio reale, dispositivi, latenze (§2) | classificazione dell'errore senza acceleratore da fixture (job `acceleratore-assente`) |
 | Processi senza acceleratore | Job Object su Windows; pidfd, gruppi, cgroup delegato su Linux, con figli di prova | test dei crate e spike; job `processi-windows`, `processi-linux` | QEMU con KVM/WHPX, limiti sul guest | `F0-06`, `F0-07` §4, `F1-08` §3 (**[processi]** in WSL2) |
 | Prove reali | QEMU con provenienza verificata e acceleratore su host fisico; test `#[ignore]` lanciati a mano o da runner fisici | `apps/desktop/tests/console_reale.rs`, `crates/qemu-backend/tests/real_qemu.rs` (ignorati per default), script in `lab/` | combinazioni diverse da quella provata | prove F0 su Windows (`F0-02`…`F0-06`) |
@@ -59,14 +59,14 @@ La fixture grafica deterministica è definita in ADR-0019 e realizzata entro F3.
 
 ## 4. Framework di test UI
 
-**egui_kittest 0.36.2** è il framework scelto (ADR-0022; versione allineata a egui/eframe 0.36.2 di ADR-0014): pilota l'interfaccia attraverso l'albero AccessKit e, con la feature `snapshot`, confronta istantanee grafiche. L'ADR resta da chiudere con la prova delle istantanee (criterio 4) e dell'esclusione dei ganci dall'artefatto pubblico (criterio 5). Provato in F0, senza GPU e senza finestra nativa:
+**egui_kittest 0.36.2** è il framework scelto (ADR-0022; versione allineata a egui/eframe 0.36.2 di ADR-0014): pilota l'interfaccia attraverso l'albero AccessKit e, con la feature `snapshot`, confronta istantanee grafiche. L'ADR è accettata (2026-10-10); le istantanee del criterio 4 sono in `F1-05`. Provato in F0, senza GPU e senza finestra nativa:
 
 | Prova | Host | Esito | Evidenza |
 | --- | --- | --- | --- |
 | Navigazione e cambio tema tramite ruolo ed etichetta AccessKit (3 test) | Windows 11 | verificato | `F0-01` §7 |
 | Assenza di campi di testo nelle sezioni; console reale configurata; percorso UI → tabella tasti → QMP → guest con QEMU reale (test `console_reale`, ignorato per default) | Windows 11 | verificato | `F0-04` Risultati §4, §6 |
 | `cargo test --workspace` inclusi 4 test `kittest_ui` | Linux in WSL2 (**[build]**) | verificato | `F0-07` §2 |
-| Istantanee grafiche (feature `snapshot`) | — | in corso in un altro flusso (`apps/desktop/tests/istantanee.rs`); nessun esito registrato in `docs/verification/` al momento di questo aggiornamento | backlog F1-19 |
+| Istantanee grafiche (feature `snapshot`) | — | 10 istantanee in `apps/desktop/tests/istantanee.rs` (pannelli, Dashboard, impostazioni VM, Settings scuro e chiaro, console), tolleranza in `kittest.toml` | `F1-05` (sezioni F1-19 e nuovo sistema visivo) |
 | Esecuzione in CI (Windows e Ubuntu, runner senza GPU) | runner GitHub | non eseguito | `F1-08` |
 
 - Usare ruolo più etichetta per individuare i nodi (`get_by_role_and_label`): l'etichetta da sola può corrispondere a più nodi (`F0-01` §7).

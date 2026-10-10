@@ -1,6 +1,6 @@
 # Architettura
 
-Ultimo aggiornamento: 2026-10-09 (riesame di F0)
+Ultimo aggiornamento: 2026-10-10 (riesame di F0, avanzamento F1)
 
 Documento richiesto dalla sezione 10 (F0) di `docs/ROADMAP.md`, derivato dalla sezione 6. Descrive componenti, confini e regole del prodotto; il codice esistente è costituito da spike di fattibilità F0 e da crate in costruzione. I punti marcati **[verificato in F0: …]** rimandano a prove di fattibilità sul primo host (Windows 11, `docs/verification/`); quelli marcati **[pendente]** dipendono da prove non ancora eseguite. Le decisioni sono negli ADR indicati.
 
@@ -55,9 +55,9 @@ Documento richiesto dalla sezione 10 (F0) di `docs/ROADMAP.md`, derivato dalla s
 - Morte esterna di QEMU: rilevata dall'attesa sull'handle e classificata dal codice di uscita e dalle notifiche del job. **[verificato in F0: `F0-06` §2b]**
 - Emergency Stop: `TerminateJobObject` con codice dedicato, completamento dopo l'uscita osservata e `ActiveProcesses = 0` (p95 640,2 ms su 30 campioni a desktop, 273,3 ms su 100 campioni durante il boot). **[verificato in F0: `F0-06` §2c]**
 - Arresto ordinario: `system_powerdown` con timeout configurabile, poi `quit`, poi `TerminateJobObject`. **[verificato in F0 come procedura: `F0-06` §2d]**
-- Limiti: hard cap CPU e limite di memoria del job applicati prima dello spawn (ADR-0017, Proposta). **[verificato in F0: `F0-08`]**
+- Limiti: hard cap CPU e limite di memoria del job applicati prima dello spawn, impostabili per VM (ADR-0017, accettata in parte). **[verificato in F0: `F0-08`; per VM in F1: `F1-10`]**
 - Linux: combinazione proposta `PR_SET_PDEATHSIG` + pidfd + cgroup v2 delegato con `cgroup.kill` (ADR-0015, Proposta). **[verificato in F0 solo per il ciclo di vita dei processi in WSL2: `F0-07` §4; QEMU su host fisico in R2a]**
-- Crash della UI: le sessioni agente sono revocate; la sorte delle VM manuali è decisa in ADR-0015. **[pendente: crash della UI su Windows non eseguito, P-2 in `F0-09`]**
+- Crash della UI: le sessioni agente sono revocate; la sorte delle VM manuali è un'impostazione (predefinito: terminarle subito; ADR-0015 parte B). **[verificato su Windows in F1: `F1-09` (P-2)]**
 - Il recupero di UI o applicazione non riattiva automaticamente sessioni agente.
 - Il supervisor non è un servizio sempre attivo nell'MVP.
 
@@ -115,7 +115,7 @@ policy_effettiva = limiti_globali ∩ policy_VM ∩ grant_sessione ∩ capacità
 - Credenziale del display emessa dal supervisor per esecuzione e VM, distinta da QMP e IPC, consegnata alla UI e revocata con la sessione. **[pendente: da realizzare e provare entro F2, ADR-0013]**
 - Ripiego: framebuffer da QMP `screendump` a frequenza limitata, file temporaneo in directory privata scelto dal backend, consegna alla UI via IPC; latenza dichiarata in `docs/COMPATIBILITY.md`. **[fattibilità verificata in F0: cattura p95 19,2 ms, `F0-04` §7; non necessario sul primo host]**
 - Input: eventi winit con scancode fisici → qcode QEMU per layout dichiarati (US, IT) → IPC → bridge autorizzato → QMP. Tasti rilasciati su perdita di focus, disconnessione o cambio proprietario. **[verificato in F0 da `egui::Event` in poi: `F0-04` §4; tastiera fisica attraverso winit pendente]**
-- Nessuna lettura automatica degli appunti host: egui-winit li legge su Ctrl+V; il testo è scartato dalla UI e il percorso va bloccato prima di F2 (backlog F1-13).
+- Nessuna lettura degli appunti host: egui-winit è usato in una copia patchata che non li legge (`vendor/egui-winit`, F1-13); il filtro della UI resta come seconda difesa; le etichette non sono selezionabili, quindi nemmeno la copia verso gli appunti.
 - Screenshot prodotti dal backend anche con console chiusa, con `run_id` e geometria del display.
 
 ### 7.1 Canali di controllo
@@ -144,7 +144,8 @@ docs/{adr,verification}/
 Direzione delle dipendenze (non fissata dalla roadmap; registrata qui e in ADR-0024):
 
 ```text
-apps/desktop ──► lightvm-proto, rfb-client
+apps/desktop ──► lightvm-proto, rfb-client, lightvm-service (solo client IPC, senza `supervisore`),
+                 f0-console (spike, console diretta da sostituire in F2)
 rfb-client ──► (nessuna dipendenza da QMP, processi, storage o supervisor)
 lightvm-service ──► vm-core, qemu-backend, vm-storage, lightvm-proto
 qemu-backend ──► vm-core
@@ -153,7 +154,7 @@ mcp-server ──► lightvm-proto
 vm-core ──► (nessuna dipendenza da UI, processi o I/O)
 ```
 
-La UI dipende dal protocollo e dal client RFB, mai dal backend né dallo storage; l'adapter MCP dipende solo dal protocollo. La sezione 6.2 colloca la console in `qemu-backend`, mentre la sezione 6.4 esegue il client RFB nel processo UI: ADR-0024 separa il client in `crates/rfb-client` e lascia in `qemu-backend` il lato server della console. Nuovi crate (`vm-network`, `ai-control-bridge`, `vm-security`, `agent-runtime`, `test-runner`) solo quando hanno responsabilità e dipendenze stabili; nessun framework di plugin o secondo backend nel MVP. Gli spike F0 (`spikes/`) non sono codice di prodotto.
+La UI dipende dal protocollo e dal client RFB, mai dal backend né dallo storage; l'adapter MCP dipende solo dal protocollo. La sezione 6.2 colloca la console in `qemu-backend`, mentre la sezione 6.4 esegue il client RFB nel processo UI: ADR-0024 separa il client in `crates/rfb-client` e lascia in `qemu-backend` il lato server della console. Nuovi crate (`vm-network`, `ai-control-bridge`, `vm-security`, `agent-runtime`, `test-runner`) solo quando hanno responsabilità e dipendenze stabili; nessun framework di plugin o secondo backend nel MVP. Gli spike F0 (`spikes/`) non sono codice di prodotto; l'unica eccezione temporanea è `f0-console`, usata dalla console della UI fino al trasporto del display attraverso il supervisor (F2, ADR-0013).
 
 ## 9. Checklist di review (sezione 6.3)
 
@@ -184,7 +185,7 @@ Riepilogo del riesame `docs/verification/F0-09-riesame-prove.md`.
 | --- | --- | --- | --- |
 | Build eframe Windows/Linux e backend di rendering, anche in RDP | 0014 | verificato con limiti (glow predefinito, wgpu selezionabile, WARP degradato; Linux solo WSL2; RDP non eseguito) | `F0-01`, `F0-04`, `F0-07` |
 | Build QEMU, acceleratore WHPX, QMP privato, stop | 0010, 0012, 0007 | verificato con deviazioni (`-cpu qemu64`, firma scaduta) | `F0-02` |
-| Guest e firmware | 0011 | verificato (boot live; installazione su disco pendente) | `F0-03`, `F0-02` §9 |
+| Guest e firmware | 0011 | verificato (boot live in F0; installazione su disco e boot dal disco verificati poi in F1-17, `F1-03`) | `F0-03`, `F0-02` §9 |
 | Console RFB sul canale protetto, input, screenshot | 0003, 0013, 0024 | verificato con pendenti (tastiera fisica, secondo utente, credenziale del display) | `F0-04` |
 | Baseline/overlay/NVRAM ed esclusione dei dischi | 0005, 0025 | verificato (5 cicli; overlay in uso non protetto da terzi dello stesso utente) | `F0-05` |
 | Modello di processo e crash | 0002, 0009, 0015 | verificato con pendente (crash della UI) | `F0-06`, `F0-07` |

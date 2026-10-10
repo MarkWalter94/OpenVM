@@ -6,9 +6,9 @@ Documento operativo previsto dalla sezione 17 di `docs/ROADMAP.md`: fase corrent
 
 ## Fase corrente
 
-**F0 — Fattibilità e decisioni: in riesame** (roadmap, sezioni 10 e 15, passo 6). Il riesame `docs/verification/F0-09-riesame-prove.md` conclude che il criterio di uscita è soddisfatto con deviazioni pubblicate sul primo host Windows, ma F0 **non è ancora chiusa**: restano i pendenti elencati sotto. Le prove F0 riguardano spike di fattibilità. Il lavoro F1 avviato in parallelo è descritto nella sezione "Lavoro F1 avviato in parallelo"; nessuna capacità di prodotto è `verificato su hardware`.
+**F0 — Fattibilità e decisioni: in riesame** (roadmap, sezioni 10 e 15, passo 6). Il riesame `docs/verification/F0-09-riesame-prove.md` conclude che il criterio di uscita è soddisfatto con deviazioni pubblicate sul primo host Windows, ma F0 **non è ancora chiusa**: restano i pendenti elencati sotto. Le prove F0 riguardano spike di fattibilità. Il lavoro F1 avviato in parallelo è descritto nella sezione "Lavoro F1 avviato in parallelo": alcune capacità di prodotto F1 sono `verificato su hardware` sul primo host, ma nessuna vale per il criterio di uscita di F1 finché F0 non è chiusa.
 
-Classificazione usata per ogni capacità (sezione 16, punto 6): `implementato`, `verificato in simulazione/test`, `verificato su hardware`, `non verificato`. Nessuna capacità di prodotto è `verificato su hardware`; alcune sono `verificato in simulazione/test` (file F1); le prove di fattibilità su hardware sono elencate nei file F0.
+Classificazione usata per ogni capacità (sezione 16, punto 6): `implementato`, `verificato in simulazione/test`, `verificato su hardware`, `non verificato`. Le capacità di prodotto F1 sono `verificato su hardware` o `verificato in simulazione/test` secondo la tabella F1 qui sotto (file F1); le prove di fattibilità su hardware sono elencate nei file F0.
 
 Regola della sezione 10: F1 parte dopo il criterio di uscita di F0. Il lavoro F1 avviato in parallelo non può essere usato per dichiarare un criterio di uscita F1 prima della chiusura di F0.
 
