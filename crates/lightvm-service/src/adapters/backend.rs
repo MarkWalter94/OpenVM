@@ -702,6 +702,20 @@ impl Backend for QemuHost {
         // Nessuna sessione agente in F1: connessioni e credenziali non UI sono
         // già revocate dal servizio; le sessioni del core arrivano con F4.
     }
+    fn prepare_shutdown(&mut self) {
+        // ACPI 15 s → `quit` 5 s → terminazione 5 s: entro i 30 s di
+        // `ServiceConfig::shutdown_timeout`. Un guest che si spegne prima
+        // termina prima; una politica `shutdown_vms` già impostata resta.
+        let mut o = lock(&self.stop_override);
+        if o.is_none() {
+            *o = Some(ShutdownPolicy {
+                powerdown_timeout: Duration::from_secs(15),
+                quit_timeout: Duration::from_secs(5),
+                kill_timeout: Duration::from_secs(5),
+            });
+        }
+    }
+
     fn on_parent_lost(&mut self, policy: ParentLossPolicy) {
         if let ParentLossPolicy::ShutdownVms { powerdown_s } = policy {
             *lock(&self.stop_override) = Some(ShutdownPolicy {

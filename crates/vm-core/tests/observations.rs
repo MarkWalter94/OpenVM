@@ -488,3 +488,42 @@ proptest! {
         prop_assert!(ev.windows(2).all(|w| w[1].seq == w[0].seq + 1));
     }
 }
+
+/// Riavvio del supervisor senza processi superstiti: le VM in `recovering`
+/// tornano `stopped` (persistito); quelle ferme o fallite non cambiano.
+#[test]
+fn reconcile_after_restart_returns_recovering_vms_to_stopped() {
+    let store = MemStore::default();
+    let mut ids = Vec::new();
+    for (i, persisted) in VmState::ALL.into_iter().enumerate() {
+        let id = VmId::from_unix_millis(20, [u8::try_from(i).unwrap(); 10]);
+        let h = Harness::new();
+        let mut cfg = h.vm_config("v", None);
+        cfg.name = VmName::parse(format!("v{i}")).unwrap();
+        store.0.borrow_mut().vms.insert(
+            id,
+            VmRecord {
+                id,
+                config: cfg,
+                config_revision: 1,
+                persisted_state: persisted,
+                created_at: UtcTimestamp::from_unix_millis(T0).unwrap(),
+            },
+        );
+        ids.push((id, persisted));
+    }
+    let mut h = Harness::with_store(config(), store);
+    h.core.load_catalog().unwrap();
+    let done = h.core.reconcile_after_restart().unwrap();
+    for (id, persisted) in ids {
+        let expected = if persisted.has_process() || persisted == VmState::Recovering {
+            VmState::Stopped
+        } else {
+            persisted
+        };
+        let st = h.core.vm_status(&Caller::User, id).unwrap();
+        assert_eq!(st.state, expected, "{persisted}");
+        assert_eq!(h.store.0.borrow().vms[&id].persisted_state, expected);
+        assert_eq!(done.contains(&id), expected != persisted, "{persisted}");
+    }
+}

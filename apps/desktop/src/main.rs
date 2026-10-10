@@ -24,6 +24,12 @@
 //!   Senza `--catalogo` il supervisor parte con le impostazioni della pagina
 //!   Settings, se l'avvio automatico è attivo (predefinito);
 //!   `--senza-supervisor` lo impedisce (smoke e misure).
+//! - `--apri-vm NOME [--crea]` (ADR-0017): all'avvio apre e avvia la VM
+//!   indicata (con `--crea` la crea se non esiste, senza supporto di
+//!   installazione);
+//!   con `--vcpu N`, `--ram MIB`, `--disco GIB`, `--cpu-max PERCENTO`,
+//!   `--memoria-margine MIB`, `--budget-disco GIB|nessuno` ne cambia prima
+//!   risorse e limiti (salvati nelle impostazioni della VM; solo a VM spenta).
 
 use std::cell::Cell;
 use std::io::Write as _;
@@ -61,6 +67,18 @@ struct ServizioArgs {
     impostazioni: Option<String>,
     /// `--senza-supervisor`: non avviare il supervisor (smoke e misure).
     nessuno: bool,
+    /// `--apri-vm`: VM da aprire all'avvio.
+    apri_vm: Option<String>,
+    /// Modifiche a risorse e limiti per `--apri-vm`.
+    modifiche: lightvm_desktop::impostazioni_vm::ModificheVm,
+    /// `--crea`: crea la VM di `--apri-vm` se non esiste.
+    crea: bool,
+}
+
+fn numero<T: std::str::FromStr>(opzione: &str, v: Option<String>) -> Result<T, String> {
+    let v = v.ok_or_else(|| format!("{opzione} richiede un valore"))?;
+    v.parse()
+        .map_err(|_| format!("{opzione}: valore non valido: {v}"))
 }
 
 /// Parametri della console reale (F0-04). Nessuna configurazione QEMU: solo
@@ -176,6 +194,29 @@ fn parse_args() -> Result<Args, String> {
                     Some(it.next().ok_or("--runtime-dir richiede una directory")?)
             }
             "--senza-supervisor" => args.servizio.nessuno = true,
+            "--apri-vm" => {
+                args.servizio.apri_vm =
+                    Some(it.next().ok_or("--apri-vm richiede il nome della VM")?)
+            }
+            "--crea" => args.servizio.crea = true,
+            "--vcpu" => args.servizio.modifiche.vcpus = Some(numero("--vcpu", it.next())?),
+            "--ram" => args.servizio.modifiche.memory_mib = Some(numero("--ram", it.next())?),
+            "--disco" => args.servizio.modifiche.disk_gib = Some(numero("--disco", it.next())?),
+            "--cpu-max" => {
+                args.servizio.modifiche.cpu_max_percent = Some(numero("--cpu-max", it.next())?)
+            }
+            "--memoria-margine" => {
+                args.servizio.modifiche.memory_margin_mib =
+                    Some(numero("--memoria-margine", it.next())?)
+            }
+            "--budget-disco" => {
+                let v = it.next().ok_or("--budget-disco richiede GiB o nessuno")?;
+                args.servizio.modifiche.storage_budget_gib = Some(if v == "nessuno" {
+                    None
+                } else {
+                    Some(numero("--budget-disco", Some(v))?)
+                });
+            }
             "--impostazioni" => {
                 args.servizio.impostazioni =
                     Some(it.next().ok_or("--impostazioni richiede un file")?)
@@ -189,7 +230,7 @@ fn parse_args() -> Result<Args, String> {
             "--help" | "-h" => {
                 println!(
                     "uso: lightvm-desktop [--smoke SECONDI] [--renderer auto|glow|wgpu|warp|glow,warp...] [--static] \
-                     [--wgpu-adapter cpu|auto] [--glow-hw preferred|required|off] \n                     [--vnc-socket S [--vnc-impl socket2|uds] | --vnc-tls 127.0.0.1:P --tls-dir D] \n                     --qmp-socket S [--capture-dir D] [--tmp-dir D] [--layout us|it] [--max-fps N] [--dump-fb PNG] \n                     [--catalogo DIR [--servizio-exe PATH] [--qemu-dir DIR] [--runtime-dir DIR] [--audit-log FILE]] [--impostazioni FILE] [--senza-supervisor]"
+                     [--wgpu-adapter cpu|auto] [--glow-hw preferred|required|off] \n                     [--vnc-socket S [--vnc-impl socket2|uds] | --vnc-tls 127.0.0.1:P --tls-dir D] \n                     --qmp-socket S [--capture-dir D] [--tmp-dir D] [--layout us|it] [--max-fps N] [--dump-fb PNG] \n                     [--catalogo DIR [--servizio-exe PATH] [--qemu-dir DIR] [--runtime-dir DIR] [--audit-log FILE]] [--impostazioni FILE] [--senza-supervisor] \n                     [--apri-vm NOME [--crea] [--vcpu N] [--ram MIB] [--disco GIB] [--cpu-max %] [--memoria-margine MIB] [--budget-disco GIB|nessuno]]"
                 );
                 std::process::exit(0);
             }
@@ -350,12 +391,22 @@ impl DesktopApp {
             let st = srv.stato();
             let _ = writeln!(
                 out,
-                "SMOKE servizio pid={} connesso={} backend={} acceleratore={} vm={} connessione=\"{}\"",
+                "SMOKE servizio pid={} connesso={} backend={} acceleratore={} vm={} vm_accese={} stati={} ultimo_esito=\"{}\" connessione=\"{}\"",
                 srv.pid(),
                 st.connesso,
                 st.backend.as_deref().unwrap_or("-"),
                 st.acceleratore.as_deref().unwrap_or("-"),
                 st.vms.len(),
+                st.vms
+                    .iter()
+                    .filter(|v| v.state == lightvm_proto::VmState::Running)
+                    .count(),
+                st.vms
+                    .iter()
+                    .map(|v| format!("{}:{}", v.name.as_str(), v.state.as_str()))
+                    .collect::<Vec<_>>()
+                    .join(","),
+                st.ultimo_esito.as_deref().unwrap_or("-").replace('"', "'"),
                 st.connessione.replace('"', "'"),
             );
         }
@@ -542,6 +593,18 @@ fn main() -> std::process::ExitCode {
     #[cfg(not(target_os = "linux"))]
     let _ = args.salta_controllo_librerie;
 
+    if args.servizio.apri_vm.is_none() && (!args.servizio.modifiche.vuote() || args.servizio.crea) {
+        eprintln!(
+            "errore: --crea, --vcpu, --ram, --disco, --cpu-max, --memoria-margine e --budget-disco richiedono --apri-vm"
+        );
+        return std::process::ExitCode::from(2);
+    }
+    if args.servizio.apri_vm.is_some() && args.servizio.nessuno {
+        eprintln!(
+            "errore: --apri-vm richiede il supervisor (incompatibile con --senza-supervisor)"
+        );
+        return std::process::ExitCode::from(2);
+    }
     let servizio = match servizio_config(&args.servizio, impostazioni.politica_perdita_ui) {
         Ok(c) => c,
         Err(e) => {
@@ -586,6 +649,9 @@ fn main() -> std::process::ExitCode {
         let impostazioni = impostazioni.clone();
         let eseguibile_servizio = args.servizio.eseguibile.as_ref().map(PathBuf::from);
         let nessun_servizio = args.servizio.nessuno;
+        let apri_vm = args.servizio.apri_vm.clone();
+        let modifiche = args.servizio.modifiche;
+        let crea = args.servizio.crea;
         let dump_fb = args.console.dump_fb.clone();
         let animate = args.animate;
         let smoke = args.smoke;
@@ -637,11 +703,14 @@ fn main() -> std::process::ExitCode {
                                 ui.set_errore_servizio(e.to_string());
                             }
                         }
-                    } else if avvio_da_impostazioni && !nessun_servizio {
+                    } else if (avvio_da_impostazioni || apri_vm.is_some()) && !nessun_servizio {
                         ui.avvia_servizio(&cc.egui_ctx);
                         if let Some(s) = ui.servizio() {
                             eprintln!("servizio: lightvm-service avviato (PID {})", s.pid());
                         }
+                    }
+                    if let Some(nome) = apri_vm {
+                        ui.apri_vm(nome, modifiche, crea);
                     }
                     Ok(Box::new(DesktopApp {
                         ui,

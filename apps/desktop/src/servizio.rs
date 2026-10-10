@@ -34,8 +34,10 @@ use tokio::sync::mpsc;
 
 /// Attesa massima della riga `ready`.
 pub const ATTESA_PRONTO: Duration = Duration::from_secs(30);
-/// Attesa massima dell'uscita dopo la richiesta di arresto controllato.
-pub const ATTESA_ARRESTO: Duration = Duration::from_secs(15);
+/// Attesa massima dell'uscita dopo la richiesta di arresto controllato:
+/// oltre il timeout di arresto del servizio (30 s, poi Emergency Stop delle VM
+/// rimaste), così la UI non lo termina a metà dell'arresto ordinato.
+pub const ATTESA_ARRESTO: Duration = Duration::from_secs(45);
 
 /// Parametri di avvio del supervisor.
 #[derive(Clone, Debug)]
@@ -130,6 +132,30 @@ pub enum Comando {
     EmergencyStop,
     /// Cambia la sorte delle VM alla perdita della UI (vale subito).
     ImpostaPolitica(ParentLossPolicy),
+    /// Salva risorse e limiti di una VM spenta.
+    AggiornaVm {
+        /// VM.
+        vm_id: VmId,
+        /// Revisione su cui si basa la modifica.
+        revisione: u64,
+        /// Nuova configurazione.
+        config: Box<VmConfig>,
+    },
+    /// Apre una VM per nome (riga di comando): applica le modifiche
+    /// richieste se la VM è spenta, poi la avvia.
+    ApriVm {
+        /// Nome della VM.
+        nome: String,
+        /// Modifiche a risorse e limiti.
+        modifiche: crate::impostazioni_vm::ModificheVm,
+        /// Se la VM non esiste, crearla con i valori predefiniti più le
+        /// modifiche (senza supporto di installazione: l'importazione dei
+        /// media arriva con la creazione guidata, F2).
+        crea: bool,
+    },
+    /// Apre il pannello delle impostazioni della VM: gestito dalla UI, mai
+    /// inviato al supervisor.
+    ApriImpostazioni(VmId),
 }
 
 /// Errori di avvio del supervisor.
@@ -554,6 +580,64 @@ async fn esegui(
                 m => Err(format!("impostazione: {}", descrivi_errore(&m))),
             }
         }
+        Comando::ApriImpostazioni(_) => Ok(()),
+        Comando::AggiornaVm {
+            vm_id,
+            revisione,
+            config,
+        } => {
+            aggiorna_vm(c, stato, vm_id, revisione, *config).await?;
+            Box::pin(esegui(c, stato, Comando::Aggiorna)).await
+        }
+        Comando::ApriVm {
+            nome,
+            modifiche,
+            crea,
+        } => {
+            Box::pin(esegui(c, stato, Comando::Aggiorna)).await?;
+            let trovata = lock(stato)
+                .vms
+                .iter()
+                .find(|v| v.name.as_str() == nome)
+                .cloned();
+            let vm = match trovata {
+                Some(v) => v,
+                None if crea => {
+                    let mut config = crate::impostazioni_vm::config_predefinita(&nome)?;
+                    modifiche.applica(&mut config);
+                    Box::pin(esegui(c, stato, Comando::Crea(Box::new(config)))).await?;
+                    lock(stato)
+                        .vms
+                        .iter()
+                        .find(|v| v.name.as_str() == nome)
+                        .cloned()
+                        .ok_or_else(|| format!("VM \"{nome}\" non trovata dopo la creazione"))?
+                }
+                None => return Err(format!("VM \"{nome}\" non trovata nel catalogo")),
+            };
+            let spenta = vm.state == lightvm_proto::VmState::Stopped;
+            if !modifiche.vuote() {
+                if !spenta {
+                    return Err(format!(
+                        "VM \"{nome}\" accesa: risorse e limiti si cambiano solo a VM spenta"
+                    ));
+                }
+                let mut config = vm.config.clone();
+                modifiche.applica(&mut config);
+                if config != vm.config {
+                    aggiorna_vm(c, stato, vm.vm_id, vm.config_revision, config).await?;
+                }
+            }
+            let avvio = if spenta {
+                azione(c, stato, vm.vm_id, VmAction::Start, "avvio").await
+            } else {
+                Ok(())
+            };
+            // L'elenco si rilegge anche se l'avvio fallisce: le modifiche
+            // salvate restano visibili.
+            Box::pin(esegui(c, stato, Comando::Aggiorna)).await?;
+            avvio
+        }
         Comando::Avvia(vm_id) => azione(c, stato, vm_id, VmAction::Start, "avvio").await,
         Comando::Arresta(vm_id) => azione(c, stato, vm_id, VmAction::Stop, "arresto").await,
         Comando::EmergencyStop => {
@@ -576,6 +660,34 @@ async fn esegui(
                 m => Err(descrivi_errore(&m)),
             }
         }
+    }
+}
+
+async fn aggiorna_vm(
+    c: &mut Client,
+    stato: &Mutex<StatoServizio>,
+    vm_id: VmId,
+    revisione: u64,
+    config: VmConfig,
+) -> Result<(), String> {
+    match c
+        .request(Request::UpdateVm {
+            vm_id,
+            expected_revision: revisione,
+            config,
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        ServerMessage::Response {
+            result: ResponseBody::VmUpdated { vm },
+            ..
+        } => {
+            lock(stato).ultimo_esito =
+                Some(format!("impostazioni salvate: {}", vm.config.name.as_str()));
+            Ok(())
+        }
+        m => Err(format!("impostazioni: {}", descrivi_errore(&m))),
     }
 }
 

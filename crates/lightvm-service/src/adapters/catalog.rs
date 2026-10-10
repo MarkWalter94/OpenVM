@@ -237,6 +237,21 @@ impl CatalogStore for SqliteStore {
         Ok(())
     }
 
+    fn has_open_intents(&self, id: VmId) -> Result<bool, PublicError> {
+        let Some(sid) = self.ids.get(&id).copied() else {
+            return Ok(false);
+        };
+        let sid = sid.to_string();
+        let intents = self
+            .cat
+            .borrow()
+            .open_intents()
+            .map_err(|e| storage_error(&e))?;
+        Ok(intents
+            .iter()
+            .any(|i| i.vm_id.as_deref() == Some(sid.as_str())))
+    }
+
     fn update_vm(&mut self, vm: &VmRecord, expected_revision: u64) -> Result<(), PublicError> {
         let sid = self.sid(vm.id)?;
         let config = serde_json::to_value(StoredConfig { core: vm.clone() })
