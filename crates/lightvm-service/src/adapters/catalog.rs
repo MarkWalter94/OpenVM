@@ -237,6 +237,18 @@ impl CatalogStore for SqliteStore {
         Ok(())
     }
 
+    fn close_open_runs(&mut self, id: VmId, reason: RunEndReason) -> Result<u32, PublicError> {
+        let sid = self.sid(id)?;
+        let (state, cause) = run_end(reason);
+        self.write(|tx| {
+            let runs = tx.open_runs(&sid)?;
+            for r in &runs {
+                tx.end_run(r, state, cause)?;
+            }
+            Ok(u32::try_from(runs.len()).unwrap_or(u32::MAX))
+        })
+    }
+
     fn has_open_intents(&self, id: VmId) -> Result<bool, PublicError> {
         let Some(sid) = self.ids.get(&id).copied() else {
             return Ok(false);

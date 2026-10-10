@@ -853,6 +853,16 @@ impl Tx<'_> {
             })
     }
 
+    /// Esecuzioni non concluse di una VM (`ended_at` assente).
+    pub fn open_runs(&self, vm: &VmId) -> Result<Vec<RunId>> {
+        let mut st = self
+            .inner
+            .prepare("SELECT run_id FROM runs WHERE vm_id = ?1 AND ended_at IS NULL")
+            .db()?;
+        let rows = st.query_map(params![vm.sql()], |r| idc(r, 0)).db()?;
+        rows.collect::<rusqlite::Result<Vec<RunId>>>().db()
+    }
+
     /// Aggiorna lo stato di un'esecuzione non conclusa.
     pub fn set_run_state(&self, id: &RunId, state: RunState) -> Result<()> {
         self.inner

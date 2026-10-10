@@ -960,3 +960,63 @@ fn e2e_real_qemu_impostazioni_vm() {
     });
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Riavvio dopo un supervisor terminato con una VM in esecuzione: nel catalogo
+/// la VM risulta `running` con un'esecuzione aperta. Il nuovo servizio (nessun
+/// processo superstite) la riporta a `stopped` e chiude l'esecuzione.
+#[tokio::test(flavor = "multi_thread")]
+async fn restart_reconciles_running_vm_and_closes_open_run() {
+    let dir = temp_dir("core-riavvio");
+    let svc = start_sqlite(&dir).await;
+    let mut ui = connect_ui(&svc).await;
+    let vm_id = match ui
+        .request(Request::CreateVm {
+            config: sample_config("riavvio"),
+        })
+        .await
+        .unwrap()
+    {
+        ServerMessage::Response {
+            result: ResponseBody::VmCreated { vm },
+            ..
+        } => vm.id,
+        other => panic!("{other:?}"),
+    };
+    drop(ui);
+    svc.handle.shutdown().await;
+
+    // "Crash": VM running con esecuzione aperta, scritti direttamente nel catalogo.
+    {
+        let mut cat = vm_storage::Catalog::open(&dir).unwrap();
+        cat.with_tx(|tx| {
+            let sid = tx.vm_ids()?[0];
+            tx.set_vm_lifecycle(&sid, vm_storage::Lifecycle::Running)?;
+            tx.insert_run(&vm_storage::RunRecord {
+                run_id: vm_storage::RunId::new_v7(),
+                vm_id: sid,
+                baseline_id: None,
+                overlay_disk_id: None,
+                vars_fw_id: None,
+                state: vm_storage::RunState::Running,
+                started_at: vm_storage::now_rfc3339(),
+                ended_at: None,
+                termination_cause: None,
+            })
+        })
+        .unwrap();
+    }
+
+    let svc = start_sqlite(&dir).await;
+    let mut ui = connect_ui(&svc).await;
+    assert_eq!(state_of(&mut ui, vm_id).await, VmState::Stopped);
+    drop(ui);
+    svc.handle.shutdown().await;
+    let mut cat = vm_storage::Catalog::open(&dir).unwrap();
+    let aperte = cat
+        .read(|tx| {
+            let sid = tx.vm_ids()?[0];
+            tx.open_runs(&sid)
+        })
+        .unwrap();
+    assert!(aperte.is_empty(), "esecuzioni ancora aperte: {aperte:?}");
+}

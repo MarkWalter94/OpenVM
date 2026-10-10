@@ -1166,3 +1166,249 @@ fn reale_p5_secondo_utente_linux_in_vm() {
     let _ = rt.block_on(run.close());
     assert_no_orphan(&id);
 }
+
+/// Percorsi con disco e variabili UEFI persistenti fra esecuzioni (F1-17):
+/// stessi percorsi del laboratorio per il resto.
+struct DiscoFisso<'a> {
+    base: &'a LabPaths,
+    disco: PathBuf,
+    vars: PathBuf,
+}
+
+impl ManagedPaths for DiscoFisso<'_> {
+    fn qemu_system(&self) -> qemu_backend::error::Result<ManagedPath> {
+        self.base.qemu_system()
+    }
+    fn firmware_code(&self) -> qemu_backend::error::Result<ManagedPath> {
+        self.base.firmware_code()
+    }
+    fn firmware_vars(&self, _run: &RunId) -> qemu_backend::error::Result<ManagedPath> {
+        ManagedPath::verify(&self.vars)
+    }
+    fn disk(&self, _run: &RunId) -> qemu_backend::error::Result<Option<ManagedPath>> {
+        ManagedPath::verify(&self.disco).map(Some)
+    }
+    fn protected_readonly(&self, _run: &RunId) -> qemu_backend::error::Result<Vec<ManagedPath>> {
+        Ok(Vec::new())
+    }
+    fn media(&self, media: &MediaId) -> qemu_backend::error::Result<ManagedPath> {
+        self.base.media(media)
+    }
+    fn run_dir(&self, run: &RunId) -> qemu_backend::error::Result<ManagedPath> {
+        self.base.run_dir(run)
+    }
+    fn private_dir(&self, run: &RunId) -> qemu_backend::error::Result<ManagedPath> {
+        self.base.private_dir(run)
+    }
+}
+
+/// Disco (32 GiB) e variabili UEFI di F1-17 in `lab/vms/f1-17/`, creati se assenti.
+fn disco_f1_17(lab: &Lab, paths: &LabPaths) -> (PathBuf, PathBuf) {
+    let dir = lab.work.parent().unwrap().parent().unwrap().join("f1-17");
+    std::fs::create_dir_all(&dir).unwrap();
+    let disco = dir.join("disco.qcow2");
+    let vars = dir.join("vars.fd");
+    if !disco.exists() {
+        prepare::create_disk(
+            &ManagedPath::verify(paths.qemu_img()).unwrap(),
+            &ManagedPath::verify(&disco).unwrap(),
+            DiskFormat::Qcow2,
+            32 * 1024,
+            prepare::QEMU_IMG_TIMEOUT,
+        )
+        .unwrap();
+    }
+    if !vars.exists() {
+        std::fs::copy(
+            paths.qemu_dir.join("share").join("edk2-i386-vars.fd"),
+            &vars,
+        )
+        .unwrap();
+    }
+    (disco, vars)
+}
+
+/// F1-17, parte 1: installazione automatica di Ubuntu su disco (autoinstall da
+/// un volume `CIDATA`, `lab/media/f1-17-cidata.iso`, sul secondo CD-ROM). Il
+/// guest si spegne da solo a fine installazione (`shutdown: poweroff`).
+/// Screenshot ogni 2 minuti; attesa massima `LIGHTVM_F1_17_MIN` minuti (45).
+#[test]
+#[ignore = "richiede QEMU reale: impostare LIGHTVM_QEMU_DIR"]
+fn reale_f1_17_installazione_su_disco() {
+    let _g = SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let lab = require_lab!();
+    let minuti: u64 = std::env::var("LIGHTVM_F1_17_MIN")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(45);
+    let mut log = Log::new(&lab, "f1-17-installazione");
+    let mut paths = lab_paths(&lab, &mut log);
+    let cidata = lab.iso.with_file_name("f1-17-cidata.iso");
+    assert!(
+        cidata.is_file(),
+        "volume CIDATA assente: {}",
+        cidata.display()
+    );
+    let cid = MediaId::new_v7();
+    paths.data = Some((cid, cidata));
+    let caps = probe_caps(&lab, &paths, &mut log);
+    let (disco, vars) = disco_f1_17(&lab, &paths);
+    let fisso = DiscoFisso {
+        base: &paths,
+        disco,
+        vars,
+    };
+    let run_id = RunId::new_v7();
+    paths.prepare_run(&run_id);
+    let mut s = spec(&caps, &paths, run_id);
+    s.cpu = caps.cpu_model("Skylake-Client-v4").unwrap();
+    s.vcpus = 4;
+    s.memory_mib = 6144;
+    s.data_media = Some(cid);
+    let rt = rt();
+    let run = rt
+        .block_on(QemuRun::start(&caps, &s, &fisso, RunConfig::default()))
+        .expect("avvio dell'installazione");
+    let t0 = Instant::now();
+    let mut n = 0u32;
+    let mut cliccato = false;
+    let esito = loop {
+        if let ProcessState::Exited { cause, code, .. } = run.state() {
+            break Some((cause, code));
+        }
+        // L'installatore desktop mostra il riepilogo dell'autoinstall e
+        // attende "Install" (in basso a destra) circa 2 minuti dopo l'avvio.
+        if !cliccato && t0.elapsed() >= Duration::from_secs(140) {
+            cliccato = true;
+            let (shot, _) = rt.block_on(run.screenshot_rgb()).unwrap();
+            let g = shot.geometry;
+            let png = lab
+                .logs
+                .join(format!("{}-f1-17-inst-riepilogo.png", lab.session));
+            std::fs::write(&png, &shot.png).unwrap();
+            let x = g.width * 1035 / 1280;
+            let y = g.height * 716 / 800;
+            let click = [
+                InputEvent::PointerMove(PointerMove::from_pixels(x, y, g).unwrap()),
+                InputEvent::PointerButton(lightvm_proto::PointerButton {
+                    button: lightvm_proto::MouseButton::Left,
+                    down: true,
+                }),
+                InputEvent::PointerButton(lightvm_proto::PointerButton {
+                    button: lightvm_proto::MouseButton::Left,
+                    down: false,
+                }),
+            ];
+            rt.block_on(run.send_input(run_id, g, &click)).unwrap();
+            log.line(format!(
+                "clic su Install ({x},{y}) a t={}s",
+                t0.elapsed().as_secs()
+            ));
+        }
+        if t0.elapsed() > Duration::from_secs(minuti * 60) {
+            break None;
+        }
+        std::thread::sleep(Duration::from_secs(10));
+        if t0.elapsed().as_secs() / 120 >= u64::from(n) {
+            n += 1;
+            if let Ok((shot, img)) = rt.block_on(run.screenshot_rgb()) {
+                let png = lab.logs.join(format!(
+                    "{}-f1-17-inst-{:03}min.png",
+                    lab.session,
+                    t0.elapsed().as_secs() / 60
+                ));
+                std::fs::write(&png, &shot.png).unwrap();
+                log.line(format!(
+                    "t={:>5}s non nero {:.2}% -> {}",
+                    t0.elapsed().as_secs(),
+                    img.non_black_percent(),
+                    png.display()
+                ));
+            }
+        }
+    };
+    log.line(format!("esito dopo {:?}: {esito:?}", t0.elapsed()));
+    let id = run.identity();
+    if esito.is_none() {
+        let _ = rt.block_on(run.emergency_stop(Duration::from_secs(10)));
+    }
+    let _ = rt.block_on(run.close());
+    assert_no_orphan(&id);
+    assert!(
+        esito.is_some(),
+        "installazione non conclusa in {minuti} minuti"
+    );
+}
+
+/// F1-17, parte 2: boot di Ubuntu dal disco installato (nessuna ISO), poi
+/// arresto ACPI ordinario (`system_powerdown`): un guest reale deve spegnersi
+/// da solo, senza `quit` né terminazione.
+#[test]
+#[ignore = "richiede QEMU reale: impostare LIGHTVM_QEMU_DIR"]
+fn reale_f1_17_boot_da_disco_e_arresto_acpi() {
+    let _g = SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let lab = require_lab!();
+    let mut log = Log::new(&lab, "f1-17-boot");
+    let paths = lab_paths(&lab, &mut log);
+    let caps = probe_caps(&lab, &paths, &mut log);
+    let (disco, vars) = disco_f1_17(&lab, &paths);
+    let fisso = DiscoFisso {
+        base: &paths,
+        disco,
+        vars,
+    };
+    let run_id = RunId::new_v7();
+    paths.prepare_run(&run_id);
+    let mut s = spec(&caps, &paths, run_id);
+    s.cpu = caps.cpu_model("Skylake-Client-v4").unwrap();
+    s.memory_mib = 4096;
+    s.install_media = None;
+    let rt = rt();
+    let run = rt
+        .block_on(QemuRun::start(&caps, &s, &fisso, RunConfig::default()))
+        .expect("avvio dal disco");
+    let t0 = Instant::now();
+    for i in 1..=8 {
+        std::thread::sleep(Duration::from_secs(15));
+        let (shot, img) = rt.block_on(run.screenshot_rgb()).unwrap();
+        let png = lab.logs.join(format!(
+            "{}-f1-17-boot-{:03}s.png",
+            lab.session,
+            t0.elapsed().as_secs()
+        ));
+        std::fs::write(&png, &shot.png).unwrap();
+        log.line(format!(
+            "boot {i}: t={}s non nero {:.2}% -> {}",
+            t0.elapsed().as_secs(),
+            img.non_black_percent(),
+            png.display()
+        ));
+    }
+    let t1 = Instant::now();
+    let report = rt
+        .block_on(run.shutdown(ShutdownPolicy {
+            powerdown_timeout: Duration::from_secs(90),
+            quit_timeout: Duration::from_secs(10),
+            kill_timeout: Duration::from_secs(10),
+        }))
+        .unwrap();
+    log.line(format!(
+        "arresto ACPI: fase {:?}, causa {:?}, codice {:?}, durata {:?}",
+        report.phase,
+        report.cause,
+        report.code,
+        t1.elapsed()
+    ));
+    let id = run.identity();
+    let _ = rt.block_on(run.close());
+    assert_no_orphan(&id);
+    assert_eq!(
+        report.phase,
+        StopPhase::Powerdown,
+        "il guest non si è spento con ACPI"
+    );
+}
