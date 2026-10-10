@@ -40,10 +40,10 @@ pub use input::{
 };
 pub use model::{
     BaselineOrigin, BaselineRecord, DisplayGeometry, FileIdentity, Firmware, GuestOs, HostCapacity,
-    ImageFormat, MAX_MEMORY_MARGIN_MIB, MAX_STORAGE_BUDGET_GIB, MIN_CPU_MAX_PERCENT,
-    MIN_MEMORY_MARGIN_MIB, MediaEntry, MediaKind, MediaRecord, NetworkProfile, OperationKind,
-    OperationRecord, OperationStatus, ResourceLimits, RunEndReason, RunRecord, Screenshot,
-    VmConfig, VmLimits, VmRecord,
+    ImageFormat, MAX_DATA_MEDIA_BYTES, MAX_INSTALL_MEDIA_BYTES, MAX_MEMORY_MARGIN_MIB,
+    MAX_STORAGE_BUDGET_GIB, MIN_CPU_MAX_PERCENT, MIN_MEMORY_MARGIN_MIB, MediaEntry, MediaKind,
+    MediaRecord, NetworkProfile, OperationKind, OperationRecord, OperationStatus, ResourceLimits,
+    RunEndReason, RunRecord, Screenshot, VmConfig, VmLimits, VmRecord,
 };
 pub use request::{Actor, Admission, Caller, VmAction, VmRequest};
 pub use session::{

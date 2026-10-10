@@ -100,6 +100,24 @@ pub struct VmConfig {
     pub limits: VmLimits,
 }
 
+/// Dimensione massima di un'ISO di installazione nel registro media (16 GiB;
+/// ADR-0008).
+pub const MAX_INSTALL_MEDIA_BYTES: u64 = 16 << 30;
+/// Dimensione massima di un'ISO dati in sola lettura (8 GiB, DVD a doppio
+/// strato; ADR-0008). Conta anche nel budget di storage (ADR-0017).
+pub const MAX_DATA_MEDIA_BYTES: u64 = 8 << 30;
+
+impl MediaKind {
+    /// Dimensione massima ammessa per questo tipo di supporto.
+    #[must_use]
+    pub const fn max_bytes(self) -> u64 {
+        match self {
+            MediaKind::InstallIso => MAX_INSTALL_MEDIA_BYTES,
+            MediaKind::DataIso => MAX_DATA_MEDIA_BYTES,
+        }
+    }
+}
+
 /// Tetto CPU minimo ammesso, in percentuale della capacità dei vCPU.
 pub const MIN_CPU_MAX_PERCENT: u8 = 5;
 /// Margine di memoria minimo oltre la RAM guest, in MiB.
