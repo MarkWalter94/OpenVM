@@ -161,3 +161,8 @@ Non richiedono librerie di sistema: SQLite (incluso, `bundled`), TLS (`rustls` +
 - `deny.toml` (aggiornato)
 - `docs/verification/F1-07-licenze-packaging.md` (questo file)
 - `lab/logs/f1-07/*` (fuori dal repository)
+
+
+## Update 2026-10-10 (late evening): getrandom 0.4.3 and sha2 0.11.0
+
+Section appended (rule 8). Dependabot updates merged into `main`: `getrandom` 0.3.4 → 0.4.3 (`lightvm-service`), `sha2` 0.10.9 → 0.11.0 (`qemu-backend`, `vm-storage`, `spikes/f0-storage`). New or changed transitive crates: `digest` 0.11.3, `block-buffer` 0.12.1, `crypto-common` 0.2.2, `cpufeatures` 0.3.1, `hybrid-array` 0.4.15 (replaces `generic-array` 0.14.7), `const-oid` 0.10.2. All `MIT OR Apache-2.0`, allowed by `deny.toml`. No code change needed; fmt, clippy `-D warnings` (all four variants) and `cargo test --workspace --locked` green: 365 passed, 0 failed, 16 ignored.
