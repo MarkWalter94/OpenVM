@@ -537,23 +537,34 @@ pub(crate) fn is_link(meta: &std::fs::Metadata) -> bool {
     false
 }
 
-/// Checks of the file chosen by the user with the native picker before the
-/// import (ADR-0008; ROADMAP 7.4, "Host" row). The path is opened only for
-/// reading by the catalog and never passed to QEMU. Rejected:
-/// - relative paths, `.`/`..` components, UNC paths (`\\server\share`) and
-///   device paths (`\\?\`, `\\.\`, `\??\`), alternate data streams (`:`
-///   after the drive), Windows device names (`CON`, `NUL`, `COM1`, ...)
-///   → `permission_denied` or `invalid_argument`;
-/// - an extension other than `.iso` → `invalid_argument`;
-/// - a missing file → `not_found`; a link, junction or other reparse point
-///   on the file → `permission_denied`; anything but a regular file →
-///   `invalid_argument`;
-/// - an empty file or one over the limit of the kind (16 GiB installation,
-///   8 GiB data) → `invalid_argument` / `resource_limit`;
-/// - a file without the ISO 9660 / UDF signature → `invalid_argument`.
+/// Checks of the file chosen by the user with the native picker (ADR-0008;
+/// ROADMAP 7.4, "Host" row): [`validate_import_path`] on the text, then
+/// [`check_import_handle`] on the handle the copy reads from. The path is
+/// opened only for reading by the catalog and never passed to QEMU.
 ///
-/// The catalog repeats type, size and signature on the handle it copies from.
+/// The service runs the two halves on different threads: the textual one on
+/// the supervisor thread, the file one on the import worker thread
+/// ([`crate::engine::MediaImportPort::begin_import`]), so a slow or hanging
+/// source never blocks the supervisor. This function runs both in sequence
+/// (tests, tools).
 pub fn validate_import_source(raw: &str, kind: MediaKind) -> Result<PathBuf, PublicError> {
+    let path = validate_import_path(raw)?;
+    precheck_source(&path)?;
+    let file = open_source(&path)?;
+    check_import_handle(&file, &path, kind)?;
+    Ok(path)
+}
+
+/// Textual checks of the media path (no file system access, never
+/// panics: only byte-level and `Path` operations). Rejected:
+/// - empty, longer than 4096 bytes, control characters → `invalid_argument`;
+/// - UNC paths (`\\server\share`) and device paths (`\\?\`, `\\.\`, `\??\`),
+///   alternate data streams (`:` after the drive), Windows device names
+///   (`CON`, `NUL`, `COM1`, ...) → `permission_denied`;
+/// - relative paths, `.`/`..` components, names ending in `.` or space →
+///   `invalid_argument`;
+/// - an extension other than `.iso` → `invalid_argument`.
+pub fn validate_import_path(raw: &str) -> Result<PathBuf, PublicError> {
     use std::path::{Component, Path};
     let invalid = PublicError::invalid_argument;
     let denied = PublicError::permission_denied;
@@ -566,7 +577,8 @@ pub fn validate_import_source(raw: &str, kind: MediaKind) -> Result<PathBuf, Pub
         if b.len() >= 2 && sep(b[0]) && (sep(b[1]) || b[1] == b'?') {
             return Err(denied("UNC and device paths are not allowed"));
         }
-        if raw.len() > 2 && raw[2..].contains(':') {
+        // Byte-level: `raw[2..]` could split a multi-byte character.
+        if b.len() > 2 && b[2..].contains(&b':') {
             return Err(denied("alternate data streams are not allowed"));
         }
     }
@@ -604,13 +616,58 @@ pub fn validate_import_source(raw: &str, kind: MediaKind) -> Result<PathBuf, Pub
     if !is_iso {
         return Err(invalid("only `.iso` files can be imported"));
     }
-    let meta = match std::fs::symlink_metadata(path) {
-        Ok(m) => m,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(PublicError::not_found("media file not found"));
-        }
-        Err(_) => return Err(denied("media file not accessible")),
-    };
+    Ok(path.to_path_buf())
+}
+
+/// Opens the source like the catalog does (read, share read only, without
+/// following a reparse point on the last component).
+fn open_source(path: &Path) -> Result<std::fs::File, PublicError> {
+    let mut o = std::fs::OpenOptions::new();
+    o.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_SHARE_READ, FILE_FLAG_OPEN_REPARSE_POINT.
+        o.share_mode(0x1);
+        o.custom_flags(0x0020_0000);
+    }
+    o.open(path).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => PublicError::not_found("media file not found"),
+        _ => PublicError::permission_denied("media file not accessible"),
+    })
+}
+
+/// File checks on the handle the copy reads from (import worker thread):
+/// - a link, junction or other reparse point on the file → `permission_denied`;
+///   anything but a regular file → `invalid_argument`;
+/// - an empty file or one over the limit of the kind (16 GiB installation,
+///   8 GiB data) → `invalid_argument` / `resource_limit`;
+/// - a file without the ISO 9660 / UDF signature → `invalid_argument`;
+/// - Windows, location resolved by the system on the handle
+///   (`GetFinalPathNameByHandleW`, then `GetDriveTypeW` on the volume
+///   root): a file on a network share or on a volume that is not a local
+///   fixed, removable or optical drive (mapped network drives included) →
+///   `permission_denied`;
+/// - Windows, **reparse traversal rule**: the final path of the handle must
+///   be the requested path itself (compared without case, `/` as `\`). Any
+///   difference means the system resolved something on the way: a symbolic
+///   link, junction or mount point in an intermediate directory, a `subst`
+///   or mapped drive, or an 8.3 short name; all are refused
+///   (`permission_denied`, "choose the file in its real location"), so the
+///   file copied is always the one at the path the user saw.
+///
+/// The handle position is left at the start of the file.
+pub fn check_import_handle(
+    file: &std::fs::File,
+    requested: &Path,
+    kind: MediaKind,
+) -> Result<(), PublicError> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let invalid = PublicError::invalid_argument;
+    let denied = PublicError::permission_denied;
+    let meta = file
+        .metadata()
+        .map_err(|_| denied("media file not accessible"))?;
     if is_link(&meta) {
         return Err(denied(
             "links, junctions and reparse points are not allowed",
@@ -629,12 +686,47 @@ pub fn validate_import_source(raw: &str, kind: MediaKind) -> Result<PathBuf, Pub
                 .with_detail("max_bytes", kind.max_bytes().to_string()),
         );
     }
-    if !is_optical_image(path) {
+    #[cfg(windows)]
+    {
+        let loc = qemu_backend::prepare::file_location(file)
+            .map_err(|_| denied("location of the media file not verifiable"))?;
+        if !loc.volume.is_local() {
+            return Err(denied(
+                "media on network shares or non-local volumes are not allowed",
+            ));
+        }
+        if !same_windows_path(&loc.final_path, requested) {
+            return Err(denied(
+                "the media path goes through a link, junction, mount point or substituted drive: choose the file in its real location",
+            ));
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = requested;
+    let mut f = file;
+    let mut id = [0u8; 5];
+    let signed = f.seek(SeekFrom::Start(VOLUME_DESCRIPTOR_ID_OFFSET)).is_ok()
+        && f.read_exact(&mut id).is_ok()
+        && (&id == b"CD001" || &id == b"BEA01");
+    f.seek(SeekFrom::Start(0))
+        .map_err(|_| denied("media file not accessible"))?;
+    if !signed {
         return Err(invalid(st::NOT_OPTICAL_IMAGE));
     }
-    Ok(path.to_path_buf())
+    Ok(())
 }
 
+/// Same Windows path, without case and with `/` as `\`.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn same_windows_path(a: &Path, b: &Path) -> bool {
+    let norm = |p: &Path| {
+        p.to_string_lossy()
+            .replace('/', "\\")
+            .trim_end_matches('\\')
+            .to_lowercase()
+    };
+    norm(a) == norm(b)
+}
 /// Public error of a failed import, without paths.
 fn import_error(e: &st::StorageError) -> PublicError {
     match e {
@@ -652,6 +744,11 @@ fn import_error(e: &st::StorageError) -> PublicError {
         }
         st::StorageError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound => {
             PublicError::not_found("media file not found")
+        }
+        st::StorageError::Io { source, .. }
+            if source.kind() == std::io::ErrorKind::PermissionDenied =>
+        {
+            PublicError::permission_denied("media file not accessible")
         }
         st::StorageError::Io { source, .. } if source.kind() == std::io::ErrorKind::StorageFull => {
             PublicError::resource_limit("not enough free space in the catalog for the medium")
@@ -686,56 +783,123 @@ fn tree_bytes(dir: &Path) -> u64 {
         .sum()
 }
 
+/// Result of the worker step of an import on the SQLite catalog.
+struct SqliteCopied {
+    copied: st::CopiedMedia,
+    /// Public reason when the service's own checks refused the source.
+    rejected: Option<PublicError>,
+}
+
+/// Placeholder storage error for a source refused by the service's checks
+/// (the public error travels in [`SqliteCopied::rejected`]).
+const SOURCE_REFUSED: &str = "media source refused by the service checks";
+
 impl crate::engine::MediaImportPort for SqliteStore {
+    /// Records the import intent only: the source is opened, checked
+    /// ([`check_import_handle`], free space) and copied by the returned job,
+    /// on the import worker thread.
     fn begin_import(
         &mut self,
         source: &Path,
         kind: MediaKind,
         declared_origin: &Label,
     ) -> Result<ImportJob, PublicError> {
-        // The copy must not fill the volume of the catalog: a margin stays
-        // free for the VM disks, the database and the logs.
-        let size = std::fs::symlink_metadata(source)
-            .map(|m| m.len())
-            .unwrap_or(0);
-        let free = qemu_backend::ManagedPath::verify(self.root())
-            .and_then(|r| qemu_backend::prepare::host_resources(&r))
-            .map(|r| r.free_disk_bytes);
-        if let Ok(free) = free
-            && free < size.saturating_add(IMPORT_FREE_MARGIN)
-        {
-            return Err(PublicError::resource_limit(
-                "not enough free space in the catalog for the medium",
-            )
-            .with_detail("size_bytes", size.to_string())
-            .with_detail("free_bytes", free.to_string()));
-        }
         let limits = st::MediaLimits {
             max_bytes: kind.max_bytes(),
             optical_signature: true,
         };
-        let job = self
+        let reservation = self
             .cat
             .borrow_mut()
-            .begin_media_import(source, storage_kind(kind), declared_origin.as_str(), limits)
+            .reserve_media_import(source, storage_kind(kind), declared_origin.as_str(), limits)
             .map_err(|e| import_error(&e))?;
-        Ok(ImportJob::new(move || ImportCopied(Box::new(job.copy()))))
+        let root = self.root();
+        let requested = source.to_path_buf();
+        Ok(ImportJob::new(move || {
+            // Readable error for the common refusals (a folder, a link, a
+            // missing file); the checks that count are made on the handle.
+            if let Err(e) = precheck_source(&requested) {
+                let copied = reservation.refuse(st::StorageError::Unsupported(SOURCE_REFUSED));
+                return ImportCopied(Box::new(SqliteCopied {
+                    copied,
+                    rejected: Some(e),
+                }));
+            }
+            let mut rejected = None;
+            let copied = reservation.open_and_copy(|file| {
+                let check = check_import_handle(file, &requested, kind)
+                    .and_then(|()| check_free_space(&root, file));
+                check.map_err(|e| {
+                    rejected = Some(e);
+                    st::StorageError::Unsupported(SOURCE_REFUSED)
+                })
+            });
+            ImportCopied(Box::new(SqliteCopied { copied, rejected }))
+        }))
     }
 
     fn finish_import(&mut self, copied: ImportCopied) -> Result<MediaEntry, PublicError> {
-        let copied = copied
+        let SqliteCopied { copied, rejected } = *copied
             .0
-            .downcast::<st::CopiedMedia>()
+            .downcast::<SqliteCopied>()
             .map_err(|_| infra("import started on another catalog"))?;
         let rec = self
             .cat
             .borrow_mut()
-            .finish_media_import(*copied)
-            .map_err(|e| import_error(&e))?;
+            .finish_media_import(copied)
+            .map_err(|e| rejected.unwrap_or_else(|| import_error(&e)))?;
         Self::media_entry(rec)?.ok_or_else(|| infra("imported medium not approved"))
+    }
+
+    fn abort_import(&mut self, copied: ImportCopied) -> Result<(), PublicError> {
+        let SqliteCopied { copied, .. } = *copied
+            .0
+            .downcast::<SqliteCopied>()
+            .map_err(|_| infra("import started on another catalog"))?;
+        self.cat
+            .borrow_mut()
+            .abort_media_import(copied)
+            .map_err(|e| storage_error(&e))
     }
 }
 
+/// Classification of the source by path, on the worker thread, before the
+/// open: missing → `not_found`; link, junction or reparse point →
+/// `permission_denied`; not a regular file → `invalid_argument`.
+fn precheck_source(path: &Path) -> Result<(), PublicError> {
+    match std::fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(PublicError::not_found("media file not found"))
+        }
+        Err(_) => Err(PublicError::permission_denied("media file not accessible")),
+        Ok(m) if is_link(&m) => Err(PublicError::permission_denied(
+            "links, junctions and reparse points are not allowed",
+        )),
+        Ok(m) if !m.is_file() => Err(PublicError::invalid_argument(
+            "the media path is not a regular file",
+        )),
+        Ok(_) => Ok(()),
+    }
+}
+
+/// The copy must not fill the volume of the catalog: a margin stays free for
+/// the VM disks, the database and the logs (size read on the handle).
+fn check_free_space(root: &Path, file: &std::fs::File) -> Result<(), PublicError> {
+    let size = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let free = qemu_backend::ManagedPath::verify(root.to_path_buf())
+        .and_then(|r| qemu_backend::prepare::host_resources(&r))
+        .map(|r| r.free_disk_bytes);
+    if let Ok(free) = free
+        && free < size.saturating_add(IMPORT_FREE_MARGIN)
+    {
+        return Err(PublicError::resource_limit(
+            "not enough free space in the catalog for the medium",
+        )
+        .with_detail("size_bytes", size.to_string())
+        .with_detail("free_bytes", free.to_string()));
+    }
+    Ok(())
+}
 /// Offset of the first volume descriptor (sector 16 of 2048 bytes) plus the
 /// type byte: there ISO 9660 writes `CD001`, UDF `BEA01` (ADR-0008).
 const VOLUME_DESCRIPTOR_ID_OFFSET: u64 = 16 * 2048 + 1;
@@ -834,6 +998,151 @@ mod tests {
         std::fs::write(&short, b"CD001").unwrap();
         assert!(!is_optical_image(&short));
         assert!(!is_optical_image(&d.join("missing.iso")));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Never panics, whatever the text: the checks run on the supervisor
+    /// thread (a panic there used to kill every VM).
+    #[test]
+    fn import_path_validation_never_panics() {
+        let fixed = [
+            "€:\\a.iso",
+            "C€:\\a.iso",
+            "€",
+            "€€",
+            "\u{1F600}:\\x.iso",
+            "C:\\é:stream.iso",
+            "C:é",
+            "C:\\dir\\€.iso",
+            "\\\\?\\C:\\a.iso",
+            "\\\\.\\PhysicalDrive0",
+            "\\??\\C:\\a.iso",
+            "//server/share/a.iso",
+            "C:\\CON.iso",
+            "C:\\nul .iso",
+            "C:\\a.iso:ads",
+            "C:\\a\\..\\b.iso",
+            "C:a.iso",
+            "a.iso",
+            "",
+            ":",
+            "::",
+            "\0",
+            "C:\\a.iso.",
+            "C:\\\u{202E}osi.exe",
+            "/",
+            "\\",
+            "C:\\",
+        ];
+        for s in fixed {
+            let _ = validate_import_path(s);
+            let _ = validate_import_source(s, MediaKind::InstallIso);
+        }
+        assert_eq!(
+            validate_import_path("€:\\a.iso").unwrap_err().code,
+            if cfg!(windows) {
+                ErrorCode::PermissionDenied
+            } else {
+                ErrorCode::InvalidArgument
+            }
+        );
+        // Pseudo-random strings over an alphabet of separators, colons,
+        // dots and multi-byte characters.
+        let alphabet: Vec<char> = "C:\\/.?a€é\u{1F600}\u{0301}NUL iso ".chars().collect();
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        for _ in 0..20_000 {
+            let mut s = String::new();
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let len = (x % 24) as usize;
+            for _ in 0..len {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                s.push(alphabet[(x % alphabet.len() as u64) as usize]);
+            }
+            if s.ends_with(".iso") || x.is_multiple_of(3) {
+                let _ = validate_import_source(&s, MediaKind::DataIso);
+            }
+            let _ = validate_import_path(&s);
+        }
+    }
+
+    #[test]
+    fn import_checks_run_on_the_handle() {
+        let d = crate::test_support::temp_dir("import-handle");
+        let iso = |p: &Path, sig: &[u8]| {
+            let mut b = vec![0u8; 40 * 1024];
+            let o = usize::try_from(VOLUME_DESCRIPTOR_ID_OFFSET).unwrap();
+            b[o..o + sig.len()].copy_from_slice(sig);
+            std::fs::write(p, b).unwrap();
+        };
+        let real = d.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let good = real.join("good.iso");
+        iso(&good, b"CD001");
+        let path = good.to_str().unwrap();
+        assert_eq!(
+            validate_import_source(path, MediaKind::InstallIso).unwrap(),
+            good
+        );
+        // The handle is left at the start for the copy.
+        let f = open_source(&good).unwrap();
+        check_import_handle(&f, &good, MediaKind::InstallIso).unwrap();
+        let mut first = [1u8; 4];
+        std::io::Read::read_exact(&mut &f, &mut first).unwrap();
+        assert_eq!(first, [0; 4]);
+        let bad = real.join("zip.iso");
+        iso(&bad, b"PK\x03\x04\x00");
+        assert_eq!(
+            validate_import_source(bad.to_str().unwrap(), MediaKind::InstallIso)
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument
+        );
+        let empty = real.join("empty.iso");
+        std::fs::write(&empty, b"").unwrap();
+        assert_eq!(
+            validate_import_source(empty.to_str().unwrap(), MediaKind::InstallIso)
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            validate_import_source(
+                real.join("missing.iso").to_str().unwrap(),
+                MediaKind::DataIso
+            )
+            .unwrap_err()
+            .code,
+            ErrorCode::NotFound
+        );
+        // Intermediate junction (Windows): the final path differs from the
+        // requested one, refused.
+        #[cfg(windows)]
+        {
+            let j = d.join("j");
+            let ok = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(&j)
+                .arg(&real)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success());
+            if ok {
+                let through = j.join("good.iso");
+                let e = validate_import_source(through.to_str().unwrap(), MediaKind::InstallIso)
+                    .unwrap_err();
+                assert_eq!(e.code, ErrorCode::PermissionDenied, "{e:?}");
+                assert!(e.message.contains("real location"), "{e:?}");
+                let _ = std::fs::remove_dir(&j);
+            }
+            // Different case is the same file: accepted.
+            let upper = good.to_str().unwrap().to_uppercase();
+            assert!(validate_import_source(&upper, MediaKind::InstallIso).is_ok());
+        }
         let _ = std::fs::remove_dir_all(&d);
     }
 }

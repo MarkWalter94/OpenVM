@@ -165,9 +165,29 @@ fn console_ticket_requires_a_running_vm_and_is_audited() {
     let run = h.start(vm);
     let st = h.core.open_console(&Caller::User, vm).unwrap();
     assert_eq!(st.run_id, Some(run));
+    // Not audited as succeeded until the ticket is actually issued.
+    assert!(
+        !h.audit_events()
+            .iter()
+            .any(|e| e.action == AuditAction::ConsoleOpen && e.outcome == AuditOutcome::Succeeded)
+    );
+    // Proxy not started: failed with the code.
+    h.core
+        .record_console_open(&Caller::User, vm, run, Err(ErrorCode::InfrastructureError));
+    let e = last(&h, AuditAction::ConsoleOpen);
+    assert_eq!(e.outcome, AuditOutcome::Failed);
+    assert_eq!(e.error, Some(ErrorCode::InfrastructureError));
+    h.core.record_console_open(&Caller::User, vm, run, Ok(()));
     let e = last(&h, AuditAction::ConsoleOpen);
     assert_eq!(e.outcome, AuditOutcome::Succeeded);
     assert_eq!(e.run_id, Some(run));
+    // Revocation with its cause.
+    h.core
+        .record_console_revoke(Actor::System, vm, run, TerminationCause::VmTerminated);
+    let e = last(&h, AuditAction::ConsoleRevoke);
+    assert_eq!(e.outcome, AuditOutcome::Succeeded);
+    assert_eq!((e.vm_id, e.run_id), (Some(vm), Some(run)));
+    assert_eq!(e.termination, Some(TerminationCause::VmTerminated));
     let (_, agent) = h.session(&[vm], &[Capability::VmScreenshot], 5);
     assert_eq!(
         code(h.core.open_console(&agent, vm)),
@@ -248,4 +268,45 @@ fn user_input_is_accepted_while_stopping_agents_and_stopped_vms_are_refused() {
         code(h.core.submit(&Caller::User, r)),
         ErrorCode::StateConflict
     );
+}
+
+/// A graceful stop whose escalation did not observe the exit in time leaves
+/// the VM `stopping` with the run current; the exit observed later closes
+/// the run as an ordinary stop.
+#[test]
+fn graceful_stop_timeout_stays_stopping_until_the_exit_is_observed() {
+    let mut h = Harness::new();
+    let vm = h.create_vm("slow-stop");
+    let run = h.start(vm);
+    let r = h.req(vm, None, VmAction::Stop);
+    h.core.submit(&Caller::User, r).unwrap();
+    let stop = h.core.begin_dispatch(vm).unwrap().expect("stop forwarded");
+    let rec = h
+        .core
+        .finish_dispatch(
+            vm,
+            stop.operation_id,
+            Err(PublicError::infrastructure("QEMU shutdown")),
+        )
+        .unwrap();
+    assert_eq!(rec.status, OperationStatus::Failed);
+    let st = h.core.vm_status(&Caller::User, vm).unwrap();
+    assert_eq!((st.state, st.run_id), (VmState::Stopping, Some(run)));
+    // A forced stop is still admitted (queued: the exit below comes first).
+    let r = h.req(vm, None, VmAction::ForceStop);
+    assert!(h.core.submit(&Caller::User, r).is_ok());
+    // The exit is observed (escalation kill, unexpected for the backend).
+    assert!(
+        h.core
+            .observe(
+                vm,
+                BackendObservation::ProcessExited {
+                    run_id: run,
+                    expected: false,
+                },
+            )
+            .unwrap()
+    );
+    let st = h.core.vm_status(&Caller::User, vm).unwrap();
+    assert_eq!((st.state, st.run_id), (VmState::Stopped, None));
 }

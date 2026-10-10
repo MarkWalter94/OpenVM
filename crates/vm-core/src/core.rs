@@ -668,8 +668,11 @@ where
         Ok(())
     }
 
-    /// Records the issue of a console display ticket for the current run of a
-    /// running VM (audit `console_open`, never the token). User only.
+    /// Checks a console request for the current run of a running VM. User
+    /// only. A refusal is audited here (`console_open` denied); success is
+    /// **not** audited yet: the caller issues the display ticket (proxy) and
+    /// then records the actual outcome with [`Self::record_console_open`],
+    /// so a `console_open` succeeded event always matches a usable ticket.
     pub fn open_console(&mut self, caller: &Caller, vm_id: VmId) -> Result<VmStatus, PublicError> {
         let actor = caller.actor();
         let ev = |run_id| Ev {
@@ -690,17 +693,70 @@ where
             Some(rt) => Ok(Self::status_of(rt)),
         };
         match status {
-            Ok(s) => {
-                self.emit_after(
-                    actor,
-                    AuditAction::ConsoleOpen,
-                    AuditOutcome::Succeeded,
-                    ev(s.run_id),
-                );
-                Ok(s)
-            }
+            Ok(s) => Ok(s),
             Err(err) => Err(self.deny(actor, AuditAction::ConsoleOpen, ev(None), err)),
         }
+    }
+
+    /// Records the outcome of issuing a console display ticket after
+    /// [`Self::open_console`] (audit `console_open` succeeded or failed with
+    /// the error code; never the token).
+    pub fn record_console_open(
+        &mut self,
+        caller: &Caller,
+        vm_id: VmId,
+        run_id: RunId,
+        result: Result<(), ErrorCode>,
+    ) {
+        let (outcome, error) = match result {
+            Ok(()) => (AuditOutcome::Succeeded, None),
+            Err(code) => (AuditOutcome::Failed, Some(code)),
+        };
+        self.emit_after(
+            caller.actor(),
+            AuditAction::ConsoleOpen,
+            outcome,
+            Ev {
+                vm_id: Some(vm_id),
+                run_id: Some(run_id),
+                error,
+                ..Ev::default()
+            },
+        );
+    }
+
+    /// Records the revocation of a console display ticket (audit
+    /// `console_revoke` with the cause in `termination`): run ended, UI
+    /// connection closed or revoked, Emergency Stop, replaced by a new
+    /// ticket, service shutdown.
+    pub fn record_console_revoke(
+        &mut self,
+        actor: Actor,
+        vm_id: VmId,
+        run_id: RunId,
+        cause: TerminationCause,
+    ) {
+        self.emit_after(
+            actor,
+            AuditAction::ConsoleRevoke,
+            AuditOutcome::Succeeded,
+            Ev {
+                vm_id: Some(vm_id),
+                run_id: Some(run_id),
+                termination: Some(cause),
+                ..Ev::default()
+            },
+        );
+    }
+
+    /// Side-effect-free authorization check of a call (no audit, no
+    /// admission): used by the supervisor to decide whether a costly
+    /// preparatory step (for example re-reading the display geometry with a
+    /// capture) may run before the core admits the request, which repeats
+    /// the full check and audits the outcome.
+    pub fn is_authorized(&self, caller: &Caller, vm_id: VmId, capability: Capability) -> bool {
+        self.authorize(caller, Some(vm_id), capability, self.clock.now())
+            .is_ok()
     }
 
     fn check_config_media(&self, config: &VmConfig) -> Result<(), PublicError> {
@@ -1524,6 +1580,14 @@ where
                     // Process end not confirmed: reconciliation decides.
                     self.set_state(vm_id, VmState::Failed);
                 }
+                // Graceful stop whose escalation did not observe the exit in
+                // time: the run stays current and the VM stays `stopping`
+                // (console and user input still allowed, a forced stop or an
+                // Emergency Stop can still be requested). The backend keeps
+                // the run "awaiting exit" and reports the exit whatever its
+                // cause; the observation (`process_exited`) then closes the
+                // run as `stopped` with the pending reason (`stopped`).
+                (OperationKind::Stop, Err(_)) => {}
                 _ => {}
             }
         }

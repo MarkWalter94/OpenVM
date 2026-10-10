@@ -120,3 +120,41 @@ test result: ok. 1 passed; 0 failed
 ```
 
 Notes: "VM running 63.5 s" includes the re-verification of the 6.4 GB install ISO hash at every start (ADR-0008); the stats line is printed before the two arrow keys are sent, so it does not prove input delivery (input is verified in `F2-01`). Default CPU model changed to `Skylake-Client-v4` in this integration (`lightvm-service` adapter), the model used by this run. Workspace after integration: fmt and clippy `-D warnings` clean (four variants), `cargo test --workspace --locked`: 424 passed, 0 failed, 18 ignored.
+
+## Update 2026-10-10 (late night): fixes of the desktop review findings
+
+Section appended (rule 8). Fourteen verified review findings on `apps/desktop`, `packaging/windows` and the user guide, fixed with a regression test each where it can run headless. Environment as above (Windows 11 Pro 26300, MSVC wrapper, `CARGO_TARGET_DIR=target\fix-desktop`), built on the working tree that also contains the in-progress `crates/*` changes of the service agent.
+
+| # | Finding | Fix | Regression test |
+| --- | --- | --- | --- |
+| 1 | Console input over the service rate limit (100 req/s, burst 50) | `LiveConsole` keeps a queue of pending batches: consecutive pointer moves coalesced into the last, keys/buttons never dropped, split only above `MAX_INPUT_EVENTS_PER_REQUEST`; at most one batch every `INPUT_INTERVAL` = 20 ms, the app schedules the frame for the next one. Service: a batch refused with `resource_limit` is sent again after 60 ms, then only its key/button releases; the fast lane is a bounded queue (32) that drops only pointer-only batches. | `console::tests::input_is_paced_coalesced_and_never_drops_keys` (600 frames at 300 fps: ≤ 50 requests in any second, all key/button events in order, last position delivered), `batches_split_only_above_the_maximum`, `service::tests::rate_limited_input_is_retried`, `releases_are_sent_alone_when_input_stays_refused`, `fast_lane_is_bounded_and_keeps_keys` |
+| 2 | Close with a dead/disconnected supervisor waits 90 s | VMs counted only if the supervisor is alive and connected; otherwise the close is immediate, also while stopping. | `dialogs_ui::close_with_a_dead_or_disconnected_supervisor_is_immediate`, `supervisor_lost_while_stopping_finishes_the_close` |
+| 3 | Clicks/wheel on popups and dialogs over the image reach the guest | Pointer positions are forwarded only if the top layer there is the console's (`ctx.layer_id_at`), no popup is open (this or the previous frame) and no app dialog is open; button releases of a press on the image still go. | `console_ui::clicks_on_popups_and_dialogs_over_the_image_do_not_reach_the_guest` (control click, layout list item over the image, popup-closing click, close dialog) |
+| 4 | Ctrl+Alt+Enter autorepeat toggles repeatedly and swallows a forwarded Enter release | A chord needs a non-repeat press; a key whose press reached the guest is never swallowed. | `console::tests::autorepeat_is_not_a_chord_and_forwarded_keys_keep_their_release`, `held_enter_is_released_in_the_guest`, `console_ui::held_enter_with_ctrl_alt_autorepeat_is_released` |
+| 5 | Display reconnection stalls until input | While the link is disconnected the app requests a frame at the end of the reconnection wait. | `console_ui::display_reconnection_does_not_wait_for_input` (repaint delay ≤ 2 s, then fresh ticket) |
+| 6 | User guide: console window, shortcuts, media removal, supervisor card, labels | Guide rewritten in those places; every label rechecked against the code. New `diag.rs`: diagnostics also appended to `%LOCALAPPDATA%\LightVM\logs\lightvm-desktop.log`, the supervisor's stderr to `lightvm-service.log`, rotated at 1 MiB with 3 copies; no secrets logged. | `diag::tests::rotation_keeps_the_newest_copies`; smoke run below |
+| 7 | Successful create/delete/save shown as failed when the refresh fails | The follow-up refresh runs separately; its failure goes to `last_outcome` only (also for `OpenVm`). | `service::tests::successful_delete_is_not_reported_failed_when_the_refresh_fails` (in-process IPC server on the real transport) |
+| 8 | IPC thread and runtime leaked on every supervisor stop/restart | IPC tasks hold a weak sender; the executor ends with the `Service`, closes the lanes; the loop also ends when the event connection closes; pending requests then fail and `send` returns `false`. | `service::tests::ipc_thread_ends_when_the_service_is_dropped`, `send_returns_false_once_the_supervisor_is_gone` |
+| 9 | `install.ps1 -AddToPath` / uninstall turn the user PATH into REG_SZ | PATH read with `DoNotExpandEnvironmentNames`, written with `Set-ItemProperty -Type ExpandString` (kind preserved), `WM_SETTINGCHANGE` broadcast; `-EnvironmentKey` for tests. | `packaging/windows/tests/install-uninstall-test.ps1` (scratch key, real PATH checked unchanged) |
+| 10 | Touchpad scrolling floods wheel clicks | Conversion by `MouseWheelUnit` (Point 50 px/notch, Line 1, Page ×5), remainder accumulated, whole notches only. | `console::tests::wheel_is_converted_by_unit_and_accumulated` |
+| 11 | Full screen flag out of sync with the OS | Synced each frame from `viewport().fullscreen`; a change requested by LightVM wins for up to 1 s until the OS reports it. | `console_ui::full_screen_follows_the_os` |
+| 12 | Close dialog edge cases | VMs stopped while asking: the close goes on; only VMs active at the confirmation are waited for. | `dialogs_ui::vms_stopped_while_asking_let_the_close_proceed`, `only_vms_active_at_confirmation_are_waited_for`; `close_with_running_vms_asks_then_stops_them` now expects "0 of 2 stopped" |
+| 13 | Uninstall manifest accepts "." and ".." | Dot-only names rejected, files only (`-PathType Leaf`), shortcut only under `[Environment]::GetFolderPath('Programs')`. | `install-uninstall-test.ps1` (hostile manifest) |
+| 14 | Display token visible via `Debug` and kept in memory | Manual `Debug` for `Service` (ticket shown as `<redacted>`); `Supervisor::discard_console_ticket` called in `close_console` and when leaving the Console page; the console moves the transport (token) into the session instead of keeping a copy. `ConsoleTicket`'s own `Debug` is in `lightvm-proto` (not owned here); the service agent's working tree already redacts it. | `service::tests::debug_redacts_the_console_ticket`, `console_ui::unused_ticket_is_discarded_when_leaving_the_console` |
+
+Results:
+
+```
+cargo fmt -p lightvm-desktop -- --check                                  exit 0
+cargo clippy -p lightvm-desktop --all-targets -- -D warnings              exit 0
+  ... --no-default-features --features glow                              exit 0
+  ... --no-default-features --features wgpu                              exit 0
+cargo test -p lightvm-desktop: lib 50, clipboard_ui 5, console_ui 11, dialogs_ui 10, kittest_ui 9,
+  service_child 3 (+2 ignored, need QEMU), service_ui 6, visual_snapshots 14, vm_settings_ui 6,
+  wizard_ui 4, real_console 0 (+1 ignored): 118 passed, 0 failed
+packaging/windows/tests/install-uninstall-test.ps1                       All checks passed (14 PASS)
+```
+
+No snapshot changed (no visual change in the snapshotted views). Smoke run of the debug build with `LOCALAPPDATA` pointed to a scratch folder (`--smoke 3 --catalog …`): exit 0, `LightVM\logs\lightvm-desktop.log` with the start, rendering (`glow gl_version=3.3`) and supervisor start lines, `lightvm-service.log` with the supervisor's stderr (`--qemu-dir missing…`, `shutdown completed`).
+
+Not verified here: the pacing against the real supervisor with a real mouse at a high refresh rate (the unit test models the service limits), the OS full screen round trip on a real window, a GUI-subsystem release build writing the logs (same code path as the debug run).

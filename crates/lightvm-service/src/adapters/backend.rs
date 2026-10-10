@@ -27,12 +27,23 @@
 //!   start and reused afterwards ([`ensure_vm_vars`], F2);
 //! - the graceful stop runs in the background on the backend runtime
 //!   ([`BackendPort::begin_shutdown`]): the supervisor thread is free during
-//!   the ACPI wait and a forced stop can overtake it (F2);
+//!   the ACPI wait and a forced stop can overtake it (F2); a stop whose
+//!   escalation times out without observing the exit leaves the run
+//!   **awaiting exit**: it is not released and its exit is reported by
+//!   [`BackendPort::drain_observations`] whatever the exit cause (the
+//!   escalation's own termination included);
+//! - exits caused by the **priority path** (Emergency Stop) are told apart
+//!   from the escalation's termination: the priority handler marks the run
+//!   before terminating it, and such runs are left to the core's
+//!   `after_emergency_stop` (`force_stop` confirms the end), never reported
+//!   as an ordinary stop or exit, even when a graceful stop was pending;
+//! - the private directory of a run is removed on every failed start path
+//!   ([`PrivateDirGuard`]);
 //! - screenshot (`screendump`, metadata only over IPC), input
 //!   (`input-send-event`), reset and the display socket of the run (for the
 //!   console proxy, `crate::display`) are connected (F2).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -45,9 +56,8 @@ use lightvm_proto::{
 use qemu_backend::cmdline::{DiskFormat, DiskSpec};
 use qemu_backend::probe::{ProbeConfig, probe_accelerator, probe_host};
 use qemu_backend::{
-    Accelerator, BackendError, CpuModel, ExitCause, HostCapabilities, JobLimits, MachineType,
-    ManagedPath, ManagedPaths, ProcessState, QemuRun, RunConfig, ShutdownPolicy, VmLaunchSpec,
-    prepare,
+    Accelerator, BackendError, CpuModel, HostCapabilities, JobLimits, MachineType, ManagedPath,
+    ManagedPaths, ProcessState, QemuRun, RunConfig, ShutdownPolicy, VmLaunchSpec, prepare,
 };
 use vm_core::media::VerifiedMedia;
 use vm_core::ports::VmBackend;
@@ -56,7 +66,11 @@ use vm_storage::CatalogLayout;
 use crate::engine::BackendPort;
 use crate::supervisor::{Backend, EmergencyOutcome, EmergencyStop, ParentLossPolicy};
 
-type Registry = Arc<Mutex<BTreeMap<VmId, qemu_backend::EmergencyStop>>>;
+type Registry = Arc<Mutex<BTreeMap<VmId, (RunId, qemu_backend::EmergencyStop)>>>;
+
+/// Runs terminated by the priority path (Emergency Stop), marked before the
+/// termination: their exit belongs to the core's `after_emergency_stop`.
+type PriorityKilled = Arc<Mutex<BTreeSet<(VmId, RunId)>>>;
 
 /// Stop policy imposed when the UI is lost (`shutdown_vms`): replaces the
 /// ordinary one for the stops that follow.
@@ -275,6 +289,7 @@ pub fn probe(setup: QemuSetup) -> Result<(QemuHost, QemuVmBackend, HostCapacity)
         });
     let capacity = host_capacity(&caps, free_storage_gib);
     let registry: Registry = Arc::default();
+    let priority_killed: PriorityKilled = Arc::default();
     let stop_override: StopOverride = Arc::default();
     let host = QemuHost {
         version: caps.version.to_string(),
@@ -283,6 +298,7 @@ pub fn probe(setup: QemuSetup) -> Result<(QemuHost, QemuVmBackend, HostCapacity)
             .is_available()
             .then(|| Accelerator::for_current_host().qemu_name().to_owned()),
         registry: registry.clone(),
+        priority_killed: priority_killed.clone(),
         emergency_timeout: setup.emergency_timeout,
         stop_override: stop_override.clone(),
     };
@@ -296,6 +312,7 @@ pub fn probe(setup: QemuSetup) -> Result<(QemuHost, QemuVmBackend, HostCapacity)
         stops: BTreeMap::new(),
         private_dirs: BTreeMap::new(),
         registry,
+        priority_killed,
         stop_override,
     };
     Ok((host, backend, capacity))
@@ -384,7 +401,63 @@ pub struct QemuVmBackend {
     /// Private (socket) directory of each run, removed on release.
     private_dirs: BTreeMap<VmId, PathBuf>,
     registry: Registry,
+    priority_killed: PriorityKilled,
     stop_override: StopOverride,
+}
+
+/// Route of a graceful stop task that ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FinishedStop {
+    /// The run was terminated by the priority path: not reported, the run is
+    /// kept for the core's `after_emergency_stop` (`force_stop`).
+    LeaveToEmergency,
+    /// Exit observed: run released, stop reported as completed.
+    Released,
+    /// Escalation timed out with the process still alive: stop reported as
+    /// failed, run kept "awaiting exit" (its exit is reported later by
+    /// `drain_observations`, whatever the cause).
+    AwaitingExit,
+}
+
+fn finished_stop_route(priority_killed: bool, stop_ok: bool, exited: bool) -> FinishedStop {
+    if priority_killed {
+        FinishedStop::LeaveToEmergency
+    } else if stop_ok || exited {
+        FinishedStop::Released
+    } else {
+        FinishedStop::AwaitingExit
+    }
+}
+
+/// `true` if the exit of a run is to be reported as an observation: the
+/// process exited, no graceful stop is in progress for it (that one reports
+/// through `finished_shutdowns`) and the priority path did not terminate it.
+/// Any other exit cause is reported, the escalation's termination included.
+fn exit_to_report(state: &ProcessState, graceful_in_progress: bool, priority_killed: bool) -> bool {
+    !graceful_in_progress && !priority_killed && matches!(state, ProcessState::Exited { .. })
+}
+
+/// Removes a run's private directory when dropped, unless disarmed: every
+/// error path of a start (preparation, firmware, disk, launch) cleans it up.
+struct PrivateDirGuard(Option<PathBuf>);
+
+impl PrivateDirGuard {
+    fn new(dir: PathBuf) -> Self {
+        Self(Some(dir))
+    }
+
+    /// The run started: the directory now belongs to the run.
+    fn disarm(mut self) -> PathBuf {
+        self.0.take().unwrap_or_default()
+    }
+}
+
+impl Drop for PrivateDirGuard {
+    fn drop(&mut self) {
+        if let Some(dir) = self.0.take() {
+            remove_private_dir(&dir);
+        }
+    }
 }
 
 impl std::fmt::Debug for QemuVmBackend {
@@ -412,6 +485,7 @@ impl QemuVmBackend {
     /// private directory.
     fn release(&mut self, vm_id: VmId) {
         lock(&self.registry).remove(&vm_id);
+        lock(&self.priority_killed).retain(|(vm, _)| *vm != vm_id);
         // A graceful stop still running ends as soon as it sees the exit
         // (the process is gone when a run is released).
         if let Some((_, task)) = self.stops.remove(&vm_id) {
@@ -434,6 +508,24 @@ impl QemuVmBackend {
         if let Some(dir) = self.private_dirs.remove(&vm_id) {
             remove_private_dir(&dir);
         }
+    }
+
+    /// The priority path (Emergency Stop) terminated this run.
+    fn priority_killed(&self, vm_id: VmId, run_id: RunId) -> bool {
+        lock(&self.priority_killed).contains(&(vm_id, run_id))
+    }
+
+    /// Private directory of a run: last 12 hexadecimal characters of the run
+    /// (random part of the UUID v7), for a short socket path.
+    fn private_dir_for(&self, run_id: RunId) -> PathBuf {
+        let short: String = run_id
+            .to_string()
+            .chars()
+            .filter(char::is_ascii_hexdigit)
+            .rev()
+            .take(12)
+            .collect();
+        self.setup.private_root.join(short)
     }
 
     /// Run already exited (also through the final termination of the stop
@@ -502,16 +594,12 @@ impl QemuVmBackend {
         let fw = self.caps.firmware.as_ref().ok_or_else(|| {
             PublicError::unsupported("UEFI firmware not found in the QEMU distribution")
         })?;
-        let run_text = run_id.to_string();
-        let run_dir = self.setup.catalog_root.join("runs").join(&run_text);
-        // Last 12 hexadecimal characters (random part of the UUID v7): short path.
-        let short: String = run_text
-            .chars()
-            .filter(char::is_ascii_hexdigit)
-            .rev()
-            .take(12)
-            .collect();
-        let private_dir = self.setup.private_root.join(short);
+        let run_dir = self
+            .setup
+            .catalog_root
+            .join("runs")
+            .join(run_id.to_string());
+        let private_dir = self.private_dir_for(run_id);
         let run_dir_m = ManagedPath::verify(run_dir.clone()).map_err(|e| public(&e))?;
         let private_m = ManagedPath::verify(private_dir.clone()).map_err(|e| public(&e))?;
         if cfg!(windows) {
@@ -586,6 +674,8 @@ impl VmBackend for QemuVmBackend {
                     .with_detail("budget_gib", budget.to_string()));
             }
         }
+        // From here on every error path removes the private directory.
+        let private_guard = PrivateDirGuard::new(self.private_dir_for(run_id));
         let paths = self.prepare(vm, run_id, media)?;
         let spec = VmLaunchSpec {
             run_id,
@@ -602,22 +692,18 @@ impl VmBackend for QemuVmBackend {
             data_media: vm.config.data_media,
             limits: job_limits(&vm.config, logical_cpus()),
         };
-        let private_dir = paths.private_dir.as_path().to_path_buf();
-        let run = match self.rt.block_on(QemuRun::start(
-            &self.caps,
-            &spec,
-            &paths,
-            self.setup.run_config.clone(),
-        )) {
-            Ok(run) => run,
-            Err(e) => {
-                remove_private_dir(&private_dir);
-                return Err(public(&e));
-            }
-        };
-        lock(&self.registry).insert(vm.id, run.emergency_stop_handle());
+        let run = self
+            .rt
+            .block_on(QemuRun::start(
+                &self.caps,
+                &spec,
+                &paths,
+                self.setup.run_config.clone(),
+            ))
+            .map_err(|e| public(&e))?;
+        lock(&self.registry).insert(vm.id, (run_id, run.emergency_stop_handle()));
         self.runs.insert(vm.id, Arc::new(run));
-        self.private_dirs.insert(vm.id, private_dir);
+        self.private_dirs.insert(vm.id, private_guard.disarm());
         Ok(())
     }
 
@@ -792,7 +878,20 @@ impl BackendPort for QemuVmBackend {
             let Some((run_id, task)) = self.stops.remove(&vm_id) else {
                 continue;
             };
-            let r = match self.rt.block_on(task) {
+            let joined = self.rt.block_on(task);
+            let stop_ok = matches!(joined, Ok(Ok(_)));
+            match finished_stop_route(
+                self.priority_killed(vm_id, run_id),
+                stop_ok,
+                self.exited(vm_id),
+            ) {
+                FinishedStop::LeaveToEmergency => {
+                    crate::diag!("lightvm-service: graceful stop overtaken by the Emergency Stop");
+                    continue;
+                }
+                FinishedStop::Released | FinishedStop::AwaitingExit => {}
+            }
+            let r = match joined {
                 Ok(Ok(report)) => {
                     crate::diag!(
                         "lightvm-service: graceful stop: phase {:?}, cause {:?}, {:?}",
@@ -813,6 +912,10 @@ impl BackendPort for QemuVmBackend {
             };
             if r.is_ok() {
                 self.release(vm_id);
+            } else {
+                crate::diag!(
+                    "lightvm-service: graceful stop without observed exit: run awaiting exit"
+                );
             }
             out.push((vm_id, run_id, r));
         }
@@ -842,18 +945,17 @@ impl BackendPort for QemuVmBackend {
         let exited: Vec<VmId> = self
             .runs
             .iter()
-            // A run with a graceful stop in progress is reported by
-            // `finished_shutdowns`.
-            .filter(|(vm, _)| !self.stops.contains_key(vm))
-            .filter(|(_, r)| match r.state() {
-                // Exits from an Emergency Stop are confirmed by the core with
-                // `force_stop` after the priority path.
-                ProcessState::Exited {
-                    cause: ExitCause::EmergencyStop,
-                    ..
-                } => false,
-                ProcessState::Exited { .. } => true,
-                _ => false,
+            .filter(|(vm, r)| {
+                // A run with a graceful stop in progress is reported by
+                // `finished_shutdowns`; one terminated by the priority path
+                // is confirmed by the core with `force_stop` after it. Every
+                // other exit is reported, also a run awaiting exit after a
+                // stop whose escalation timed out.
+                exit_to_report(
+                    &r.state(),
+                    self.stops.contains_key(vm),
+                    self.priority_killed(**vm, r.run_id()),
+                )
             })
             .map(|(id, _)| *id)
             .collect();
@@ -883,6 +985,7 @@ pub struct QemuHost {
     version: String,
     accelerator: Option<String>,
     registry: Registry,
+    priority_killed: PriorityKilled,
     emergency_timeout: Duration,
     stop_override: StopOverride,
 }
@@ -890,19 +993,25 @@ pub struct QemuHost {
 #[derive(Debug)]
 struct QemuEmergency {
     registry: Registry,
+    priority_killed: PriorityKilled,
     timeout: Duration,
 }
 
 impl EmergencyStop for QemuEmergency {
     fn emergency_stop_all(&self) -> EmergencyOutcome {
         // Copy of the handlers: the registry does not stay locked during the wait.
-        let handles: Vec<qemu_backend::EmergencyStop> =
-            lock(&self.registry).values().cloned().collect();
+        let handles: Vec<(VmId, RunId, qemu_backend::EmergencyStop)> = lock(&self.registry)
+            .iter()
+            .map(|(vm, (run, h))| (*vm, *run, h.clone()))
+            .collect();
+        // Marked before terminating: the exits that follow belong to the
+        // Emergency Stop, never to a graceful stop or an ordinary exit.
+        lock(&self.priority_killed).extend(handles.iter().map(|(vm, run, _)| (*vm, *run)));
         let mut out = EmergencyOutcome {
             processes_terminated: 0,
             completed: true,
         };
-        for h in handles {
+        for (_, _, h) in handles {
             match h.trigger_and_wait(self.timeout) {
                 Ok(_) => out.processes_terminated += 1,
                 Err(e) => {
@@ -925,6 +1034,7 @@ impl Backend for QemuHost {
     fn emergency_handle(&self) -> Arc<dyn EmergencyStop> {
         Arc::new(QemuEmergency {
             registry: self.registry.clone(),
+            priority_killed: self.priority_killed.clone(),
             timeout: self.emergency_timeout,
         })
     }
@@ -960,6 +1070,7 @@ impl Backend for QemuHost {
         // terminated through the priority path.
         let leftover = QemuEmergency {
             registry: self.registry.clone(),
+            priority_killed: self.priority_killed.clone(),
             timeout: self.emergency_timeout,
         }
         .emergency_stop_all();
@@ -1125,6 +1236,80 @@ mod tests {
         let bad = d.join("bad.fd");
         std::fs::create_dir_all(&bad).unwrap();
         assert!(ensure_vm_vars(&template, &bad).is_err());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn stop_and_exit_routing() {
+        use qemu_backend::ExitCause;
+        // Emergency Stop during a pending graceful stop: left to the core's
+        // Emergency Stop recording, whatever the stop task returned.
+        for (ok, exited) in [(true, true), (false, true), (false, false)] {
+            assert_eq!(
+                finished_stop_route(true, ok, exited),
+                FinishedStop::LeaveToEmergency
+            );
+        }
+        assert_eq!(
+            finished_stop_route(false, true, true),
+            FinishedStop::Released
+        );
+        assert_eq!(
+            finished_stop_route(false, false, true),
+            FinishedStop::Released
+        );
+        // Escalation timed out with the process alive: awaiting exit.
+        assert_eq!(
+            finished_stop_route(false, false, false),
+            FinishedStop::AwaitingExit
+        );
+        let exited = |cause| ProcessState::Exited {
+            code: Some(1),
+            cause,
+        };
+        // The escalation's own termination is reported (awaiting exit).
+        assert!(exit_to_report(
+            &exited(ExitCause::EmergencyStop),
+            false,
+            false
+        ));
+        assert!(exit_to_report(
+            &exited(ExitCause::GuestShutdown),
+            false,
+            false
+        ));
+        assert!(exit_to_report(&exited(ExitCause::Unexpected), false, false));
+        // Priority path: left to `after_emergency_stop`.
+        assert!(!exit_to_report(
+            &exited(ExitCause::EmergencyStop),
+            false,
+            true
+        ));
+        // Graceful stop in progress: reported by `finished_shutdowns`.
+        assert!(!exit_to_report(&exited(ExitCause::QmpQuit), true, false));
+        assert!(!exit_to_report(&ProcessState::Running, false, false));
+    }
+
+    #[test]
+    fn failed_start_steps_remove_the_private_dir() {
+        let d = crate::test_support::temp_dir("private-guard");
+        let private = d.join("abcdef012345");
+        // A step after the preparation fails: the directory goes.
+        std::fs::create_dir_all(&private).unwrap();
+        std::fs::write(private.join("qmp.sock"), b"").unwrap();
+        let start = |fail: bool| -> Result<PathBuf, PublicError> {
+            let guard = PrivateDirGuard::new(private.clone());
+            if fail {
+                return Err(PublicError::infrastructure("QEMU backend: disk"));
+            }
+            Ok(guard.disarm())
+        };
+        assert!(start(true).is_err());
+        assert!(!private.exists());
+        // Successful start: the directory stays with the run.
+        std::fs::create_dir_all(&private).unwrap();
+        assert_eq!(start(false).unwrap(), private);
+        assert!(private.exists());
         let _ = std::fs::remove_dir_all(&d);
     }
 

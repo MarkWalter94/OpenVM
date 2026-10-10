@@ -207,6 +207,14 @@ impl MediaImportPort for MemoryStore {
         self.insert_media(&entry)?;
         Ok(entry)
     }
+
+    fn abort_import(&mut self, copied: ImportCopied) -> Result<(), PublicError> {
+        copied
+            .0
+            .downcast::<Result<MediaEntry, PublicError>>()
+            .map(|_| ())
+            .map_err(|_| PublicError::infrastructure("foreign import"))
+    }
 }
 
 fn fake_entry(
@@ -289,6 +297,10 @@ pub struct FakeVmBackend {
     pub stop_results: StopResults,
     /// Background stops in progress (filled by the backend).
     pub stopping: BTreeMap<VmId, RunId>,
+    /// VMs whose process the test declares terminated by the priority path
+    /// (Emergency Stop): as with QEMU, their stop outcome and exit are not
+    /// reported, they are left to `after_emergency_stop` (`force_stop`).
+    pub emergency_killed: Arc<Mutex<std::collections::BTreeSet<VmId>>>,
 }
 
 /// Outcomes of background graceful stops injected by a test.
@@ -314,6 +326,7 @@ impl VmBackend for FakeVmBackend {
     fn force_stop(&mut self, vm_id: VmId, _run_id: RunId) -> Result<(), PublicError> {
         push(&self.calls, "vm_force_stop");
         self.stopping.remove(&vm_id);
+        lock(&self.emergency_killed).remove(&vm_id);
         Ok(())
     }
     fn reset(&mut self, _vm_id: VmId, _run_id: RunId) -> Result<(), PublicError> {
@@ -362,7 +375,11 @@ impl BackendPort for FakeVmBackend {
         if let Some(g) = &self.gate {
             g.wait();
         }
-        std::mem::take(&mut *lock(&self.observations))
+        let killed = lock(&self.emergency_killed).clone();
+        let mut obs = lock(&self.observations);
+        let (keep, out): (Vec<_>, Vec<_>) = obs.drain(..).partition(|(vm, _)| killed.contains(vm));
+        *obs = keep;
+        out
     }
     fn display_socket(&self, _vm_id: VmId, _run_id: RunId) -> Option<PathBuf> {
         self.display_socket.clone()
@@ -383,10 +400,15 @@ impl BackendPort for FakeVmBackend {
         Some(Ok(()))
     }
     fn finished_shutdowns(&mut self) -> Vec<(VmId, RunId, Result<(), PublicError>)> {
+        let killed = lock(&self.emergency_killed).clone();
         let injected = std::mem::take(&mut *lock(&self.stop_results));
         injected
             .into_iter()
-            .filter_map(|(vm, r)| self.stopping.remove(&vm).map(|run| (vm, run, r)))
+            .filter_map(|(vm, r)| {
+                let run = self.stopping.remove(&vm)?;
+                // Overtaken by the Emergency Stop: left to `force_stop`.
+                (!killed.contains(&vm)).then_some((vm, run, r))
+            })
             .collect()
     }
 }

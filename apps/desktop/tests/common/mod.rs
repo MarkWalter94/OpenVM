@@ -92,6 +92,9 @@ impl Supervisor for FakeSupervisor {
             None
         }
     }
+    fn discard_console_ticket(&self) {
+        *self.h.ticket.lock().unwrap() = None;
+    }
 }
 
 pub(crate) fn host() -> HostCapacity {
@@ -178,6 +181,22 @@ pub(crate) fn connected(vms: Vec<VmSummary>) -> ServiceState {
         },
         ..ServiceState::default()
     }
+}
+
+/// Lets the console send the input still waiting (one batch every
+/// `INPUT_INTERVAL`): steps the harness until nothing is pending.
+pub(crate) fn settle<S>(
+    h: &mut egui_kittest::Harness<'_, S>,
+    app: impl Fn(&S) -> &lightvm_desktop::LightVmApp,
+) {
+    for _ in 0..200 {
+        if !app(h.state()).console_input_pending() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+        h.step();
+    }
+    panic!("console input still pending");
 }
 
 /// Text inputs of the whole tree.

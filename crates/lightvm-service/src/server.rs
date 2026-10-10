@@ -18,6 +18,7 @@ use lightvm_proto::ipc::{
 };
 use lightvm_proto::{
     Actor, Caller, ErrorCode, ProtocolError, ProtocolErrorCode, PublicError, ReplyError,
+    TerminationCause,
 };
 
 use crate::credential::{Credential, CredentialId, CredentialStore};
@@ -163,15 +164,17 @@ impl Shared {
 
     /// Revokes a connection; for roles other than `Ui` it also revokes the
     /// credential (the session is not reusable).
-    fn revoke_connection(&self, id: u64) -> bool {
+    fn revoke_connection(&self, id: u64, actor: Actor) -> bool {
         let entry = lock(&self.conns).remove(&id);
         match entry {
             Some(e) => {
                 if e.role != Role::Ui {
                     lock(&self.creds).revoke(e.credential_id);
                 }
-                self.revoke_consoles_of(id);
+                // Before anything else: requests of this connection still
+                // queued towards the supervisor are no longer executed.
                 let _ = e.revoke.send(true);
+                self.revoke_consoles_of(id, actor, TerminationCause::Revoked);
                 let _ = self
                     .events
                     .send(ServiceEvent::ConnectionRevoked { connection_id: id });
@@ -191,7 +194,7 @@ impl Shared {
             .collect();
         let mut n = 0;
         for id in ids {
-            if self.revoke_connection(id) {
+            if self.revoke_connection(id, Actor::System) {
                 n += 1;
             }
         }
@@ -199,11 +202,16 @@ impl Shared {
     }
 
     /// Revokes the console tickets obtained by a connection (revoked or
-    /// closed) and releases the input still pressed on those runs.
-    fn revoke_consoles_of(&self, connection_id: u64) {
+    /// closed): audit and release of the input still pressed on those runs.
+    fn revoke_consoles_of(&self, connection_id: u64, actor: Actor, cause: TerminationCause) {
         let runs = self.display.revoke_owner(connection_id);
         if !runs.is_empty() {
-            self.send_cmd(Command::ReleaseInput(runs));
+            self.send_cmd(Command::ConsolesRevoked {
+                runs,
+                actor,
+                cause,
+                release_input: true,
+            });
         }
     }
 
@@ -235,7 +243,7 @@ impl Shared {
         // outside the supervisor thread.
         let revoked = self.revoke_non_ui();
         // Console tickets: no new display connection, live ones closed.
-        self.display.revoke_all();
+        let consoles = self.display.revoke_all();
         // Mutations already queued towards the supervisor are not executed.
         self.emergency_epoch.fetch_add(1, Ordering::SeqCst);
         let handle = self.emergency.clone();
@@ -244,6 +252,14 @@ impl Shared {
             .unwrap_or_default();
         // Recording in the core (audit, VM state) without waiting for it: the
         // supervisor may be busy and the priority path does not wait.
+        if !consoles.is_empty() {
+            self.send_cmd(Command::ConsolesRevoked {
+                runs: consoles,
+                actor,
+                cause: TerminationCause::EmergencyStop,
+                release_input: false,
+            });
+        }
         self.send_cmd(Command::EmergencyReconcile(actor));
         let _ = self.events.send(ServiceEvent::AgentSessionsStopped {
             reason: StopReason::EmergencyStop,
@@ -338,7 +354,7 @@ impl ServiceHandle {
 
     /// Revokes a connection.
     pub fn revoke_connection(&self, id: u64) -> bool {
-        self.shared.revoke_connection(id)
+        self.shared.revoke_connection(id, Actor::User)
     }
 
     /// Parent process lost: stop of the agent sessions, backend hook and then
@@ -402,6 +418,12 @@ pub async fn start(
             .join("d")
     });
     let display = Arc::new(DisplayRegistry::new(display_root));
+    // The instance lock is held: per-proxy directories left by a previous
+    // service of this catalog can go.
+    let stale = display.remove_stale();
+    if stale > 0 {
+        crate::diag!("lightvm-service: {stale} stale display directories removed");
+    }
     let sup = SupervisorThread {
         engine,
         backend,
@@ -870,9 +892,14 @@ async fn handle_connection(shared: Arc<Shared>, stream: BoxedStream, peer: PeerI
     if let Some(reason) = close_reason {
         let _ = send(&mut wr, &ServerMessage::Closing { reason }, max).await;
     }
-    lock(&shared.conns).remove(&connection_id);
+    // Requests of this connection still queued (or a media import still
+    // copying) are not executed: the revocation flag is raised before the
+    // entry (and its sender) goes away.
+    if let Some(entry) = lock(&shared.conns).remove(&connection_id) {
+        let _ = entry.revoke.send(true);
+    }
     // The console tickets do not outlive the connection that obtained them.
-    shared.revoke_consoles_of(connection_id);
+    shared.revoke_consoles_of(connection_id, Actor::System, TerminationCause::UiClosed);
     let _ = tokio::io::AsyncWriteExt::shutdown(&mut wr).await;
 }
 
@@ -1004,7 +1031,7 @@ async fn dispatch(
             }));
         }
         Request::RevokeConnection { connection_id } => {
-            return Dispatch::Reply(if shared.revoke_connection(connection_id) {
+            return Dispatch::Reply(if shared.revoke_connection(connection_id, Actor::User) {
                 Ok(ResponseBody::Revoked { connection_id })
             } else {
                 Err(op_error(ErrorCode::StateConflict, "no such connection"))

@@ -69,7 +69,8 @@ pub use manifest::{
     sha256_file,
 };
 pub use media::{
-    CopiedMedia, MAX_DECLARED_ORIGIN, MediaCheck, MediaImportJob, MediaLimits, NOT_OPTICAL_IMAGE,
+    CopiedMedia, MAX_DECLARED_ORIGIN, MediaCheck, MediaImportJob, MediaImportReservation,
+    MediaLimits, NOT_OPTICAL_IMAGE,
 };
 pub use ops::PromoteBaseline;
 pub use paths::ManagedPath;

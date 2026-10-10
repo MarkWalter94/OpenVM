@@ -152,7 +152,11 @@ fn private_root(
     if fits(&candidate) {
         return Ok(candidate);
     }
-    let short = std::env::temp_dir().join(format!("lightvm-p-{}", std::process::id()));
+    let short = std::env::temp_dir().join(format!(
+        "{}{}",
+        lightvm_service::display::FALLBACK_ROOT_PREFIX,
+        std::process::id()
+    ));
     if !fits(&short) {
         return Err((
             4,
@@ -188,6 +192,12 @@ fn compose(args: &Args) -> Result<Composed, (u8, String)> {
     let audit = FileAuditSink::open(&audit_path)
         .map_err(|e| (4, format!("audit {}: {e}", audit_path.display())))?;
     let inspector = ManagedMediaInspector::new(root.clone());
+    // Fallback private roots of services that are no longer running
+    // (sockets and display directories left by a crash).
+    let stale = lightvm_service::display::remove_stale_fallback_roots(&std::env::temp_dir());
+    if stale > 0 {
+        lightvm_service::diag!("lightvm-service: {stale} stale private directories removed");
+    }
     let private_root = private_root(args.runtime_dir.as_deref(), &root)?;
     let display_dir = private_root.join("d");
     match &args.qemu_dir {

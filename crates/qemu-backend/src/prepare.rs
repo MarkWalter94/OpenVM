@@ -340,9 +340,122 @@ pub fn host_resources(storage_dir: &ManagedPath) -> Result<HostResources> {
     }
 }
 
+/// Kind of volume holding an open file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VolumeKind {
+    /// Local fixed disk.
+    Fixed,
+    /// Removable local disk (USB stick, card reader).
+    Removable,
+    /// Local optical drive.
+    CdRom,
+    /// Network share, including mapped network drives.
+    Remote,
+    /// RAM disk, unknown type or no root directory.
+    Other,
+}
+
+impl VolumeKind {
+    /// Local volumes from which a user-chosen file may be read.
+    pub fn is_local(self) -> bool {
+        matches!(self, Self::Fixed | Self::Removable | Self::CdRom)
+    }
+}
+
+/// Where an open file really is, as resolved by the operating system.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileLocation {
+    /// Final path of the handle with the `\\?\` prefix removed
+    /// (`\\?\UNC\server\share\x` becomes `\\server\share\x`): links,
+    /// junctions, mount points, `subst` and mapped drives resolved.
+    pub final_path: std::path::PathBuf,
+    /// Kind of the volume holding the file.
+    pub volume: VolumeKind,
+}
+
+/// Final path and volume kind of an open file (Windows:
+/// `GetFinalPathNameByHandleW`, `GetVolumePathNameW`, `GetDriveTypeW`).
+pub fn file_location(file: &std::fs::File) -> Result<FileLocation> {
+    #[cfg(windows)]
+    {
+        use std::path::PathBuf;
+        let raw = crate::sys::windows::final_path_by_handle(file)?;
+        let s = raw.to_string_lossy().into_owned();
+        let (final_path, unc) = if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+            (PathBuf::from(format!(r"\\{rest}")), true)
+        } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+            (PathBuf::from(rest), false)
+        } else {
+            (PathBuf::from(&s), s.starts_with(r"\\"))
+        };
+        if unc {
+            return Ok(FileLocation {
+                final_path,
+                volume: VolumeKind::Remote,
+            });
+        }
+        let root = crate::sys::windows::volume_path_name(&final_path)?;
+        // `DRIVE_*` values of `GetDriveTypeW`.
+        let volume = match crate::sys::windows::drive_type(Path::new(&root)) {
+            2 => VolumeKind::Removable,
+            3 => VolumeKind::Fixed,
+            4 => VolumeKind::Remote,
+            5 => VolumeKind::CdRom,
+            _ => VolumeKind::Other,
+        };
+        Ok(FileLocation { final_path, volume })
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = file;
+        Err(BackendError::Unsupported {
+            what: "final path of a handle on this system".into(),
+            hint: "Linux implementation not yet available".into(),
+        })
+    }
+}
+
+/// `false` only if no running process has this PID; access denied or any
+/// error count as running (conservative: used to decide whether a
+/// leftover directory of a previous service can be removed).
+pub fn pid_may_be_running(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        crate::sys::windows::pid_may_be_running(pid)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = pid;
+        true
+    }
+}
+
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn location_of_a_local_file_and_pid_liveness() {
+        let d = tmp_dir("location");
+        std::fs::create_dir_all(d.as_path()).unwrap();
+        let p = d.as_path().join("f.bin");
+        std::fs::write(&p, b"x").unwrap();
+        let f = std::fs::File::open(&p).unwrap();
+        let loc = file_location(&f).unwrap();
+        assert_eq!(loc.volume, VolumeKind::Fixed);
+        assert!(loc.volume.is_local());
+        // Same file, possibly with different case or long names of the
+        // temporary directory.
+        let canon = std::fs::canonicalize(&p).unwrap();
+        let canon = canon.to_string_lossy();
+        let canon = canon.strip_prefix(r"\\?\").unwrap_or(&canon);
+        assert!(
+            loc.final_path.to_string_lossy().eq_ignore_ascii_case(canon),
+            "{loc:?} vs {canon}"
+        );
+        assert!(pid_may_be_running(std::process::id()));
+        assert!(!pid_may_be_running(0xFFFF_FFF0));
+    }
 
     fn tmp_dir(name: &str) -> ManagedPath {
         let d = std::env::temp_dir()

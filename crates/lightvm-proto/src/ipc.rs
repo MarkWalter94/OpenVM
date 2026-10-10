@@ -234,7 +234,9 @@ pub struct VmSummary {
 /// supervisor forwards the stream to QEMU's display only after checking the
 /// token; the ticket is distinct from the QMP channel and from the IPC
 /// credential, valid for one run, and revoked with it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+///
+/// `Debug` redacts the token (it ends up in logs and panic messages).
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ConsoleTicket {
     /// VM.
     pub vm_id: VmId,
@@ -248,6 +250,18 @@ pub struct ConsoleTicket {
     /// Display geometry, if already known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub geometry: Option<DisplayGeometry>,
+}
+
+impl std::fmt::Debug for ConsoleTicket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConsoleTicket")
+            .field("vm_id", &self.vm_id)
+            .field("run_id", &self.run_id)
+            .field("socket_path", &self.socket_path)
+            .field("token", &"<redacted>")
+            .field("geometry", &self.geometry)
+            .finish()
+    }
 }
 
 /// Capabilities reported by `get_capabilities`.
@@ -655,5 +669,22 @@ mod tests {
     fn credential_is_write_only_in_schema() {
         let s = serde_json::to_string(&generate::<ClientMessage>()).unwrap();
         assert!(s.contains("writeOnly"));
+    }
+
+    #[test]
+    fn console_ticket_debug_redacts_the_token() {
+        let token = "ab".repeat(32);
+        let t = ConsoleTicket {
+            vm_id: VmId::from_unix_millis(1_760_000_000_000, [0; 10]),
+            run_id: RunId::from_unix_millis(1_760_000_000_000, [1; 10]),
+            socket_path: "C:\\x\\d.sock".into(),
+            token: token.clone(),
+            geometry: None,
+        };
+        let d = format!("{t:?}");
+        assert!(!d.contains(&token), "{d}");
+        assert!(d.contains("redacted"));
+        let body = format!("{:?}", ResponseBody::Console { ticket: t });
+        assert!(!body.contains(&token));
     }
 }
