@@ -32,7 +32,7 @@ supervisore = ["dep:qemu-backend", "dep:vm-core", "dep:vm-storage"]
 
 # Versioni esatte e lockfile (ROADMAP 6.3); nessuna dipendenza git.
 [dependencies]
-getrandom = { version = "=0.3.4", features = ["std"] }
+getrandom = { version = "=0.4.3", features = ["std"] }
 lightvm-proto = { path = "../lightvm-proto" }
 # Composition root (ROADMAP 6.1): core, catalogo SQLite e backend QEMU reali.
 qemu-backend = { path = "../qemu-backend", optional = true }
