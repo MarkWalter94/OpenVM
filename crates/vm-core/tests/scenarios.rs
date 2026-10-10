@@ -1118,3 +1118,27 @@ fn update_vm_config_rejections_have_no_effect() {
             .all(|e| e.outcome == AuditOutcome::Denied)
     );
 }
+
+/// ADR-0008: dimensione massima per tipo di supporto.
+#[test]
+fn register_media_rejects_oversized_images() {
+    let mut h = Harness::new();
+    for (kind, max) in [
+        (MediaKind::InstallIso, MAX_INSTALL_MEDIA_BYTES),
+        (MediaKind::DataIso, MAX_DATA_MEDIA_BYTES),
+    ] {
+        let reg = |size_bytes| vm_core::MediaRegistration {
+            kind,
+            sha256: Sha256Digest::from_bytes([3; 32]),
+            size_bytes,
+            declared_origin: Label::parse("prova").unwrap(),
+            managed_path: ManagedRelPath::parse("media/x.iso").unwrap(),
+            file_identity: None,
+        };
+        denied(
+            ErrorCode::ResourceLimit,
+            h.core.register_media(reg(max + 1)),
+        );
+        assert!(h.core.register_media(reg(max)).is_ok());
+    }
+}

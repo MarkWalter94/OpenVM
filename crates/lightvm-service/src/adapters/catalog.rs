@@ -389,6 +389,24 @@ impl CatalogStore for SqliteStore {
     }
 }
 
+/// Offset del primo descrittore di volume (settore 16 da 2048 byte) più il
+/// byte di tipo: lì ISO 9660 scrive `CD001`, UDF `BEA01` (ADR-0008).
+const VOLUME_DESCRIPTOR_ID_OFFSET: u64 = 16 * 2048 + 1;
+
+/// `true` se il file ha la firma di un'immagine ottica ISO 9660 (anche ibrida
+/// con UDF) o UDF: l'unico formato ammesso per i supporti (CD-ROM in sola
+/// lettura nel guest).
+pub fn is_optical_image(path: &Path) -> bool {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut id = [0u8; 5];
+    f.seek(SeekFrom::Start(VOLUME_DESCRIPTOR_ID_OFFSET)).is_ok()
+        && f.read_exact(&mut id).is_ok()
+        && (&id == b"CD001" || &id == b"BEA01")
+}
+
 /// Ispettore delle copie gestite dei media: hash SHA-256 e dimensione letti
 /// dal file nel catalogo; il confronto con il registro è del core.
 ///
@@ -424,6 +442,11 @@ impl vm_core::ports::MediaInspector for ManagedMediaInspector {
                 "copia gestita del supporto non è un file regolare",
             ));
         }
+        if !is_optical_image(&path) {
+            return Err(PublicError::invalid_argument(
+                "il supporto non è un'immagine ISO 9660 o UDF",
+            ));
+        }
         let hex = qemu_backend::probe::sha256_file(&path)
             .map_err(|_| infra("lettura della copia gestita non riuscita"))?;
         Ok(vm_core::media::ObservedMediaFacts {
@@ -432,5 +455,38 @@ impl vm_core::ports::MediaInspector for ManagedMediaInspector {
             file_identity: None,
             read_only: meta.permissions().readonly(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn firma_iso_9660_o_udf() {
+        let d = std::env::temp_dir().join(format!(
+            "lightvm-iso-firma-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        let file = |nome: &str, id: &[u8]| {
+            let mut b = vec![0u8; 40 * 1024];
+            let o = usize::try_from(VOLUME_DESCRIPTOR_ID_OFFSET).unwrap();
+            b[o..o + id.len()].copy_from_slice(id);
+            let p = d.join(nome);
+            std::fs::write(&p, b).unwrap();
+            p
+        };
+        assert!(is_optical_image(&file("iso9660.iso", b"CD001")));
+        assert!(is_optical_image(&file("udf.iso", b"BEA01")));
+        assert!(!is_optical_image(&file("zip.iso", b"PK\x03\x04\x00")));
+        let corto = d.join("corto.iso");
+        std::fs::write(&corto, b"CD001").unwrap();
+        assert!(!is_optical_image(&corto));
+        assert!(!is_optical_image(&d.join("assente.iso")));
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

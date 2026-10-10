@@ -496,6 +496,13 @@ where
         if reg.size_bytes == 0 {
             return Err(PublicError::invalid_argument("supporto vuoto"));
         }
+        if reg.size_bytes > reg.kind.max_bytes() {
+            return Err(
+                PublicError::resource_limit("supporto oltre la dimensione massima")
+                    .with_detail("size_bytes", reg.size_bytes.to_string())
+                    .with_detail("max_bytes", reg.kind.max_bytes().to_string()),
+            );
+        }
         let record = MediaRecord {
             id: self.ids.media_id(),
             kind: reg.kind,

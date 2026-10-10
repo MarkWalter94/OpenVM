@@ -40,7 +40,7 @@ La decisione diventa efficace con la conferma dell'utente (U-5) e con la chiusur
 | P-4 | Tastiera fisica → winit → egui → QMP, inclusi AltGr, Ctrl+C/V, tastierino | utente con sviluppo: il responsabile lo esegue a fine sviluppo F1 |
 | P-5 | Test con secondo utente locale sui socket privati, oppure decisione di registrarlo come limite | indicazione del responsabile: eseguirlo dentro una VM. Parte Linux (socket Unix, `SO_PEERCRED`) in una VM Ubuntu con due utenti, valida solo **[processi]**; parte Windows (named pipe con ACL) richiede un guest Windows o un secondo account sull'host: da definire |
 | P-6 | Disponibilità di firma del codice e revisione indipendente (ADR-0020) | **chiuso il 2026-10-10**: non disponibili (U-7); pubblicazione F6 bloccata finché manca, ADR-0020 accettata |
-| P-7 | Dettagli del supporto dati approvato (ADR-0008) | sviluppo |
+| P-7 | Dettagli del supporto dati approvato (ADR-0008) | **chiuso il 2026-10-10**: formato ISO 9660/UDF verificato, limiti 16/8 GiB, CD-ROM IDE in sola lettura, hash riverificato a ogni avvio (ADR-0008); prova di scrittura dal guest in F3 |
 
 ## Lavoro F1 avviato in parallelo
 
