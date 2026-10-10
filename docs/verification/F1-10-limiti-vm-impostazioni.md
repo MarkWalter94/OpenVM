@@ -66,7 +66,7 @@ lightvm-desktop --impostazioni C:\lvmtest\imp.json --apri-vm prova-cli --smoke 8
 | Chiusura normale della UI con una VM accesa | **fallito, poi verificato dopo correzione** | prima: `processo genitore terminato` e Emergency Stop (l'EOF che segue la riga `shutdown` era trattato come crash); dopo la prima correzione: arresto ordinato ma 37 s e timeout del supervisor (ACPI 60 s contro 30 s); dopo la seconda: arresto ordinato limitato (ACPI 15 s → `quit` 5 s → kill 5 s), `arresto completato` senza timeout |
 | VM rimasta in `recovering` dopo un supervisor terminato al timeout | **fallito, poi verificato dopo correzione** | prima: `stati=prova-cli:recovering`, nessun avvio possibile; dopo: `1 VM riportate a stopped dopo il riavvio`, `stati=prova-cli:running`; test `observations::reconcile_after_restart_returns_recovering_vms_to_stopped` |
 | Workspace | verificato | `cargo test --workspace --locked`: 353 passati, 0 falliti, 12 ignorati; clippy `-D warnings` pulito (workspace, varianti UI, servizio senza `supervisore`) |
-| Effetto del tetto CPU sotto carico del guest | non eseguito | guest nel firmware; spike `F0-08` |
+| Effetto del tetto CPU sotto carico del guest | verificato (vedi sezione del 2026-10-10 in coda) | boot di Ubuntu dal disco: 0,22 core senza tetto, 0,10 core con tetto a 0,1 core |
 | Limiti da MCP | non eseguito | F5 |
 | Linux | non eseguito | cgroup v2, R2a |
 
@@ -89,3 +89,14 @@ lightvm-desktop --impostazioni C:\lvmtest\imp.json --apri-vm prova-cli --smoke 8
 ## Decisioni proposte
 
 Registrate in ADR-0017 (sezione del 2026-10-10).
+
+## Aggiornamento del 2026-10-10 (circa 11:45 UTC): effetto del tetto CPU con un guest reale
+
+Sezione aggiunta in coda (regola 8). Guest: Ubuntu installato su disco in `F1-03` (sezione F1-17), 2 vCPU, 4096 MiB, `Skylake-Client-v4`; tempo CPU del processo QEMU letto dal sistema (`TotalProcessorTime`) nei primi 60 s di boot. Test: `real_qemu::reale_effetto_tetto_cpu_durante_il_boot`.
+
+| Voce | Esito | Evidenza |
+| --- | --- | --- |
+| Prima esecuzione: tetto al 25 % dei vCPU (0,5 core) | non probante | senza tetto 13,0 s di CPU (0,22 core medi), con tetto 12,4 s: il boot non raggiunge 0,5 core, il tetto non interviene (difetto della prova, non del limite) |
+| **Tetto al 5 % dei vCPU (0,1 core, `cpu_rate` 31 su 32 processori)** | verificato | senza tetto 13,0 s (0,22 core), con tetto **5,8 s (0,10 core)**: consumo pari alla quota concessa, meno della metà del consumo libero; nessun orfano |
+
+Resta da misurare il tetto con un carico sostenuto nel guest (sessione con accesso), utile per tetti più alti.
