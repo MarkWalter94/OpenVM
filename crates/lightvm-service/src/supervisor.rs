@@ -10,12 +10,19 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 use lightvm_proto::ipc::{
-    Capabilities, ResponseBody, SUPPORTED_PROTOCOL_VERSIONS, ServiceEvent, ServiceState, StopReason,
+    Capabilities, ConsoleTicket, ResponseBody, SUPPORTED_PROTOCOL_VERSIONS, ServiceEvent,
+    ServiceState, StopReason,
 };
-use lightvm_proto::{Actor, Caller, PublicError, ReplyError, VmConfig, VmId, VmRequest};
+use lightvm_proto::{
+    Actor, Caller, MediaKind, PublicError, ReplyError, RunId, VmConfig, VmId, VmRequest,
+};
 use tokio::sync::{OwnedSemaphorePermit, broadcast, oneshot, watch};
 
-use crate::engine::VmEngine;
+use crate::display::DisplayRegistry;
+use crate::engine::{ImportCopied, VmEngine};
+
+/// Media imports copying at the same time (each holds a worker thread).
+pub const MAX_CONCURRENT_IMPORTS: usize = 2;
 
 /// Service host: processes, agent sessions and priority path.
 ///
@@ -75,6 +82,17 @@ pub(crate) enum SupervisorRequest {
         config: Box<VmConfig>,
     },
     SubmitVm(Box<VmRequest>),
+    ListMedia,
+    ImportMedia {
+        source_path: String,
+        media_kind: MediaKind,
+        declared_origin: String,
+    },
+    DeleteVm {
+        vm_id: VmId,
+        expected_revision: u64,
+    },
+    OpenConsole(VmId),
 }
 
 impl SupervisorRequest {
@@ -83,7 +101,11 @@ impl SupervisorRequest {
     fn is_mutation(&self) -> bool {
         matches!(
             self,
-            Self::CreateVm(_) | Self::UpdateVm { .. } | Self::SubmitVm(_)
+            Self::CreateVm(_)
+                | Self::UpdateVm { .. }
+                | Self::SubmitVm(_)
+                | Self::DeleteVm { .. }
+                | Self::OpenConsole(_)
         )
     }
 }
@@ -95,6 +117,8 @@ pub(crate) enum Command {
         req: SupervisorRequest,
         /// Caller towards the core; `None` for roles without VM permissions.
         caller: Option<Caller>,
+        /// Connection that sent the request (owner of a console ticket).
+        connection_id: u64,
         /// Connection revocation: checked again immediately before executing
         /// (double check, ROADMAP 7.3).
         revoked: watch::Receiver<bool>,
@@ -114,6 +138,15 @@ pub(crate) enum Command {
     Shutdown {
         done: oneshot::Sender<()>,
     },
+    /// Copy of a media import finished on its worker thread.
+    FinishImport {
+        caller: Caller,
+        copied: ImportCopied,
+        reply: Reply,
+    },
+    /// Console lost (ticket revoked with its UI connection): release the
+    /// keys and buttons still pressed on these runs.
+    ReleaseInput(Vec<(VmId, RunId)>),
 }
 
 impl std::fmt::Debug for Command {
@@ -123,6 +156,8 @@ impl std::fmt::Debug for Command {
             Self::EmergencyReconcile(a) => write!(f, "EmergencyReconcile({a:?})"),
             Self::ParentLost { policy, .. } => write!(f, "ParentLost({policy:?})"),
             Self::Shutdown { .. } => write!(f, "Shutdown"),
+            Self::FinishImport { .. } => write!(f, "FinishImport"),
+            Self::ReleaseInput(v) => write!(f, "ReleaseInput({})", v.len()),
         }
     }
 }
@@ -141,6 +176,12 @@ pub(crate) struct SupervisorThread {
     pub(crate) parent_loss_policy: Arc<Mutex<ParentLossPolicy>>,
     /// VMs with a process, read by the shutdown driver for its budget.
     pub(crate) vms_with_process: Arc<AtomicUsize>,
+    /// Console tickets and display proxies.
+    pub(crate) display: Arc<DisplayRegistry>,
+    /// Sender towards this same thread (end of a media import copy).
+    pub(crate) self_tx: mpsc::Sender<Command>,
+    /// Media imports whose copy is in progress.
+    pub(crate) imports: usize,
 }
 
 /// Interval at which, without commands, the supervisor observes process exits
@@ -163,6 +204,7 @@ impl SupervisorThread {
                 Command::Request {
                     req,
                     caller,
+                    connection_id,
                     revoked,
                     epoch,
                     reply,
@@ -176,10 +218,44 @@ impl SupervisorThread {
                         Err(ReplyError::Operational(PublicError::state_conflict(
                             "request discarded by the Emergency Stop",
                         )))
+                    } else if let SupervisorRequest::ImportMedia {
+                        source_path,
+                        media_kind,
+                        declared_origin,
+                    } = req
+                    {
+                        // The reply is sent when the copy ends.
+                        self.start_import(
+                            caller,
+                            &source_path,
+                            media_kind,
+                            &declared_origin,
+                            reply,
+                        );
+                        self.publish_state_changes();
+                        continue;
                     } else {
-                        self.handle(req, caller.as_ref())
+                        self.handle(req, caller.as_ref(), connection_id)
                     };
                     let _ = reply.send(res);
+                }
+                Command::FinishImport {
+                    caller,
+                    copied,
+                    reply,
+                } => {
+                    self.imports = self.imports.saturating_sub(1);
+                    let res = self
+                        .engine
+                        .finish_import(&caller, copied)
+                        .map(|media| ResponseBody::MediaImported { media })
+                        .map_err(ReplyError::Operational);
+                    let _ = reply.send(res);
+                }
+                Command::ReleaseInput(runs) => {
+                    for (vm_id, run_id) in runs {
+                        self.engine.release_input(vm_id, run_id);
+                    }
                 }
                 Command::EmergencyReconcile(actor) => self.engine.after_emergency_stop(actor),
                 Command::ParentLost { policy, done } => {
@@ -208,8 +284,17 @@ impl SupervisorThread {
                             Command::ParentLost { done, .. } | Command::Shutdown { done } => {
                                 let _ = done.send(());
                             }
+                            Command::FinishImport { reply, .. } => {
+                                // The copy is not published: the open intent is
+                                // rolled back by the next catalog open.
+                                let _ = reply.send(Err(ReplyError::Operational(
+                                    PublicError::state_conflict("service shutting down"),
+                                )));
+                            }
+                            Command::ReleaseInput(_) => {}
                         }
                     }
+                    self.display.revoke_all();
                     self.backend.stop_agent_sessions(StopReason::Shutdown);
                     self.backend.prepare_shutdown();
                     self.engine.stop_all();
@@ -225,16 +310,108 @@ impl SupervisorThread {
 
     fn publish_state_changes(&mut self) {
         for (vm_id, state) in self.engine.state_changes() {
+            // The display ticket lives only as long as the run: a state
+            // without a process revokes it (stopped, failed, reconciliation);
+            // during a graceful stop (`stopping`) the console stays open.
+            if !state.has_process() {
+                self.display.revoke_vm(vm_id);
+            }
             let _ = self.events.send(ServiceEvent::VmState { vm_id, state });
         }
         self.vms_with_process
             .store(self.engine.vms_with_process(), Ordering::SeqCst);
     }
 
+    /// First step of a media import on this thread, copy on a worker
+    /// thread, last step back here with [`Command::FinishImport`]: the
+    /// supervisor keeps serving the VMs (console input included) while a
+    /// multi-GiB ISO is copied.
+    fn start_import(
+        &mut self,
+        caller: Option<Caller>,
+        source: &str,
+        kind: MediaKind,
+        origin: &str,
+        reply: Reply,
+    ) {
+        let Some(caller) = caller else {
+            let _ = reply.send(Err(ReplyError::Operational(
+                PublicError::permission_denied("no VM permissions for this role"),
+            )));
+            return;
+        };
+        if self.imports >= MAX_CONCURRENT_IMPORTS {
+            let _ = reply.send(Err(ReplyError::Operational(PublicError::resource_limit(
+                "too many media imports in progress",
+            ))));
+            return;
+        }
+        let job = match self.engine.begin_import(&caller, source, kind, origin) {
+            Ok(job) => job,
+            Err(e) => {
+                let _ = reply.send(Err(ReplyError::Operational(e)));
+                return;
+            }
+        };
+        let tx = self.self_tx.clone();
+        let spawned = std::thread::Builder::new()
+            .name("lightvm-media-import".into())
+            .spawn(move || {
+                let copied = job.run();
+                // If the supervisor is gone the copy stays unpublished and
+                // the catalog rolls it back at the next open.
+                let _ = tx.send(Command::FinishImport {
+                    caller,
+                    copied,
+                    reply,
+                });
+            });
+        match spawned {
+            Ok(_) => self.imports += 1,
+            Err(e) => crate::diag!("lightvm-service: media import thread not started: {e}"),
+        }
+    }
+
+    /// Console ticket: the core checks the caller and the VM state, the
+    /// display registry starts the per-run proxy owned by the connection.
+    fn open_console(
+        &mut self,
+        caller: &Caller,
+        vm_id: VmId,
+        connection_id: u64,
+    ) -> Result<ResponseBody, PublicError> {
+        let target = self.engine.open_console(caller, vm_id)?;
+        let socket = target
+            .display_socket
+            .ok_or_else(|| PublicError::unsupported("console not available on this backend"))?;
+        let ticket = self
+            .display
+            .issue(vm_id, target.run_id, connection_id, &socket)
+            .map_err(|e| {
+                crate::diag!("lightvm-service: display proxy not started: {e}");
+                PublicError::infrastructure("display proxy not available")
+            })?;
+        let socket_path = ticket
+            .socket_path
+            .to_str()
+            .ok_or_else(|| PublicError::infrastructure("display socket path not UTF-8"))?
+            .to_owned();
+        Ok(ResponseBody::Console {
+            ticket: ConsoleTicket {
+                vm_id,
+                run_id: target.run_id,
+                socket_path,
+                token: ticket.token,
+                geometry: target.geometry,
+            },
+        })
+    }
+
     fn handle(
         &mut self,
         req: SupervisorRequest,
         caller: Option<&Caller>,
+        connection_id: u64,
     ) -> Result<ResponseBody, ReplyError> {
         let who = || {
             caller.ok_or_else(|| PublicError::permission_denied("no VM permissions for this role"))
@@ -246,7 +423,7 @@ impl SupervisorThread {
                 backend: self.backend.name(),
                 accelerator: self.backend.accelerator(),
                 max_frame_bytes: self.max_frame,
-                host: None,
+                host: self.engine.host_capacity(),
                 parent_loss_policy: *self
                     .parent_loss_policy
                     .lock()
@@ -279,6 +456,25 @@ impl SupervisorThread {
                         admission,
                         operation,
                     })
+            }
+            SupervisorRequest::ListMedia => self
+                .engine
+                .list_media(who()?)
+                .map(|media| ResponseBody::MediaList { media }),
+            SupervisorRequest::DeleteVm {
+                vm_id,
+                expected_revision,
+            } => self
+                .engine
+                .delete_vm(who()?, vm_id, expected_revision)
+                .map(|()| ResponseBody::VmDeleted { vm_id }),
+            SupervisorRequest::OpenConsole(vm_id) => {
+                let c = who()?;
+                self.open_console(c, vm_id, connection_id)
+            }
+            // Served by `start_import` (reply after the copy).
+            SupervisorRequest::ImportMedia { .. } => {
+                Err(PublicError::infrastructure("media import not dispatched"))
             }
         };
         r.map_err(ReplyError::Operational)

@@ -233,6 +233,21 @@
           "description": "Change to a VM's configuration (resources and limits).",
           "type": "string",
           "const": "vm_configure"
+        },
+        {
+          "description": "Deletion of a stopped VM with its files.",
+          "type": "string",
+          "const": "vm_delete"
+        },
+        {
+          "description": "Import of a medium into the approved registry (user only).",
+          "type": "string",
+          "const": "media_import"
+        },
+        {
+          "description": "Issue of a per-run console display ticket (never the token).",
+          "type": "string",
+          "const": "console_open"
         }
       ]
     },

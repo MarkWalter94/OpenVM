@@ -101,8 +101,9 @@ fn labels_not_selectable() {
 }
 
 /// F0-04 negative test (ROADMAP 7.4, rows "Host" and "File"): no section of
-/// the UI exposes text fields that could end up in the QEMU command line. The
-/// real console receives the socket paths only from the command line.
+/// the UI exposes text fields that could end up in the QEMU command line
+/// (the only text field, the VM name of the wizard, is tested in
+/// `wizard_ui.rs`).
 #[test]
 fn no_text_field_in_any_section() {
     let mut h = harness(LightVmApp::new(false));
@@ -116,47 +117,6 @@ fn no_text_field_in_any_section() {
             + h.query_all_by_role(Role::SpinButton).count();
         assert_eq!(fields, 0, "input fields in the {label} section");
     }
-}
-
-/// As above, with the real console configured (non-existent sockets: the
-/// connection fails and the status shows it). Also in this case no text
-/// field and no control that builds QEMU options.
-#[test]
-fn no_text_field_with_real_console_configured() {
-    use lightvm_desktop::console::ConsoleConfig;
-    use lightvm_desktop::keymap::KeyboardLayout;
-    let dir = std::env::temp_dir().join("lightvm-f0-04-nonexistent");
-    let cfg = ConsoleConfig {
-        vnc: rfb_client::Transport::Unix {
-            path: dir.join("vnc.sock"),
-            imp: rfb_client::UnixImpl::Socket2,
-        },
-        qmp_socket: dir.join("qmp.sock"),
-        capture_dir: dir.clone(),
-        tmp_dir: dir,
-        layout: KeyboardLayout::It,
-        max_fps: 30,
-    };
-    let mut app = LightVmApp::with_console(cfg);
-    app.set_section(Section::Console);
-    let mut h = harness(app);
-    for _ in 0..20 {
-        h.step();
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    for label in ["Console", "Dashboard", "Settings"] {
-        h.get_by_role_and_label(Role::Button, label).click();
-        h.run();
-        let fields = h.query_all_by_role(Role::TextInput).count()
-            + h.query_all_by_role(Role::MultilineTextInput).count()
-            + h.query_all_by_role(Role::SearchInput).count()
-            + h.query_all_by_role(Role::SpinButton).count();
-        assert_eq!(fields, 0, "input fields in the {label} section");
-    }
-    h.get_by_role_and_label(Role::Button, "Console").click();
-    h.run();
-    // The only action control of the console is "Screenshot".
-    h.get_by_role_and_label(Role::Button, "Screenshot");
 }
 
 /// Settings: policy on unexpected UI close and preferred backend, chosen
@@ -175,7 +135,7 @@ fn settings_saves_policy_and_rendering() {
     let file = dir.join("ui-settings.json");
     let mut app = LightVmApp::new(false);
     app.set_settings(UiSettings::default(), Some(file.clone()), None);
-    let mut h = harness_with_height(app, 1600.0);
+    let mut h = harness_with_height(app, 2400.0);
     h.run();
     h.get_by_role_and_label(Role::Button, "Settings").click();
     h.run();
@@ -220,7 +180,7 @@ fn settings_supervisor_chooses_folders_without_text_fields() {
     ]));
     let c2 = choices.clone();
     app.set_folder_picker(Some(Box::new(move |_title: &str| c2.borrow_mut().pop())));
-    let mut h = harness_with_height(app, 1600.0);
+    let mut h = harness_with_height(app, 2400.0);
     h.run();
     h.get_by_role_and_label(Role::Button, "Settings").click();
     h.run();

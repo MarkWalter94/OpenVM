@@ -1,12 +1,16 @@
-//! Settings of a VM (ADR-0017): resources (vCPU, RAM, disk) and execution
+//! Settings of a VM (ADR-0017): resources (vCPU, RAM, disk), attached media
+//! (installation and data ISO from the approved registry) and execution
 //! limits (CPU cap, memory margin, storage budget). They can be changed only
 //! while the VM is stopped; the disk can only grow. No text fields: sliders
 //! without a value box and choice menus. The limits are enforced by the
 //! supervisor, the UI only proposes them.
 
 use lightvm_proto::{
-    MAX_MEMORY_MARGIN_MIB, MIN_CPU_MAX_PERCENT, MIN_MEMORY_MARGIN_MIB, VmConfig, VmId, VmLimits,
+    MAX_MEMORY_MARGIN_MIB, MIN_CPU_MAX_PERCENT, MIN_MEMORY_MARGIN_MIB, MediaId, MediaKind,
+    VmConfig, VmId, VmLimits,
 };
+
+use crate::service::MediaState;
 
 use egui::WidgetType;
 
@@ -157,13 +161,72 @@ fn group_caption(ui: &mut egui::Ui, text: &str) {
     ui.label(egui::RichText::new(text).small().color(p.text_weak));
 }
 
+/// Short description of an approved media item, or of an identifier no
+/// longer in the registry.
+pub fn media_name(media: &MediaState, id: MediaId) -> String {
+    media.records.iter().find(|m| m.id == id).map_or_else(
+        || "medium no longer in the registry".to_owned(),
+        |m| {
+            format!(
+                "{} ({})",
+                m.declared_origin.as_str(),
+                crate::dashboard::format_bytes(m.size_bytes)
+            )
+        },
+    )
+}
+
+/// Row of the Media group: attached medium, menu to pick another approved
+/// one of the same kind, "Remove".
+fn media_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    description: &str,
+    slot: &mut Option<MediaId>,
+    kind: MediaKind,
+    media: &MediaState,
+) {
+    let p = theme::Palette::of(ui);
+    theme::row(ui, label, Some(description), |ui| {
+        ui.add_space(4.0);
+        let current = slot.map_or_else(|| "none".to_owned(), |id| media_name(media, id));
+        ui.add(egui::Label::new(egui::RichText::new(&current).color(p.text)).wrap());
+        ui.horizontal(|ui| {
+            let r = egui::ComboBox::from_id_salt(("lightvm_media", label))
+                .width(220.0)
+                .selected_text("Choose another…")
+                .show_ui(ui, |ui| {
+                    for m in media.of_kind(kind) {
+                        ui.selectable_value(slot, Some(m.id), media_name(media, m.id));
+                    }
+                });
+            theme::accessible_name(
+                &r.response,
+                WidgetType::ComboBox,
+                &format!("Choose the {}", label.to_lowercase()),
+            );
+            let r = ui.add_enabled(slot.is_some(), theme::subtle("Remove"));
+            theme::accessible_name(
+                &r,
+                WidgetType::Button,
+                &format!("Remove the {}", label.to_lowercase()),
+            );
+            if r.clicked() {
+                *slot = None;
+            }
+        });
+    });
+}
+
 /// VM settings panel. `stopped`: the VM is stopped and editable; `max_vcpu`:
-/// logical processors of the host.
+/// logical processors of the host; `media`: approved media, for the Media
+/// group.
 pub fn vm_settings_ui(
     ui: &mut egui::Ui,
     m: &mut VmEdit,
     stopped: bool,
     max_vcpu: u32,
+    media: &MediaState,
 ) -> Option<EditOutcome> {
     let mut outcome = None;
     theme::group_title(
@@ -213,6 +276,24 @@ pub fn vm_settings_ui(
                     |v| format!("{v} GiB"),
                 )
             });
+            theme::divider(ui);
+            group_caption(ui, "Media");
+            media_row(
+                ui,
+                "Installation media",
+                "Boots first while attached: remove it once the system is installed.",
+                &mut c.install_media,
+                MediaKind::InstallIso,
+                media,
+            );
+            media_row(
+                ui,
+                "Data media",
+                "Read-only ISO visible to the guest.",
+                &mut c.data_media,
+                MediaKind::DataIso,
+                media,
+            );
             theme::divider(ui);
             group_caption(ui, "Execution limits, enforced by the supervisor");
             let l = &mut c.limits;

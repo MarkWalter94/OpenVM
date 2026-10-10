@@ -863,6 +863,7 @@ pub(crate) fn target_exists(tx: &Tx<'_>, kind: TargetKind, id: Option<&str>) -> 
         TargetKind::Baseline => "SELECT 1 FROM baselines WHERE baseline_id = ?1",
         TargetKind::Artifact => return tx.artifact_exists(id),
         TargetKind::Media => "SELECT 1 FROM media WHERE media_id = ?1",
+        TargetKind::Vm => "SELECT 1 FROM vms WHERE vm_id = ?1",
         TargetKind::None => return Ok(false),
     };
     tx.exists(sql, id)
@@ -908,6 +909,12 @@ fn deletion_precheck(tx: &Tx<'_>, kind: TargetKind, id: Option<&str>) -> Result<
             if referenced("SELECT EXISTS (SELECT 1 FROM vm_media WHERE media_id = ?1)")? {
                 return Err(StorageError::Referenced("media_referenced"));
             }
+        }
+        TargetKind::Vm => {
+            let vm: VmId = id
+                .parse()
+                .map_err(|_| StorageError::Constraint("invalid vm_id".into()))?;
+            crate::vm_delete::check_deletable(tx, &vm)?;
         }
         TargetKind::Artifact | TargetKind::None => {}
     }

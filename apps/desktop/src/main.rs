@@ -1,11 +1,13 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 //! Startup of `lightvm-desktop`.
 //!
 //! Command-line options (spike and measurements):
 //! - `--smoke SECONDS`: closes the app after N seconds and prints backend,
-//!   versions, window size and frame count on stdout. Without a real console
-//!   it implies `--simulated-console`.
-//! - `--simulated-console`: without a real console, the Console page shows a
-//!   framebuffer generated in memory (measurements; never product data).
+//!   versions, window size and frame count on stdout. It implies
+//!   `--simulated-console`.
+//! - `--simulated-console`: without an open VM console, the Console page
+//!   shows a framebuffer generated in memory (measurements; never product
+//!   data).
 //! - `--renderer auto|glow|wgpu|warp|LIST`: `auto` (default) tries glow, then
 //!   wgpu on a hardware adapter (DX12 on Windows), then wgpu on a software
 //!   rasterizer (WARP). A single name forces that backend without fallback; a
@@ -33,6 +35,17 @@
 //!   `--cpu-max PERCENT`, `--memory-margin MIB`, `--disk-budget GIB|none` it
 //!   first changes its resources and limits (saved in the VM settings; only
 //!   while the VM is stopped).
+//!
+//! Release builds use the Windows GUI subsystem (no console window). Output
+//! (`--smoke`, `--help`, diagnostics) still reaches redirected handles: pipe
+//! it (`| Out-File`), use `cmd /c ... > file` or `Start-Process -Wait
+//! -RedirectStandardOutput`. PowerShell's `& exe ... > file` neither waits
+//! for a GUI program nor captures its output, and in an interactive console
+//! without redirection nothing is printed. Debug builds keep the console.
+//!
+//! The console of the product path is opened from the Dashboard with a
+//! per-run display ticket of the supervisor (ADR-0013); the F0 options that
+//! connected the UI directly to QEMU's VNC and QMP sockets were removed in F2.
 
 use std::cell::Cell;
 use std::io::Write as _;
@@ -56,7 +69,6 @@ struct Args {
     wgpu_cpu: bool,
     glow_hw: String,
     skip_library_check: bool,
-    console: ConsoleArgs,
     service: ServiceArgs,
 }
 
@@ -85,22 +97,6 @@ fn parse_number<T: std::str::FromStr>(option: &str, v: Option<String>) -> Result
         .map_err(|_| format!("{option}: invalid value: {v}"))
 }
 
-/// Parameters of the real console (F0-04). No QEMU configuration: only the
-/// paths of the sockets already created by whoever started QEMU.
-#[derive(Debug, Default)]
-struct ConsoleArgs {
-    vnc_socket: Option<String>,
-    vnc_impl: Option<String>,
-    vnc_tls: Option<String>,
-    tls_dir: Option<String>,
-    qmp_socket: Option<String>,
-    capture_dir: Option<String>,
-    tmp_dir: Option<String>,
-    layout: Option<String>,
-    max_fps: Option<u32>,
-    dump_fb: Option<String>,
-}
-
 fn parse_args() -> Result<Args, String> {
     let mut args = Args {
         smoke: None,
@@ -110,7 +106,6 @@ fn parse_args() -> Result<Args, String> {
         simulated_console: false,
         wgpu_cpu: false,
         glow_hw: "preferred".to_owned(),
-        console: ConsoleArgs::default(),
         service: ServiceArgs::default(),
     };
     let mut it = std::env::args().skip(1);
@@ -149,39 +144,6 @@ fn parse_args() -> Result<Args, String> {
                     return Err(format!("unknown --glow-hw value: {v}"));
                 }
                 args.glow_hw = v;
-            }
-            "--vnc-socket" => {
-                args.console.vnc_socket = Some(it.next().ok_or("--vnc-socket requires a path")?)
-            }
-            "--vnc-impl" => {
-                args.console.vnc_impl = Some(it.next().ok_or("--vnc-impl requires socket2 or uds")?)
-            }
-            "--vnc-tls" => {
-                args.console.vnc_tls = Some(it.next().ok_or("--vnc-tls requires 127.0.0.1:PORT")?)
-            }
-            "--tls-dir" => {
-                args.console.tls_dir = Some(it.next().ok_or("--tls-dir requires a directory")?)
-            }
-            "--qmp-socket" => {
-                args.console.qmp_socket = Some(it.next().ok_or("--qmp-socket requires a path")?)
-            }
-            "--capture-dir" => {
-                args.console.capture_dir =
-                    Some(it.next().ok_or("--capture-dir requires a directory")?)
-            }
-            "--tmp-dir" => {
-                args.console.tmp_dir = Some(it.next().ok_or("--tmp-dir requires a directory")?)
-            }
-            "--layout" => {
-                args.console.layout = Some(it.next().ok_or("--layout requires us or it")?)
-            }
-            "--max-fps" => {
-                let v = it.next().ok_or("--max-fps requires a number")?;
-                let n: u32 = v.parse().map_err(|_| format!("invalid --max-fps: {v}"))?;
-                if !(1..=120).contains(&n) {
-                    return Err(format!("--max-fps out of range 1..=120: {v}"));
-                }
-                args.console.max_fps = Some(n);
             }
             "--catalog" => {
                 args.service.catalog = Some(it.next().ok_or("--catalog requires a directory")?)
@@ -225,13 +187,10 @@ fn parse_args() -> Result<Args, String> {
             "--audit-log" => {
                 args.service.audit_log = Some(it.next().ok_or("--audit-log requires a file")?)
             }
-            "--dump-fb" => {
-                args.console.dump_fb = Some(it.next().ok_or("--dump-fb requires a PNG path")?)
-            }
             "--help" | "-h" => {
                 println!(
                     "usage: lightvm-desktop [--smoke SECONDS] [--simulated-console] [--renderer auto|glow|wgpu|warp|glow,warp...] [--static] \
-                     [--wgpu-adapter cpu|auto] [--glow-hw preferred|required|off] [--skip-library-check] \n                     [--vnc-socket S [--vnc-impl socket2|uds] | --vnc-tls 127.0.0.1:P --tls-dir D] \n                     --qmp-socket S [--capture-dir D] [--tmp-dir D] [--layout us|it] [--max-fps N] [--dump-fb PNG] \n                     [--catalog DIR [--service-exe PATH] [--qemu-dir DIR] [--runtime-dir DIR] [--audit-log FILE]] [--settings FILE] [--no-supervisor] \n                     [--open-vm NAME [--create] [--vcpu N] [--ram MIB] [--disk GIB] [--cpu-max %] [--memory-margin MIB] [--disk-budget GIB|none]]"
+                     [--wgpu-adapter cpu|auto] [--glow-hw preferred|required|off] [--skip-library-check] \n                     [--catalog DIR [--service-exe PATH] [--qemu-dir DIR] [--runtime-dir DIR] [--audit-log FILE]] [--settings FILE] [--no-supervisor] \n                     [--open-vm NAME [--create] [--vcpu N] [--ram MIB] [--disk GIB] [--cpu-max %] [--memory-margin MIB] [--disk-budget GIB|none]]"
                 );
                 std::process::exit(0);
             }
@@ -250,7 +209,6 @@ struct DesktopApp {
     repaint_causes: std::collections::BTreeMap<String, u64>,
     last_frame: Option<Instant>,
     intervals: [u64; 4],
-    dump_fb: Option<String>,
     clipboard_filter: lightvm_desktop::clipboard::ClipboardFilter,
 }
 
@@ -371,22 +329,15 @@ impl DesktopApp {
             let (w, h) = live.geometry();
             let _ = writeln!(
                 out,
-                "SMOKE console geometry={w}x{h} rfb_updates={} texture_uploads={} uploaded_pixels={} input_events={} resizes={}",
-                s.rfb_updates, s.texture_uploads, s.uploaded_pixels, s.input_events, s.resizes
+                "SMOKE console vm=\"{}\" geometry={w}x{h} link=\"{}\" rfb_updates={} texture_uploads={} uploaded_pixels={} input_events={} resizes={}",
+                live.target().vm_name,
+                live.link().describe().0,
+                s.rfb_updates,
+                s.texture_uploads,
+                s.uploaded_pixels,
+                s.input_events,
+                s.resizes
             );
-            if let Some(path) = &self.dump_fb {
-                match live.framebuffer_snapshot().map(|fb| save_png(&fb, path)) {
-                    Some(Ok(nb)) => {
-                        let _ = writeln!(out, "SMOKE dump_fb={path} non_black={nb:.2}%");
-                    }
-                    Some(Err(e)) => {
-                        let _ = writeln!(out, "SMOKE dump_fb_error={e}");
-                    }
-                    None => {
-                        let _ = writeln!(out, "SMOKE dump_fb_error=no framebuffer");
-                    }
-                }
-            }
         }
         if let Some(srv) = self.ui.service() {
             let st = srv.state();
@@ -459,8 +410,8 @@ fn options(t: Attempt, args: &Args) -> eframe::NativeOptions {
     let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("LightVM")
-            .with_inner_size([1460.0, 860.0])
-            .with_min_inner_size([640.0, 400.0]),
+            .with_inner_size([1280.0, 800.0])
+            .with_min_inner_size([880.0, 560.0]),
         // The same event loop serves several attempts: without
         // `run_and_return` winit does not allow recreating it after an
         // initialisation error.
@@ -629,16 +580,8 @@ fn main() -> std::process::ExitCode {
         }
     };
 
-    let console = match console_config(&args.console) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return std::process::ExitCode::from(2);
-        }
-    };
-    // `--smoke` without a real console measures the simulated framebuffer,
-    // as before the flag existed.
-    let simulated_console = console.is_none() && (args.simulated_console || args.smoke.is_some());
+    // `--smoke` measures the simulated framebuffer, as before the flag existed.
+    let simulated_console = args.simulated_console || args.smoke.is_some();
 
     // Panics due to missing libraries become a usable message (below): the
     // default hook stays for all the others.
@@ -661,7 +604,6 @@ fn main() -> std::process::ExitCode {
             failed: failed.clone(),
             forced: plan.forced,
         };
-        let console = console.clone();
         let service = service.clone();
         let settings_path = settings_path.clone();
         let settings_error = settings_error.clone();
@@ -671,7 +613,6 @@ fn main() -> std::process::ExitCode {
         let open_vm = args.service.open_vm.clone();
         let changes = args.service.changes;
         let create = args.service.create;
-        let dump_fb = args.console.dump_fb.clone();
         let animate = args.animate;
         let smoke = args.smoke;
         let created_app = created.clone();
@@ -691,15 +632,10 @@ fn main() -> std::process::ExitCode {
                     if let Some(gl) = &cc.gl {
                         (info.detail, info.cpu_adapter) = glow_info(gl);
                     }
-                    let mut ui = match console {
-                        Some(mut cfg) => {
-                            if info.degraded() {
-                                cfg.max_fps = cfg.max_fps.min(DEGRADED_CONSOLE_FPS);
-                            }
-                            LightVmApp::with_console(cfg)
-                        }
-                        None => LightVmApp::new(animate),
-                    };
+                    let mut ui = LightVmApp::new(animate);
+                    if info.degraded() {
+                        ui.set_console_max_fps(DEGRADED_CONSOLE_FPS);
+                    }
                     ui.set_simulated_console(simulated_console);
                     if simulated_console {
                         // The simulated framebuffer is what is being measured:
@@ -713,6 +649,8 @@ fn main() -> std::process::ExitCode {
                     ui.set_settings(settings, settings_path, settings_error);
                     ui.set_service_exe(service_exe);
                     ui.set_folder_picker(lightvm_desktop::native_folder_picker());
+                    ui.set_file_picker(lightvm_desktop::native_file_picker());
+                    ui.set_save_picker(lightvm_desktop::native_save_picker());
                     // Style and theme before the first frame (no frame with the
                     // default egui style).
                     lightvm_desktop::theme::install(&cc.egui_ctx);
@@ -752,7 +690,6 @@ fn main() -> std::process::ExitCode {
                         repaint_causes: Default::default(),
                         last_frame: None,
                         intervals: [0; 4],
-                        dump_fb,
                         clipboard_filter: Default::default(),
                     }))
                 }),
@@ -825,80 +762,5 @@ fn service_config(
         runtime_dir: a.runtime_dir.as_ref().map(PathBuf::from),
         audit_log: a.audit_log.as_ref().map(PathBuf::from),
         policy,
-    }))
-}
-
-fn save_png(fb: &rfb_client::Framebuffer, path: &str) -> Result<f64, String> {
-    let img = f0_console::image::RgbImage {
-        width: u32::from(fb.width()),
-        height: u32::from(fb.height()),
-        data: fb.to_rgb(),
-    };
-    std::fs::write(path, f0_console::image::encode_png(&img)?).map_err(|e| e.to_string())?;
-    Ok(img.non_black_percent())
-}
-
-/// Builds the console configuration from the given paths only.
-fn console_config(
-    a: &ConsoleArgs,
-) -> Result<Option<lightvm_desktop::console::ConsoleConfig>, String> {
-    use lightvm_desktop::keymap::KeyboardLayout;
-    use rfb_client::{TlsConfig, Transport, UnixImpl};
-    use std::path::PathBuf;
-    let vnc = match (&a.vnc_socket, &a.vnc_tls) {
-        (None, None) => {
-            if a.qmp_socket.is_some() {
-                return Err("--qmp-socket requires --vnc-socket or --vnc-tls".into());
-            }
-            return Ok(None);
-        }
-        (Some(_), Some(_)) => {
-            return Err("use --vnc-socket or --vnc-tls, not both".into());
-        }
-        (Some(p), None) => Transport::Unix {
-            path: PathBuf::from(p),
-            imp: match a.vnc_impl.as_deref().unwrap_or("socket2") {
-                "socket2" => UnixImpl::Socket2,
-                "uds" => UnixImpl::UdsWindows,
-                o => return Err(format!("unknown --vnc-impl: {o}")),
-            },
-        },
-        (None, Some(addr)) => {
-            let dir = PathBuf::from(a.tls_dir.as_deref().ok_or("--vnc-tls requires --tls-dir")?);
-            Transport::VencryptTls {
-                addr: addr.parse().map_err(|e| format!("--vnc-tls: {e}"))?,
-                tls: TlsConfig {
-                    ca_cert: dir.join("ca-cert.pem"),
-                    client_cert: dir.join("client-cert.pem"),
-                    client_key: dir.join("client-key.pem"),
-                    server_name: "localhost".into(),
-                },
-            }
-        }
-    };
-    let qmp = PathBuf::from(
-        a.qmp_socket
-            .as_deref()
-            .ok_or("--qmp-socket is mandatory with the console")?,
-    );
-    let capture = PathBuf::from(a.capture_dir.as_deref().unwrap_or("."));
-    let tmp = a
-        .tmp_dir
-        .as_deref()
-        .map(PathBuf::from)
-        .or_else(|| qmp.parent().map(PathBuf::from))
-        .unwrap_or_else(|| capture.clone());
-    let layout = match a.layout.as_deref().unwrap_or("us") {
-        "us" => KeyboardLayout::Us,
-        "it" => KeyboardLayout::It,
-        o => return Err(format!("unknown --layout: {o}")),
-    };
-    Ok(Some(lightvm_desktop::console::ConsoleConfig {
-        vnc,
-        qmp_socket: qmp,
-        capture_dir: capture,
-        tmp_dir: tmp,
-        layout,
-        max_fps: a.max_fps.unwrap_or(30),
     }))
 }

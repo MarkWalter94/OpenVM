@@ -53,6 +53,8 @@ pub struct MemStoreInner {
     pub runs: BTreeMap<RunId, RunRecord>,
     /// Sequence of persisted states, to check the transitions.
     pub state_log: Vec<(VmId, VmState)>,
+    /// Makes `remove_vm` and `import_media` fail (catalog error).
+    pub fail_files: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -119,6 +121,56 @@ impl CatalogStore for MemStore {
             r.ended_at = Some(ended_at);
             r.end_reason = Some(reason);
         }
+        Ok(())
+    }
+    fn list_media(&self) -> Result<Vec<MediaRecord>, PublicError> {
+        Ok(self
+            .0
+            .borrow()
+            .media
+            .values()
+            .map(|e| e.record.clone())
+            .collect())
+    }
+    fn import_media(
+        &mut self,
+        source: &std::path::Path,
+        kind: MediaKind,
+        declared_origin: &Label,
+    ) -> Result<MediaEntry, PublicError> {
+        if self.0.borrow().fail_files {
+            return Err(PublicError::infrastructure("catalog error"));
+        }
+        let n = self.0.borrow().media.len() as u64;
+        let mut r = [0x5a; 10];
+        r[2..].copy_from_slice(&n.to_be_bytes());
+        let entry = MediaEntry {
+            record: MediaRecord {
+                id: MediaId::from_unix_millis(1, r),
+                kind,
+                sha256: Sha256Digest::from_bytes([7; 32]),
+                size_bytes: 1024,
+                declared_origin: declared_origin.clone(),
+                approved_at: UtcTimestamp::from_unix_millis(T0).unwrap(),
+            },
+            managed_path: ManagedRelPath::parse(format!(
+                "media/{}",
+                source.file_name().and_then(|n| n.to_str()).unwrap_or("x")
+            ))
+            .unwrap(),
+            file_identity: None,
+        };
+        self.insert_media(&entry)?;
+        Ok(entry)
+    }
+    fn remove_vm(&mut self, id: VmId) -> Result<(), PublicError> {
+        let mut inner = self.0.borrow_mut();
+        if inner.fail_files {
+            return Err(PublicError::infrastructure("catalog error"));
+        }
+        inner.vms.remove(&id);
+        inner.runs.retain(|_, r| r.vm_id != id);
+        inner.ops.retain(|_, o| o.vm_id != id);
         Ok(())
     }
 }

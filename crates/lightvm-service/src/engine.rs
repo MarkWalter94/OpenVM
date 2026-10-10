@@ -8,20 +8,28 @@
 //! the core: every creation, start, stop, Emergency Stop and denial produces
 //! audit events in the core's sink.
 //!
+//! F2: media import (copy on a worker thread between [`VmEngine::begin_import`]
+//! and [`VmEngine::finish_import`]), VM deletion, console target for the
+//! display ticket, display geometry refreshed from the backend for console
+//! input ([`BackendPort::refresh_geometry`]).
+//!
 //! The Emergency Stop does not go through here: the priority path terminates
 //! the processes with the backend handler ([`crate::supervisor::EmergencyStop`]);
 //! afterwards, [`VmEngine::after_emergency_stop`] records the stop in the core
 //! (session revocation, queue discarded, audit, observed process end).
 
+use std::any::Any;
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use lightvm_proto::ipc::VmSummary;
 use lightvm_proto::{
-    Actor, Admission, BackendObservation, Caller, OperationRecord, PolicyLayer, PublicError,
-    ResourceLimits, VmAction, VmConfig, VmId, VmRecord, VmRequest, VmState,
+    Actor, Admission, BackendObservation, Caller, DisplayGeometry, HostCapacity, InputEvent, Label,
+    MediaEntry, MediaKind, MediaRecord, OperationId, OperationRecord, PolicyLayer, PublicError,
+    ResourceLimits, RunId, VmAction, VmConfig, VmId, VmRecord, VmRequest, VmState,
 };
 use vm_core::ports::{AuditSink, CatalogStore, IdGenerator, MediaInspector, VmBackend};
-use vm_core::{Core, CoreConfig, VmStatus};
+use vm_core::{Core, CoreConfig, DispatchOutcome, VmStatus};
 
 use crate::adapters::{SystemClock, SystemIds};
 
@@ -59,6 +67,93 @@ pub trait VmEngine: Send + 'static {
     fn stop_all(&mut self);
     /// State changes since the last call, for the `vm_state` events.
     fn state_changes(&mut self) -> Vec<(VmId, VmState)>;
+    /// Approved media of the registry.
+    fn list_media(&mut self, caller: &Caller) -> Result<Vec<MediaRecord>, PublicError>;
+    /// First step of a media import (checks of the path chosen by the user,
+    /// source opened, journal intent): returns the copy to run outside the
+    /// supervisor thread.
+    fn begin_import(
+        &mut self,
+        caller: &Caller,
+        source: &str,
+        kind: MediaKind,
+        declared_origin: &str,
+    ) -> Result<ImportJob, PublicError>;
+    /// Last step of a media import: publication and registry row.
+    fn finish_import(
+        &mut self,
+        caller: &Caller,
+        copied: ImportCopied,
+    ) -> Result<MediaRecord, PublicError>;
+    /// Deletion of a stopped VM with its files.
+    fn delete_vm(
+        &mut self,
+        caller: &Caller,
+        vm_id: VmId,
+        expected_revision: u64,
+    ) -> Result<(), PublicError>;
+    /// Console of a running VM: run, QEMU display socket, geometry.
+    fn open_console(&mut self, caller: &Caller, vm_id: VmId) -> Result<ConsoleTarget, PublicError>;
+    /// Releases the keys and buttons still pressed on a run (console lost).
+    fn release_input(&mut self, vm_id: VmId, run_id: RunId);
+    /// Host capacity used by the core.
+    fn host_capacity(&self) -> Option<HostCapacity>;
+}
+
+/// Copy of a media import, to run on a worker thread; its result goes back
+/// to [`VmEngine::finish_import`] on the supervisor thread.
+pub struct ImportJob(Box<dyn FnOnce() -> ImportCopied + Send>);
+
+impl ImportJob {
+    /// Job from a closure.
+    pub fn new(f: impl FnOnce() -> ImportCopied + Send + 'static) -> Self {
+        Self(Box::new(f))
+    }
+
+    /// Runs the copy (blocking).
+    pub fn run(self) -> ImportCopied {
+        (self.0)()
+    }
+}
+
+impl std::fmt::Debug for ImportJob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ImportJob")
+    }
+}
+
+/// Opaque result of an [`ImportJob`], specific to the catalog that made it.
+pub struct ImportCopied(pub Box<dyn Any + Send>);
+
+impl std::fmt::Debug for ImportCopied {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ImportCopied")
+    }
+}
+
+/// Media import in two steps on a catalog (the copy runs between them,
+/// outside the catalog).
+pub trait MediaImportPort {
+    /// Opens the source, checks it and records the intent.
+    fn begin_import(
+        &mut self,
+        source: &Path,
+        kind: MediaKind,
+        declared_origin: &Label,
+    ) -> Result<ImportJob, PublicError>;
+    /// Publishes the copy made by the job.
+    fn finish_import(&mut self, copied: ImportCopied) -> Result<MediaEntry, PublicError>;
+}
+
+/// Data for a console ticket.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsoleTarget {
+    /// Current run.
+    pub run_id: RunId,
+    /// QEMU display socket of the run (never sent to clients).
+    pub display_socket: Option<PathBuf>,
+    /// Current display geometry, if known.
+    pub geometry: Option<DisplayGeometry>,
 }
 
 /// VM backend as seen by the engine: the core's `VmBackend` port plus the
@@ -66,10 +161,37 @@ pub trait VmEngine: Send + 'static {
 pub trait BackendPort: VmBackend + Send + 'static {
     /// Accumulated observations to apply to the core with `Core::observe`.
     fn drain_observations(&mut self) -> Vec<(VmId, BackendObservation)>;
+    /// Display socket of the run (QEMU `vnc.sock`), if the backend has one.
+    fn display_socket(&self, _vm_id: VmId, _run_id: RunId) -> Option<PathBuf> {
+        None
+    }
+    /// Current display geometry read from the backend (cheap capture), if
+    /// available.
+    fn refresh_geometry(&mut self, _vm_id: VmId, _run_id: RunId) -> Option<DisplayGeometry> {
+        None
+    }
+    /// Releases the keys and buttons still pressed on the run.
+    fn release_input(&mut self, _vm_id: VmId, _run_id: RunId) {}
+    /// Starts a graceful stop without waiting for it: ACPI powerdown, then
+    /// the escalation (wait, `quit`, termination) runs in the background and
+    /// its outcome is reported by [`Self::finished_shutdowns`]. `None` if the
+    /// backend only supports the blocking [`VmBackend::shutdown`].
+    fn begin_shutdown(&mut self, _vm_id: VmId, _run_id: RunId) -> Option<Result<(), PublicError>> {
+        None
+    }
+    /// Graceful stops started with [`Self::begin_shutdown`] that ended
+    /// (`Ok` = process exit observed and run released). A run whose stop is in
+    /// progress is not reported by [`Self::drain_observations`].
+    fn finished_shutdowns(&mut self) -> Vec<(VmId, RunId, Result<(), PublicError>)> {
+        Vec::new()
+    }
 }
 
+/// Safety bound of [`VmEngine::stop_all`] beyond the escalation of each stop.
+const STOP_ALL_LIMIT: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// Core configuration for the service.
-pub fn core_config(host: lightvm_proto::HostCapacity) -> CoreConfig {
+pub fn core_config(host: HostCapacity) -> CoreConfig {
     CoreConfig {
         global_limits: ResourceLimits::MVP_DEFAULT,
         global_policy: PolicyLayer::permissive(),
@@ -77,7 +199,7 @@ pub fn core_config(host: lightvm_proto::HostCapacity) -> CoreConfig {
     }
 }
 
-fn summary(s: VmStatus) -> VmSummary {
+fn summary(s: VmStatus, disk_used_bytes: Option<u64>) -> VmSummary {
     VmSummary {
         vm_id: s.vm_id,
         name: s.name,
@@ -85,7 +207,7 @@ fn summary(s: VmStatus) -> VmSummary {
         run_id: s.run_id,
         config: s.config,
         config_revision: s.config_revision,
-        disk_used_bytes: None,
+        disk_used_bytes,
     }
 }
 
@@ -100,6 +222,10 @@ where
     inspector: M,
     ids: SystemIds,
     last: BTreeMap<VmId, VmState>,
+    /// Graceful stops forwarded and still running in the backend: VM →
+    /// (operation, run). The operation stays forwarded in the core (VM in
+    /// `stopping`) until the backend reports the outcome.
+    pending_stops: BTreeMap<VmId, (OperationId, RunId)>,
 }
 
 impl<S, A, B, M> std::fmt::Debug for CoreEngine<S, A, B, M>
@@ -116,7 +242,7 @@ where
 
 impl<S, A, B, M> CoreEngine<S, A, B, M>
 where
-    S: CatalogStore + Send + 'static,
+    S: CatalogStore + MediaImportPort + Send + 'static,
     A: AuditSink + Send + 'static,
     B: BackendPort,
     M: MediaInspector + Send + 'static,
@@ -147,6 +273,7 @@ where
             inspector,
             ids: SystemIds::default(),
             last: BTreeMap::new(),
+            pending_stops: BTreeMap::new(),
         };
         let _ = e.state_changes();
         Ok(e)
@@ -158,41 +285,129 @@ where
     }
 
     fn apply_observations(&mut self) {
+        for (vm_id, run_id, result) in self.backend.finished_shutdowns() {
+            if self.pending_stops.get(&vm_id).map(|(_, r)| *r) == Some(run_id)
+                && let Some((op, _)) = self.pending_stops.remove(&vm_id)
+            {
+                let _ =
+                    self.core
+                        .finish_dispatch(vm_id, op, result.map(|()| DispatchOutcome::Done));
+            }
+        }
         for (vm_id, obs) in self.backend.drain_observations() {
             let _ = self.core.observe(vm_id, obs);
         }
+        self.settle_pending_stops();
     }
 
+    /// Graceful stops whose run ended otherwise (forced stop, Emergency Stop,
+    /// VM deleted): the operation is closed as superseded.
+    fn settle_pending_stops(&mut self) {
+        let stale: Vec<(VmId, OperationId)> = self
+            .pending_stops
+            .iter()
+            .filter(|(vm, (_, run))| {
+                self.core
+                    .vm_status(&Caller::User, **vm)
+                    .map_or(true, |st| st.run_id != Some(*run))
+            })
+            .map(|(vm, (op, _))| (*vm, *op))
+            .collect();
+        for (vm, op) in stale {
+            self.pending_stops.remove(&vm);
+            let _ = self.core.finish_dispatch(
+                vm,
+                op,
+                Err(PublicError::state_conflict(
+                    "graceful stop superseded by a forced stop",
+                )),
+            );
+        }
+    }
+
+    /// Graceful stops in progress.
+    pub fn pending_stops(&self) -> usize {
+        self.pending_stops.len()
+    }
+
+    fn with_usage(&self, s: VmStatus) -> VmSummary {
+        let used = self.core.store().vm_disk_usage(s.vm_id);
+        summary(s, used)
+    }
+
+    /// Input with pointer coordinates on a geometry different from the one
+    /// known to the core: the geometry is re-read from the backend once (the
+    /// guest may have changed resolution); the core then still rejects a
+    /// batch whose geometry differs from the current one (stale coordinates).
+    fn refresh_geometry_for(&mut self, req: &VmRequest) {
+        let VmAction::Input(batch) = &req.action else {
+            return;
+        };
+        if !batch
+            .events
+            .iter()
+            .any(|e| matches!(e, InputEvent::PointerMove(_)))
+        {
+            return;
+        }
+        let Ok(st) = self.core.vm_status(&Caller::User, req.vm_id) else {
+            return;
+        };
+        if !matches!(st.state, VmState::Running | VmState::Stopping)
+            || st.run_id != Some(batch.run_id)
+            || st.geometry == Some(batch.geometry)
+        {
+            return;
+        }
+        if let Some(g) = self.backend.refresh_geometry(req.vm_id, batch.run_id) {
+            let _ = self.core.observe_geometry(req.vm_id, batch.run_id, g);
+        }
+    }
+
+    /// Forwards the queued operations of the VM. A graceful stop is started
+    /// in the backend and left forwarded (the supervisor thread is not held
+    /// for the ACPI wait); a forced stop queued meanwhile is forwarded at
+    /// once by the core and wins.
     fn run_queue(&mut self, vm_id: VmId) -> Result<(), PublicError> {
-        while self
-            .core
-            .execute_next(vm_id, &mut self.backend, &mut self.inspector)?
-            .is_some()
-        {}
+        while let Some(d) = self.core.begin_dispatch(vm_id)? {
+            if d.action == VmAction::Stop {
+                match self.backend.begin_shutdown(vm_id, d.run_id) {
+                    Some(Ok(())) => {
+                        self.pending_stops.insert(vm_id, (d.operation_id, d.run_id));
+                        continue;
+                    }
+                    Some(Err(e)) => {
+                        self.core.finish_dispatch(vm_id, d.operation_id, Err(e))?;
+                        continue;
+                    }
+                    None => {}
+                }
+            }
+            self.core
+                .execute_dispatch(d, &mut self.backend, &mut self.inspector)?;
+        }
+        self.settle_pending_stops();
         Ok(())
     }
 }
 
 impl<S, A, B, M> VmEngine for CoreEngine<S, A, B, M>
 where
-    S: CatalogStore + Send + 'static,
+    S: CatalogStore + MediaImportPort + Send + 'static,
     A: AuditSink + Send + 'static,
     B: BackendPort,
     M: MediaInspector + Send + 'static,
 {
     fn list_vms(&mut self, caller: &Caller) -> Result<Vec<VmSummary>, PublicError> {
         self.apply_observations();
-        Ok(self
-            .core
-            .list_vms(caller)?
-            .into_iter()
-            .map(summary)
-            .collect())
+        let vms = self.core.list_vms(caller)?;
+        Ok(vms.into_iter().map(|s| self.with_usage(s)).collect())
     }
 
     fn vm_status(&mut self, caller: &Caller, vm_id: VmId) -> Result<VmSummary, PublicError> {
         self.apply_observations();
-        self.core.vm_status(caller, vm_id).map(summary)
+        let s = self.core.vm_status(caller, vm_id)?;
+        Ok(self.with_usage(s))
     }
 
     fn create_vm(&mut self, caller: &Caller, config: VmConfig) -> Result<VmRecord, PublicError> {
@@ -215,6 +430,7 @@ where
         self.apply_observations();
         let vm_id = req.vm_id;
         let op = req.operation_id;
+        self.refresh_geometry_for(&req);
         let admission = self.core.submit(caller, req)?;
         // Execution is synchronous on the supervisor thread: a single owner of
         // the core and the backend (ARCHITECTURE 5).
@@ -237,6 +453,7 @@ where
                 .emergency_stop_with(actor, vm.vm_id, &mut self.backend);
         }
         self.apply_observations();
+        self.settle_pending_stops();
     }
 
     fn observe(&mut self) {
@@ -255,6 +472,8 @@ where
         for vm in vms {
             let action = match vm.state {
                 VmState::Running => VmAction::Stop,
+                // A graceful stop already in progress is awaited below.
+                VmState::Stopping if self.pending_stops.contains_key(&vm.vm_id) => continue,
                 VmState::Starting | VmState::Stopping => VmAction::ForceStop,
                 _ => continue,
             };
@@ -267,6 +486,13 @@ where
             if self.core.submit(&Caller::User, req).is_ok() {
                 let _ = self.run_queue(vm.vm_id);
             }
+        }
+        // The stops run in parallel in the backend, each bounded by its own
+        // escalation (ACPI wait → `quit` → termination): wait for them.
+        let deadline = std::time::Instant::now() + STOP_ALL_LIMIT;
+        while !self.pending_stops.is_empty() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            self.apply_observations();
         }
     }
 
@@ -281,5 +507,76 @@ where
             }
         }
         out
+    }
+
+    fn list_media(&mut self, caller: &Caller) -> Result<Vec<MediaRecord>, PublicError> {
+        self.core.list_media(caller)
+    }
+
+    fn begin_import(
+        &mut self,
+        caller: &Caller,
+        source: &str,
+        kind: MediaKind,
+        declared_origin: &str,
+    ) -> Result<ImportJob, PublicError> {
+        self.core.begin_media_import(caller, |store| {
+            let origin = Label::parse(declared_origin)
+                .map_err(|_| PublicError::invalid_argument("invalid declared origin"))?;
+            let path = crate::adapters::catalog::validate_import_source(source, kind)?;
+            store.begin_import(&path, kind, &origin)
+        })
+    }
+
+    fn finish_import(
+        &mut self,
+        caller: &Caller,
+        copied: ImportCopied,
+    ) -> Result<MediaRecord, PublicError> {
+        self.core
+            .finish_media_import(caller, |store| store.finish_import(copied))
+    }
+
+    fn delete_vm(
+        &mut self,
+        caller: &Caller,
+        vm_id: VmId,
+        expected_revision: u64,
+    ) -> Result<(), PublicError> {
+        self.apply_observations();
+        self.core.delete_vm(caller, vm_id, expected_revision)?;
+        self.last.remove(&vm_id);
+        Ok(())
+    }
+
+    fn open_console(&mut self, caller: &Caller, vm_id: VmId) -> Result<ConsoleTarget, PublicError> {
+        self.apply_observations();
+        let st = self.core.open_console(caller, vm_id)?;
+        let run_id = st
+            .run_id
+            .ok_or_else(|| PublicError::state_conflict("the console requires a running VM"))?;
+        let mut geometry = st.geometry;
+        if geometry.is_none()
+            && let Some(g) = self.backend.refresh_geometry(vm_id, run_id)
+            && self
+                .core
+                .observe_geometry(vm_id, run_id, g)
+                .unwrap_or(false)
+        {
+            geometry = Some(g);
+        }
+        Ok(ConsoleTarget {
+            run_id,
+            display_socket: self.backend.display_socket(vm_id, run_id),
+            geometry,
+        })
+    }
+
+    fn release_input(&mut self, vm_id: VmId, run_id: RunId) {
+        self.backend.release_input(vm_id, run_id);
+    }
+
+    fn host_capacity(&self) -> Option<HostCapacity> {
+        Some(self.core.config().host)
     }
 }

@@ -15,11 +15,20 @@
 //!    `run_id` after insertion; `finish_run` uses the storage's timestamp.
 //!
 //! No path comes from clients: the managed media paths are validated twice
-//! (`ManagedRelPath` of the proto and `ManagedPath` of the storage).
+//! (`ManagedRelPath` of the proto and `ManagedPath` of the storage). The only
+//! host path received over IPC is the file the user picked for
+//! `import_media` (UI role only), checked by [`validate_import_source`] and
+//! opened read-only by the storage, never passed to QEMU.
+//!
+//! F2: media import in two steps around a copy made outside the supervisor
+//! thread ([`crate::engine::MediaImportPort`]), VM deletion through the
+//! storage journal (`remove_vm`), disk usage of a VM (`vm_disk_usage`); input
+//! operations are not stored in the `operations` table (see
+//! `upsert_operation`).
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use lightvm_proto::{
     ErrorCode, Label, ManagedRelPath, MediaEntry, MediaId, MediaKind, MediaRecord, OperationId,
@@ -29,6 +38,8 @@ use lightvm_proto::{
 use serde::{Deserialize, Serialize};
 use vm_core::ports::CatalogStore;
 use vm_storage as st;
+
+use crate::engine::{ImportCopied, ImportJob, MediaImportPort as _};
 
 /// Version of the `config_json` format written by this adapter.
 const CONFIG_VERSION: u32 = 1;
@@ -154,7 +165,7 @@ impl SqliteStore {
     }
 
     /// Catalog root (for the managed media paths).
-    pub fn root(&self) -> std::path::PathBuf {
+    pub fn root(&self) -> PathBuf {
         self.cat.borrow().layout().root().to_path_buf()
     }
 
@@ -338,7 +349,14 @@ impl CatalogStore for SqliteStore {
         }
     }
 
+    /// Input batches are not persisted as catalog operations: they are never
+    /// retried, carry no recovery state, and the core keeps them in memory
+    /// for idempotency; each one stays in the audit. Writing three synced
+    /// SQLite transactions per keystroke made console typing slow (F2-01).
     fn upsert_operation(&mut self, op: &OperationRecord) -> Result<(), PublicError> {
+        if op.kind == OperationKind::Input {
+            return Ok(());
+        }
         let sid = self.sid(op.vm_id)?;
         let state = op_state(op.status);
         let error = op.error.map(ErrorCode::as_str);
@@ -412,6 +430,310 @@ impl CatalogStore for SqliteStore {
         let (state, cause) = run_end(reason);
         self.write(|tx| tx.end_run(&id, state, cause))
     }
+
+    fn list_media(&self) -> Result<Vec<MediaRecord>, PublicError> {
+        let rows = self.read(|tx| {
+            tx.media_ids()?
+                .iter()
+                .map(|id| tx.media(id))
+                .collect::<st::Result<Vec<_>>>()
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            if let Some(e) = Self::media_entry(row)? {
+                out.push(e.record);
+            }
+        }
+        Ok(out)
+    }
+
+    fn import_media(
+        &mut self,
+        source: &Path,
+        kind: MediaKind,
+        declared_origin: &Label,
+    ) -> Result<MediaEntry, PublicError> {
+        let job = self.begin_import(source, kind, declared_origin)?;
+        let copied = job.run();
+        self.finish_import(copied)
+    }
+
+    /// Deletion through the storage journal: rows of the VM, `vms/<id>`
+    /// under both identifiers (storage and core) and `runs/<run_id>` of
+    /// every run of the VM.
+    fn remove_vm(&mut self, id: VmId) -> Result<(), PublicError> {
+        let sid = self.sid(id)?;
+        let mut extra = Vec::new();
+        if sid != id {
+            extra.push(st::CatalogLayout::vm_dir(&id));
+        }
+        let report = self
+            .cat
+            .borrow_mut()
+            .delete_vm_with_files(&sid, &extra)
+            .map_err(|e| {
+                crate::diag!("lightvm-service: VM deletion: {e}");
+                storage_error(&e)
+            })?;
+        crate::diag!(
+            "lightvm-service: VM deleted: {} files ({} MiB), {} directories",
+            report.files_removed,
+            report.bytes_removed >> 20,
+            report.dirs_removed
+        );
+        self.ids.remove(&id);
+        Ok(())
+    }
+
+    /// Bytes of `vms/<id>` (both identifiers) and of the run directories.
+    fn vm_disk_usage(&self, id: VmId) -> Option<u64> {
+        let sid = self.ids.get(&id).copied()?;
+        let runs = self.read(|tx| tx.run_ids_of_vm(&sid)).ok()?;
+        let root = self.root();
+        let rel = |m: st::ManagedPath| managed_abs(&root, m.as_str());
+        let mut total = tree_bytes(&rel(st::CatalogLayout::vm_dir(&id)));
+        if sid != id {
+            total += tree_bytes(&rel(st::CatalogLayout::vm_dir(&sid)));
+        }
+        for r in runs {
+            total += tree_bytes(&root.join("runs").join(r.to_string()));
+        }
+        Some(total)
+    }
+}
+
+/// Absolute path of a managed relative path (`/` separator).
+fn managed_abs(root: &Path, rel: &str) -> PathBuf {
+    rel.split('/').fold(root.to_path_buf(), |p, c| p.join(c))
+}
+
+/// Free space that must remain on the catalog volume after a media copy.
+const IMPORT_FREE_MARGIN: u64 = 1 << 30;
+
+/// Maximum length of the path of a medium chosen by the user.
+const MAX_SOURCE_PATH: usize = 4096;
+
+/// Windows device names: a file with one of these stems opens a device.
+const RESERVED_NAMES: &[&str] = &[
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9", "CONIN$",
+    "CONOUT$",
+];
+
+/// `true` for a symbolic link or, on Windows, any reparse point (junctions,
+/// mount points, cloud placeholders).
+pub(crate) fn is_link(meta: &std::fs::Metadata) -> bool {
+    if meta.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return true;
+        }
+    }
+    false
+}
+
+/// Checks of the file chosen by the user with the native picker before the
+/// import (ADR-0008; ROADMAP 7.4, "Host" row). The path is opened only for
+/// reading by the catalog and never passed to QEMU. Rejected:
+/// - relative paths, `.`/`..` components, UNC paths (`\\server\share`) and
+///   device paths (`\\?\`, `\\.\`, `\??\`), alternate data streams (`:`
+///   after the drive), Windows device names (`CON`, `NUL`, `COM1`, ...)
+///   → `permission_denied` or `invalid_argument`;
+/// - an extension other than `.iso` → `invalid_argument`;
+/// - a missing file → `not_found`; a link, junction or other reparse point
+///   on the file → `permission_denied`; anything but a regular file →
+///   `invalid_argument`;
+/// - an empty file or one over the limit of the kind (16 GiB installation,
+///   8 GiB data) → `invalid_argument` / `resource_limit`;
+/// - a file without the ISO 9660 / UDF signature → `invalid_argument`.
+///
+/// The catalog repeats type, size and signature on the handle it copies from.
+pub fn validate_import_source(raw: &str, kind: MediaKind) -> Result<PathBuf, PublicError> {
+    use std::path::{Component, Path};
+    let invalid = PublicError::invalid_argument;
+    let denied = PublicError::permission_denied;
+    if raw.is_empty() || raw.len() > MAX_SOURCE_PATH || raw.chars().any(char::is_control) {
+        return Err(invalid("invalid media path"));
+    }
+    if cfg!(windows) {
+        let b = raw.as_bytes();
+        let sep = |c: u8| c == b'\\' || c == b'/';
+        if b.len() >= 2 && sep(b[0]) && (sep(b[1]) || b[1] == b'?') {
+            return Err(denied("UNC and device paths are not allowed"));
+        }
+        if raw.len() > 2 && raw[2..].contains(':') {
+            return Err(denied("alternate data streams are not allowed"));
+        }
+    }
+    let path = Path::new(raw);
+    if !path.is_absolute() {
+        return Err(invalid("an absolute path is required"));
+    }
+    for c in path.components() {
+        match c {
+            Component::Prefix(p) => {
+                if !matches!(p.kind(), std::path::Prefix::Disk(_)) {
+                    return Err(denied("UNC and device paths are not allowed"));
+                }
+            }
+            Component::RootDir => {}
+            Component::CurDir | Component::ParentDir => {
+                return Err(invalid("`.` and `..` are not allowed in the media path"));
+            }
+            Component::Normal(n) => {
+                let n = n.to_str().ok_or_else(|| invalid("invalid media path"))?;
+                let stem = n.split('.').next().unwrap_or(n).trim_end();
+                if cfg!(windows) && RESERVED_NAMES.iter().any(|r| r.eq_ignore_ascii_case(stem)) {
+                    return Err(denied("device names are not allowed"));
+                }
+                if cfg!(windows) && (n.ends_with('.') || n.ends_with(' ')) {
+                    return Err(invalid("invalid media path"));
+                }
+            }
+        }
+    }
+    let is_iso = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("iso"));
+    if !is_iso {
+        return Err(invalid("only `.iso` files can be imported"));
+    }
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(PublicError::not_found("media file not found"));
+        }
+        Err(_) => return Err(denied("media file not accessible")),
+    };
+    if is_link(&meta) {
+        return Err(denied(
+            "links, junctions and reparse points are not allowed",
+        ));
+    }
+    if !meta.is_file() {
+        return Err(invalid("the media path is not a regular file"));
+    }
+    if meta.len() == 0 {
+        return Err(invalid("empty media file"));
+    }
+    if meta.len() > kind.max_bytes() {
+        return Err(
+            PublicError::resource_limit("medium exceeds the maximum size")
+                .with_detail("size_bytes", meta.len().to_string())
+                .with_detail("max_bytes", kind.max_bytes().to_string()),
+        );
+    }
+    if !is_optical_image(path) {
+        return Err(invalid(st::NOT_OPTICAL_IMAGE));
+    }
+    Ok(path.to_path_buf())
+}
+
+/// Public error of a failed import, without paths.
+fn import_error(e: &st::StorageError) -> PublicError {
+    match e {
+        st::StorageError::Unsupported(m) if *m == st::NOT_OPTICAL_IMAGE => {
+            PublicError::invalid_argument(st::NOT_OPTICAL_IMAGE)
+        }
+        st::StorageError::ResourceLimit(_) => {
+            PublicError::resource_limit("medium exceeds the maximum size")
+        }
+        st::StorageError::VmBusy(_) => {
+            PublicError::state_conflict("the media file is in use by another program")
+        }
+        st::StorageError::InvalidPath { .. } => {
+            PublicError::permission_denied("links, junctions and reparse points are not allowed")
+        }
+        st::StorageError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound => {
+            PublicError::not_found("media file not found")
+        }
+        st::StorageError::Io { source, .. } if source.kind() == std::io::ErrorKind::StorageFull => {
+            PublicError::resource_limit("not enough free space in the catalog for the medium")
+        }
+        other => {
+            crate::diag!("lightvm-service: media import: {other}");
+            storage_error(other)
+        }
+    }
+}
+
+fn storage_kind(kind: MediaKind) -> st::MediaKind {
+    match kind {
+        MediaKind::InstallIso => st::MediaKind::Iso,
+        MediaKind::DataIso => st::MediaKind::Data,
+    }
+}
+
+/// Bytes of the regular files under `dir` (recursive, without following
+/// links); 0 if missing.
+fn tree_bytes(dir: &Path) -> u64 {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    rd.filter_map(Result::ok)
+        .map(|e| match std::fs::symlink_metadata(e.path()) {
+            Ok(m) if is_link(&m) => 0,
+            Ok(m) if m.is_dir() => tree_bytes(&e.path()),
+            Ok(m) if m.is_file() => m.len(),
+            _ => 0,
+        })
+        .sum()
+}
+
+impl crate::engine::MediaImportPort for SqliteStore {
+    fn begin_import(
+        &mut self,
+        source: &Path,
+        kind: MediaKind,
+        declared_origin: &Label,
+    ) -> Result<ImportJob, PublicError> {
+        // The copy must not fill the volume of the catalog: a margin stays
+        // free for the VM disks, the database and the logs.
+        let size = std::fs::symlink_metadata(source)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        let free = qemu_backend::ManagedPath::verify(self.root())
+            .and_then(|r| qemu_backend::prepare::host_resources(&r))
+            .map(|r| r.free_disk_bytes);
+        if let Ok(free) = free
+            && free < size.saturating_add(IMPORT_FREE_MARGIN)
+        {
+            return Err(PublicError::resource_limit(
+                "not enough free space in the catalog for the medium",
+            )
+            .with_detail("size_bytes", size.to_string())
+            .with_detail("free_bytes", free.to_string()));
+        }
+        let limits = st::MediaLimits {
+            max_bytes: kind.max_bytes(),
+            optical_signature: true,
+        };
+        let job = self
+            .cat
+            .borrow_mut()
+            .begin_media_import(source, storage_kind(kind), declared_origin.as_str(), limits)
+            .map_err(|e| import_error(&e))?;
+        Ok(ImportJob::new(move || ImportCopied(Box::new(job.copy()))))
+    }
+
+    fn finish_import(&mut self, copied: ImportCopied) -> Result<MediaEntry, PublicError> {
+        let copied = copied
+            .0
+            .downcast::<st::CopiedMedia>()
+            .map_err(|_| infra("import started on another catalog"))?;
+        let rec = self
+            .cat
+            .borrow_mut()
+            .finish_media_import(*copied)
+            .map_err(|e| import_error(&e))?;
+        Self::media_entry(rec)?.ok_or_else(|| infra("imported medium not approved"))
+    }
 }
 
 /// Offset of the first volume descriptor (sector 16 of 2048 bytes) plus the
@@ -440,12 +762,12 @@ pub fn is_optical_image(path: &Path) -> bool {
 /// happen on the same handle handed to QEMU.
 #[derive(Debug, Clone)]
 pub struct ManagedMediaInspector {
-    root: std::path::PathBuf,
+    root: PathBuf,
 }
 
 impl ManagedMediaInspector {
     /// Inspector for the catalog root.
-    pub fn new(root: std::path::PathBuf) -> Self {
+    pub fn new(root: PathBuf) -> Self {
         Self { root }
     }
 }

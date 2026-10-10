@@ -64,7 +64,27 @@ Situation at end of day (2026-10-10):
 - **F1 exit criterion (F1-12)**: all items run with a positive outcome on the first host (`F1-03`: disk creation, 20 real cycles also through the service, accelerator absent, no NIC, rejections), but per section 10 **they do not count until F0 is closed**. To close F0, **P-4** (physical keyboard, script ready) and the **Windows part of P-5** (second Windows account or recording as a limit) remain.
 - Resolved during the day: shutdown on UI loss (ADR-0015 B), host clipboard reading (F1-13, patched egui-winit), disk installation and boot from disk (F1-17), per-VM limits (ADR-0017 in part), details of the data medium (P-7), reconciliation on restart.
 - Open in F1: cold start and RDP (F1-18, F1-16), CI never run on GitHub (F1-02), process containment on Linux (F1-15, R2a).
-- **The spike console still opens the QMP socket directly**: the product path of the console goes through the supervisor in F2 (ADR-0012, ADR-0013).
+- The console no longer opens QMP directly: since F2 it goes through the supervisor with a per-run display ticket (`F2-01`, `F2-02`).
+
+## F2 work started in parallel
+
+Started on 2026-10-10 at the owner's request, before the closure of F0 and of the F1 exit criterion: like the F1 work, **not usable for the F2 exit criterion** until the previous phases are closed (section 10). Evidence in `docs/verification/F2-*`.
+
+| Item (ROADMAP F2) | Evidence | Declared outcome |
+| --- | --- | --- |
+| Dashboard (OS, state, vCPU/RAM, virtual size, space used), wizard (name, OS, install media, data media, CPU/RAM/disk, network Offline only, summary), ISO import with the native picker | `F2-02`, `F2-01` | verified headless (kittest) and on hardware (wizard → import 6.4 GB ISO → create → start, `real_console`) |
+| Console as a texture through the supervisor with a per-run display ticket (ADR-0013), input as IPC batches, full screen, screenshot, connection state | `F2-01`, `F2-02` | verified on hardware (framebuffer through the ticket, input p95 < 1 ms, ticket revoked on stop/Emergency Stop/connection loss); IT/US keyboard in a real guest and coordinates after resize by hand not executed (P-4) |
+| Manual Ubuntu installation, boot from disk, persistence after reopening | `F2-01` | verified on hardware through the service (unattended install, media removed, boot from disk to the login screen, new service on the same catalog, boot again); **by a user following the guide: not executed** (exit criterion) |
+| Graceful stop with timeout, distinct force stop, explicit reset | `F2-01`, `F2-02` | verified on hardware; graceful stop runs in the background, force stop wins |
+| Delete dialog, close with running VMs | `F2-02`, `F2-01` | verified headless; deletion verified on hardware |
+| Config changes only with the VM stopped; media detach | `F2-02`, `F1-10` | verified headless; baseline invalidation not applicable until F3 |
+| Dark/light mode, resizable layout, keyboard operation, AccessKit, status not by colour only; Settings (QEMU paths, host capacity, security, network/MCP shown unavailable) | `F2-02` | verified headless; screen reader, DPI scaling and multi-monitor **not executed** (manual) |
+| Experimental installer and first test on a clean machine | `F2-03` | per-user zip and Inno Setup installer verified on the development host; clean machine **not executed** (Windows Sandbox procedure ready) |
+| macOS build on a runner (portability probe) | `F2-03` | job written; **never run on GitHub** |
+
+Decisions taken in F2: default CPU model `Skylake-Client-v4` (with `qemu64` the reference guest does not reach the desktop, deviation D-1); per-VM persistent UEFI variables; graceful stop asynchronous; user console input allowed while a VM is stopping; the wizard VM name is the only text field of the UI (it never reaches QEMU).
+
+Open for the F2 exit criterion: a user follows `docs/USER_GUIDE.md`, installs Ubuntu, reopens LightVM and finds the VM; Italian/English keyboard and coordinates after resize checked by hand; screen reader, DPI and multi-monitor; clean-machine installer test.
 
 ## Linux lab outcome
 

@@ -49,6 +49,9 @@ Examples: `F0-01-toolchain-eframe.md`, `F0-02-qemu-whpx-qmp.md`, `F1-04-start-st
 | `F1-09-ui-supervisor-ui-crash.md` | F1 (backlog F1-11); F0 P-2 pending | partial: UI → child supervisor → IPC verified; UI crash without orphans verified, orderly VM shutdown failed (supervisor timeout); Linux not executed | complete |
 | `F1-10-vm-limits-settings.md` | F1 (ADR-0017; backlog F1-04, F1-05) | partial: CPU and memory limits applied to QEMU and verified; VM editing via IPC, UI and command line; storage budget only at startup; fixes to normal shutdown and to reconciliation on restart | complete |
 | `F1-11-second-user-and-data-disc.md` | F0 P-5 (Linux part), P-7 | partial: second user rejected (permissions and UID) in Ubuntu VM [processes]; writing the data CD from the guest impossible; Windows part not executed | complete |
+| `F2-01-service-console-media.md` | F2 (supervisor: media import, deletion, console ticket, input, persistent UEFI variables, asynchronous stop; exit path through the service) | partial: verified on hardware through the service; by a user via the UI not executed | complete (dated sections at the end) |
+| `F2-02-desktop-ui.md` | F2 (dashboard, wizard, console, dialogs, settings, accessibility) | partial: verified headless and with real QEMU (wizard → console); screen reader, DPI, multi-monitor, real keyboard not executed | complete |
+| `F2-03-packaging-guide-ci.md` | F2 (experimental installer, user guide, macOS portability probe) | partial: package verified on the development host; clean machine and macOS job not executed | complete |
 | `F1-05-desktop-egui.md` | F1 (backlog F1-13, F1-16, F1-18, F1-19) | partial: clipboard without text in the UI (headless) but read in egui-winit not blocking; rendering fallback verified; UI + supervisor measurements (wgpu above the memory target); RDP, cold start and manual test not executed | complete |
 
 ## Template

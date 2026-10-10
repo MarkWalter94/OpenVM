@@ -1,10 +1,13 @@
 //! VM settings panel (ADR-0017) driven headless with `egui_kittest`: no text
 //! field, save only with changes and the VM stopped, budget chosen from the
-//! menu.
+//! menu, attached media (F2) removed or replaced.
+
+mod common;
 
 use egui::accesskit::Role;
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT as _, Queryable as _};
+use lightvm_desktop::service::MediaState;
 use lightvm_desktop::vm_settings::{EditOutcome, VmEdit, vm_settings_ui};
 use lightvm_proto::{Firmware, GuestOs, NetworkProfile, VmConfig, VmId, VmLimits, VmName};
 
@@ -12,6 +15,7 @@ struct Fixture {
     m: VmEdit,
     stopped: bool,
     outcomes: Vec<EditOutcome>,
+    media: MediaState,
 }
 
 fn config() -> VmConfig {
@@ -31,10 +35,10 @@ fn config() -> VmConfig {
 
 fn harness_for(c: VmConfig, stopped: bool) -> Harness<'static, Fixture> {
     Harness::builder()
-        .with_size(egui::vec2(900.0, 600.0))
+        .with_size(egui::vec2(900.0, 900.0))
         .build_ui_state(
             |ui, p: &mut Fixture| {
-                if let Some(e) = vm_settings_ui(ui, &mut p.m, p.stopped, 16) {
+                if let Some(e) = vm_settings_ui(ui, &mut p.m, p.stopped, 16, &p.media) {
                     p.outcomes.push(e);
                 }
             },
@@ -42,6 +46,7 @@ fn harness_for(c: VmConfig, stopped: bool) -> Harness<'static, Fixture> {
                 m: VmEdit::new(VmId::new_v7(), 3, c),
                 stopped,
                 outcomes: Vec::new(),
+                media: common::connected(vec![]).media,
             },
         )
 }
@@ -80,7 +85,7 @@ fn save_only_with_changes_and_budget_from_menu() {
     let mut h = harness(true);
     h.run();
     assert!(!enabled(&h, "Save settings"));
-    assert_eq!(h.query_all_by_role(Role::ComboBox).count(), 2);
+    assert_eq!(h.query_all_by_role(Role::ComboBox).count(), 4);
     h.get_by_role_and_label(Role::ComboBox, "Storage budget")
         .click();
     h.run();
@@ -127,4 +132,41 @@ fn opening_the_panel_creates_no_changes() {
     h.run();
     assert_eq!(h.state().m.config, c);
     assert!(!enabled(&h, "Save settings"));
+}
+
+/// Installation media attached: "Remove" detaches it (the VM then boots from
+/// its disk), the menu picks another approved one; saved with the rest.
+#[test]
+fn media_removed_or_replaced() {
+    let mut c = config();
+    c.install_media = Some(common::media_id(1));
+    let mut h = harness_for(c, true);
+    h.run();
+    h.get_by_label("ubuntu-24.04.3-live-server-amd64.iso (3.0 GiB)");
+    assert!(enabled(&h, "Remove the installation media"));
+    assert!(!enabled(&h, "Remove the data media"));
+    h.get_by_role_and_label(Role::Button, "Remove the installation media")
+        .click();
+    h.run();
+    assert_eq!(h.state().m.config.install_media, None);
+    assert!(enabled(&h, "Save settings"));
+    h.get_by_role_and_label(Role::ComboBox, "Choose the data media")
+        .click();
+    h.run();
+    h.get_by_label("tools.iso (3.0 GiB)").click();
+    h.run();
+    assert_eq!(h.state().m.config.data_media, Some(common::media_id(2)));
+    h.get_by_role_and_label(Role::Button, "Save settings")
+        .click();
+    h.run();
+    assert_eq!(h.state().outcomes, [EditOutcome::Save]);
+}
+
+#[test]
+fn media_not_editable_while_running() {
+    let mut c = config();
+    c.install_media = Some(common::media_id(1));
+    let mut h = harness_for(c, false);
+    h.run();
+    assert!(!enabled(&h, "Remove the installation media"));
 }

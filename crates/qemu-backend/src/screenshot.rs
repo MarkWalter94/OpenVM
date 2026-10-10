@@ -83,7 +83,29 @@ impl RgbImage {
 
 /// Parses a binary PPM (P6, maxval 255) with maximum side `max_side`.
 pub fn parse_ppm(bytes: &[u8], max_side: u32) -> Result<RgbImage> {
-    let bad = |m: String| BackendError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, m));
+    let (w, h, pos) = parse_ppm_header(bytes, max_side)?;
+    let need = w as usize * h as usize * 3;
+    if bytes.len() != pos + need {
+        return Err(invalid_data(format!(
+            "PPM data of {} bytes, expected {need}",
+            bytes.len().saturating_sub(pos)
+        )));
+    }
+    Ok(RgbImage {
+        width: w,
+        height: h,
+        data: bytes[pos..].to_vec(),
+    })
+}
+
+fn invalid_data(m: String) -> BackendError {
+    BackendError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, m))
+}
+
+/// Header of a binary PPM (P6, maxval 255): width, height and offset of the
+/// pixel data. Sides above `max_side` give `resource_limit`.
+pub fn parse_ppm_header(bytes: &[u8], max_side: u32) -> Result<(u32, u32, usize)> {
+    let bad = invalid_data;
     let mut pos = 0usize;
     let mut fields: Vec<&str> = Vec::with_capacity(4);
     while fields.len() < 4 {
@@ -125,18 +147,7 @@ pub fn parse_ppm(bytes: &[u8], max_side: u32) -> Result<RgbImage> {
             "screen {w}x{h} exceeds the maximum side {max_side}"
         )));
     }
-    let need = w as usize * h as usize * 3;
-    if bytes.len() != pos + need {
-        return Err(bad(format!(
-            "PPM data of {} bytes, expected {need}",
-            bytes.len().saturating_sub(pos)
-        )));
-    }
-    Ok(RgbImage {
-        width: w,
-        height: h,
-        data: bytes[pos..].to_vec(),
-    })
+    Ok((w, h, pos))
 }
 
 /// Encodes an RGB PNG in memory (`Fast` compression).
@@ -220,9 +231,55 @@ pub(crate) async fn capture(
     ))
 }
 
+/// Current display geometry from a `screendump` of which only the PPM
+/// header is read (no decoding, no PNG): cheaper than [`capture`]. The file
+/// size must match the header. The temporary file is removed in every case.
+pub(crate) async fn capture_geometry(
+    qmp: &QmpClient,
+    private_dir: &ManagedPath,
+    timeout: Duration,
+) -> Result<DisplayGeometry> {
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let file = private_dir.join_file(&format!("screendump-{n}.ppm"))?;
+    let _ = std::fs::remove_file(file.as_path());
+    let guard = TempFile(&file);
+    qmp.screendump_ppm(&file, timeout).await?;
+    let path = file.as_path().to_owned();
+    let (w, h) = tokio::task::spawn_blocking(move || -> Result<(u32, u32)> {
+        let f = std::fs::File::open(&path)?;
+        let len = f.metadata()?.len();
+        let mut head = Vec::with_capacity(64);
+        f.take(64).read_to_end(&mut head)?;
+        let (w, h, pos) = parse_ppm_header(&head, MAX_SIDE)?;
+        let need = u64::from(w) * u64::from(h) * 3 + pos as u64;
+        if len != need {
+            return Err(invalid_data(format!(
+                "screendump of {len} bytes, expected {need}"
+            )));
+        }
+        Ok((w, h))
+    })
+    .await
+    .map_err(|e| BackendError::Io(std::io::Error::other(e.to_string())))??;
+    drop(guard);
+    Ok(DisplayGeometry::new(w, h)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ppm_header_only() {
+        let (w, h, pos) = parse_ppm_header(b"P6\n# c\n640 480\n255\n", MAX_SIDE).unwrap();
+        assert_eq!((w, h), (640, 480));
+        assert_eq!(pos, 19);
+        assert!(parse_ppm_header(b"P5\n1 1\n255\n", MAX_SIDE).is_err());
+        assert!(matches!(
+            parse_ppm_header(b"P6\n1 99999\n255\n", MAX_SIDE),
+            Err(BackendError::ResourceLimit(_))
+        ));
+    }
 
     #[test]
     fn valid_ppm_and_png() {

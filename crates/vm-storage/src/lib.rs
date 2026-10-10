@@ -45,6 +45,7 @@ mod paths;
 mod records;
 mod recover;
 mod time;
+mod vm_delete;
 
 pub use budget::{
     BUDGET_MANIFEST_FILE, BaselineUsage, BudgetCheck, BudgetConfig, BudgetManifest, Enforcement,
@@ -67,7 +68,9 @@ pub use manifest::{
     BaselineManifest, Divergence, MANIFEST_FORMAT_VERSION, ManifestFile, ManifestMedia, VmManifest,
     sha256_file,
 };
-pub use media::{MAX_DECLARED_ORIGIN, MediaCheck};
+pub use media::{
+    CopiedMedia, MAX_DECLARED_ORIGIN, MediaCheck, MediaImportJob, MediaLimits, NOT_OPTICAL_IMAGE,
+};
 pub use ops::PromoteBaseline;
 pub use paths::ManagedPath;
 pub use records::{
@@ -76,6 +79,7 @@ pub use records::{
 };
 pub use recover::{IntegrityIssue, IntentRecovery, RecoveryOutcome, RecoveryReport};
 pub use time::{UtcMillis, now_rfc3339};
+pub use vm_delete::VmDeletionReport;
 
 /// Lowercase hexadecimal.
 pub(crate) fn hex(bytes: &[u8]) -> String {

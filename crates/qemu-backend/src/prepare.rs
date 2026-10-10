@@ -253,6 +253,14 @@ fn current_user_sid() -> Result<String> {
 /// second account available).
 pub fn prepare_run_dirs(run_dir: &ManagedPath, private_dir: &ManagedPath) -> Result<RunDirs> {
     std::fs::create_dir_all(run_dir.as_path())?;
+    restrict_to_current_user(private_dir)
+}
+
+/// Creates `dir` if missing, removes inheritance and grants full control to
+/// the current user only (by SID), then checks that the ACL has exactly one
+/// entry (same procedure as [`prepare_run_dirs`], used also for the
+/// supervisor's per-run display sockets).
+pub fn restrict_to_current_user(private_dir: &ManagedPath) -> Result<RunDirs> {
     std::fs::create_dir_all(private_dir.as_path())?;
     if !cfg!(windows) {
         return Err(BackendError::Unsupported {

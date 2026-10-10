@@ -28,7 +28,7 @@ path = "src/bin/lightvm-ipc-probe.rs"
 # `qemu-backend` stays in the supervisor only (ADR-0024).
 [features]
 default = ["supervisor"]
-supervisor = ["dep:qemu-backend", "dep:vm-core", "dep:vm-storage"]
+supervisor = ["dep:qemu-backend", "dep:socket2", "dep:vm-core", "dep:vm-storage"]
 
 # Exact versions and lockfile (ROADMAP 6.3); no git dependencies.
 [dependencies]
@@ -38,6 +38,8 @@ lightvm-proto = { path = "../lightvm-proto" }
 qemu-backend = { path = "../qemu-backend", optional = true }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
+# AF_UNIX display proxy (ADR-0013), same crate and version as qemu-backend.
+socket2 = { version = "=0.6.5", features = ["all"], optional = true }
 tokio = { version = "=1.53.2", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 vm-core = { path = "../vm-core", optional = true }
 vm-storage = { path = "../vm-storage", optional = true }
@@ -57,6 +59,8 @@ rustix = { version = "=1.1.5", features = ["process"] }
 rustix = { version = "=1.1.5", features = ["event", "process"] }
 
 [dev-dependencies]
+# End-to-end console test through the display ticket (tests only).
+rfb-client = { path = "../rfb-client" }
 tokio = { version = "=1.53.2", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 
 [lints]
@@ -69,4 +73,8 @@ required-features = ["supervisor"]
 
 [[test]]
 name = "core_path"
+required-features = ["supervisor"]
+
+[[test]]
+name = "f2"
 required-features = ["supervisor"]

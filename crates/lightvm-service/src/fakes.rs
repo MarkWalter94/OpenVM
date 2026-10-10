@@ -5,18 +5,22 @@
 //! adapters ([`crate::adapters`]).
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 use lightvm_proto::ipc::StopReason;
 use lightvm_proto::{
-    AuditEvent, BackendObservation, Caller, DisplayGeometry, GuestOs, HostCapacity, InputEvent,
-    MediaEntry, MediaId, NetworkProfile, OperationId, OperationRecord, PublicError, RunEndReason,
-    RunId, RunRecord, Screenshot, UtcTimestamp, VmConfig, VmId, VmName, VmRecord, VmState,
+    AuditEvent, BackendObservation, Caller, DisplayGeometry, GuestOs, HostCapacity, ImageFormat,
+    InputEvent, Label, ManagedRelPath, MediaEntry, MediaId, MediaKind, MediaRecord, NetworkProfile,
+    OperationId, OperationRecord, PublicError, RunEndReason, RunId, RunRecord, Screenshot,
+    Sha256Digest, UtcTimestamp, VmConfig, VmId, VmName, VmRecord, VmState,
 };
 use vm_core::media::{ObservedMediaFacts, VerifiedMedia};
 use vm_core::ports::{AuditSink, CatalogStore, MediaInspector, VmBackend};
 
-use crate::engine::{BackendPort, CoreEngine, VmEngine, core_config};
+use crate::engine::{
+    BackendPort, CoreEngine, ImportCopied, ImportJob, MediaImportPort, VmEngine, core_config,
+};
 use crate::supervisor::{Backend, EmergencyOutcome, EmergencyStop, ParentLossPolicy};
 
 /// Log of the calls received by the fake implementations.
@@ -57,7 +61,7 @@ impl Gate {
     }
 }
 
-/// Fake host capacity: accelerator available, no capture or input.
+/// Fake host capacity: accelerator, capture and input available.
 pub fn host_capacity() -> HostCapacity {
     HostCapacity {
         logical_cpus: 8,
@@ -66,11 +70,17 @@ pub fn host_capacity() -> HostCapacity {
         free_storage_gib: 512,
         reserved_storage_gib: 16,
         accelerator_available: true,
-        screenshot_available: false,
-        input_available: false,
+        screenshot_available: true,
+        input_available: true,
         baseline_available: false,
     }
 }
+
+/// Geometry of the fake display.
+pub const FAKE_GEOMETRY: DisplayGeometry = DisplayGeometry {
+    width: 1280,
+    height: 800,
+};
 
 /// Test configuration valid for the MVP limits.
 pub fn sample_config(name: &str) -> VmConfig {
@@ -157,6 +167,73 @@ impl CatalogStore for MemoryStore {
         }
         Ok(())
     }
+    fn list_media(&self) -> Result<Vec<MediaRecord>, PublicError> {
+        Ok(self.0.media.values().map(|e| e.record.clone()).collect())
+    }
+    fn remove_vm(&mut self, id: VmId) -> Result<(), PublicError> {
+        self.0.vms.remove(&id);
+        self.0.runs.retain(|_, r| r.vm_id != id);
+        self.0.ops.retain(|_, o| o.vm_id != id);
+        Ok(())
+    }
+    fn vm_disk_usage(&self, id: VmId) -> Option<u64> {
+        self.0.vms.contains_key(&id).then_some(0)
+    }
+}
+
+/// Import without a managed copy: hash and size of the source computed on
+/// the worker thread, registry row in memory.
+impl MediaImportPort for MemoryStore {
+    fn begin_import(
+        &mut self,
+        source: &Path,
+        kind: MediaKind,
+        declared_origin: &Label,
+    ) -> Result<ImportJob, PublicError> {
+        let source = source.to_path_buf();
+        let origin = declared_origin.clone();
+        Ok(ImportJob::new(move || {
+            let r = fake_entry(&source, kind, origin);
+            ImportCopied(Box::new(r))
+        }))
+    }
+
+    fn finish_import(&mut self, copied: ImportCopied) -> Result<MediaEntry, PublicError> {
+        let r = copied
+            .0
+            .downcast::<Result<MediaEntry, PublicError>>()
+            .map_err(|_| PublicError::infrastructure("foreign import"))?;
+        let entry = (*r)?;
+        self.insert_media(&entry)?;
+        Ok(entry)
+    }
+}
+
+fn fake_entry(
+    source: &Path,
+    kind: MediaKind,
+    declared_origin: Label,
+) -> Result<MediaEntry, PublicError> {
+    let size = std::fs::metadata(source)
+        .map_err(|_| PublicError::not_found("media file not found"))?
+        .len();
+    let hex = qemu_backend::probe::sha256_file(source)
+        .map_err(|_| PublicError::infrastructure("hash"))?;
+    let id = MediaId::new_v7();
+    Ok(MediaEntry {
+        record: MediaRecord {
+            id,
+            kind,
+            sha256: Sha256Digest::parse_hex(&hex)
+                .map_err(|_| PublicError::infrastructure("hash"))?,
+            size_bytes: size,
+            declared_origin,
+            approved_at: UtcTimestamp::now(),
+        },
+        managed_path: ManagedRelPath::parse(format!("media/{id}.iso"))
+            .map_err(|_| PublicError::infrastructure("path"))?,
+        file_identity: None,
+    })
 }
 
 /// In-memory audit, shared with the test.
@@ -203,7 +280,19 @@ pub struct FakeVmBackend {
     pub gate: Option<Arc<Gate>>,
     /// Observations to deliver to the core (simulated exits).
     pub observations: Arc<Mutex<Vec<(VmId, BackendObservation)>>>,
+    /// Display socket returned for every run (a fake RFB server in tests).
+    pub display_socket: Option<PathBuf>,
+    /// Graceful stops in the background (like QEMU): `stop` returns at
+    /// once and the outcome is injected by the test in `stop_results`.
+    pub async_stop: bool,
+    /// Outcomes of the background stops, injected by the test.
+    pub stop_results: StopResults,
+    /// Background stops in progress (filled by the backend).
+    pub stopping: BTreeMap<VmId, RunId>,
 }
+
+/// Outcomes of background graceful stops injected by a test.
+pub type StopResults = Arc<Mutex<Vec<(VmId, Result<(), PublicError>)>>>;
 
 impl VmBackend for FakeVmBackend {
     fn start(
@@ -222,8 +311,9 @@ impl VmBackend for FakeVmBackend {
         push(&self.calls, "vm_shutdown");
         Ok(())
     }
-    fn force_stop(&mut self, _vm_id: VmId, _run_id: RunId) -> Result<(), PublicError> {
+    fn force_stop(&mut self, vm_id: VmId, _run_id: RunId) -> Result<(), PublicError> {
         push(&self.calls, "vm_force_stop");
+        self.stopping.remove(&vm_id);
         Ok(())
     }
     fn reset(&mut self, _vm_id: VmId, _run_id: RunId) -> Result<(), PublicError> {
@@ -232,24 +322,38 @@ impl VmBackend for FakeVmBackend {
     }
     fn screenshot(
         &mut self,
-        _vm_id: VmId,
-        _run_id: RunId,
+        vm_id: VmId,
+        run_id: RunId,
         _max_bytes: u64,
     ) -> Result<Screenshot, PublicError> {
-        Err(PublicError::unsupported(
-            "screenshot not available in the fake backend",
-        ))
+        push(&self.calls, "vm_screenshot");
+        Ok(Screenshot {
+            vm_id,
+            run_id,
+            geometry: FAKE_GEOMETRY,
+            format: ImageFormat::Png,
+            sha256: Sha256Digest::from_bytes([0; 32]),
+            byte_len: 0,
+            captured_at: UtcTimestamp::now(),
+        })
     }
     fn send_input(
         &mut self,
         _vm_id: VmId,
         _run_id: RunId,
-        _geometry: DisplayGeometry,
-        _events: &[InputEvent],
+        geometry: DisplayGeometry,
+        events: &[InputEvent],
     ) -> Result<(), PublicError> {
-        Err(PublicError::unsupported(
-            "input not available in the fake backend",
-        ))
+        push(
+            &self.calls,
+            format!(
+                "vm_input:{}x{}:{}",
+                geometry.width,
+                geometry.height,
+                events.len()
+            ),
+        );
+        Ok(())
     }
 }
 
@@ -259,6 +363,31 @@ impl BackendPort for FakeVmBackend {
             g.wait();
         }
         std::mem::take(&mut *lock(&self.observations))
+    }
+    fn display_socket(&self, _vm_id: VmId, _run_id: RunId) -> Option<PathBuf> {
+        self.display_socket.clone()
+    }
+    fn refresh_geometry(&mut self, _vm_id: VmId, _run_id: RunId) -> Option<DisplayGeometry> {
+        push(&self.calls, "vm_refresh_geometry");
+        Some(FAKE_GEOMETRY)
+    }
+    fn release_input(&mut self, _vm_id: VmId, _run_id: RunId) {
+        push(&self.calls, "vm_release_input");
+    }
+    fn begin_shutdown(&mut self, vm_id: VmId, run_id: RunId) -> Option<Result<(), PublicError>> {
+        if !self.async_stop {
+            return None;
+        }
+        push(&self.calls, "vm_shutdown_begin");
+        self.stopping.insert(vm_id, run_id);
+        Some(Ok(()))
+    }
+    fn finished_shutdowns(&mut self) -> Vec<(VmId, RunId, Result<(), PublicError>)> {
+        let injected = std::mem::take(&mut *lock(&self.stop_results));
+        injected
+            .into_iter()
+            .filter_map(|(vm, r)| self.stopping.remove(&vm).map(|run| (vm, run, r)))
+            .collect()
     }
 }
 

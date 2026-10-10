@@ -44,6 +44,12 @@ pub enum AuditAction {
     OperationDiscard,
     /// Change to a VM's configuration (resources and limits).
     VmConfigure,
+    /// Deletion of a stopped VM with its files.
+    VmDelete,
+    /// Import of a medium into the approved registry (user only).
+    MediaImport,
+    /// Issue of a per-run console display ticket (never the token).
+    ConsoleOpen,
 }
 
 /// Recorded outcome.

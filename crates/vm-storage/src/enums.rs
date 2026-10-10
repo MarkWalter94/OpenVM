@@ -300,6 +300,8 @@ str_enum!(
         Artifact => "artifact",
         /// Row of `media`.
         Media => "media",
+        /// Row of `vms` (deletion of a VM with its files, schema v5).
+        Vm => "vm",
         /// No row (export).
         None => "none",
     }

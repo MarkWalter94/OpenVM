@@ -3,8 +3,9 @@
 //! indicators, notices, buttons).
 //!
 //! Rules: a single accent colour; colour always accompanies text and is
-//! never the only carrier of meaning (ROADMAP F2, accessibility); no text
-//! fields.
+//! never the only carrier of meaning (ROADMAP F2, accessibility); a visible
+//! focus ring for keyboard navigation; no text fields except the VM name in
+//! the creation wizard.
 
 use egui::{
     Color32, CornerRadius, FontId, Margin, Response, RichText, Sense, Shadow, Stroke, TextStyle,
@@ -188,7 +189,9 @@ fn style(theme: Theme) -> egui::Style {
 
     w.active.bg_fill = p.control_active;
     w.active.weak_bg_fill = p.control_active;
-    w.active.bg_stroke = Stroke::new(1.0, p.accent);
+    // Also the keyboard focus style (egui uses `active` for focused
+    // widgets): a clearly visible accent ring.
+    w.active.bg_stroke = Stroke::new(2.0, p.accent);
     w.active.fg_stroke = Stroke::new(1.5, p.text);
     w.active.corner_radius = r;
     w.active.expansion = 0.0;
@@ -409,8 +412,9 @@ pub fn accessible_name(r: &Response, kind: WidgetType, name: &str) {
 }
 
 /// Side navigation item: full width, left-aligned text, accent bar on the
-/// selected item.
-pub fn nav_item(ui: &mut Ui, text: &str, selected: bool) -> Response {
+/// selected item; accent ring when it has the keyboard focus and keyboard
+/// navigation is in use (`focus_ring`).
+pub fn nav_item(ui: &mut Ui, text: &str, selected: bool, focus_ring: bool) -> Response {
     let p = Palette::of(ui);
     let (rect, resp) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 34.0), Sense::click());
@@ -425,6 +429,14 @@ pub fn nav_item(ui: &mut Ui, text: &str, selected: bool) -> Response {
         };
         let painter = ui.painter();
         painter.rect_filled(rect, CornerRadius::same(WIDGET_RADIUS), background);
+        if focus_ring && resp.has_focus() {
+            painter.rect_stroke(
+                rect,
+                CornerRadius::same(WIDGET_RADIUS),
+                Stroke::new(2.0, p.accent),
+                egui::StrokeKind::Inside,
+            );
+        }
         if selected {
             let bar = egui::Rect::from_center_size(
                 egui::pos2(rect.min.x + 1.5, rect.center().y),

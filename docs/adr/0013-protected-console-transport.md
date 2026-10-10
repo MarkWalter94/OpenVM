@@ -18,7 +18,7 @@ On Windows with the build from ADR-0010, in the roadmap's order of preference:
 
 The client uses `socket2` for AF_UNIX on Windows; session shutdown on a Unix socket with a single shared handle, blocking reads and a 1×1 update request to provoke a response from the server (measured stop 93–94 ms).
 
-**Per-run display credential (section 6.4): obligation not yet implemented.** In F0 the protection tested is the private directory's ACL and the rejection of a low-integrity process. With a Unix socket and the UI and supervisor running as the same user, the ACL does not distinguish the display credential from the QMP one: today the distinction comes from the fact that only the supervisor knows and occupies the QMP socket (ADR-0012). By F2 the supervisor must issue, for each run and VM, a display credential distinct from QMP and IPC, delivered to the UI and revoked with the session, with evidence. Candidates to test: a display directory separate from the QMP one with an integrity label that allows access to a UI running at reduced integrity; or VeNCrypt with a client certificate issued per run, after the shutdown problem is solved. If no candidate passes the test, this ADR reverts to Proposed.
+**Per-run display credential (section 6.4): implemented in F2 on Windows (`F2-01`).** The supervisor exposes a per-run display socket in a user-only directory and forwards to QEMU's `vnc.sock` only after the client presents a 32-byte ticket obtained over the authenticated IPC (`open_console`, UI role only); the ticket is distinct from QMP and from the IPC credential, valid for one run and revoked when the run ends, on Emergency Stop and when the UI connection is revoked. Second Windows user not tested (P-5). Original F0 text follows. **Obligation as written in F0:** In F0 the protection tested is the private directory's ACL and the rejection of a low-integrity process. With a Unix socket and the UI and supervisor running as the same user, the ACL does not distinguish the display credential from the QMP one: today the distinction comes from the fact that only the supervisor knows and occupies the QMP socket (ADR-0012). By F2 the supervisor must issue, for each run and VM, a display credential distinct from QMP and IPC, delivered to the UI and revoked with the session, with evidence. Candidates to test: a display directory separate from the QMP one with an integrity label that allows access to a UI running at reduced integrity; or VeNCrypt with a client certificate issued per run, after the shutdown problem is solved. If no candidate passes the test, this ADR reverts to Proposed.
 
 Criteria check:
 
@@ -44,7 +44,7 @@ Criteria check:
 
 - Console, transports, negative tests and measurements: `docs/verification/F0-04-console-rfb-input.md` Results §1, §5, §6, §7 (verified with the stated limitations).
 - VNC endpoint over a Unix socket and VeNCrypt with real QEMU: `docs/verification/F0-02-qemu-whpx-qmp.md` §6 (verified).
-- Per-run display credential and revocation: to be run by F2.
+- Per-run display credential and revocation: `docs/verification/F2-01-service-console-media.md` (verified on hardware, Windows).
 - Second user: pending P-5 in `docs/verification/F0-09-evidence-review.md`.
 
 ## References

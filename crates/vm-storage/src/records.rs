@@ -503,6 +503,16 @@ impl Tx<'_> {
             })
     }
 
+    /// Identifiers of every media of the registry, in approval order.
+    pub fn media_ids(&self) -> Result<Vec<MediaId>> {
+        let mut st = self
+            .inner
+            .prepare("SELECT media_id FROM media ORDER BY approved_at, media_id")
+            .db()?;
+        let rows = st.query_map([], |r| idc(r, 0)).db()?;
+        rows.collect::<rusqlite::Result<Vec<MediaId>>>().db()
+    }
+
     /// Attaches an approved media to a VM.
     pub fn attach_media(&self, vm: &VmId, slot: MediaSlot, media: &MediaId) -> Result<()> {
         let m = self.media(media)?;
@@ -851,6 +861,16 @@ impl Tx<'_> {
                 kind: "run",
                 id: id.to_string(),
             })
+    }
+
+    /// All runs of a VM, finished or not, in identifier order.
+    pub fn run_ids_of_vm(&self, vm: &VmId) -> Result<Vec<RunId>> {
+        let mut st = self
+            .inner
+            .prepare("SELECT run_id FROM runs WHERE vm_id = ?1 ORDER BY run_id")
+            .db()?;
+        let rows = st.query_map(params![vm.sql()], |r| idc(r, 0)).db()?;
+        rows.collect::<rusqlite::Result<Vec<RunId>>>().db()
     }
 
     /// Unfinished runs of a VM (`ended_at` absent).

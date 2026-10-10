@@ -16,15 +16,21 @@
 //! - the primary disk (`vms/<vm_id>/primary.qcow2`) is created or grown here
 //!   with `qemu-img` on first start, without going through the catalog
 //!   journal (F3);
-//! - the run directories and the private socket directory are created here
-//!   with the inherited ACL (the explicit user-only ACL is F1-06/F1-09); the
-//!   private directory is removed when the run is released, the run directory
-//!   (`runs/<run_id>/`, QEMU log and UEFI variables) stays for diagnostics and
-//!   does not count towards the VM storage budget;
-//! - the per-run copy of the UEFI variables is made here from the firmware
-//!   template of the QEMU distribution (the storage does not produce it yet);
-//! - screenshot and input are not connected (the host capabilities declare
-//!   them absent, so the core does not forward them).
+//! - the run directory is created here; the private socket directory (QMP,
+//!   VNC, screendumps) gets the explicit user-only ACL
+//!   (`qemu_backend::prepare::prepare_run_dirs`, F2); the private directory
+//!   is removed when the run is released, the run directory (`runs/<run_id>/`,
+//!   QEMU log) stays for diagnostics until the VM is deleted and does not
+//!   count towards the VM storage budget (it counts in `disk_used_bytes`);
+//! - the UEFI variables are per VM (`vms/<vm_id>/firmware/primary.vars.fd`),
+//!   copied from the firmware template of the QEMU distribution on the first
+//!   start and reused afterwards ([`ensure_vm_vars`], F2);
+//! - the graceful stop runs in the background on the backend runtime
+//!   ([`BackendPort::begin_shutdown`]): the supervisor thread is free during
+//!   the ACPI wait and a forced stop can overtake it (F2);
+//! - screenshot (`screendump`, metadata only over IPC), input
+//!   (`input-send-event`), reset and the display socket of the run (for the
+//!   console proxy, `crate::display`) are connected (F2).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -93,7 +99,12 @@ pub struct QemuSetup {
     /// Root of the private directories for the QMP/VNC sockets: it must be short
     /// (107-byte limit of a Unix socket path).
     pub private_root: PathBuf,
-    /// Nominal CPU model (F0: `qemu64`; F1-17 evaluates richer models).
+    /// Named CPU model. Default `Skylake-Client-v4`: with `qemu64` the
+    /// reference guest (Ubuntu 26.04) does not reach the desktop (deviation
+    /// D-1); `Skylake-Client-v4` is the model verified for live boot,
+    /// installation and boot from disk (F1-17, F2-01). `-cpu host` stays
+    /// refused (ADR-0011). Hosts whose CPU lacks the model's features are not
+    /// verified (single reference host).
     pub cpu_model: String,
     /// Ordinary stop policy (`system_powerdown` → `quit` → kill).
     pub stop_policy: ShutdownPolicy,
@@ -117,7 +128,7 @@ impl QemuSetup {
             qemu_dir,
             catalog_root,
             private_root,
-            cpu_model: "qemu64".into(),
+            cpu_model: "Skylake-Client-v4".into(),
             stop_policy: ShutdownPolicy::default(),
             emergency_timeout: Duration::from_secs(10),
             run_config: RunConfig::default(),
@@ -207,9 +218,9 @@ fn host_capacity(caps: &HostCapabilities, free_storage_gib: u64) -> HostCapacity
         accelerator_available: caps.accelerator.is_available()
             && caps.firmware.is_some()
             && caps.recommended_machine().is_some(),
-        // Not connected to the service in F1 (see the module header).
-        screenshot_available: false,
-        input_available: false,
+        // `screendump` and `input-send-event` through QMP (F2).
+        screenshot_available: true,
+        input_available: true,
         baseline_available: false,
     }
 }
@@ -282,6 +293,7 @@ pub fn probe(setup: QemuSetup) -> Result<(QemuHost, QemuVmBackend, HostCapacity)
         cpu,
         setup,
         runs: BTreeMap::new(),
+        stops: BTreeMap::new(),
         private_dirs: BTreeMap::new(),
         registry,
         stop_override,
@@ -352,6 +364,12 @@ fn managed_abs(root: &Path, rel: &str) -> PathBuf {
     rel.split('/').fold(root.to_path_buf(), |p, c| p.join(c))
 }
 
+/// Graceful stop of a run in progress on the backend runtime.
+type StopTask = (
+    RunId,
+    tokio::task::JoinHandle<qemu_backend::error::Result<qemu_backend::ExitReport>>,
+);
+
 /// VM backend over `qemu-backend`.
 pub struct QemuVmBackend {
     rt: tokio::runtime::Runtime,
@@ -359,7 +377,10 @@ pub struct QemuVmBackend {
     machine: MachineType,
     cpu: CpuModel,
     setup: QemuSetup,
-    runs: BTreeMap<VmId, QemuRun>,
+    runs: BTreeMap<VmId, Arc<QemuRun>>,
+    /// Graceful stops running in the background (escalation of
+    /// `QemuRun::shutdown`), per VM.
+    stops: BTreeMap<VmId, StopTask>,
     /// Private (socket) directory of each run, removed on release.
     private_dirs: BTreeMap<VmId, PathBuf>,
     registry: Registry,
@@ -377,7 +398,7 @@ impl std::fmt::Debug for QemuVmBackend {
 }
 
 impl QemuVmBackend {
-    fn run(&self, vm_id: VmId, run_id: RunId) -> Result<&QemuRun, PublicError> {
+    fn run(&self, vm_id: VmId, run_id: RunId) -> Result<&Arc<QemuRun>, PublicError> {
         match self.runs.get(&vm_id) {
             Some(r) if r.run_id() == run_id => Ok(r),
             Some(_) => Err(PublicError::state_conflict(
@@ -391,7 +412,16 @@ impl QemuVmBackend {
     /// private directory.
     fn release(&mut self, vm_id: VmId) {
         lock(&self.registry).remove(&vm_id);
+        // A graceful stop still running ends as soon as it sees the exit
+        // (the process is gone when a run is released).
+        if let Some((_, task)) = self.stops.remove(&vm_id) {
+            let _ = self.rt.block_on(task);
+        }
         if let Some(run) = self.runs.remove(&vm_id) {
+            let Ok(run) = Arc::try_unwrap(run) else {
+                crate::diag!("lightvm-service: run still referenced, not closed");
+                return;
+            };
             match self.rt.block_on(run.close()) {
                 Ok(r) if r.active_at_close > 0 => crate::diag!(
                     "lightvm-service: {} processes still active when closing the run",
@@ -474,7 +504,6 @@ impl QemuVmBackend {
         })?;
         let run_text = run_id.to_string();
         let run_dir = self.setup.catalog_root.join("runs").join(&run_text);
-        std::fs::create_dir_all(&run_dir).map_err(|e| io_public("run directory", &e))?;
         // Last 12 hexadecimal characters (random part of the UUID v7): short path.
         let short: String = run_text
             .chars()
@@ -483,9 +512,27 @@ impl QemuVmBackend {
             .take(12)
             .collect();
         let private_dir = self.setup.private_root.join(short);
-        std::fs::create_dir_all(&private_dir).map_err(|e| io_public("private directory", &e))?;
-        let vars = run_dir.join("vars.fd");
-        std::fs::copy(&fw.vars_template, &vars).map_err(|e| io_public("UEFI variables", &e))?;
+        let run_dir_m = ManagedPath::verify(run_dir.clone()).map_err(|e| public(&e))?;
+        let private_m = ManagedPath::verify(private_dir.clone()).map_err(|e| public(&e))?;
+        if cfg!(windows) {
+            // Run directory plus private directory with the user-only ACL.
+            prepare::prepare_run_dirs(&run_dir_m, &private_m).map_err(|e| public(&e))?;
+        } else {
+            std::fs::create_dir_all(&run_dir).map_err(|e| io_public("run directory", &e))?;
+            std::fs::create_dir_all(&private_dir)
+                .map_err(|e| io_public("private directory", &e))?;
+        }
+        // Firmware state of the VM: created from the template on the first
+        // start, then reused (boot entries written by an installer persist).
+        let vars = managed_abs(
+            &self.setup.catalog_root,
+            CatalogLayout::primary_vars(&vm.id).as_str(),
+        );
+        if ensure_vm_vars(&fw.vars_template, &vars)
+            .map_err(|e| io_public("UEFI variables of the VM", &e))?
+        {
+            crate::diag!("lightvm-service: UEFI variables of the VM created from the template");
+        }
         let mut media_paths = BTreeMap::new();
         for m in media {
             let p = managed_abs(&self.setup.catalog_root, m.entry().managed_path.as_str());
@@ -569,7 +616,7 @@ impl VmBackend for QemuVmBackend {
             }
         };
         lock(&self.registry).insert(vm.id, run.emergency_stop_handle());
-        self.runs.insert(vm.id, run);
+        self.runs.insert(vm.id, Arc::new(run));
         self.private_dirs.insert(vm.id, private_dir);
         Ok(())
     }
@@ -619,28 +666,82 @@ impl VmBackend for QemuVmBackend {
         self.rt.block_on(run.reset()).map_err(|e| public(&e))
     }
 
+    /// `screendump` in the private directory; only the metadata (geometry,
+    /// hash, size) leaves the backend: the image is not delivered over IPC
+    /// (the console uses RFB).
     fn screenshot(
         &mut self,
-        _vm_id: VmId,
-        _run_id: RunId,
-        _max_bytes: u64,
+        vm_id: VmId,
+        run_id: RunId,
+        max_bytes: u64,
     ) -> Result<Screenshot, PublicError> {
-        Err(PublicError::unsupported(
-            "screenshot not yet connected to the service",
-        ))
+        let run = self.run(vm_id, run_id)?;
+        self.rt
+            .block_on(run.screenshot_limited(max_bytes))
+            .map(|c| c.metadata(vm_id))
+            .map_err(|e| public(&e))
     }
 
+    /// `input-send-event`. A batch without pointer movements does not depend
+    /// on the geometry: it is sent with the run's current one, so a keyboard
+    /// batch is never refused for a resolution change.
     fn send_input(
         &mut self,
-        _vm_id: VmId,
-        _run_id: RunId,
-        _geometry: DisplayGeometry,
-        _events: &[InputEvent],
+        vm_id: VmId,
+        run_id: RunId,
+        geometry: DisplayGeometry,
+        events: &[InputEvent],
     ) -> Result<(), PublicError> {
-        Err(PublicError::unsupported(
-            "input not yet connected to the service",
-        ))
+        let run = self.run(vm_id, run_id)?;
+        let pointer = events
+            .iter()
+            .any(|e| matches!(e, InputEvent::PointerMove(_)));
+        let g = if pointer {
+            geometry
+        } else {
+            run.current_geometry().unwrap_or(geometry)
+        };
+        self.rt
+            .block_on(run.send_input(run_id, g, events))
+            .map_err(|e| public(&e))
     }
+}
+
+/// Persistent UEFI variables of a VM (`vms/<vm_id>/firmware/primary.vars.fd`,
+/// `vm-storage` layout): if missing, copied from the firmware template into
+/// a temporary file next to it, synced and published with a hard link that
+/// never replaces an existing file; if present (regular file, not a link) it
+/// is reused as is. Returns `true` if it was created. Like the primary disk
+/// it is made by the backend, not through the catalog journal (F3); it is
+/// protected during the run by the storage guard (`firmware_vars` is in the
+/// no-delete set of `QemuRun::start`), counted in `disk_used_bytes` and
+/// deleted with the VM (`vms/<vm_id>/`).
+pub fn ensure_vm_vars(template: &Path, dest: &Path) -> std::io::Result<bool> {
+    match std::fs::symlink_metadata(dest) {
+        Ok(m) if m.is_file() && !crate::adapters::catalog::is_link(&m) => return Ok(false),
+        Ok(_) => {
+            return Err(std::io::Error::other(
+                "UEFI variables of the VM: not a regular file",
+            ));
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    if let Some(dir) = dest.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = dest.with_extension("fd.part");
+    let _ = std::fs::remove_file(&tmp);
+    let result = (|| {
+        std::fs::copy(template, &tmp)?;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&tmp)?
+            .sync_all()?;
+        std::fs::hard_link(&tmp, dest)
+    })();
+    let _ = std::fs::remove_file(&tmp);
+    result.map(|()| true)
 }
 
 /// Removes the private directory of a run (sockets already closed).
@@ -656,10 +757,94 @@ fn remove_private_dir(dir: &Path) {
 }
 
 impl BackendPort for QemuVmBackend {
+    fn display_socket(&self, vm_id: VmId, run_id: RunId) -> Option<PathBuf> {
+        self.run(vm_id, run_id)
+            .ok()
+            .and_then(|r| r.display_socket())
+            .map(Path::to_path_buf)
+    }
+
+    /// `system_powerdown` and escalation (`quit`, termination) on the
+    /// backend runtime: the supervisor thread is not held for the ACPI wait.
+    fn begin_shutdown(&mut self, vm_id: VmId, run_id: RunId) -> Option<Result<(), PublicError>> {
+        let run = match self.run(vm_id, run_id) {
+            Ok(r) => r.clone(),
+            Err(e) => return Some(Err(e)),
+        };
+        if self.stops.contains_key(&vm_id) {
+            return Some(Err(PublicError::state_conflict("stop already in progress")));
+        }
+        let policy = lock(&self.stop_override).unwrap_or(self.setup.stop_policy);
+        let task = self.rt.spawn(async move { run.shutdown(policy).await });
+        self.stops.insert(vm_id, (run_id, task));
+        Some(Ok(()))
+    }
+
+    fn finished_shutdowns(&mut self) -> Vec<(VmId, RunId, Result<(), PublicError>)> {
+        let done: Vec<VmId> = self
+            .stops
+            .iter()
+            .filter(|(_, (_, t))| t.is_finished())
+            .map(|(vm, _)| *vm)
+            .collect();
+        let mut out = Vec::new();
+        for vm_id in done {
+            let Some((run_id, task)) = self.stops.remove(&vm_id) else {
+                continue;
+            };
+            let r = match self.rt.block_on(task) {
+                Ok(Ok(report)) => {
+                    crate::diag!(
+                        "lightvm-service: graceful stop: phase {:?}, cause {:?}, {:?}",
+                        report.phase,
+                        report.cause,
+                        report.elapsed
+                    );
+                    Ok(())
+                }
+                // The process exited even though the escalation ran out of
+                // time: the stop is complete anyway.
+                Ok(Err(_)) if self.exited(vm_id) => Ok(()),
+                Ok(Err(e)) => Err(public(&e)),
+                Err(e) => Err(io_public(
+                    "stop task",
+                    &std::io::Error::other(e.to_string()),
+                )),
+            };
+            if r.is_ok() {
+                self.release(vm_id);
+            }
+            out.push((vm_id, run_id, r));
+        }
+        out
+    }
+
+    fn refresh_geometry(&mut self, vm_id: VmId, run_id: RunId) -> Option<DisplayGeometry> {
+        let run = self.run(vm_id, run_id).ok()?;
+        match self.rt.block_on(run.refresh_geometry()) {
+            Ok(g) => Some(g),
+            Err(e) => {
+                crate::diag!("lightvm-service: display geometry not read: {e}");
+                None
+            }
+        }
+    }
+
+    fn release_input(&mut self, vm_id: VmId, run_id: RunId) {
+        if let Ok(run) = self.run(vm_id, run_id)
+            && let Err(e) = self.rt.block_on(run.release_all_input(run_id))
+        {
+            crate::diag!("lightvm-service: input release: {e}");
+        }
+    }
+
     fn drain_observations(&mut self) -> Vec<(VmId, BackendObservation)> {
         let exited: Vec<VmId> = self
             .runs
             .iter()
+            // A run with a graceful stop in progress is reported by
+            // `finished_shutdowns`.
+            .filter(|(vm, _)| !self.stops.contains_key(vm))
             .filter(|(_, r)| match r.state() {
                 // Exits from an Emergency Stop are confirmed by the core with
                 // `force_stop` after the priority path.
@@ -909,6 +1094,38 @@ mod tests {
         c.vcpus = 64;
         c.limits.cpu_max_percent = 99;
         assert_eq!(job_limits(&c, 4).cpu_rate, Some(10_000));
+    }
+
+    #[test]
+    fn vm_vars_are_created_once_and_then_reused() {
+        let d = std::env::temp_dir().join(format!(
+            "lightvm-vm-vars-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        let template = d.join("template.fd");
+        std::fs::write(&template, b"template").unwrap();
+        let vars = d
+            .join("vms")
+            .join("x")
+            .join("firmware")
+            .join("primary.vars.fd");
+        assert!(ensure_vm_vars(&template, &vars).unwrap());
+        assert_eq!(std::fs::read(&vars).unwrap(), b"template");
+        // The guest writes boot entries during the run.
+        std::fs::write(&vars, b"written by the guest").unwrap();
+        // Next start: reused, never overwritten by the template.
+        assert!(!ensure_vm_vars(&template, &vars).unwrap());
+        assert_eq!(std::fs::read(&vars).unwrap(), b"written by the guest");
+        assert!(!vars.with_extension("fd.part").exists());
+        // A directory in its place is refused.
+        let bad = d.join("bad.fd");
+        std::fs::create_dir_all(&bad).unwrap();
+        assert!(ensure_vm_vars(&template, &bad).is_err());
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

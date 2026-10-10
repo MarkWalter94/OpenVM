@@ -48,7 +48,7 @@ pub const IDEMPOTENCY_WINDOW: usize = 1024;
 /// | `start` | `stopped` |
 /// | `stop` | `running` |
 /// | `force_stop` | `starting`, `running`, `stopping` |
-/// | `reset`, `screenshot`, `input` | `running` |
+/// | `reset`, `screenshot`, `input` | `running` (input also `stopping` for the user: [`input_allowed_for`]) |
 /// | `create`, `snapshot`, `restore` | `stopped` |
 /// | `emergency_stop` | any (priority path) |
 #[must_use]
@@ -65,6 +65,17 @@ pub fn action_allowed_in(kind: OperationKind, state: VmState) -> bool {
         OperationKind::ForceStop => state.has_process(),
         OperationKind::EmergencyStop => true,
     }
+}
+
+/// `true` if `caller` may send input in `state`. Base rule
+/// [`action_allowed_in`] (`running`), plus `stopping` for the **user** only:
+/// after a graceful stop request the guest may show a power-off
+/// confirmation that the user answers from the console (F2). Agent
+/// sessions (F4) keep the base rule. Run and geometry checks are unchanged.
+#[must_use]
+pub fn input_allowed_for(caller: &Caller, state: VmState) -> bool {
+    action_allowed_in(OperationKind::Input, state)
+        || (state == VmState::Stopping && matches!(caller, Caller::User))
 }
 
 /// Core configuration.
@@ -524,6 +535,174 @@ where
         Ok(record)
     }
 
+    /// Approved media of the registry (user only: agents see media IDs only
+    /// through the VM configuration).
+    pub fn list_media(&self, caller: &Caller) -> Result<Vec<MediaRecord>, PublicError> {
+        if matches!(caller, Caller::Agent { .. }) {
+            return Err(PublicError::permission_denied(
+                "media registry not available to agent sessions",
+            ));
+        }
+        self.store.list_media()
+    }
+
+    /// Imports a medium chosen by the user with the native picker of the UI
+    /// (ADR-0008): the catalog makes the read-only managed copy and the
+    /// registry row. User only; audited (`media_import`) without the path.
+    /// Blocking: the copy of a multi-GiB ISO takes as long as the disk (the
+    /// supervisor can split it with [`Self::begin_media_import`] and
+    /// [`Self::finish_media_import`] and copy on another thread).
+    pub fn import_media(
+        &mut self,
+        caller: &Caller,
+        source: &std::path::Path,
+        kind: MediaKind,
+        declared_origin: Label,
+    ) -> Result<MediaRecord, PublicError> {
+        self.begin_media_import(caller, |_| Ok(()))?;
+        self.finish_media_import(caller, |store| {
+            store.import_media(source, kind, &declared_origin)
+        })
+    }
+
+    /// First step of a media import: denies (and audits) agent sessions,
+    /// then runs `begin` on the catalog (checks, journal intent); an error of
+    /// `begin` is audited as a failed import.
+    pub fn begin_media_import<T>(
+        &mut self,
+        caller: &Caller,
+        begin: impl FnOnce(&mut S) -> Result<T, PublicError>,
+    ) -> Result<T, PublicError> {
+        let actor = caller.actor();
+        if matches!(caller, Caller::Agent { .. }) {
+            let err =
+                PublicError::permission_denied("media import not available to agent sessions");
+            return Err(self.deny(actor, AuditAction::MediaImport, Ev::default(), err));
+        }
+        begin(&mut self.store).inspect_err(|err| {
+            let ev = Ev {
+                error: Some(err.code),
+                ..Ev::default()
+            };
+            self.emit_after(actor, AuditAction::MediaImport, AuditOutcome::Failed, ev);
+        })
+    }
+
+    /// Last step of a media import: `finish` publishes the copy and the
+    /// registry row; the outcome is audited.
+    pub fn finish_media_import(
+        &mut self,
+        caller: &Caller,
+        finish: impl FnOnce(&mut S) -> Result<MediaEntry, PublicError>,
+    ) -> Result<MediaRecord, PublicError> {
+        let actor = caller.actor();
+        match finish(&mut self.store) {
+            Ok(entry) => {
+                self.emit_after(
+                    actor,
+                    AuditAction::MediaImport,
+                    AuditOutcome::Succeeded,
+                    Ev::default(),
+                );
+                Ok(entry.record)
+            }
+            Err(err) => {
+                let ev = Ev {
+                    error: Some(err.code),
+                    ..Ev::default()
+                };
+                self.emit_after(actor, AuditAction::MediaImport, AuditOutcome::Failed, ev);
+                Err(err)
+            }
+        }
+    }
+
+    /// Deletes a VM: user only, VM `stopped` with no queued or forwarded
+    /// operation, expected revision. The catalog removes rows and files
+    /// through its journal; the VM leaves the core only if that succeeds.
+    /// Audited (`vm_delete`).
+    pub fn delete_vm(
+        &mut self,
+        caller: &Caller,
+        vm_id: VmId,
+        expected_revision: u64,
+    ) -> Result<(), PublicError> {
+        let actor = caller.actor();
+        let ev = || Ev {
+            vm_id: Some(vm_id),
+            ..Ev::default()
+        };
+        if matches!(caller, Caller::Agent { .. }) {
+            let err = PublicError::permission_denied("VM deletion not available to agent sessions");
+            return Err(self.deny(actor, AuditAction::VmDelete, ev(), err));
+        }
+        let check = match self.vms.get(&vm_id) {
+            None => Err(PublicError::not_found("VM does not exist")),
+            Some(rt) if rt.state != VmState::Stopped => Err(PublicError::state_conflict(
+                "only a stopped VM can be deleted",
+            )
+            .with_detail("state", rt.state.as_str())),
+            Some(rt) if !rt.queue.is_empty() || !rt.in_flight.is_empty() => {
+                Err(PublicError::vm_busy("operations in progress on the VM"))
+            }
+            Some(rt) if rt.record.config_revision != expected_revision => Err(
+                PublicError::state_conflict("configuration modified in the meantime")
+                    .with_detail("revision", rt.record.config_revision.to_string()),
+            ),
+            Some(_) => Ok(()),
+        };
+        if let Err(err) = check {
+            return Err(self.deny(actor, AuditAction::VmDelete, ev(), err));
+        }
+        if let Err(err) = self.store.remove_vm(vm_id) {
+            let e = Ev {
+                error: Some(err.code),
+                ..ev()
+            };
+            self.emit_after(actor, AuditAction::VmDelete, AuditOutcome::Failed, e);
+            return Err(err);
+        }
+        self.vms.remove(&vm_id);
+        self.vm_policies.remove(&vm_id);
+        self.emit_after(actor, AuditAction::VmDelete, AuditOutcome::Succeeded, ev());
+        Ok(())
+    }
+
+    /// Records the issue of a console display ticket for the current run of a
+    /// running VM (audit `console_open`, never the token). User only.
+    pub fn open_console(&mut self, caller: &Caller, vm_id: VmId) -> Result<VmStatus, PublicError> {
+        let actor = caller.actor();
+        let ev = |run_id| Ev {
+            vm_id: Some(vm_id),
+            run_id,
+            ..Ev::default()
+        };
+        if matches!(caller, Caller::Agent { .. }) {
+            let err = PublicError::permission_denied("console not available to agent sessions");
+            return Err(self.deny(actor, AuditAction::ConsoleOpen, ev(None), err));
+        }
+        let status = match self.vms.get(&vm_id) {
+            None => Err(PublicError::not_found("VM does not exist")),
+            Some(rt) if rt.state != VmState::Running || rt.run_id.is_none() => Err(
+                PublicError::state_conflict("the console requires a running VM")
+                    .with_detail("state", rt.state.as_str()),
+            ),
+            Some(rt) => Ok(Self::status_of(rt)),
+        };
+        match status {
+            Ok(s) => {
+                self.emit_after(
+                    actor,
+                    AuditAction::ConsoleOpen,
+                    AuditOutcome::Succeeded,
+                    ev(s.run_id),
+                );
+                Ok(s)
+            }
+            Err(err) => Err(self.deny(actor, AuditAction::ConsoleOpen, ev(None), err)),
+        }
+    }
+
     fn check_config_media(&self, config: &VmConfig) -> Result<(), PublicError> {
         for (id, kind) in [
             (config.install_media, MediaKind::InstallIso),
@@ -932,8 +1111,13 @@ where
             }
         }
 
-        // State.
-        if !action_allowed_in(kind, rt.state) {
+        // State (input: see `input_allowed_for`).
+        let allowed = if kind == OperationKind::Input {
+            input_allowed_for(caller, rt.state)
+        } else {
+            action_allowed_in(kind, rt.state)
+        };
+        if !allowed {
             return Err(
                 PublicError::state_conflict("action not allowed in the current state")
                     .with_detail("state", rt.state.as_str()),
@@ -945,7 +1129,11 @@ where
             if rt.force_stop_pending() {
                 return Err(PublicError::vm_busy("forced stop already in progress"));
             }
-        } else if rt.lifecycle_pending() {
+        } else if rt.lifecycle_pending()
+            // The stop forwarded while `stopping` does not block the user's
+            // input (state already checked above).
+            && !(kind == OperationKind::Input && rt.state == VmState::Stopping)
+        {
             return Err(PublicError::vm_busy(
                 "another mutation is in progress on the VM",
             ));
@@ -1094,7 +1282,14 @@ where
                 .queue
                 .front()
                 .is_some_and(|p| p.record.kind == OperationKind::ForceStop);
-            if !rt.in_flight.is_empty() && !front_is_force {
+            // User input while a graceful stop is forwarded (the guest's
+            // power-off confirmation): forwarded alongside the stop.
+            let front_is_input_while_stopping = rt.state == VmState::Stopping
+                && rt
+                    .queue
+                    .front()
+                    .is_some_and(|p| p.record.kind == OperationKind::Input);
+            if !rt.in_flight.is_empty() && !front_is_force && !front_is_input_while_stopping {
                 return Ok(None);
             }
             let Some(p) = rt.queue.pop_front() else {
@@ -1118,7 +1313,12 @@ where
                 self.discard(vm_id, p, ErrorCode::StateConflict);
                 continue;
             }
-            if !action_allowed_in(kind, state) {
+            let allowed = if kind == OperationKind::Input {
+                input_allowed_for(&p.caller, state)
+            } else {
+                action_allowed_in(kind, state)
+            };
+            if !allowed {
                 self.discard(vm_id, p, ErrorCode::StateConflict);
                 continue;
             }
@@ -1356,6 +1556,20 @@ where
         let Some(d) = self.begin_dispatch(vm_id)? else {
             return Ok(None);
         };
+        self.execute_dispatch(d, backend, inspector).map(Some)
+    }
+
+    /// Synchronous helper: forwards an operation obtained from
+    /// [`Self::begin_dispatch`] to the backend and records its outcome with
+    /// [`Self::finish_dispatch`]. For `start` it inspects and verifies the
+    /// media before use.
+    pub fn execute_dispatch<B: VmBackend, M: MediaInspector>(
+        &mut self,
+        d: Dispatch,
+        backend: &mut B,
+        inspector: &mut M,
+    ) -> Result<OperationRecord, PublicError> {
+        let vm_id = d.vm_id;
         let result = match &d.action {
             VmAction::Start => {
                 let now = self.clock.now();
@@ -1399,7 +1613,6 @@ where
                 .map(|()| DispatchOutcome::Done),
         };
         self.finish_dispatch(vm_id, d.operation_id, result)
-            .map(Some)
     }
 
     // ----- observations and reconciliation --------------------------------

@@ -1,144 +1,225 @@
-//! F0-04 integration test against a real QEMU (ignored by default).
+//! F2 end-to-end test against a real supervisor and a real QEMU (ignored by
+//! default): the product path of the UI, driven headless with
+//! `egui_kittest`. ISO import through the (fake) file picker, VM created in
+//! the wizard, start from the Dashboard, console opened with the per-run
+//! display ticket, framebuffer received, keyboard sent as `Input` batches,
+//! screenshot saved, orderly stop and deletion.
 //!
-//! Drives the UI headless with `egui_kittest`: egui keyboard events with
-//! `physical_key` → `keymap` table → QMP `input-send-event` → guest; then the
-//! "Screenshot" button → QMP `screendump`. It goes through neither winit nor
-//! the operating system (the scancode → `egui::Key` layer remains untested
-//! here).
-//!
-//! Run (QEMU started with `lab/scripts/f0-04-boot.ps1`, guest terminal in the
-//! foreground):
+//! It goes through neither winit nor the operating system (the scancode →
+//! `egui::Key` layer remains untested here).
 //!
 //! ```text
-//! LIGHTVM_F004_DIR=E:/OpenVM/lab/vms/f0-04 cargo test -p lightvm-desktop --test real_console -- --ignored --nocapture
+//! LIGHTVM_QEMU_DIR=C:/Woarkareas/OpenVM/lab/qemu/qemu-11.1.0 \
+//! LIGHTVM_ISO=C:/Woarkareas/OpenVM/lab/media/<ubuntu>.iso \
+//! cargo test -p lightvm-desktop --test real_console -- --ignored --nocapture
 //! ```
+//!
+//! The `lightvm-service` executable is looked up as in `service_child.rs`.
+//! The catalog (with the managed copy of the ISO) is created in the temporary
+//! directory and removed at the end unless `LIGHTVM_E2E_KEEP` is set.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use egui::accesskit::Role;
 use egui_kittest::Harness;
-use egui_kittest::kittest::Queryable as _;
-use lightvm_desktop::console::ConsoleConfig;
-use lightvm_desktop::keymap::KeyboardLayout;
+use egui_kittest::kittest::{NodeT as _, Queryable as _};
+use lightvm_desktop::service::{Service, ServiceConfig};
 use lightvm_desktop::{LightVmApp, Section};
-use rfb_client::{Transport, UnixImpl};
+use lightvm_proto::VmState;
+use lightvm_proto::ipc::ParentLossPolicy;
 
-fn key(h: &Harness<'_, LightVmApp>, k: egui::Key, pressed: bool) {
-    h.event(egui::Event::Key {
-        key: k,
-        physical_key: Some(k),
-        pressed,
-        repeat: false,
-        modifiers: egui::Modifiers::NONE,
-    });
+fn service_executable() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("LIGHTVM_SERVICE_EXE") {
+        return Some(PathBuf::from(p));
+    }
+    let exe = std::env::current_exe().ok()?;
+    let p = exe
+        .parent()?
+        .parent()?
+        .join(format!("lightvm-service{}", std::env::consts::EXE_SUFFIX));
+    p.exists().then_some(p)
 }
 
-fn wait(h: &mut Harness<'_, LightVmApp>, what: &str, secs: u64, ok: impl Fn(&LightVmApp) -> bool) {
+fn wait(
+    h: &mut Harness<'_, LightVmApp>,
+    what: &str,
+    secs: u64,
+    ok: impl Fn(&mut Harness<'_, LightVmApp>) -> bool,
+) {
     let t0 = Instant::now();
-    while !ok(h.state()) {
+    while !ok(h) {
         assert!(t0.elapsed() < Duration::from_secs(secs), "timeout: {what}");
-        std::thread::sleep(Duration::from_millis(50));
-        h.step();
+        std::thread::sleep(Duration::from_millis(100));
+        h.run_steps(3);
     }
+    println!("E2E {what}: {:.1} s", t0.elapsed().as_secs_f64());
+}
+
+fn vm_state(h: &Harness<'_, LightVmApp>, name: &str) -> Option<VmState> {
+    h.state()
+        .service()?
+        .state()
+        .vms
+        .iter()
+        .find(|v| v.name.as_str() == name)
+        .map(|v| v.state)
+}
+
+fn enabled(h: &Harness<'_, LightVmApp>, label: &str) -> bool {
+    h.query_by_role_and_label(Role::Button, label)
+        .is_some_and(|n| !n.accesskit_node().is_disabled())
 }
 
 #[test]
-#[ignore = "requires a real QEMU started by lab/scripts/f0-04-boot.ps1"]
-fn keyboard_and_screenshot_from_ui_to_real_qemu() {
-    let dir = PathBuf::from(std::env::var("LIGHTVM_F004_DIR").expect("LIGHTVM_F004_DIR"));
-    let cfg = ConsoleConfig {
-        vnc: Transport::Unix {
-            path: dir.join("priv").join("vnc.sock"),
-            imp: UnixImpl::Socket2,
-        },
-        qmp_socket: dir.join("priv").join("qmp.sock"),
-        capture_dir: dir.clone(),
-        tmp_dir: dir.join("priv"),
-        layout: KeyboardLayout::Us,
-        max_fps: 30,
+#[ignore = "requires a real QEMU and an ISO: set LIGHTVM_QEMU_DIR and LIGHTVM_ISO"]
+fn wizard_start_and_console_with_real_qemu() {
+    let (Some(qemu), Some(iso)) = (
+        std::env::var_os("LIGHTVM_QEMU_DIR").map(PathBuf::from),
+        std::env::var_os("LIGHTVM_ISO").map(PathBuf::from),
+    ) else {
+        eprintln!("LIGHTVM_QEMU_DIR or LIGHTVM_ISO not set: test skipped");
+        return;
     };
-    // The app starts on the Dashboard: the console connects when shown.
-    let mut app = LightVmApp::with_console(cfg);
-    app.set_section(Section::Console);
+    let exe = service_executable().expect("lightvm-service built");
+    let dir = std::env::temp_dir().join(format!("lightvm-e2e-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg = ServiceConfig {
+        executable: exe,
+        catalog: dir.join("catalog"),
+        qemu_dir: Some(qemu),
+        runtime_dir: Some(dir.join("run")),
+        audit_log: Some(dir.join("audit.jsonl")),
+        policy: ParentLossPolicy::KillVms,
+    };
+    let ctx_holder: Arc<std::sync::Mutex<Option<egui::Context>>> = Arc::default();
+    let c2 = ctx_holder.clone();
+    let service = Service::start(
+        &cfg,
+        Arc::new(move || {
+            if let Some(c) = c2.lock().unwrap().as_ref() {
+                c.request_repaint();
+            }
+        }),
+    )
+    .expect("supervisor start");
+    let mut app = LightVmApp::new(false);
+    app.set_service(service, &cfg);
+    let iso2 = iso.clone();
+    app.set_file_picker(Some(Box::new(move |_t: &str| Some(iso2.clone()))));
+    let shot = dir.join("e2e-console.png");
+    let shot2 = shot.clone();
+    app.set_save_picker(Some(Box::new(move |_n: &str| Some(shot2.clone()))));
     let mut h = Harness::builder()
-        .with_size(egui::vec2(1460.0, 860.0))
-        .with_max_steps(1_000_000)
+        .with_size(egui::vec2(1280.0, 1300.0))
+        .with_max_steps(10_000_000)
         .build_ui_state(|ui, app: &mut LightVmApp| app.ui(ui), app);
-    wait(&mut h, "RFB geometry", 15, |a| {
-        a.live_console()
+    *ctx_holder.lock().unwrap() = Some(h.ctx.clone());
+    h.run_steps(3);
+    wait(&mut h, "supervisor connected", 30, |h| enabled(h, "New VM"));
+
+    // Wizard: name, system, import of the ISO, resources, create.
+    h.get_by_role_and_label(Role::Button, "New VM").click();
+    h.run_steps(3);
+    h.run_steps(3);
+    h.get_by_role(Role::TextInput).type_text("e2e-ubuntu");
+    h.run_steps(3);
+    h.get_by_role_and_label(Role::Button, "Next").click();
+    h.run_steps(3);
+    h.get_by_role_and_label(Role::Button, "Next").click();
+    h.run_steps(3);
+    h.get_by_role_and_label(Role::Button, "Import ISO…").click();
+    h.run_steps(3);
+    wait(&mut h, "ISO imported and selected", 900, |h| {
+        let failed = h.state().service().and_then(|s| match s.state().import {
+            lightvm_desktop::service::RequestStatus::Failed(f) => Some(f.message),
+            _ => None,
+        });
+        assert!(failed.is_none(), "import failed: {failed:?}");
+        enabled(h, "Next")
+    });
+    for _ in 0..8 {
+        if h.state()
+            .wizard()
+            .is_some_and(|w| w.step == lightvm_desktop::wizard::Step::Summary)
+        {
+            break;
+        }
+        assert!(
+            enabled(&h, "Next"),
+            "wizard blocked: {:?}",
+            h.state().wizard()
+        );
+        h.get_by_role_and_label(Role::Button, "Next").click();
+        h.run_steps(3);
+    }
+    println!(
+        "E2E wizard: {:?}",
+        h.state()
+            .wizard()
+            .map(|w| (w.step, w.vcpus, w.memory_mib, w.disk_gib))
+    );
+    h.get_by_label("Step 7 of 7: Summary");
+    h.get_by_role_and_label(Role::Button, "Create").click();
+    h.run_steps(3);
+    wait(&mut h, "VM created", 120, |h| {
+        h.state().wizard().is_none() && vm_state(h, "e2e-ubuntu").is_some()
+    });
+
+    // Start, then console from the Dashboard.
+    h.get_by_role_and_label(Role::Button, "Start e2e-ubuntu")
+        .click();
+    h.run_steps(3);
+    wait(&mut h, "VM running", 120, |h| {
+        vm_state(h, "e2e-ubuntu") == Some(VmState::Running)
+    });
+    wait(&mut h, "console button enabled", 30, |h| {
+        enabled(h, "Open the console of e2e-ubuntu")
+    });
+    h.get_by_role_and_label(Role::Button, "Open the console of e2e-ubuntu")
+        .click();
+    h.run_steps(3);
+    assert_eq!(h.state().section(), Section::Console);
+    wait(&mut h, "framebuffer received", 120, |h| {
+        h.state()
+            .live_console()
             .is_some_and(|c| c.geometry().0 > 0 && c.stats.texture_uploads > 0)
     });
-    h.step();
-    let geom = h.state().live_console().map(|c| c.geometry());
-    println!("UI-REAL geometry={geom:?}");
-
-    // Click on the console image: gives keyboard focus.
-    h.get_by_label("Guest console framebuffer").click();
-    h.step();
-    h.step();
-
-    let text: &[(egui::Key, bool)] = &[
-        (egui::Key::E, false),
-        (egui::Key::C, false),
-        (egui::Key::H, false),
-        (egui::Key::O, false),
-        (egui::Key::Space, false),
-        (egui::Key::U, true),
-        (egui::Key::I, true),
-        (egui::Key::Minus, false),
-        (egui::Key::K, false),
-        (egui::Key::I, false),
-        (egui::Key::T, false),
-        (egui::Key::T, false),
-        (egui::Key::E, false),
-        (egui::Key::S, false),
-        (egui::Key::T, false),
-        (egui::Key::Enter, false),
-    ];
-    for (k, shift) in text {
-        if *shift {
-            key(&h, egui::Key::ShiftLeft, true);
-            h.step();
-        }
-        key(&h, *k, true);
-        h.step();
-        key(&h, *k, false);
-        h.step();
-        if *shift {
-            key(&h, egui::Key::ShiftLeft, false);
-            h.step();
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    // Key left pressed and then focus loss (click on "Dashboard"): the UI
-    // must release it by itself.
-    key(&h, egui::Key::ShiftLeft, true);
-    h.step();
-    let before = h.state().live_console().map(|c| c.stats.input_events);
-    h.get_by_role_and_label(Role::Button, "Dashboard").click();
-    h.step();
-    h.step();
-    let after = h.state().live_console().map(|c| c.stats.input_events);
-    println!("UI-REAL input_events before_focus_loss={before:?} after={after:?}");
-    assert!(after > before, "no release sent on focus loss");
-    h.get_by_role_and_label(Role::Button, "Console").click();
-    h.step();
-
-    std::thread::sleep(Duration::from_millis(800));
-    h.get_by_role_and_label(Role::Button, "Screenshot").click();
-    h.step();
+    // Let the installer draw its first screen.
     let t0 = Instant::now();
-    let shot = dir.join("ui-screenshot-001.png");
-    while !shot.exists() {
-        assert!(
-            t0.elapsed() < Duration::from_secs(10),
-            "screenshot not produced"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-        h.step();
+    while t0.elapsed() < Duration::from_secs(45) {
+        std::thread::sleep(Duration::from_millis(200));
+        h.run_steps(3);
     }
-    std::thread::sleep(Duration::from_millis(200));
-    let s = h.state().live_console().map(|c| c.stats.clone());
-    println!("UI-REAL screenshot={} stats={s:?}", shot.display());
+    let (geom, link, stats) = {
+        let c = h.state().live_console().unwrap();
+        (c.geometry(), c.link().describe().0, c.stats.clone())
+    };
+    println!("E2E console geometry={geom:?} link=\"{link}\" stats={stats:?}");
+    h.get_by_label("Console of e2e-ubuntu").click();
+    h.run_steps(3);
+    for k in [egui::Key::ArrowDown, egui::Key::ArrowUp] {
+        h.key_press(k);
+        h.run_steps(3);
+        std::thread::sleep(Duration::from_millis(300));
+        h.run_steps(3);
+    }
+    let input_error = h.state().service().and_then(|s| s.state().input_error);
+    println!("E2E input_error={input_error:?}");
+    h.get_by_role_and_label(Role::Button, "Screenshot").click();
+    h.run_steps(3);
+    let png = std::fs::read(&shot).expect("screenshot saved");
+    println!("E2E screenshot={} bytes={}", shot.display(), png.len());
+
+    // Orderly stop of the supervisor (VMs stopped by it).
+    let mut app = h.into_state();
+    let outcome = app.stop_service();
+    println!("E2E service_stop={outcome:?}");
+    // The catalog holds a copy of the ISO: removed unless asked to keep it.
+    if std::env::var_os("LIGHTVM_E2E_KEEP").is_none() {
+        let _ = std::fs::remove_dir_all(&dir);
+    } else {
+        println!("E2E catalog kept: {}", dir.display());
+    }
 }
