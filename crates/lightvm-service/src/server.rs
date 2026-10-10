@@ -21,6 +21,7 @@ use lightvm_proto::{
 };
 
 use crate::credential::{Credential, CredentialId, CredentialStore};
+use crate::display::DisplayRegistry;
 use crate::engine::VmEngine;
 use crate::frame::{self, FrameError};
 use crate::lock::{InstanceLock, LockError};
@@ -54,6 +55,11 @@ pub struct ServiceConfig {
     pub shutdown_timeout: Duration,
     /// Fate of the VMs when the UI is lost (changeable via IPC).
     pub parent_loss_policy: ParentLossPolicy,
+    /// Root of the per-run display sockets (console tickets, ADR-0013),
+    /// made accessible to the current user only. It must be short (AF_UNIX
+    /// paths: 107 bytes, the proxy adds 21 characters). Default:
+    /// `<runtime_dir or catalog/p>/d`.
+    pub display_dir: Option<PathBuf>,
 }
 
 impl ServiceConfig {
@@ -70,6 +76,7 @@ impl ServiceConfig {
             pairing_ttl: Duration::from_secs(600),
             shutdown_timeout: Duration::from_secs(30),
             parent_loss_policy: ParentLossPolicy::default(),
+            display_dir: None,
         }
     }
 }
@@ -125,6 +132,8 @@ struct Shared {
     parent_loss_policy: Arc<Mutex<ParentLossPolicy>>,
     /// VMs with a process according to the supervisor (shutdown budget).
     vms_with_process: Arc<AtomicUsize>,
+    /// Console tickets (revoked here on connection loss and Emergency Stop).
+    display: Arc<DisplayRegistry>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -161,6 +170,7 @@ impl Shared {
                 if e.role != Role::Ui {
                     lock(&self.creds).revoke(e.credential_id);
                 }
+                self.revoke_consoles_of(id);
                 let _ = e.revoke.send(true);
                 let _ = self
                     .events
@@ -186,6 +196,15 @@ impl Shared {
             }
         }
         n
+    }
+
+    /// Revokes the console tickets obtained by a connection (revoked or
+    /// closed) and releases the input still pressed on those runs.
+    fn revoke_consoles_of(&self, connection_id: u64) {
+        let runs = self.display.revoke_owner(connection_id);
+        if !runs.is_empty() {
+            self.send_cmd(Command::ReleaseInput(runs));
+        }
     }
 
     fn connections(&self) -> Vec<ConnectionInfo> {
@@ -215,6 +234,8 @@ impl Shared {
         // Then termination through the backend handler, outside the queue and
         // outside the supervisor thread.
         let revoked = self.revoke_non_ui();
+        // Console tickets: no new display connection, live ones closed.
+        self.display.revoke_all();
         // Mutations already queued towards the supervisor are not executed.
         self.emergency_epoch.fetch_add(1, Ordering::SeqCst);
         let handle = self.emergency.clone();
@@ -374,6 +395,13 @@ pub async fn start(
     let emergency_epoch = Arc::new(AtomicU64::new(0));
     let parent_loss_policy = Arc::new(Mutex::new(cfg.parent_loss_policy));
     let vms_with_process = Arc::new(AtomicUsize::new(0));
+    let display_root = cfg.display_dir.clone().unwrap_or_else(|| {
+        cfg.runtime_dir
+            .clone()
+            .unwrap_or_else(|| cfg.catalog_dir.join("p"))
+            .join("d")
+    });
+    let display = Arc::new(DisplayRegistry::new(display_root));
     let sup = SupervisorThread {
         engine,
         backend,
@@ -382,6 +410,9 @@ pub async fn start(
         emergency_epoch: emergency_epoch.clone(),
         parent_loss_policy: parent_loss_policy.clone(),
         vms_with_process: vms_with_process.clone(),
+        display: display.clone(),
+        self_tx: cmd_tx.clone(),
+        imports: 0,
     };
     // Published before any possible subscription: no client receives it late,
     // after later events (race with `subscribe`).
@@ -413,6 +444,7 @@ pub async fn start(
         emergency_epoch,
         parent_loss_policy,
         vms_with_process,
+        display,
     });
 
     // Accept loop.
@@ -746,12 +778,18 @@ async fn handle_connection(shared: Arc<Shared>, stream: BoxedStream, peer: PeerI
     let mut closing_rx = shared.closing.subscribe();
     let mut bucket = TokenBucket::new(shared.cfg.rate_limit);
     let mut events: Option<broadcast::Receiver<ServiceEvent>> = None;
+    // Replies of long requests served without blocking the connection (media
+    // import: the reply arrives after the copy, events keep flowing).
+    let (late_tx, mut late_rx) = tokio::sync::mpsc::channel::<ServerMessage>(4);
 
     let close_reason: Option<CloseReason> = loop {
         let flow = tokio::select! {
             biased;
             _ = flag_set(&mut revoke_rx) => Flow::Close(Some(CloseReason::Revoked)),
             _ = flag_set(&mut closing_rx) => Flow::Close(Some(CloseReason::ServiceStopping)),
+            Some(m) = late_rx.recv() => {
+                if send(&mut wr, &m, max).await.is_err() { Flow::Close(None) } else { Flow::Continue }
+            }
             ev = recv_event(&mut events) => {
                 let msg = match ev {
                     Ok(event) => ServerMessage::Event { event },
@@ -788,8 +826,11 @@ async fn handle_connection(shared: Arc<Shared>, stream: BoxedStream, peer: PeerI
                             bucket.retry_after().as_millis()
                         ));
                         if send(&mut wr, &m, max).await.is_err() { Flow::Close(None) } else { Flow::Continue }
+                    } else if matches!(body, Request::ImportMedia { .. }) {
+                        spawn_detached(&shared, role, connection_id, &revoke_rx, &late_tx, request_id, body);
+                        Flow::Continue
                     } else {
-                        let ctx = ReqCtx { shared: &shared, role, revoke_rx: &mut revoke_rx };
+                        let ctx = ReqCtx { shared: &shared, role, connection_id, revoke_rx: &mut revoke_rx };
                         match dispatch(ctx, &mut events, body).await {
                             Dispatch::Reply(res) => {
                                 let m = match res {
@@ -830,6 +871,8 @@ async fn handle_connection(shared: Arc<Shared>, stream: BoxedStream, peer: PeerI
         let _ = send(&mut wr, &ServerMessage::Closing { reason }, max).await;
     }
     lock(&shared.conns).remove(&connection_id);
+    // The console tickets do not outlive the connection that obtained them.
+    shared.revoke_consoles_of(connection_id);
     let _ = tokio::io::AsyncWriteExt::shutdown(&mut wr).await;
 }
 
@@ -845,7 +888,42 @@ async fn recv_event(
 struct ReqCtx<'a> {
     shared: &'a Arc<Shared>,
     role: Role,
+    connection_id: u64,
     revoke_rx: &'a mut watch::Receiver<bool>,
+}
+
+/// Serves a request in its own task; the reply goes through `late`.
+fn spawn_detached(
+    shared: &Arc<Shared>,
+    role: Role,
+    connection_id: u64,
+    revoke_rx: &watch::Receiver<bool>,
+    late: &tokio::sync::mpsc::Sender<ServerMessage>,
+    request_id: RequestId,
+    body: Request,
+) {
+    let shared = shared.clone();
+    let mut revoke_rx = revoke_rx.clone();
+    let late = late.clone();
+    tokio::spawn(async move {
+        let mut no_events = None;
+        let ctx = ReqCtx {
+            shared: &shared,
+            role,
+            connection_id,
+            revoke_rx: &mut revoke_rx,
+        };
+        let m = match dispatch(ctx, &mut no_events, body).await {
+            Dispatch::Reply(Ok(result)) => ServerMessage::Response { request_id, result },
+            Dispatch::Reply(Err(error)) => ServerMessage::Error {
+                request_id: Some(request_id),
+                error,
+            },
+            // The connection is closing: nobody to answer.
+            Dispatch::Interrupted(_) | Dispatch::ReplyThenShutdown(_) => return,
+        };
+        let _ = late.send(m).await;
+    });
 }
 
 enum Dispatch {
@@ -896,16 +974,24 @@ async fn dispatch(
             config: Box::new(config),
         },
         Request::SubmitVm { request } => SupervisorRequest::SubmitVm(Box::new(request)),
-        // TODO(F2): implemented by the F2 service work.
-        Request::ListMedia
-        | Request::ImportMedia { .. }
-        | Request::DeleteVm { .. }
-        | Request::OpenConsole { .. } => {
-            return Dispatch::Reply(Err(op_error(
-                ErrorCode::Unsupported,
-                format!("operation {} not implemented yet", req.name()),
-            )));
-        }
+        Request::ListMedia => SupervisorRequest::ListMedia,
+        Request::ImportMedia {
+            source_path,
+            media_kind,
+            declared_origin,
+        } => SupervisorRequest::ImportMedia {
+            source_path,
+            media_kind,
+            declared_origin,
+        },
+        Request::DeleteVm {
+            vm_id,
+            expected_revision,
+        } => SupervisorRequest::DeleteVm {
+            vm_id,
+            expected_revision,
+        },
+        Request::OpenConsole { vm_id } => SupervisorRequest::OpenConsole(vm_id),
         Request::Subscribe => {
             if events.is_none() {
                 *events = Some(shared.events.subscribe());
@@ -965,6 +1051,7 @@ async fn dispatch(
     let sent = shared.send_cmd(Command::Request {
         req: sup_req,
         caller: caller_for(ctx.role),
+        connection_id: ctx.connection_id,
         revoked: ctx.revoke_rx.clone(),
         epoch: shared.emergency_epoch.load(Ordering::SeqCst),
         reply: reply_tx,

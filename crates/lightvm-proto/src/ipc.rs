@@ -119,7 +119,10 @@ pub enum Request {
         config: VmConfig,
     },
     /// Action on an existing VM through the core's queue (UI only in F1).
-    /// The response arrives after the backend outcome.
+    /// The response arrives after the backend outcome, except for `stop`
+    /// with a backend that stops in the background (QEMU): the response
+    /// arrives when the graceful stop has started (operation `forwarded`, VM
+    /// `stopping`) and the end is published as a `vm_state` event.
     SubmitVm {
         /// Request with idempotency key.
         request: VmRequest,

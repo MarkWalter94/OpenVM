@@ -36,6 +36,8 @@ pub mod transport;
 #[cfg(feature = "supervisor")]
 pub mod adapters;
 #[cfg(feature = "supervisor")]
+pub mod display;
+#[cfg(feature = "supervisor")]
 pub mod engine;
 #[cfg(feature = "supervisor")]
 pub mod lock;

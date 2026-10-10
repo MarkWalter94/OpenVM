@@ -110,6 +110,8 @@ pub struct UiSettings {
     /// Interface theme.
     #[serde(alias = "tema")]
     pub theme: crate::UiTheme,
+    /// Keyboard layout configured in the guests (console).
+    pub keyboard_layout: crate::keymap::KeyboardLayout,
 }
 
 impl Default for UiSettings {
@@ -121,6 +123,7 @@ impl Default for UiSettings {
             catalog: None,
             qemu_dir: None,
             theme: crate::UiTheme::Dark,
+            keyboard_layout: crate::keymap::KeyboardLayout::Us,
         }
     }
 }
@@ -482,6 +485,146 @@ pub fn policy_ui(ui: &mut egui::Ui, p: &mut ParentLossPolicy) -> bool {
     *p != before
 }
 
+/// Content of the host capacity card: what the supervisor measured, and the
+/// resulting per-VM maxima offered by the wizard. Read only.
+pub fn host_ui(ui: &mut egui::Ui, host: Option<lightvm_proto::HostCapacity>, connected: bool) {
+    let colours = theme::Palette::of(ui);
+    let Some(h) = host else {
+        let text = if connected {
+            "Not reported by the supervisor: the limits are checked when a VM is created or started."
+        } else {
+            "Available when the supervisor is connected."
+        };
+        ui.label(egui::RichText::new(text).color(colours.text_weak));
+        return;
+    };
+    let mib = crate::dashboard::format_mib;
+    let yes_no = |b: bool| if b { "available" } else { "not available" };
+    let max = crate::wizard::Bounds::new(Some(h));
+    let rows: [(&str, String); 6] = [
+        ("Logical processors", h.logical_cpus.to_string()),
+        (
+            "Memory",
+            format!(
+                "{} total, {} reserved for the host",
+                mib(h.total_memory_mib),
+                mib(h.reserved_memory_mib)
+            ),
+        ),
+        (
+            "Catalog storage",
+            format!(
+                "{} GiB free, {} GiB kept free",
+                h.free_storage_gib, h.reserved_storage_gib
+            ),
+        ),
+        (
+            "Hardware acceleration",
+            if h.accelerator_available {
+                "available".into()
+            } else {
+                "not available: VMs cannot be started".into()
+            },
+        ),
+        (
+            "Screenshots and input",
+            format!(
+                "screenshots {}, input {}",
+                yes_no(h.screenshot_available),
+                yes_no(h.input_available)
+            ),
+        ),
+        (
+            "Maximum per VM",
+            format!(
+                "{} vCPU, {} memory, {} GiB disk",
+                max.max_vcpus,
+                mib(max.max_memory_mib),
+                max.max_disk_gib
+            ),
+        ),
+    ];
+    for (i, (k, v)) in rows.iter().enumerate() {
+        if i > 0 {
+            theme::divider(ui);
+        }
+        theme::row(ui, k, None, |ui| {
+            ui.add_space(4.0);
+            ui.add(egui::Label::new(egui::RichText::new(v).color(colours.text)).wrap());
+        });
+    }
+}
+
+/// Features of this version, stated plainly. Read only: none of them can be
+/// enabled from the UI.
+pub const SECURITY_FACTS: [(&str, &str); 5] = [
+    ("Network", "Offline only: VMs have no network adapter."),
+    (
+        "Clipboard",
+        "Not shared: nothing is copied between host and guest.",
+    ),
+    (
+        "Shared folders",
+        "Not available: files reach the guest only as read-only data ISOs.",
+    ),
+    ("MCP server for AI agents", "Not available in this version."),
+    (
+        "Agent sessions",
+        "Disabled: only you control the VMs, from this window.",
+    ),
+];
+
+/// Content of the Security card.
+pub fn security_ui(ui: &mut egui::Ui) {
+    let colours = theme::Palette::of(ui);
+    ui.label(
+        egui::RichText::new("Fixed in this version: these features cannot be turned on.")
+            .color(colours.text_weak),
+    );
+    ui.add_space(4.0);
+    for (i, (k, v)) in SECURITY_FACTS.iter().enumerate() {
+        if i > 0 {
+            theme::divider(ui);
+        }
+        theme::row(ui, k, None, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                theme::pill(ui, "Unavailable", Tone::Neutral);
+                ui.add(egui::Label::new(egui::RichText::new(*v).color(colours.text)).wrap());
+            });
+        });
+    }
+}
+
+/// Content of the Console card: declared guest keyboard layout. Returns
+/// `true` if it changed.
+pub fn console_ui(ui: &mut egui::Ui, layout: &mut crate::keymap::KeyboardLayout) -> bool {
+    let before = *layout;
+    theme::row(
+        ui,
+        "Guest keyboard layout",
+        Some("Keys are sent by physical position: set the same layout inside the guest."),
+        |ui| {
+            for l in crate::keymap::KeyboardLayout::ALL {
+                ui.radio_value(layout, l, l.description());
+            }
+        },
+    );
+    theme::divider(ui);
+    theme::row(ui, "Console shortcuts", None, |ui| {
+        let colours = theme::Palette::of(ui);
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(format!(
+                "{}: full screen on or off. {}: leave the console (exit full screen, release the keyboard). Neither reaches the guest.",
+                crate::console::FULLSCREEN_CHORD,
+                crate::console::LEAVE_CHORD
+            ))
+            .color(colours.text),
+        );
+    });
+    *layout != before
+}
+
 /// Content of the rendering backend card. Returns `true` if the choice
 /// changes. `active` is the backend in use in this run.
 pub fn rendering_ui(ui: &mut egui::Ui, p: &mut RenderingPreference, active: &str) -> bool {
@@ -539,6 +682,7 @@ mod tests {
             catalog: Some(PathBuf::from(r"D:\vm\catalog")),
             qemu_dir: Some(PathBuf::from(r"D:\qemu")),
             theme: crate::UiTheme::Light,
+            keyboard_layout: crate::keymap::KeyboardLayout::It,
         };
         i.save(&p).unwrap();
         assert_eq!(UiSettings::load(&p), (i, None));
@@ -585,6 +729,7 @@ mod tests {
             catalog: Some(PathBuf::from(r"D:\vm\catalogo")),
             qemu_dir: Some(PathBuf::from(r"D:\qemu")),
             theme: crate::UiTheme::Light,
+            keyboard_layout: crate::keymap::KeyboardLayout::Us,
         };
         let (i, err) = UiSettings::load_or_legacy(&p, &legacy);
         assert!(err.is_none(), "{err:?}");

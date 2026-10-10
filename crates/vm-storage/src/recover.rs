@@ -23,7 +23,9 @@
 
 use rusqlite::params;
 
-use crate::catalog::{Catalog, Intent, exists_no_follow, remove_temp, target_exists};
+use crate::catalog::{
+    Catalog, Intent, exists_no_follow, remove_managed_file, remove_temp, target_exists,
+};
 use crate::enums::{DiskRole, DiskStatus, IntentKind, IntentState, Lifecycle, TargetKind};
 use crate::error::{Result, SqlResultExt, StorageError};
 use crate::fsx;
@@ -226,6 +228,9 @@ impl Catalog {
                     IntentState::Aborted,
                 ))
             }
+            IntentKind::DeleteFile if i.target_kind == TargetKind::Vm => {
+                self.recover_vm_file(i, prior, temp_exists, final_exists, row_exists)
+            }
             IntentKind::DeleteFile => {
                 if temp_exists && !final_exists {
                     if !row_exists {
@@ -278,6 +283,86 @@ impl Catalog {
                 }
             }
             _ => {
+                let d = self.rollback_fs(i, prior)?;
+                Ok((RolledBack, d, IntentState::Aborted))
+            }
+        }
+    }
+
+    /// One file of a VM deletion (target `vm`). The group rolls forward as
+    /// soon as one file was moved: the first moved file deletes the rows,
+    /// the following ones (moved or still in place) are removed.
+    fn recover_vm_file(
+        &mut self,
+        i: &Intent,
+        prior: IntentState,
+        temp_exists: bool,
+        final_exists: bool,
+        row_exists: bool,
+    ) -> Result<(RecoveryOutcome, String, IntentState)> {
+        use RecoveryOutcome::*;
+        match (temp_exists, final_exists, row_exists) {
+            // Moved, rows still present: complete the deletion.
+            (true, false, true) => {
+                let tid = i.target_id.clone().unwrap_or_default();
+                match self.with_tx(|tx| delete_target_rows(tx, TargetKind::Vm, &tid)) {
+                    Ok(()) => {
+                        remove_temp(&self.layout, &i.temp_rel)?;
+                        Ok((
+                            RolledForward,
+                            "vm_rows_deleted+temp_removed".into(),
+                            IntentState::Committed,
+                        ))
+                    }
+                    Err(StorageError::Referenced(_) | StorageError::Constraint(_)) => {
+                        let d = self.rollback_fs(i, prior)?;
+                        Ok((
+                            RolledBack,
+                            format!("delete_refused+{d}"),
+                            IntentState::Aborted,
+                        ))
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            // Moved and rows already gone: only the temporary remains.
+            (true, false, false) => {
+                remove_temp(&self.layout, &i.temp_rel)?;
+                Ok((
+                    RolledForward,
+                    "rolled_forward+temp_removed".into(),
+                    IntentState::Committed,
+                ))
+            }
+            // Not moved, the group already rolled forward: remove the file.
+            (temp, true, false) => {
+                if temp {
+                    remove_temp(&self.layout, &i.temp_rel)?;
+                }
+                if let Some(rel) = &i.final_rel {
+                    remove_managed_file(&self.layout, rel)?;
+                }
+                Ok((
+                    RolledForward,
+                    "vm_deleted+file_removed".into(),
+                    IntentState::Committed,
+                ))
+            }
+            // Nothing moved and the VM is still there: nothing to undo.
+            (false, true, true) => Ok((
+                RolledBack,
+                "delete_not_started".into(),
+                IntentState::Aborted,
+            )),
+            // File gone in both places.
+            (false, false, true) => Ok((RolledBack, "file_missing".into(), IntentState::Aborted)),
+            (false, false, false) => Ok((
+                RolledForward,
+                "already_deleted".into(),
+                IntentState::Committed,
+            )),
+            // Both copies present with the VM still there: restore.
+            (true, true, true) => {
                 let d = self.rollback_fs(i, prior)?;
                 Ok((RolledBack, d, IntentState::Aborted))
             }
@@ -472,6 +557,7 @@ fn delete_target_rows(tx: &Tx<'_>, kind: TargetKind, id: &str) -> Result<()> {
         TargetKind::Baseline => tx.delete_baseline(&parse_id::<BaselineId>(id)?),
         TargetKind::Artifact => tx.delete_artifact(&parse_id::<ArtifactId>(id)?),
         TargetKind::Media => tx.delete_media(&parse_id::<MediaId>(id)?),
+        TargetKind::Vm => crate::vm_delete::delete_vm_rows(tx, &parse_id::<VmId>(id)?),
         TargetKind::None => Ok(()),
     }
 }

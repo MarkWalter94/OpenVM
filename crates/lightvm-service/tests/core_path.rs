@@ -144,6 +144,39 @@ fn expect_succeeded(m: &ServerMessage) {
     }
 }
 
+/// Graceful stop accepted: completed (blocking backend) or forwarded (the
+/// QEMU backend stops in the background; the end is observed later).
+fn expect_accepted_stop(m: &ServerMessage) {
+    match m {
+        ServerMessage::Response {
+            result:
+                ResponseBody::Operation {
+                    operation: Some(op),
+                    ..
+                },
+            ..
+        } => assert!(
+            matches!(
+                op.status,
+                OperationStatus::Succeeded | OperationStatus::Forwarded
+            ),
+            "{op:?}"
+        ),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Waits (up to 3 minutes) for the VM to be `stopped`.
+async fn wait_stopped(c: &mut Client, vm_id: VmId) {
+    for _ in 0..1800 {
+        if state_of(c, vm_id).await == VmState::Stopped {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("VM not stopped");
+}
+
 async fn state_of(c: &mut Client, vm_id: VmId) -> VmState {
     match c.request(Request::VmStatus { vm_id }).await.unwrap() {
         ServerMessage::Response {
@@ -507,9 +540,9 @@ fn e2e_real_qemu_create_start_status_stop() {
         assert_eq!(state_of(&mut c, vm_id).await, VmState::Running);
         let t = std::time::Instant::now();
         let m = submit(&mut c, vm_id, VmAction::Stop).await;
+        expect_accepted_stop(&m);
+        wait_stopped(&mut c, vm_id).await;
         eprintln!("stop: {:?} → {m:?}", t.elapsed());
-        expect_succeeded(&m);
-        assert_eq!(state_of(&mut c, vm_id).await, VmState::Stopped);
         let disk = dir
             .join("vms")
             .join(vm_id.to_string())
@@ -756,7 +789,7 @@ fn e2e_real_qemu_cycles_through_the_service() {
                 }
                 "emergency_stop"
             } else if i % 2 == 0 {
-                expect_succeeded(&submit(&mut c, vm_id, VmAction::Stop).await);
+                expect_accepted_stop(&submit(&mut c, vm_id, VmAction::Stop).await);
                 "stop"
             } else {
                 expect_succeeded(&submit(&mut c, vm_id, VmAction::ForceStop).await);

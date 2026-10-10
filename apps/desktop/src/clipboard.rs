@@ -43,6 +43,9 @@ pub struct FilterOutcome {
     pub discarded: u32,
     /// Text bytes zeroed before the memory was released.
     pub zeroed_bytes: usize,
+    /// `Copy`/`Cut` events replaced by their keys (F2: the VM name field
+    /// must not write to the host clipboard either).
+    pub copies: u32,
 }
 
 /// Physical key that produced the paste, reconstructed from the modifiers.
@@ -84,7 +87,12 @@ fn discard_paste_with_state(
     modifiers: &mut egui::Modifiers,
 ) -> FilterOutcome {
     let mut outcome = FilterOutcome::default();
-    if !events.iter().any(|e| matches!(e, egui::Event::Paste(_))) {
+    if !events.iter().any(|e| {
+        matches!(
+            e,
+            egui::Event::Paste(_) | egui::Event::Copy | egui::Event::Cut
+        )
+    }) {
         if let Some(m) = events.iter().rev().find_map(event_modifiers) {
             *modifiers = m;
         }
@@ -101,6 +109,23 @@ fn discard_paste_with_state(
                 outcome.discarded += 1;
                 outcome.zeroed_bytes += zeroize(text);
                 let key = paste_key(modifiers);
+                for pressed in [true, false] {
+                    out.push(egui::Event::Key {
+                        key,
+                        physical_key: Some(key),
+                        pressed,
+                        repeat: false,
+                        modifiers,
+                    });
+                }
+            }
+            egui::Event::Copy | egui::Event::Cut => {
+                outcome.copies += 1;
+                let key = if matches!(ev, egui::Event::Copy) {
+                    egui::Key::C
+                } else {
+                    egui::Key::X
+                };
                 for pressed in [true, false] {
                     out.push(egui::Event::Key {
                         key,
@@ -146,6 +171,22 @@ pub fn filter_context(ctx: &egui::Context) -> FilterOutcome {
     })
 }
 
+/// Removes from the output of the frame any request to write the host
+/// clipboard (`CopyText`, `CopyImage`): no widget of LightVM copies to the
+/// clipboard (ROADMAP: no clipboard features). Returns how many were removed.
+pub fn strip_clipboard_output(ctx: &egui::Context) -> usize {
+    ctx.output_mut(|o| {
+        let before = o.commands.len();
+        o.commands.retain(|c| {
+            !matches!(
+                c,
+                egui::OutputCommand::CopyText(_) | egui::OutputCommand::CopyImage(_)
+            )
+        });
+        before - o.commands.len()
+    })
+}
+
 /// Overwrites the bytes of the string with zeros and releases it. Returns the
 /// number of zeroed bytes. Copies made by egui-winit before the filter
 /// (`replace("\r\n", "\n")`) are not reachable from here.
@@ -180,7 +221,8 @@ mod tests {
             outcome,
             FilterOutcome {
                 discarded: 1,
-                zeroed_bytes: 7
+                zeroed_bytes: 7,
+                copies: 0
             }
         );
         assert_eq!(ev.len(), 3);
@@ -216,9 +258,29 @@ mod tests {
     }
 
     #[test]
-    fn without_paste_nothing_changes() {
-        let mut ev = vec![egui::Event::Copy, egui::Event::Text("x".into())];
+    fn without_clipboard_events_nothing_changes() {
+        let mut ev = vec![egui::Event::Text("x".into())];
         assert_eq!(discard_paste(&mut ev, ctrl()), FilterOutcome::default());
-        assert_eq!(ev.len(), 2);
+        assert_eq!(ev.len(), 1);
+    }
+
+    #[test]
+    fn copy_and_cut_become_keys() {
+        let mut ev = vec![egui::Event::Copy, egui::Event::Cut];
+        let o = discard_paste(&mut ev, ctrl());
+        assert_eq!(o.copies, 2);
+        assert_eq!(ev.len(), 4);
+        assert!(
+            !ev.iter()
+                .any(|e| matches!(e, egui::Event::Copy | egui::Event::Cut))
+        );
+        assert!(matches!(
+            ev[0],
+            egui::Event::Key {
+                key: egui::Key::C,
+                pressed: true,
+                ..
+            }
+        ));
     }
 }

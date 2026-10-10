@@ -12,9 +12,9 @@
 //! backend call; [`VmBackend`] serves helpers and tests.
 
 use lightvm_proto::{
-    AuditEvent, BaselineId, DisplayGeometry, GrantId, InputEvent, MediaEntry, MediaId, OperationId,
-    OperationRecord, PublicError, RunEndReason, RunId, RunRecord, Screenshot, SessionId,
-    UtcTimestamp, VmId, VmRecord, VmState,
+    AuditEvent, BaselineId, DisplayGeometry, GrantId, InputEvent, Label, MediaEntry, MediaId,
+    MediaKind, MediaRecord, OperationId, OperationRecord, PublicError, RunEndReason, RunId,
+    RunRecord, Screenshot, SessionId, UtcTimestamp, VmId, VmRecord, VmState,
 };
 
 use crate::media::{ObservedMediaFacts, VerifiedMedia};
@@ -108,6 +108,31 @@ pub trait CatalogStore {
         ended_at: UtcTimestamp,
         reason: RunEndReason,
     ) -> Result<(), PublicError>;
+    /// Approved media of the registry.
+    fn list_media(&self) -> Result<Vec<MediaRecord>, PublicError> {
+        Ok(Vec::new())
+    }
+    /// Imports the file chosen by the user with the native picker: read-only
+    /// managed copy, hash and registry row, with the size limit of `kind`
+    /// (ADR-0008). The path is never passed to QEMU. The copy reads the
+    /// whole file: it blocks the caller for as long as the copy takes.
+    fn import_media(
+        &mut self,
+        _source: &std::path::Path,
+        _kind: MediaKind,
+        _declared_origin: &Label,
+    ) -> Result<MediaEntry, PublicError> {
+        Err(PublicError::unsupported("media import not available"))
+    }
+    /// Removes a VM without a process with its rows and files (journaled
+    /// by the storage).
+    fn remove_vm(&mut self, _id: VmId) -> Result<(), PublicError> {
+        Err(PublicError::unsupported("VM deletion not available"))
+    }
+    /// Space used on the host by the VM's files, if measurable.
+    fn vm_disk_usage(&self, _id: VmId) -> Option<u64> {
+        None
+    }
 }
 
 /// Destination of audit events, in `seq` order.

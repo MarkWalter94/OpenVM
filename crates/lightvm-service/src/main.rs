@@ -127,13 +127,15 @@ fn parse_args() -> Result<Args, String> {
     })
 }
 
-/// Engine and host composed from the real adapters.
-type Composed = (Box<dyn VmEngine>, Box<dyn Backend>);
+/// Engine and host composed from the real adapters, and the root of the
+/// per-run display sockets.
+type Composed = (Box<dyn VmEngine>, Box<dyn Backend>, PathBuf);
 
 /// Synchronous composition, outside the service tokio runtime: the QEMU probe
 /// uses the backend's own runtime.
-/// Space reserved under the private root for the QEMU sockets: separator,
-/// per-run subdirectory (12 characters), separator and `qmp.sock`/`vnc.sock`.
+/// Space reserved under the private root for the sockets: separator,
+/// per-run subdirectory (12 characters), separator and `qmp.sock`/`vnc.sock`;
+/// for the display proxy `\d\<12 characters>\d.sock` (same length).
 const SOCKET_RESERVE: usize = 22;
 
 /// Root of the private directories of the QEMU sockets: `--runtime-dir` or
@@ -186,16 +188,17 @@ fn compose(args: &Args) -> Result<Composed, (u8, String)> {
     let audit = FileAuditSink::open(&audit_path)
         .map_err(|e| (4, format!("audit {}: {e}", audit_path.display())))?;
     let inspector = ManagedMediaInspector::new(root.clone());
+    let private_root = private_root(args.runtime_dir.as_deref(), &root)?;
+    let display_dir = private_root.join("d");
     match &args.qemu_dir {
         Some(dir) => {
-            let private_root = private_root(args.runtime_dir.as_deref(), &root)?;
             let setup = QemuSetup::new(dir.clone(), root, private_root);
             let (host, vm_backend, capacity) =
                 backend::probe(setup).map_err(|e| (4, format!("backend QEMU: {e}")))?;
             let engine =
                 CoreEngine::new(store, audit, vm_backend, inspector, core_config(capacity))
                     .map_err(|e| (4, format!("core: {e}")))?;
-            Ok((Box::new(engine), Box::new(host)))
+            Ok((Box::new(engine), Box::new(host), display_dir))
         }
         None => {
             lightvm_service::diag!(
@@ -210,7 +213,7 @@ fn compose(args: &Args) -> Result<Composed, (u8, String)> {
                 core_config(capacity),
             )
             .map_err(|e| (4, format!("core: {e}")))?;
-            Ok((Box::new(engine), Box::new(UnavailableHost)))
+            Ok((Box::new(engine), Box::new(UnavailableHost), display_dir))
         }
     }
 }
@@ -223,7 +226,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let (engine, host) = match compose(&args) {
+    let (engine, host, display_dir) = match compose(&args) {
         Ok(x) => x,
         Err((code, msg)) => {
             lightvm_service::diag!("lightvm-service: {msg}");
@@ -241,13 +244,19 @@ fn main() -> ExitCode {
             return ExitCode::from(4);
         }
     };
-    rt.block_on(run(args, engine, host))
+    rt.block_on(run(args, engine, host, display_dir))
 }
 
-async fn run(args: Args, engine: Box<dyn VmEngine>, host: Box<dyn Backend>) -> ExitCode {
+async fn run(
+    args: Args,
+    engine: Box<dyn VmEngine>,
+    host: Box<dyn Backend>,
+    display_dir: PathBuf,
+) -> ExitCode {
     let mut cfg = ServiceConfig::new(&args.catalog);
     cfg.runtime_dir = args.runtime_dir;
     cfg.parent_loss_policy = args.parent_loss_policy;
+    cfg.display_dir = Some(display_dir);
     let (handle, ui_credential) = match start(cfg, engine, host).await {
         Ok(x) => x,
         Err(e @ StartError::Lock(lightvm_service::lock::LockError::AlreadyRunning { .. })) => {

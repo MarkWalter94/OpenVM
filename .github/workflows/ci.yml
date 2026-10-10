@@ -534,12 +534,19 @@ jobs:
         run: cargo deny --locked check
 
   # ---------------------------------------------------------------------------
-  # macOS: compile check only, no declared support
-  # (ROADMAP 10 F1: macOS build by F2). It does not block CI; a failure or
-  # the runner being unavailable must be recorded as a risk in docs/STATUS.md.
+  # macOS portability probe (ROADMAP 10 F1: "build macOS su runner adeguato
+  # entro F2 per individuare assunzioni di portabilita', senza dichiarare
+  # supporto operativo"). macOS is NOT a supported or verified target: this
+  # job only compiles the workspace (all targets, spikes included) to surface
+  # Windows/Linux-only assumptions early. `continue-on-error: true` keeps it
+  # from blocking CI; a failure, or the runner being unavailable, is recorded
+  # as a risk in docs/STATUS.md and never turns macOS into a verified target.
+  # Pinned to `macos-14` (Apple silicon, aarch64-apple-darwin) instead of
+  # `macos-latest` so the probe does not change under us when the label moves.
+  # Evidence: docs/verification/F2-03-packaging-guide-ci.md.
   macos-check:
-    name: macOS (check only, no declared support)
-    runs-on: macos-latest
+    name: macOS portability probe (check only, not a supported target)
+    runs-on: macos-14
     timeout-minutes: 45
     continue-on-error: true
     steps:
@@ -553,6 +560,6 @@ jobs:
           rustc -Vv
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: macos
-      - name: cargo check --workspace
+          shared-key: macos-14
+      - name: cargo check --workspace --all-targets --locked
         run: cargo check --workspace --all-targets --locked

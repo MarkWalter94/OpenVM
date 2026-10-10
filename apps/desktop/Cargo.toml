@@ -1,6 +1,6 @@
 [package]
 name = "lightvm-desktop"
-description = "LightVM: native egui/eframe desktop interface (F0 spike)"
+description = "LightVM: native egui/eframe desktop interface"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -31,7 +31,9 @@ glow = ["eframe/glow"]
 eframe = { workspace = true, features = ["accesskit", "default_fonts", "wayland", "x11"] }
 egui = { workspace = true, features = ["default_fonts"] }
 egui_extras = { workspace = true }
-# Real console F0-04: read-only RFB client and QMP of the spike.
+# Console (F2): read-only RFB client on the supervisor's per-run display
+# ticket; input goes through the supervisor IPC, never QMP from the UI. From
+# the F0 spike only the PNG encoder is used (screenshots).
 rfb-client = { path = "../../crates/rfb-client" }
 f0-console = { path = "../../spikes/f0-console" }
 # Supervisor as a child process and IPC (F1-11): only the client side of the

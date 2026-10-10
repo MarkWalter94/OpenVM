@@ -496,7 +496,7 @@
           ]
         },
         {
-          "description": "Action on an existing VM through the core's queue (UI only in F1).\nThe response arrives after the backend outcome.",
+          "description": "Action on an existing VM through the core's queue (UI only in F1).\nThe response arrives after the backend outcome, except for `stop`\nwith a backend that stops in the background (QEMU): the response\narrives when the graceful stop has started (operation `forwarded`, VM\n`stopping`) and the end is published as a `vm_state` event.",
           "type": "object",
           "properties": {
             "op": {

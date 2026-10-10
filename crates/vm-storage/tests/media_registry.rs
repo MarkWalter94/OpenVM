@@ -201,3 +201,102 @@ fn source_open_by_a_writer_is_refused() {
     let err = cat.approve_media(&src, MediaKind::Iso, "x").unwrap_err();
     assert!(matches!(err, StorageError::VmBusy(_)), "{err:?}");
 }
+
+#[test]
+fn checked_approval_enforces_size_and_optical_signature_on_the_handle() {
+    use vm_storage::{MediaLimits, NOT_OPTICAL_IMAGE};
+    let dir = common::tempdir();
+    let src_dir = common::tempdir();
+    let mut cat = Catalog::open(dir.path()).unwrap();
+    let image = |name: &str, id: &[u8], len: usize| {
+        let mut b = vec![0u8; len];
+        let o = 16 * 2048 + 1;
+        if len >= o + id.len() {
+            b[o..o + id.len()].copy_from_slice(id);
+        }
+        let p = src_dir.path().join(name);
+        std::fs::write(&p, b).unwrap();
+        p
+    };
+    let strict = MediaLimits {
+        max_bytes: 64 * 1024,
+        optical_signature: true,
+    };
+    // ISO 9660 and UDF accepted.
+    for (name, id) in [("a.iso", b"CD001"), ("b.iso", b"BEA01")] {
+        let m = cat
+            .approve_media_checked(&image(name, id, 40 * 1024), MediaKind::Data, "x", strict)
+            .unwrap();
+        assert_eq!(m.size_bytes, 40 * 1024);
+    }
+    // Wrong signature and file too short: refused, nothing left behind.
+    for p in [
+        image("zip.iso", b"PK\x03\x04\x00", 40 * 1024),
+        image("short.iso", b"", 1024),
+    ] {
+        match cat.approve_media_checked(&p, MediaKind::Data, "x", strict) {
+            Err(StorageError::Unsupported(m)) => assert_eq!(m, NOT_OPTICAL_IMAGE),
+            other => panic!("{other:?}"),
+        }
+    }
+    // Over the size limit: refused before copying.
+    let big = image("big.iso", b"CD001", 65 * 1024);
+    assert!(matches!(
+        cat.approve_media_checked(&big, MediaKind::Iso, "x", strict),
+        Err(StorageError::ResourceLimit(_))
+    ));
+    assert!(cat.open_intents().unwrap().is_empty());
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("tmp")).unwrap().count(),
+        0
+    );
+    let media = std::fs::read_dir(dir.path().join("media")).unwrap().count();
+    assert_eq!(media, 2, "only the two accepted copies");
+}
+
+#[test]
+fn import_in_three_steps_copies_outside_the_catalog() {
+    use vm_storage::MediaLimits;
+    let dir = common::tempdir();
+    let src_dir = common::tempdir();
+    let src = src_dir.path().join("data.iso");
+    let mut content = vec![0u8; 48 * 1024];
+    content[16 * 2048 + 1..16 * 2048 + 6].copy_from_slice(b"CD001");
+    std::fs::write(&src, &content).unwrap();
+    let limits = MediaLimits {
+        max_bytes: 1 << 20,
+        optical_signature: true,
+    };
+    let mut cat = Catalog::open(dir.path()).unwrap();
+    let job = cat
+        .begin_media_import(&src, MediaKind::Data, "built with oscdimg", limits)
+        .unwrap();
+    assert_eq!(job.size_bytes(), content.len() as u64);
+    // While the job holds the source, nobody can write it.
+    assert!(std::fs::OpenOptions::new().write(true).open(&src).is_err() || cfg!(not(windows)));
+    // The catalog keeps serving while the copy runs on another thread.
+    let copied = std::thread::spawn(move || job.copy()).join().unwrap();
+    let other = common::new_vm(&mut cat, "meanwhile");
+    assert!(cat.read(|tx| tx.vm(&other)).is_ok());
+    let m = cat.finish_media_import(copied).unwrap();
+    assert_eq!(m.sha256, sha_hex(&content));
+    assert!(cat.open_intents().unwrap().is_empty());
+
+    // A job never finished (service stopped mid-copy) is rolled back at the
+    // next open: no row, no file, no temporary.
+    let job = cat
+        .begin_media_import(&src, MediaKind::Data, "x", limits)
+        .unwrap();
+    drop(job);
+    drop(cat);
+    let cat = Catalog::open(dir.path()).unwrap();
+    assert!(cat.open_intents().unwrap().is_empty());
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("tmp")).unwrap().count(),
+        0
+    );
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("media")).unwrap().count(),
+        1
+    );
+}

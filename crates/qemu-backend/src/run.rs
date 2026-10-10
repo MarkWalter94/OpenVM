@@ -779,6 +779,18 @@ impl QemuRun {
         }
     }
 
+    /// Process alive and QMP usable: running, or shutting down after a
+    /// graceful stop request (the guest may still show a confirmation that
+    /// the user answers from the console).
+    fn ensure_alive(&self) -> Result<()> {
+        match self.state() {
+            ProcessState::Running | ProcessState::Stopping => Ok(()),
+            s => Err(BackendError::StateConflict(format!(
+                "operation not allowed in state {s:?}"
+            ))),
+        }
+    }
+
     fn ensure_run(&self, run_id: RunId) -> Result<()> {
         if run_id != self.run_id {
             return Err(BackendError::StateConflict(format!(
@@ -854,9 +866,32 @@ impl QemuRun {
         Ok(r)
     }
 
-    /// Geometry of the last screenshot, if known.
+    /// Geometry of the last screenshot (or of the last
+    /// [`Self::refresh_geometry`]), if known.
     pub fn current_geometry(&self) -> Option<DisplayGeometry> {
         *lock(&self.geometry)
+    }
+
+    /// Reads the current display geometry with a `screendump` of which only
+    /// the PPM header is parsed, and records it as the current geometry
+    /// (used to accept input from a console without a prior screenshot
+    /// while still rejecting stale coordinates).
+    pub async fn refresh_geometry(&self) -> Result<DisplayGeometry> {
+        self.ensure_alive()?;
+        let g = crate::screenshot::capture_geometry(
+            &self.qmp,
+            &self.private_dir,
+            self.cfg.screendump_timeout,
+        )
+        .await?;
+        *lock(&self.geometry) = Some(g);
+        Ok(g)
+    }
+
+    /// QEMU display socket of the run (`-vnc unix:`), in the private
+    /// directory. Only the supervisor's display proxy connects to it.
+    pub fn display_socket(&self) -> Option<&std::path::Path> {
+        self.command.vnc_socket.as_ref().map(ManagedPath::as_path)
     }
 
     /// Forwards input events. The request must refer to this
@@ -870,7 +905,7 @@ impl QemuRun {
         events: &[InputEvent],
     ) -> Result<()> {
         self.ensure_run(run_id)?;
-        self.ensure_running()?;
+        self.ensure_alive()?;
         validate_events(geometry, events)?;
         if let Some(g) = *lock(&self.geometry)
             && g != geometry
@@ -902,7 +937,7 @@ impl QemuRun {
     pub async fn release_all_input(&self, run_id: RunId) -> Result<usize> {
         self.ensure_run(run_id)?;
         let events = lock(&self.pressed).take_release_events();
-        if events.is_empty() || !matches!(self.state(), ProcessState::Running) {
+        if events.is_empty() || self.ensure_alive().is_err() {
             return Ok(0);
         }
         self.qmp.input_send_event(&events).await?;

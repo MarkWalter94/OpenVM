@@ -19,7 +19,7 @@ F1 streams delivered so far, each with its evidence file under `docs/verificatio
 - Supervisor service with authenticated local IPC, real composition root and a headless end-to-end run against real QEMU (`lightvm-service`).
 - MCP server spike on the official Rust SDK pinned to protocol revision 2025-11-25 (`lightvm-mcp`), licence inventory, CI workflow validated locally.
 
-Since then the QEMU backend passed 20 real start/stop cycles without orphan processes (`F1-03`), and the desktop UI now launches the supervisor as a child process and talks to it over IPC, including a UI-crash test with a real VM (`F1-09`). These results do not count towards the F1 exit criterion until F0 is closed. The same 20 cycles also pass through the supervisor (IPC to core to QEMU), the live ISO reaches the desktop with the `Skylake-Client-v4` CPU model, and the desktop UI evidence is recorded (`F1-05`). The desktop UI has a Settings page (supervisor folders chosen with a folder picker, behaviour on abnormal UI exit, preferred renderer) and per-VM settings for vCPU, RAM, disk and execution limits (CPU cap, memory margin, storage budget) enforced by the supervisor through the Windows Job Object (`F1-10`); `lightvm-desktop --open-vm NAME [--create] [--cpu-max N] ...` opens a VM from the command line. Still open in F1: cold-start and RDP measurements, CI on GitHub, Linux process containment (R2a), and moving the console off its direct QMP connection (F2). To close F0: the physical keyboard test (P-4, script ready in `apps/desktop/scripts/keyboard-test-u4.ps1`) and the Windows part of the second-user test (P-5).
+Since then the QEMU backend passed 20 real start/stop cycles without orphan processes (`F1-03`), and the desktop UI now launches the supervisor as a child process and talks to it over IPC, including a UI-crash test with a real VM (`F1-09`). These results do not count towards the F1 exit criterion until F0 is closed. The same 20 cycles also pass through the supervisor (IPC to core to QEMU), the live ISO reaches the desktop with the `Skylake-Client-v4` CPU model, and the desktop UI evidence is recorded (`F1-05`). The desktop UI has a Settings page (supervisor folders chosen with a folder picker, behaviour on abnormal UI exit, preferred renderer) and per-VM settings for vCPU, RAM, disk and execution limits (CPU cap, memory margin, storage budget) enforced by the supervisor through the Windows Job Object (`F1-10`); `lightvm-desktop --open-vm NAME [--create] [--cpu-max N] ...` opens a VM from the command line. Still open in F1: cold-start and RDP measurements, CI on GitHub, Linux process containment (R2a). F2 (manual alpha) work is in progress: wizard, ISO import, console through the supervisor with a per-run display ticket, VM deletion, experimental installer and user guide (`docs/STATUS.md`, `F2-01`…`F2-03`). To close F0: the physical keyboard test (P-4, script ready in `apps/desktop/scripts/keyboard-test-u4.ps1`) and the Windows part of the second-user test (P-5).
 
 ## Repository layout
 
@@ -35,6 +35,14 @@ Since then the QEMU backend passed 20 real start/stop cycles without orphan proc
 | `crates/rfb-client` | Read-only RFB 3.8 client used by the UI |
 | `spikes/` | F0 feasibility probes, kept for reference |
 | `docs/` | Roadmap, status, architecture, security, ADRs, verification evidence |
+
+## Install (alpha)
+
+An experimental per-user package for Windows 11 x64 is built with `packaging/windows/build-package.ps1` (output in `dist/`, not in the repository): `LightVM-<version>-windows-x64.zip` with its SHA-256 file, and a per-user Inno Setup `setup.exe` when Inno Setup 6 is installed on the build machine. It installs into `%LOCALAPPDATA%\Programs\LightVM` without administrator rights and never touches your VMs on uninstall. **The binaries are not code-signed** (ADR-0020) and **QEMU is not included**: QEMU 11.1.0 is installed separately and verified against the approved hashes (ADR-0010). Step-by-step instructions, requirements (virtualization and Windows Hypervisor Platform) and known limitations: [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md). Packaging evidence: [`docs/verification/F2-03-packaging-guide-ci.md`](docs/verification/F2-03-packaging-guide-ci.md).
+
+## Usage
+
+Start **LightVM** from the Start Menu, point **Settings → QEMU distribution** to the QEMU folder, then create a VM with the wizard on the Dashboard, import the Ubuntu ISO, start it and install Ubuntu in the built-in console. The VMs are stored in `%LOCALAPPDATA%\LightVM\catalog` and are found again when LightVM is reopened. The full walkthrough, from requirements to Emergency Stop and deleting a VM, is in [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md).
 
 ## Building
 

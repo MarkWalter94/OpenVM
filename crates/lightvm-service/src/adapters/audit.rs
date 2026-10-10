@@ -2,9 +2,16 @@
 //! ([`lightvm_proto::AuditEvent`]), append-only, in the user profile.
 //!
 //! Events arrive from the core already stripped of sensitive payloads (no
-//! typed text, tokens, host paths or guest content). Each line is written and
-//! synced before returning: if the write fails the core counts the error and,
-//! for events that precede an effect, rejects the operation.
+//! typed text, tokens, host paths or guest content). Each line is written
+//! before returning: if the write fails the core counts the error and, for
+//! events that precede an effect, rejects the operation. Every line is also
+//! synced to disk (`sync_data`) except the `vm_input` lines (three per
+//! console input batch: accepted, forwarded, outcome): they are written to
+//! the file like the others and reach the disk with the next synced line
+//! (any lifecycle, configuration or denial event), so typing in the console
+//! does not cost three disk flushes per key (F2-01 measurements). A crash of
+//! the service loses nothing (the lines are in the OS cache); a power loss
+//! may lose the last input lines, never a lifecycle line.
 //!
 //! The `seq` number restarts from 1 at every supervisor start: lines from
 //! different starts are told apart by `at` (each line is a full `AuditEvent`).
@@ -13,7 +20,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use lightvm_proto::{AuditEvent, PublicError};
+use lightvm_proto::{AuditAction, AuditEvent, PublicError};
 use vm_core::ports::AuditSink;
 
 /// Name of the audit file in the user's state directory.
@@ -76,7 +83,13 @@ impl AuditSink for FileAuditSink {
         let line = serde_json::to_string(event)
             .map_err(|_| PublicError::infrastructure("audit: event not serializable"))?;
         writeln!(self.file, "{line}")
-            .and_then(|()| self.file.sync_data())
+            .and_then(|()| {
+                if event.action == AuditAction::VmInput {
+                    Ok(())
+                } else {
+                    self.file.sync_data()
+                }
+            })
             .map_err(|_| PublicError::infrastructure("audit: write failed"))
     }
 }

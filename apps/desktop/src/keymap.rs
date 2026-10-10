@@ -16,15 +16,28 @@
 use egui::Key;
 
 /// Keyboard layouts declared for the guest.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum KeyboardLayout {
     /// US English (ANSI/ISO).
+    #[default]
     Us,
     /// Italian (ISO, with the `<>` key to the left of Z).
     It,
 }
 
 impl KeyboardLayout {
+    /// All declared layouts, in the order shown.
+    pub const ALL: [Self; 2] = [Self::Us, Self::It];
+
+    /// Name shown in the choice menus.
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Us => "US English",
+            Self::It => "Italian",
+        }
+    }
+
     /// Short name.
     pub fn label(self) -> &'static str {
         match self {

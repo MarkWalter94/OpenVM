@@ -26,17 +26,19 @@
 //! recomputes the hash through a handle with `FILE_SHARE_READ` only before
 //! use.
 
+use std::fs::File;
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use crate::catalog::{Catalog, IntentSpec};
+use crate::catalog::{Catalog, Intent, IntentSpec};
 use crate::enums::{IntentKind, MediaKind, MediaStatus, TargetKind};
 use crate::error::{Result, StorageError};
 use crate::fsx::{self, Share};
 use crate::ids::MediaId;
 use crate::layout::CatalogLayout;
+use crate::paths::ManagedPath;
 use crate::records::MediaRecord;
 use crate::time::now_rfc3339;
 
@@ -52,6 +54,152 @@ pub struct MediaCheck {
     pub readonly_restored: bool,
 }
 
+/// Checks applied by [`Catalog::approve_media_checked`] on the opened source
+/// handle, so that the bytes checked are the bytes copied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MediaLimits {
+    /// Maximum size in bytes ([`StorageError::ResourceLimit`] above it).
+    pub max_bytes: u64,
+    /// Requires the ISO 9660 (`CD001`) or UDF (`BEA01`) signature of the
+    /// first volume descriptor ([`StorageError::Unsupported`] with
+    /// [`NOT_OPTICAL_IMAGE`] otherwise).
+    pub optical_signature: bool,
+}
+
+impl MediaLimits {
+    /// No limit (behaviour of [`Catalog::approve_media`]).
+    pub const NONE: Self = Self {
+        max_bytes: u64::MAX,
+        optical_signature: false,
+    };
+}
+
+/// Message of the [`StorageError::Unsupported`] returned for a source without
+/// an optical image signature.
+pub const NOT_OPTICAL_IMAGE: &str = "the medium is not an ISO 9660 or UDF image";
+
+/// Offset of the identifier of the first volume descriptor (sector 16 of
+/// 2048 bytes, after the type byte): `CD001` (ISO 9660) or `BEA01` (UDF).
+const VOLUME_DESCRIPTOR_ID_OFFSET: u64 = 16 * 2048 + 1;
+
+/// Name of the source in errors (never the user's path).
+const SOURCE_LABEL: &str = "media source";
+
+#[derive(Debug)]
+struct ImportMeta {
+    intent: Intent,
+    media_id: MediaId,
+    final_rel: ManagedPath,
+    kind: MediaKind,
+    declared_origin: String,
+}
+
+/// Import started by [`Catalog::begin_media_import`]: open source handle and
+/// reserved temporary file. [`Self::copy`] needs no catalog and can run on
+/// another thread while the catalog serves other requests.
+#[derive(Debug)]
+pub struct MediaImportJob {
+    src: File,
+    source: PathBuf,
+    expected_len: u64,
+    limits: MediaLimits,
+    meta: ImportMeta,
+}
+
+/// Outcome of [`MediaImportJob::copy`], to give to
+/// [`Catalog::finish_media_import`].
+#[derive(Debug)]
+pub struct CopiedMedia {
+    meta: ImportMeta,
+    /// SHA-256 and size of the copied bytes.
+    outcome: Result<(String, u64)>,
+}
+
+impl MediaImportJob {
+    /// Size of the source measured on the handle.
+    pub fn size_bytes(&self) -> u64 {
+        self.expected_len
+    }
+
+    /// Copies the source into the temporary file (`CREATE_NEW`, exclusive)
+    /// and computes the SHA-256 of the copied bytes in the same read; checks
+    /// the optical signature on those bytes if required. Synced before
+    /// returning. Never touches the catalog database.
+    pub fn copy(self) -> CopiedMedia {
+        let Self {
+            mut src,
+            source,
+            expected_len,
+            limits,
+            meta,
+        } = self;
+        let outcome = copy_and_hash(&mut src, &source, &meta.intent.temp_path, limits).and_then(
+            |(sha, size)| {
+                if size == expected_len {
+                    Ok((sha, size))
+                } else {
+                    Err(StorageError::IntegrityMismatch {
+                        path: SOURCE_LABEL.into(),
+                        detail: format!("read {size} bytes, expected {expected_len}"),
+                    })
+                }
+            },
+        );
+        drop(src);
+        CopiedMedia { meta, outcome }
+    }
+}
+
+fn copy_and_hash(
+    src: &mut File,
+    source: &Path,
+    temp: &Path,
+    limits: MediaLimits,
+) -> Result<(String, u64)> {
+    let mut dst = fsx::create_new_exclusive(temp)?;
+    let mut h = Sha256::new();
+    let mut buf = vec![0u8; 1 << 16];
+    let mut total = 0u64;
+    let mut sig = [0u8; 5];
+    let sig_end = VOLUME_DESCRIPTOR_ID_OFFSET + sig.len() as u64;
+    loop {
+        let n = src
+            .read(&mut buf)
+            .map_err(|e| StorageError::io(source, e))?;
+        if n == 0 {
+            break;
+        }
+        // Bytes of the signature that fall in this block.
+        let end = total.saturating_add(n as u64);
+        let lo = VOLUME_DESCRIPTOR_ID_OFFSET.max(total);
+        let hi = sig_end.min(end);
+        for off in lo..hi {
+            let (Ok(si), Ok(bi)) = (
+                usize::try_from(off - VOLUME_DESCRIPTOR_ID_OFFSET),
+                usize::try_from(off - total),
+            ) else {
+                break;
+            };
+            sig[si] = buf[bi];
+        }
+        h.update(&buf[..n]);
+        dst.write_all(&buf[..n])
+            .map_err(|e| StorageError::io(temp, e))?;
+        total = end;
+        if total > limits.max_bytes {
+            return Err(StorageError::ResourceLimit(format!(
+                "medium over the limit of {} bytes",
+                limits.max_bytes
+            )));
+        }
+    }
+    if limits.optical_signature && (total < sig_end || (&sig != b"CD001" && &sig != b"BEA01")) {
+        return Err(StorageError::Unsupported(NOT_OPTICAL_IMAGE));
+    }
+    dst.sync_all().map_err(|e| StorageError::io(temp, e))?;
+    Ok((crate::hex(&h.finalize()), total))
+}
+
 impl Catalog {
     /// Approves a medium: read-only managed copy, hash and registry row.
     /// `source` is the file chosen by the user with the native picker (never
@@ -64,6 +212,41 @@ impl Catalog {
         kind: MediaKind,
         declared_origin: &str,
     ) -> Result<MediaRecord> {
+        self.approve_media_checked(source, kind, declared_origin, MediaLimits::NONE)
+    }
+
+    /// [`Self::approve_media`] with size and format checks on the opened
+    /// handle: the size is checked before copying, the signature on the
+    /// bytes actually copied (the copy is discarded if it is missing).
+    /// The copy reads the whole file once (sequential, 64 KiB blocks): for a
+    /// multi-GiB ISO it takes as long as the disk needs to copy it. The same
+    /// procedure in three steps, with the copy outside the catalog, is
+    /// [`Self::begin_media_import`] → [`MediaImportJob::copy`] →
+    /// [`Self::finish_media_import`].
+    pub fn approve_media_checked(
+        &mut self,
+        source: &Path,
+        kind: MediaKind,
+        declared_origin: &str,
+        limits: MediaLimits,
+    ) -> Result<MediaRecord> {
+        let job = self.begin_media_import(source, kind, declared_origin, limits)?;
+        self.finish_media_import(job.copy())
+    }
+
+    /// First step of an import: checks the declared origin, opens the source
+    /// once (shared for reading only, without following a reparse point),
+    /// checks type and size on the handle and records the `import_media`
+    /// intent. The returned job holds the handle: nobody can modify the
+    /// source until it is dropped. A job never finished leaves a `pending`
+    /// intent that reconciliation rolls back at the next start.
+    pub fn begin_media_import(
+        &mut self,
+        source: &Path,
+        kind: MediaKind,
+        declared_origin: &str,
+        limits: MediaLimits,
+    ) -> Result<MediaImportJob> {
         if declared_origin.len() > MAX_DECLARED_ORIGIN
             || declared_origin.chars().any(char::is_control)
         {
@@ -71,12 +254,17 @@ impl Catalog {
                 "declared origin too long or contains control characters".into(),
             ));
         }
-        let label = "media source";
-        let mut src = fsx::open_regular(source, Share::ReadOnly, label)?;
+        let src = fsx::open_regular(source, Share::ReadOnly, SOURCE_LABEL)?;
         let expected_len = src
             .metadata()
             .map_err(|e| StorageError::io(source, e))?
             .len();
+        if expected_len > limits.max_bytes {
+            return Err(StorageError::ResourceLimit(format!(
+                "medium of {expected_len} bytes over the limit of {}",
+                limits.max_bytes
+            )));
+        }
         let media_id = MediaId::new_v7();
         let final_rel = CatalogLayout::media_file(&media_id, "iso")?;
         let intent = self.begin_intent(IntentSpec {
@@ -88,53 +276,46 @@ impl Catalog {
             final_path: Some(final_rel.clone()),
             read_only: true,
         })?;
-        let result = (|| -> Result<MediaRecord> {
-            let (sha256, size) = {
-                let mut dst = fsx::create_new_exclusive(&intent.temp_path)?;
-                let mut h = Sha256::new();
-                let mut buf = vec![0u8; 1 << 16];
-                let mut total = 0u64;
-                loop {
-                    let n = src
-                        .read(&mut buf)
-                        .map_err(|e| StorageError::io(source, e))?;
-                    if n == 0 {
-                        break;
-                    }
-                    h.update(&buf[..n]);
-                    dst.write_all(&buf[..n])
-                        .map_err(|e| StorageError::io(&intent.temp_path, e))?;
-                    total = total.saturating_add(n as u64);
-                }
-                dst.sync_all()
-                    .map_err(|e| StorageError::io(&intent.temp_path, e))?;
-                (crate::hex(&h.finalize()), total)
-            };
-            if size != expected_len {
-                return Err(StorageError::IntegrityMismatch {
-                    path: label.into(),
-                    detail: format!("read {size} bytes, expected {expected_len}"),
-                });
-            }
-            drop(src);
-            self.mark_applied(&intent)?;
-            let record = MediaRecord {
+        Ok(MediaImportJob {
+            src,
+            source: source.to_path_buf(),
+            expected_len,
+            limits,
+            meta: ImportMeta {
+                intent,
                 media_id,
-                sha256,
-                size_bytes: size,
+                final_rel,
                 kind,
                 declared_origin: declared_origin.to_owned(),
+            },
+        })
+    }
+
+    /// Last step of an import: publishes the copy (read-only, without
+    /// overwriting) and records the registry row with the intent commit. If
+    /// the copy failed, or publishing fails, the intent is aborted and the
+    /// temporary removed.
+    pub fn finish_media_import(&mut self, copied: CopiedMedia) -> Result<MediaRecord> {
+        let CopiedMedia { meta, outcome } = copied;
+        let result = outcome.and_then(|(sha256, size)| {
+            self.mark_applied(&meta.intent)?;
+            let record = MediaRecord {
+                media_id: meta.media_id,
+                sha256,
+                size_bytes: size,
+                kind: meta.kind,
+                declared_origin: meta.declared_origin.clone(),
                 approved_at: now_rfc3339(),
-                managed_path: final_rel.clone(),
+                managed_path: meta.final_rel.clone(),
                 status: MediaStatus::Approved,
             };
-            self.commit(&intent, |tx| tx.insert_media(&record))?;
+            self.commit(&meta.intent, |tx| tx.insert_media(&record))?;
             Ok(record)
-        })();
+        });
         if result.is_err() {
             // A failed abort leaves the intent open: reconciliation resolves
             // it at the next startup.
-            let _ = self.abort(&intent);
+            let _ = self.abort(&meta.intent);
         }
         result
     }
