@@ -299,6 +299,7 @@ fn spec(caps: &HostCapabilities, paths: &LabPaths, run_id: RunId) -> VmLaunchSpe
         }),
         install_media: Some(paths.iso_id),
         data_media: None,
+        limits: qemu_backend::JobLimits::default(),
     }
 }
 
@@ -960,4 +961,90 @@ fn reale_boot_live_cpu_nominale() {
     let closed = rt.block_on(run.close()).unwrap();
     assert!(closed.job_closed);
     log.line(format!("{n} screendump; arresto {:?}", report.phase));
+}
+
+/// ADR-0017: limiti del Job Object applicati a QEMU reale. (1) Tetto CPU e
+/// memoria del job = RAM + 1024 MiB: riletti dal job, VM avviata, picco
+/// registrato. (2) Memoria del job inferiore alla RAM del guest (512 MiB contro
+/// 2048 MiB): QEMU non deve restare in esecuzione oltre il limite.
+#[test]
+#[ignore = "richiede QEMU reale: impostare LIGHTVM_QEMU_DIR"]
+fn reale_limiti_job_cpu_e_memoria() {
+    let _g = SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let lab = require_lab!();
+    let mut log = Log::new(&lab, "limiti-job");
+    let paths = lab_paths(&lab, &mut log);
+    let caps = probe_caps(&lab, &paths, &mut log);
+    let rt = rt();
+
+    // (1) Limiti compatibili con la VM.
+    let run_id = RunId::new_v7();
+    paths.prepare_run(&run_id);
+    let mut s = spec(&caps, &paths, run_id);
+    s.limits = qemu_backend::JobLimits {
+        cpu_rate: Some(300),
+        job_memory_bytes: Some((2048 + 1024) << 20),
+    };
+    let run = rt
+        .block_on(QemuRun::start(&caps, &s, &paths, RunConfig::default()))
+        .expect("avvio con limiti");
+    std::thread::sleep(Duration::from_secs(5));
+    assert_eq!(run.state(), ProcessState::Running);
+    let r = run.limit_report().unwrap();
+    log.line(format!("limiti applicati: {r:?}"));
+    assert_eq!(r.cpu_rate, Some(300));
+    assert_eq!(r.job_memory_bytes, Some((2048 + 1024) << 20));
+    assert!(r.peak_job_memory_bytes > 0);
+    assert!(!r.memory_limit_reached());
+    let id = run.identity();
+    let report = rt
+        .block_on(run.emergency_stop(Duration::from_secs(10)))
+        .unwrap();
+    assert_eq!(report.active_after, 0);
+    let _ = rt.block_on(run.close()).unwrap();
+    assert_no_orphan(&id);
+
+    // (2) Memoria del job sotto la RAM del guest.
+    let run_id = RunId::new_v7();
+    paths.prepare_run(&run_id);
+    let mut s = spec(&caps, &paths, run_id);
+    s.limits = qemu_backend::JobLimits {
+        cpu_rate: None,
+        job_memory_bytes: Some(512 << 20),
+    };
+    let t0 = Instant::now();
+    match rt.block_on(QemuRun::start(&caps, &s, &paths, RunConfig::default())) {
+        Err(e) => log.line(format!(
+            "memoria del job 512 MiB: avvio rifiutato dopo {:?}: {e}",
+            t0.elapsed()
+        )),
+        Ok(run) => {
+            let id = run.identity();
+            let mut uscito = None;
+            while t0.elapsed() < Duration::from_secs(60) {
+                if let ProcessState::Exited { .. } = run.state() {
+                    uscito = Some(t0.elapsed());
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            let r = run.limit_report().unwrap();
+            log.line(format!(
+                "memoria del job 512 MiB: stato {:?}, uscita dopo {uscito:?}, rapporto {r:?}, limite raggiunto {}",
+                run.state(),
+                r.memory_limit_reached()
+            ));
+            if uscito.is_none() {
+                let _ = rt.block_on(run.emergency_stop(Duration::from_secs(10)));
+                let _ = rt.block_on(run.close());
+                assert_no_orphan(&id);
+                panic!("QEMU ancora in esecuzione oltre il limite di memoria del job");
+            }
+            assert!(r.peak_job_memory_bytes <= 512 << 20);
+            let _ = rt.block_on(run.close());
+            assert_no_orphan(&id);
+        }
+    }
 }

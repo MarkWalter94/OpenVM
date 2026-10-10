@@ -72,7 +72,8 @@ pub use paths::{ManagedPath, ManagedPaths};
 pub use prepare::{HostResources, RunDirs};
 pub use probe::{AcceleratorStatus, HostCapabilities, ProbeConfig};
 pub use process::{
-    ContainmentMechanism, ExitCodeClass, IdentityStatus, ProcessContainer, ProcessIdentity,
+    ContainmentMechanism, ExitCodeClass, IdentityStatus, JobLimitReport, JobLimits,
+    ProcessContainer, ProcessIdentity,
 };
 pub use qmp::{QmpClient, QmpConfig, QmpEvent};
 pub use run::{

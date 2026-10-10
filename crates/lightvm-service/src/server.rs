@@ -857,6 +857,15 @@ async fn dispatch(
         Request::ListVms => SupervisorRequest::ListVms,
         Request::VmStatus { vm_id } => SupervisorRequest::VmStatus(vm_id),
         Request::CreateVm { config } => SupervisorRequest::CreateVm(Box::new(config)),
+        Request::UpdateVm {
+            vm_id,
+            expected_revision,
+            config,
+        } => SupervisorRequest::UpdateVm {
+            vm_id,
+            expected_revision,
+            config: Box::new(config),
+        },
         Request::SubmitVm { request } => SupervisorRequest::SubmitVm(Box::new(request)),
         Request::Subscribe => {
             if events.is_none() {

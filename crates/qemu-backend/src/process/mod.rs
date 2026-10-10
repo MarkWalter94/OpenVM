@@ -182,16 +182,72 @@ pub trait ProcessContainer: Send + Sync + fmt::Debug {
     /// Verifica che il processo appartenga al contenitore e che il
     /// contenitore termini i processi alla propria chiusura.
     fn verify_membership(&self, child: &ChildProcess) -> Result<()>;
+
+    /// Limiti applicati e picco di memoria.
+    fn limit_report(&self) -> Result<JobLimitReport>;
 }
 
-/// Crea il contenitore per una nuova esecuzione.
-pub fn new_container() -> Result<Arc<dyn ProcessContainer>> {
+/// Limiti del contenitore, applicati prima dello spawn (ADR-0017).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct JobLimits {
+    /// Tetto CPU rigido in centesimi di punto percentuale di tutti i processori
+    /// logici (1..=10000; 2500 = 25 % della macchina).
+    pub cpu_rate: Option<u32>,
+    /// Memoria massima dell'intero contenitore in byte (QEMU compreso).
+    pub job_memory_bytes: Option<u64>,
+}
+
+impl JobLimits {
+    /// Validazione dei valori.
+    pub fn validate(&self) -> Result<()> {
+        if let Some(r) = self.cpu_rate
+            && !(1..=10_000).contains(&r)
+        {
+            return Err(crate::error::BackendError::invalid(
+                "cpu_rate",
+                "tetto CPU fuori dall'intervallo 1..=10000",
+            ));
+        }
+        if self.job_memory_bytes == Some(0) {
+            return Err(crate::error::BackendError::invalid(
+                "job_memory_bytes",
+                "limite di memoria nullo",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Limiti letti dal contenitore e picco di memoria osservato.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct JobLimitReport {
+    /// Tetto CPU attivo.
+    pub cpu_rate: Option<u32>,
+    /// Memoria massima attiva in byte.
+    pub job_memory_bytes: Option<u64>,
+    /// Picco di memoria del contenitore in byte.
+    pub peak_job_memory_bytes: u64,
+}
+
+impl JobLimitReport {
+    /// `true` se il picco ha raggiunto il limite di memoria (uscita probabile
+    /// per superamento del limite: il job rifiuta le allocazioni oltre).
+    pub fn memory_limit_reached(&self) -> bool {
+        self.job_memory_bytes
+            .is_some_and(|l| self.peak_job_memory_bytes.saturating_add(16 << 20) >= l)
+    }
+}
+
+/// Crea il contenitore per una nuova esecuzione con i limiti indicati.
+pub fn new_container(limits: &JobLimits) -> Result<Arc<dyn ProcessContainer>> {
+    limits.validate()?;
     #[cfg(windows)]
     {
-        Ok(Arc::new(windows::JobContainer::new()?))
+        Ok(Arc::new(windows::JobContainer::new(limits)?))
     }
     #[cfg(not(windows))]
     {
+        let _ = limits;
         // TODO(F1/R2a): cgroup v2 delegato + `cgroup.kill` e
         // `PR_SET_PDEATHSIG(SIGKILL)` da thread di spawn dedicato (F0-07).
         Err(crate::error::BackendError::Unsupported {

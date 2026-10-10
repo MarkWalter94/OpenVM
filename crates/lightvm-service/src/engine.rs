@@ -36,6 +36,14 @@ pub trait VmEngine: Send + 'static {
     fn vm_status(&mut self, caller: &Caller, vm_id: VmId) -> Result<VmSummary, PublicError>;
     /// Creazione di una VM.
     fn create_vm(&mut self, caller: &Caller, config: VmConfig) -> Result<VmRecord, PublicError>;
+    /// Modifica della configurazione di una VM spenta.
+    fn update_vm(
+        &mut self,
+        caller: &Caller,
+        vm_id: VmId,
+        expected_revision: u64,
+        config: VmConfig,
+    ) -> Result<VmRecord, PublicError>;
     /// Azione su una VM: accettazione nella coda del core ed esecuzione.
     fn submit(&mut self, caller: &Caller, req: VmRequest) -> Result<SubmitOutcome, PublicError>;
     /// Registra nel core un Emergency Stop già eseguito dal percorso prioritario.
@@ -68,6 +76,8 @@ fn summary(s: VmStatus) -> VmSummary {
         name: s.name,
         state: s.state,
         run_id: s.run_id,
+        config: s.config,
+        config_revision: s.config_revision,
     }
 }
 
@@ -170,6 +180,18 @@ where
 
     fn create_vm(&mut self, caller: &Caller, config: VmConfig) -> Result<VmRecord, PublicError> {
         self.core.create_vm(caller, config)
+    }
+
+    fn update_vm(
+        &mut self,
+        caller: &Caller,
+        vm_id: VmId,
+        expected_revision: u64,
+        config: VmConfig,
+    ) -> Result<VmRecord, PublicError> {
+        self.apply_observations();
+        self.core
+            .update_vm_config(caller, vm_id, expected_revision, config)
     }
 
     fn submit(&mut self, caller: &Caller, req: VmRequest) -> Result<SubmitOutcome, PublicError> {

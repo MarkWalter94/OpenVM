@@ -71,6 +71,9 @@ pub trait IdGenerator {
 pub trait CatalogStore {
     /// Inserisce una nuova VM.
     fn insert_vm(&mut self, vm: &VmRecord) -> Result<(), PublicError>;
+    /// Sostituisce configurazione e revisione di una VM esistente se la
+    /// revisione salvata è `expected_revision`.
+    fn update_vm(&mut self, vm: &VmRecord, expected_revision: u64) -> Result<(), PublicError>;
     /// Legge una VM.
     fn get_vm(&self, id: VmId) -> Result<Option<VmRecord>, PublicError>;
     /// Elenca le VM.

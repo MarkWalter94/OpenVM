@@ -451,6 +451,36 @@
           ]
         },
         {
+          "description": "Modifica della configurazione di una VM spenta: risorse e limiti\n(solo UI; il disco si può solo ingrandire).",
+          "type": "object",
+          "properties": {
+            "config": {
+              "description": "Nuova configurazione completa.",
+              "$ref": "#/$defs/VmConfig"
+            },
+            "expected_revision": {
+              "description": "Revisione attesa: una modifica concorrente è rifiutata.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "op": {
+              "type": "string",
+              "const": "update_vm"
+            },
+            "vm_id": {
+              "description": "VM.",
+              "$ref": "#/$defs/VmId"
+            }
+          },
+          "required": [
+            "op",
+            "vm_id",
+            "expected_revision",
+            "config"
+          ]
+        },
+        {
           "description": "Azione su una VM esistente tramite la coda del core (solo UI in F1).\nLa risposta arriva dopo l'esito del backend.",
           "type": "object",
           "properties": {
@@ -704,6 +734,14 @@
             }
           ]
         },
+        "limits": {
+          "description": "Limiti di esecuzione applicati dal supervisor al processo QEMU\n(ADR-0017); assenti nei cataloghi precedenti → valori predefiniti.",
+          "$ref": "#/$defs/VmLimits",
+          "default": {
+            "cpu_max_percent": 100,
+            "memory_margin_mib": 1024
+          }
+        },
         "memory_mib": {
           "description": "Memoria guest in MiB (non è il limite dell'intero processo QEMU).",
           "type": "integer",
@@ -740,6 +778,37 @@
       "type": "string",
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "VmLimits": {
+      "description": "Limiti di esecuzione di una VM (ADR-0017), impostati dall'utente nelle\nimpostazioni della VM e applicati dal supervisor, mai dal client.",
+      "type": "object",
+      "properties": {
+        "cpu_max_percent": {
+          "description": "Tetto di CPU in percentuale della capacità dei vCPU assegnati\n([`MIN_CPU_MAX_PERCENT`]..=100; 100 = nessun tetto). Applicato dal\nsistema operativo all'intero processo QEMU.",
+          "type": "integer",
+          "format": "uint8",
+          "default": 100,
+          "maximum": 255,
+          "minimum": 0
+        },
+        "memory_margin_mib": {
+          "description": "Memoria concessa al processo QEMU oltre la RAM del guest, in MiB\n([`MIN_MEMORY_MARGIN_MIB`]..=[`MAX_MEMORY_MARGIN_MIB`]). Superato il\nlimite, QEMU è terminato e l'uscita è classificata come limite di risorse.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 1024,
+          "minimum": 0
+        },
+        "storage_budget_gib": {
+          "description": "Spazio massimo in GiB per i file della VM oltre al disco principale\n(overlay, baseline, variabili firmware); `None` = nessun budget dedicato.\nVerificato a ogni avvio.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
     },
     "VmName": {
       "description": "Nome VM: etichetta ASCII, non un percorso.",

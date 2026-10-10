@@ -89,6 +89,10 @@ pub struct VmStatus {
     pub state: VmState,
     /// Esecuzione corrente.
     pub run_id: Option<RunId>,
+    /// Configurazione corrente.
+    pub config: VmConfig,
+    /// Revisione della configurazione.
+    pub config_revision: u64,
     /// Geometria corrente del display, se nota.
     pub geometry: Option<DisplayGeometry>,
     /// Operazioni in coda non inoltrate.
@@ -571,12 +575,81 @@ where
         Ok(record)
     }
 
+    /// Modifica la configurazione di una VM spenta (risorse e limiti,
+    /// ADR-0017). Solo l'utente: le sessioni agente non modificano le VM in
+    /// F1 (gli strumenti MCP, F5, resteranno entro i limiti dell'utente).
+    /// Rifiuta VM non spente o con operazioni in corso (`state_conflict`),
+    /// revisione diversa (`state_conflict`), disco ridotto
+    /// (`invalid_argument`) e risorse oltre i limiti effettivi.
+    pub fn update_vm_config(
+        &mut self,
+        caller: &Caller,
+        vm_id: VmId,
+        expected_revision: u64,
+        config: VmConfig,
+    ) -> Result<VmRecord, PublicError> {
+        let actor = caller.actor();
+        let ev = Ev {
+            vm_id: Some(vm_id),
+            session_id: match actor {
+                Actor::Agent { session_id } => Some(session_id),
+                _ => None,
+            },
+            ..Ev::default()
+        };
+        if matches!(caller, Caller::Agent { .. }) {
+            let err = PublicError::permission_denied(
+                "modifica della VM non disponibile alle sessioni agente",
+            );
+            return Err(self.deny(actor, AuditAction::VmConfigure, ev, err));
+        }
+        let Some(rt) = self.vms.get(&vm_id) else {
+            let err = PublicError::not_found("VM inesistente");
+            return Err(self.deny(actor, AuditAction::VmConfigure, ev, err));
+        };
+        let current = rt.record.clone();
+        let check = if rt.state != VmState::Stopped || rt.lifecycle_pending() {
+            Err(
+                PublicError::state_conflict("la VM deve essere spenta e senza operazioni in corso")
+                    .with_detail("state", rt.state.as_str()),
+            )
+        } else if current.config_revision != expected_revision {
+            Err(
+                PublicError::state_conflict("configurazione modificata nel frattempo")
+                    .with_detail("revision", current.config_revision.to_string()),
+            )
+        } else if config.disk_gib < current.config.disk_gib {
+            Err(PublicError::invalid_argument(
+                "riduzione del disco non supportata: si può solo ingrandire",
+            ))
+        } else {
+            validate_config(&config, &self.effective_limits())
+                .and_then(|()| self.check_config_media(&config))
+        };
+        if let Err(err) = check {
+            return Err(self.deny(actor, AuditAction::VmConfigure, ev, err));
+        }
+        let record = VmRecord {
+            config,
+            config_revision: current.config_revision + 1,
+            ..current
+        };
+        self.store.update_vm(&record, expected_revision)?;
+        if let Some(rt) = self.vms.get_mut(&vm_id) {
+            rt.record = record.clone();
+        }
+        self.emit_after(actor, AuditAction::VmConfigure, AuditOutcome::Succeeded, ev);
+        Ok(record)
+    }
+
     fn status_of(rt: &VmRuntime) -> VmStatus {
         VmStatus {
             vm_id: rt.record.id,
             name: rt.record.config.name.clone(),
             state: rt.state,
             run_id: rt.run_id,
+            config: rt.record.config.clone(),
+            config_revision: rt.record.config_revision,
             geometry: rt.geometry,
             queued: rt.queue.len(),
             in_flight: rt.in_flight.iter().map(|p| p.record.id).collect(),

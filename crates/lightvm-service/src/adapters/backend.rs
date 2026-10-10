@@ -34,8 +34,9 @@ use lightvm_proto::{
 use qemu_backend::cmdline::{DiskFormat, DiskSpec};
 use qemu_backend::probe::{ProbeConfig, probe_accelerator, probe_host};
 use qemu_backend::{
-    Accelerator, BackendError, CpuModel, ExitCause, HostCapabilities, MachineType, ManagedPath,
-    ManagedPaths, ProcessState, QemuRun, RunConfig, ShutdownPolicy, VmLaunchSpec, prepare,
+    Accelerator, BackendError, CpuModel, ExitCause, HostCapabilities, JobLimits, MachineType,
+    ManagedPath, ManagedPaths, ProcessState, QemuRun, RunConfig, ShutdownPolicy, VmLaunchSpec,
+    prepare,
 };
 use vm_core::media::VerifiedMedia;
 use vm_core::ports::VmBackend;
@@ -142,12 +143,57 @@ fn total_memory_mib() -> Option<u64> {
     }
 }
 
+/// Processori logici dell'host.
+fn logical_cpus() -> u32 {
+    std::thread::available_parallelism()
+        .map(|n| u32::try_from(n.get()).unwrap_or(u32::MAX))
+        .unwrap_or(1)
+}
+
+/// Limiti del Job Object dai limiti della VM (ADR-0017):
+/// - tetto CPU: `cpu_max_percent` della capacità dei vCPU assegnati, espresso
+///   come quota dell'intera macchina in centesimi di punto percentuale
+///   (`vcpus × percento × 100 / processori logici`); 100 % = nessun tetto;
+/// - memoria del job: RAM guest più `memory_margin_mib`.
+pub fn job_limits(config: &lightvm_proto::VmConfig, logical: u32) -> JobLimits {
+    let l = config.limits;
+    let cpu_rate = (l.cpu_max_percent < 100).then(|| {
+        let rate = u64::from(config.vcpus) * u64::from(l.cpu_max_percent) * 100
+            / u64::from(logical.max(1));
+        u32::try_from(rate.clamp(1, 10_000)).unwrap_or(10_000)
+    });
+    let job_memory_bytes = config
+        .memory_mib
+        .checked_add(u64::from(l.memory_margin_mib))
+        .and_then(|m| m.checked_mul(1 << 20));
+    JobLimits {
+        cpu_rate,
+        job_memory_bytes,
+    }
+}
+
+/// Byte occupati dai file sotto `dir` (ricorsivo, senza seguire collegamenti),
+/// escluso `escluso`.
+fn dir_usage(dir: &Path, escluso: &Path) -> u64 {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    rd.filter_map(Result::ok)
+        .map(|e| {
+            let p = e.path();
+            match std::fs::symlink_metadata(&p) {
+                Ok(m) if m.is_dir() => dir_usage(&p, escluso),
+                Ok(m) if m.is_file() && p != escluso => m.len(),
+                _ => 0,
+            }
+        })
+        .sum()
+}
+
 /// Capacità host per il core a partire dal probe.
 fn host_capacity(caps: &HostCapabilities, free_storage_gib: u64) -> HostCapacity {
     HostCapacity {
-        logical_cpus: std::thread::available_parallelism()
-            .map(|n| u32::try_from(n.get()).unwrap_or(u32::MAX))
-            .unwrap_or(1),
+        logical_cpus: logical_cpus(),
         total_memory_mib: total_memory_mib().unwrap_or(4096),
         reserved_memory_mib: 2048,
         free_storage_gib,
@@ -357,17 +403,33 @@ impl QemuVmBackend {
             CatalogLayout::primary_disk(&vm.id).as_str(),
         );
         let disk = ManagedPath::verify(&path).map_err(|e| public(&e))?;
-        if std::fs::symlink_metadata(&path).is_ok() {
-            return Ok(disk);
-        }
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| io_public("directory della VM", &e))?;
-        }
         let size_mib = vm
             .config
             .disk_gib
             .checked_mul(1024)
             .ok_or_else(|| PublicError::resource_limit("disco fuori intervallo"))?;
+        if std::fs::symlink_metadata(&path).is_ok() {
+            // Disco esistente: portato alla dimensione configurata se è stata
+            // aumentata nelle impostazioni della VM (mai ridotto).
+            if prepare::grow_disk(
+                &self.caps.qemu_img,
+                &disk,
+                DiskFormat::Qcow2,
+                size_mib,
+                prepare::QEMU_IMG_TIMEOUT,
+            )
+            .map_err(|e| public(&e))?
+            {
+                crate::diag!(
+                    "lightvm-service: disco della VM ingrandito a {} GiB",
+                    vm.config.disk_gib
+                );
+            }
+            return Ok(disk);
+        }
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| io_public("directory della VM", &e))?;
+        }
         prepare::create_disk(
             &self.caps.qemu_img,
             &disk,
@@ -437,6 +499,24 @@ impl VmBackend for QemuVmBackend {
                 "esecuzione già attiva per la VM",
             ));
         }
+        if let Some(budget) = vm.config.limits.storage_budget_gib {
+            let vm_dir = managed_abs(
+                &self.setup.catalog_root,
+                CatalogLayout::vm_dir(&vm.id).as_str(),
+            );
+            let primary = managed_abs(
+                &self.setup.catalog_root,
+                CatalogLayout::primary_disk(&vm.id).as_str(),
+            );
+            let used = dir_usage(&vm_dir, &primary);
+            if used > budget << 30 {
+                return Err(
+                    PublicError::resource_limit("budget di storage della VM superato")
+                        .with_detail("used_mib", (used >> 20).to_string())
+                        .with_detail("budget_gib", budget.to_string()),
+                );
+            }
+        }
         let paths = self.prepare(vm, run_id, media)?;
         let spec = VmLaunchSpec {
             run_id,
@@ -451,6 +531,7 @@ impl VmBackend for QemuVmBackend {
             }),
             install_media: vm.config.install_media,
             data_media: vm.config.data_media,
+            limits: job_limits(&vm.config, logical_cpus()),
         };
         let run = self
             .rt
@@ -549,6 +630,15 @@ impl BackendPort for QemuVmBackend {
         let mut out = Vec::new();
         for vm_id in exited {
             if let Some(run) = self.runs.get(&vm_id) {
+                if let Ok(r) = run.limit_report()
+                    && r.memory_limit_reached()
+                {
+                    crate::diag!(
+                        "lightvm-service: QEMU terminato al limite di memoria della VM (picco {} MiB, limite {} MiB)",
+                        r.peak_job_memory_bytes >> 20,
+                        r.job_memory_bytes.unwrap_or(0) >> 20
+                    );
+                }
                 out.push((vm_id, run.observation()));
             }
             self.release(vm_id);
@@ -726,5 +816,56 @@ pub fn unavailable_capacity(free_storage_gib: u64) -> HostCapacity {
         screenshot_available: false,
         input_available: false,
         baseline_available: false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fakes::sample_config;
+    use lightvm_proto::VmLimits;
+
+    #[test]
+    fn limiti_del_job_dai_limiti_della_vm() {
+        let mut c = sample_config("limiti");
+        c.vcpus = 2;
+        c.memory_mib = 2048;
+        // Predefiniti: nessun tetto CPU, memoria = RAM + 1024 MiB.
+        let l = job_limits(&c, 32);
+        assert_eq!(l.cpu_rate, None);
+        assert_eq!(l.job_memory_bytes, Some(3072 << 20));
+        // 50 % di 2 vCPU su 32 processori logici = 1 core = 3,12 % della macchina.
+        c.limits = VmLimits {
+            cpu_max_percent: 50,
+            memory_margin_mib: 512,
+            storage_budget_gib: None,
+        };
+        let l = job_limits(&c, 32);
+        assert_eq!(l.cpu_rate, Some(312));
+        assert_eq!(l.job_memory_bytes, Some(2560 << 20));
+        // Mai sotto 1 né sopra il 100 % della macchina.
+        c.vcpus = 1;
+        c.limits.cpu_max_percent = 5;
+        assert_eq!(job_limits(&c, 1024).cpu_rate, Some(1));
+        c.vcpus = 64;
+        c.limits.cpu_max_percent = 99;
+        assert_eq!(job_limits(&c, 4).cpu_rate, Some(10_000));
+    }
+
+    #[test]
+    fn uso_della_directory_esclude_il_disco_principale() {
+        let d = std::env::temp_dir().join(format!(
+            "lightvm-dir-usage-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::create_dir_all(d.join("overlays")).unwrap();
+        std::fs::write(d.join("primary.qcow2"), vec![0u8; 4096]).unwrap();
+        std::fs::write(d.join("overlays").join("a.qcow2"), vec![0u8; 1000]).unwrap();
+        std::fs::write(d.join("manifest.json"), vec![0u8; 24]).unwrap();
+        assert_eq!(dir_usage(&d, &d.join("primary.qcow2")), 1024);
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

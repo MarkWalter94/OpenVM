@@ -268,7 +268,7 @@ pub(crate) async fn launch(
         ));
     }
     remove_sockets(cmd);
-    let container = new_container()?;
+    let container = new_container(&cmd.limits)?;
     let req = SpawnRequest {
         run_id: cmd.run_id,
         program: cmd.program.clone(),
@@ -633,6 +633,11 @@ impl QemuRun {
     /// Identità del processo QEMU (PID, tempo di creazione, `run_id`).
     pub fn identity(&self) -> ProcessIdentity {
         self.identity
+    }
+
+    /// Limiti applicati al Job Object dell'esecuzione e picco di memoria.
+    pub fn limit_report(&self) -> Result<crate::process::JobLimitReport> {
+        self.emergency.container.limit_report()
     }
 
     /// Acceleratore verificato all'avvio.

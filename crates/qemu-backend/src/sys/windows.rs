@@ -23,10 +23,13 @@ use windows_sys::Win32::Foundation::{
     WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::System::JobObjects::{
-    CreateJobObjectW, IsProcessInJob, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-    JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
-    QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
+    CreateJobObjectW, IsProcessInJob, JOB_OBJECT_CPU_RATE_CONTROL_ENABLE,
+    JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP, JOB_OBJECT_LIMIT_JOB_MEMORY,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+    JOBOBJECT_CPU_RATE_CONTROL_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JobObjectBasicAccountingInformation, JobObjectCpuRateControlInformation,
+    JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
+    TerminateJobObject,
 };
 use windows_sys::Win32::System::Threading::{
     CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DETACHED_PROCESS,
@@ -90,8 +93,19 @@ pub(crate) struct JobAccounting {
     pub(crate) total_processes: u32,
 }
 
+/// Limiti letti dal job: tetto CPU (centesimi di punto percentuale di tutti
+/// i processori logici), memoria massima del job e picco osservato, in byte.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct JobLimitInfo {
+    pub(crate) cpu_rate: Option<u32>,
+    pub(crate) job_memory: Option<u64>,
+    pub(crate) peak_job_memory: u64,
+}
+
 impl Job {
-    pub(crate) fn create() -> io::Result<Job> {
+    /// Job con `KILL_ON_JOB_CLOSE` e, se indicati, memoria massima del job e
+    /// tetto CPU rigido, applicati prima che qualunque processo vi entri.
+    pub(crate) fn create(cpu_rate: Option<u32>, job_memory: Option<u64>) -> io::Result<Job> {
         // SAFETY: attributi di sicurezza nulli (handle non ereditabile) e nome
         // nullo sono valori ammessi da CreateJobObjectW.
         let h = unsafe { CreateJobObjectW(null(), null()) };
@@ -99,6 +113,15 @@ impl Job {
         // SAFETY: struttura POD di soli interi; lo zero è un valore valido.
         let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
         info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if let Some(m) = job_memory {
+            info.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_JOB_MEMORY;
+            info.JobMemoryLimit = usize::try_from(m).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "limite di memoria fuori intervallo",
+                )
+            })?;
+        }
         // SAFETY: `info` è una struttura valida della dimensione esatta della
         // classe JobObjectExtendedLimitInformation; l'handle è vivo.
         check(unsafe {
@@ -109,7 +132,67 @@ impl Job {
                 size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
             )
         })?;
+        if let Some(rate) = cpu_rate {
+            job.set_cpu_hard_cap(rate)?;
+        }
         Ok(job)
+    }
+
+    /// Imposta il tetto CPU rigido del job (`rate` in centesimi di punto
+    /// percentuale dell'intero sistema, 1..=10000).
+    fn set_cpu_hard_cap(&self, rate: u32) -> io::Result<()> {
+        // SAFETY: struttura POD di soli interi; lo zero è un valore valido.
+        let mut info: JOBOBJECT_CPU_RATE_CONTROL_INFORMATION = unsafe { zeroed() };
+        info.ControlFlags =
+            JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP;
+        info.Anonymous.CpuRate = rate;
+        // SAFETY: `info` è una struttura valida della dimensione esatta della
+        // classe JobObjectCpuRateControlInformation; l'handle è vivo.
+        check(unsafe {
+            SetInformationJobObject(
+                raw(&self.handle),
+                JobObjectCpuRateControlInformation,
+                (&info as *const JOBOBJECT_CPU_RATE_CONTROL_INFORMATION).cast(),
+                size_of::<JOBOBJECT_CPU_RATE_CONTROL_INFORMATION>() as u32,
+            )
+        })
+    }
+
+    /// Limiti effettivamente applicati al job e picco di memoria osservato.
+    pub(crate) fn limit_info(&self) -> io::Result<JobLimitInfo> {
+        // SAFETY: struttura POD; lo zero è valido.
+        let mut e: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
+        // SAFETY: buffer della dimensione esatta della classe, handle vivo.
+        check(unsafe {
+            QueryInformationJobObject(
+                raw(&self.handle),
+                JobObjectExtendedLimitInformation,
+                (&mut e as *mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                null_mut(),
+            )
+        })?;
+        // SAFETY: struttura POD; lo zero è valido.
+        let mut c: JOBOBJECT_CPU_RATE_CONTROL_INFORMATION = unsafe { zeroed() };
+        // SAFETY: buffer della dimensione esatta della classe, handle vivo.
+        check(unsafe {
+            QueryInformationJobObject(
+                raw(&self.handle),
+                JobObjectCpuRateControlInformation,
+                (&mut c as *mut JOBOBJECT_CPU_RATE_CONTROL_INFORMATION).cast(),
+                size_of::<JOBOBJECT_CPU_RATE_CONTROL_INFORMATION>() as u32,
+                null_mut(),
+            )
+        })?;
+        let hard = JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP;
+        Ok(JobLimitInfo {
+            // SAFETY: l'unione contiene soli `u32`: qualunque valore letto è
+            // valido; con HARD_CAP attivo il campo significativo è CpuRate.
+            cpu_rate: (c.ControlFlags & hard == hard).then_some(unsafe { c.Anonymous.CpuRate }),
+            job_memory: (e.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_JOB_MEMORY != 0)
+                .then_some(e.JobMemoryLimit as u64),
+            peak_job_memory: e.PeakJobMemoryUsed as u64,
+        })
     }
 
     fn raw_handle(&self) -> HANDLE {
@@ -507,8 +590,24 @@ mod tests {
     }
 
     #[test]
+    fn job_con_limiti_cpu_e_memoria() {
+        let job = Job::create(Some(2500), Some(512 << 20)).unwrap();
+        let i = job.limit_info().unwrap();
+        assert_eq!(i.cpu_rate, Some(2500));
+        assert_eq!(i.job_memory, Some(512 << 20));
+        assert_eq!(i.peak_job_memory, 0);
+        assert_eq!(
+            job.limit_flags().unwrap() & KILL_ON_JOB_CLOSE,
+            KILL_ON_JOB_CLOSE
+        );
+        let senza = Job::create(None, None).unwrap().limit_info().unwrap();
+        assert_eq!(senza.cpu_rate, None);
+        assert_eq!(senza.job_memory, None);
+    }
+
+    #[test]
     fn job_con_kill_on_close() {
-        let job = Job::create().unwrap();
+        let job = Job::create(None, None).unwrap();
         assert_eq!(
             job.limit_flags().unwrap() & KILL_ON_JOB_CLOSE,
             KILL_ON_JOB_CLOSE

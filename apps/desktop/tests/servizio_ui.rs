@@ -22,6 +22,19 @@ fn vm(nome: &str, state: VmState) -> VmSummary {
         name: VmName::parse(nome).unwrap(),
         state,
         run_id: None,
+        config: lightvm_proto::VmConfig {
+            name: VmName::parse(nome).unwrap(),
+            guest_os: lightvm_proto::GuestOs::UbuntuLtsX86_64,
+            vcpus: 2,
+            memory_mib: 2048,
+            disk_gib: 16,
+            network: lightvm_proto::NetworkProfile::Offline,
+            install_media: None,
+            data_media: None,
+            firmware: lightvm_proto::Firmware::Uefi,
+            limits: Default::default(),
+        },
+        config_revision: 1,
     }
 }
 

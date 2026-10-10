@@ -84,6 +84,7 @@ pub fn sample_config(name: &str) -> VmConfig {
         install_media: None,
         data_media: None,
         firmware: lightvm_proto::Firmware::Uefi,
+        limits: Default::default(),
     }
 }
 
@@ -106,6 +107,16 @@ impl CatalogStore for MemoryStore {
     }
     fn get_vm(&self, id: VmId) -> Result<Option<VmRecord>, PublicError> {
         Ok(self.0.vms.get(&id).cloned())
+    }
+    fn update_vm(&mut self, vm: &VmRecord, expected_revision: u64) -> Result<(), PublicError> {
+        match self.0.vms.get_mut(&vm.id) {
+            Some(v) if v.config_revision == expected_revision => {
+                *v = vm.clone();
+                Ok(())
+            }
+            Some(_) => Err(PublicError::state_conflict("revisione diversa")),
+            None => Err(PublicError::not_found("VM inesistente")),
+        }
     }
     fn list_vms(&self) -> Result<Vec<VmRecord>, PublicError> {
         Ok(self.0.vms.values().cloned().collect())

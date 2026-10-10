@@ -173,6 +173,7 @@ fn ruolo_ui(qemu_dir: PathBuf) -> ! {
         install_media: None,
         data_media: None,
         firmware: Firmware::Uefi,
+        limits: Default::default(),
     };
     assert!(s.invia(Comando::Crea(Box::new(vm))));
     attendi(&s, "creazione", |s| s.stato().vms.len() == 1);

@@ -32,6 +32,7 @@ fn sample_config() -> VmConfig {
         install_media: Some(MediaId::from_unix_millis(1, [1; 10])),
         data_media: None,
         firmware: Firmware::Uefi,
+        limits: Default::default(),
     }
 }
 

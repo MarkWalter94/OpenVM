@@ -42,6 +42,8 @@ pub enum AuditAction {
     SessionTerminate,
     /// Operazione scartata prima dell'inoltro.
     OperationDiscard,
+    /// Modifica della configurazione di una VM (risorse e limiti).
+    VmConfigure,
 }
 
 /// Esito registrato.

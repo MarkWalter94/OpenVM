@@ -228,6 +228,11 @@
           "description": "Operazione scartata prima dell'inoltro.",
           "type": "string",
           "const": "operation_discard"
+        },
+        {
+          "description": "Modifica della configurazione di una VM (risorse e limiti).",
+          "type": "string",
+          "const": "vm_configure"
         }
       ]
     },
