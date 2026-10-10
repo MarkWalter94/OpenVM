@@ -22,7 +22,9 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use lightvm_proto::ipc::{Request, ResponseBody, ServerMessage, ServiceEvent, VmSummary};
+use lightvm_proto::ipc::{
+    ParentLossPolicy, Request, ResponseBody, ServerMessage, ServiceEvent, VmSummary,
+};
 use lightvm_proto::{
     OperationId, OperationStatus, ReplyError, VmAction, VmConfig, VmId, VmRequest,
 };
@@ -49,6 +51,8 @@ pub struct ConfigServizio {
     /// File di audit; senza, il servizio usa il profilo utente
     /// (`%LOCALAPPDATA%\LightVM\audit.jsonl` su Windows).
     pub audit_log: Option<PathBuf>,
+    /// Sorte delle VM se la UI termina senza arresto controllato.
+    pub politica: ParentLossPolicy,
 }
 
 impl ConfigServizio {
@@ -69,6 +73,19 @@ impl ConfigServizio {
         }
         if let Some(a) = &self.audit_log {
             c.arg("--audit-log").arg(a);
+        }
+        match self.politica {
+            ParentLossPolicy::KillVms => {
+                c.args(["--parent-loss-policy", "kill-vms"]);
+            }
+            ParentLossPolicy::ShutdownVms { powerdown_s } => {
+                c.args(["--parent-loss-policy", "shutdown-vms"])
+                    .arg("--parent-loss-powerdown-s")
+                    .arg(powerdown_s.to_string());
+            }
+            ParentLossPolicy::KeepVms => {
+                c.args(["--parent-loss-policy", "keep-vms"]);
+            }
         }
         c.args(["--parent-watch", "stdin"])
             .stdin(Stdio::piped())
@@ -93,6 +110,8 @@ pub struct StatoServizio {
     pub vms: Vec<VmSummary>,
     /// Esito dell'ultima azione richiesta, leggibile.
     pub ultimo_esito: Option<String>,
+    /// Politica alla perdita della UI riportata dal servizio.
+    pub politica: Option<ParentLossPolicy>,
 }
 
 /// Azioni richieste dalla UI al servizio.
@@ -109,6 +128,8 @@ pub enum Comando {
     Arresta(VmId),
     /// Emergency Stop (percorso prioritario del servizio).
     EmergencyStop,
+    /// Cambia la sorte delle VM alla perdita della UI (vale subito).
+    ImpostaPolitica(ParentLossPolicy),
 }
 
 /// Errori di avvio del supervisor.
@@ -479,6 +500,7 @@ async fn esegui(
                 let mut s = lock(stato);
                 s.backend = Some(k.backend);
                 s.acceleratore = k.accelerator;
+                s.politica = Some(k.parent_loss_policy);
             }
             match c
                 .request(Request::ListVms)
@@ -509,6 +531,27 @@ async fn esegui(
                     Box::pin(esegui(c, stato, Comando::Aggiorna)).await
                 }
                 m => Err(format!("creazione: {}", descrivi_errore(&m))),
+            }
+        }
+        Comando::ImpostaPolitica(policy) => {
+            match c
+                .request(Request::SetParentLossPolicy { policy })
+                .await
+                .map_err(|e| e.to_string())?
+            {
+                ServerMessage::Response {
+                    result: ResponseBody::ParentLossPolicy { policy },
+                    ..
+                } => {
+                    let mut s = lock(stato);
+                    s.politica = Some(policy);
+                    s.ultimo_esito = Some(format!(
+                        "alla chiusura anomala della UI: {}",
+                        crate::impostazioni::descrivi(policy)
+                    ));
+                    Ok(())
+                }
+                m => Err(format!("impostazione: {}", descrivi_errore(&m))),
             }
         }
         Comando::Avvia(vm_id) => azione(c, stato, vm_id, VmAction::Start, "avvio").await,

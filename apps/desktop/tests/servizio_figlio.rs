@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use lightvm_desktop::servizio::{Comando, ConfigServizio, ErroreAvvio, Servizio};
+use lightvm_proto::ipc::ParentLossPolicy;
 
 fn eseguibile_servizio() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("LIGHTVM_SERVICE_EXE") {
@@ -64,6 +65,7 @@ fn ui_avvia_il_supervisor_e_lo_arresta() {
         qemu_dir: None,
         runtime_dir: Some(dir.join("run")),
         audit_log: Some(dir.join("audit.jsonl")),
+        politica: ParentLossPolicy::default(),
     };
     let mut s = Servizio::avvia(&cfg, Arc::new(|| {})).expect("avvio del supervisor");
     assert!(s.pid() > 0);
@@ -105,6 +107,7 @@ fn eseguibile_assente_e_un_errore_di_avvio() {
         qemu_dir: None,
         runtime_dir: None,
         audit_log: None,
+        politica: ParentLossPolicy::default(),
     };
     match Servizio::avvia(&cfg, Arc::new(|| {})) {
         Err(ErroreAvvio::Spawn(_)) => {}
@@ -156,6 +159,7 @@ fn ruolo_ui(qemu_dir: PathBuf) -> ! {
         qemu_dir: Some(qemu_dir),
         runtime_dir: Some(dir.join("run")),
         audit_log: Some(dir.join("audit.jsonl")),
+        politica: politica_p2(),
     };
     let s = Servizio::avvia(&cfg, Arc::new(|| {})).expect("avvio del supervisor");
     attendi(&s, "connessione", |s| s.stato().connesso);
@@ -186,17 +190,25 @@ fn ruolo_ui(qemu_dir: PathBuf) -> ! {
     }
 }
 
+/// Politica della prova P-2 passata alla UI di prova (`kill` o `shutdown:N`).
+const POLITICA_P2: &str = "LIGHTVM_P2_POLITICA";
+
+fn politica_p2() -> ParentLossPolicy {
+    match std::env::var(POLITICA_P2).ok().as_deref() {
+        Some(v) if v.starts_with("shutdown:") => ParentLossPolicy::ShutdownVms {
+            powerdown_s: v["shutdown:".len()..].parse().unwrap(),
+        },
+        _ => ParentLossPolicy::KillVms,
+    }
+}
+
 /// P-2 (`docs/STATUS.md`): crash della UI che ha avviato il supervisor, con una
 /// VM reale in esecuzione. La UI è terminata con `TerminateProcess`; il
-/// supervisor deve rilevare la chiusura della pipe di vita, arrestare la VM
-/// (politica predefinita `shutdown`) e uscire, senza processi QEMU orfani.
-#[test]
-#[ignore = "richiede QEMU reale con acceleratore: impostare LIGHTVM_QEMU_DIR"]
-fn crash_ui_con_vm_reale() {
-    let Some(qemu_dir) = std::env::var_os("LIGHTVM_QEMU_DIR").map(PathBuf::from) else {
-        eprintln!("LIGHTVM_QEMU_DIR non impostata: prova saltata");
-        return;
-    };
+/// supervisor deve rilevare la chiusura della pipe di vita, applicare la
+/// politica scelta e uscire, senza processi QEMU orfani. Restituisce i tempi
+/// di fine di QEMU e del servizio e le righe di audit rilevanti.
+fn prova_crash_ui(nome_test: &str, politica: &str) -> Option<(Duration, Duration, String)> {
+    let qemu_dir = std::env::var_os("LIGHTVM_QEMU_DIR").map(PathBuf::from)?;
     if std::env::var_os(RUOLO_UI).is_some() {
         ruolo_ui(qemu_dir);
     }
@@ -208,12 +220,13 @@ fn crash_ui_con_vm_reale() {
     let mut ui = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
-            "crash_ui_con_vm_reale",
+            nome_test,
             "--ignored",
             "--nocapture",
             "--test-threads=1",
         ])
         .env(RUOLO_UI, "1")
+        .env(POLITICA_P2, politica)
         .env("LIGHTVM_P2_DIR", &dir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -248,7 +261,7 @@ fn crash_ui_con_vm_reale() {
         .map(|(p, _)| p)
         .collect();
     eprintln!(
-        "UI pid {} → servizio pid {svc_pid} → QEMU {qemu:?}",
+        "politica {politica}: UI pid {} → servizio pid {svc_pid} → QEMU {qemu:?}",
         ui.id()
     );
     assert_eq!(qemu.len(), 1, "un processo QEMU figlio del servizio");
@@ -258,9 +271,6 @@ fn crash_ui_con_vm_reale() {
     let _ = ui.wait();
     let mut fine_servizio = None;
     let mut fine_qemu = None;
-    // Finestra ampia: con la politica predefinita il servizio tenta prima un
-    // arresto ordinario (`system_powerdown`, attesa 60 s) e il proprio timeout
-    // di arresto è 30 s; i tempi misurati sono registrati, non imposti.
     while t0.elapsed() < Duration::from_secs(120) {
         if fine_qemu.is_none() && !pid_vivo(qemu[0]) {
             fine_qemu = Some(t0.elapsed());
@@ -276,17 +286,56 @@ fn crash_ui_con_vm_reale() {
     eprintln!(
         "dopo il kill della UI: QEMU terminato in {fine_qemu:?}, servizio in {fine_servizio:?}"
     );
-    assert!(fine_qemu.is_some(), "QEMU orfano dopo il crash della UI");
-    assert!(
-        fine_servizio.is_some(),
-        "servizio ancora vivo dopo il crash della UI"
-    );
-    let audit = std::fs::read_dir(&dir)
-        .ok()
-        .and_then(|_| default_audit(&dir))
-        .unwrap_or_default();
-    eprintln!("audit: {audit}");
+    let audit = default_audit(&dir).unwrap_or_default();
+    eprintln!("audit:\n{audit}");
     let _ = std::fs::remove_dir_all(&dir);
+    Some((
+        fine_qemu.expect("QEMU orfano dopo il crash della UI"),
+        fine_servizio.expect("servizio ancora vivo dopo il crash della UI"),
+        audit,
+    ))
+}
+
+/// Politica predefinita (`kill_vms`): Emergency Stop subito dopo la perdita
+/// della UI, poi arresto del servizio.
+#[test]
+#[ignore = "richiede QEMU reale con acceleratore: impostare LIGHTVM_QEMU_DIR"]
+fn crash_ui_con_vm_reale() {
+    let Some((qemu, servizio, audit)) = prova_crash_ui("crash_ui_con_vm_reale", "kill") else {
+        eprintln!("LIGHTVM_QEMU_DIR non impostata: prova saltata");
+        return;
+    };
+    assert!(qemu < Duration::from_secs(5), "QEMU terminato in {qemu:?}");
+    assert!(
+        servizio < Duration::from_secs(10),
+        "servizio terminato in {servizio:?}"
+    );
+    assert!(
+        audit.contains(r#""action":"emergency_stop","outcome":"succeeded""#),
+        "{audit}"
+    );
+}
+
+/// `shutdown_vms` con 3 s di attesa: il firmware non risponde all'ACPI, quindi
+/// `quit` dopo 3 s; arresto registrato come riuscito, nessun timeout.
+#[test]
+#[ignore = "richiede QEMU reale con acceleratore: impostare LIGHTVM_QEMU_DIR"]
+fn crash_ui_con_vm_reale_spegnimento_ordinato() {
+    let Some((qemu, servizio, audit)) =
+        prova_crash_ui("crash_ui_con_vm_reale_spegnimento_ordinato", "shutdown:3")
+    else {
+        eprintln!("LIGHTVM_QEMU_DIR non impostata: prova saltata");
+        return;
+    };
+    assert!(qemu < Duration::from_secs(15), "QEMU terminato in {qemu:?}");
+    assert!(
+        servizio < Duration::from_secs(20),
+        "servizio terminato in {servizio:?}"
+    );
+    assert!(
+        audit.contains(r#""action":"vm_stop","outcome":"succeeded""#),
+        "{audit}"
+    );
 }
 
 /// Righe di audit di arresto, se il file è nel catalogo di prova.
@@ -297,7 +346,11 @@ fn default_audit(dir: &std::path::Path) -> Option<String> {
             let t = std::fs::read_to_string(&e).ok()?;
             righe.extend(
                 t.lines()
-                    .filter(|l| l.contains("vm_stop") || l.contains("parent"))
+                    .filter(|l| {
+                        l.contains("vm_stop")
+                            || l.contains("emergency_stop")
+                            || l.contains("parent")
+                    })
                     .map(str::to_owned),
             );
         }

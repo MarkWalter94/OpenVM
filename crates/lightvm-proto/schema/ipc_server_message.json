@@ -176,6 +176,13 @@
           "format": "uint32",
           "minimum": 0
         },
+        "parent_loss_policy": {
+          "description": "Politica attiva alla perdita della UI.",
+          "$ref": "#/$defs/ParentLossPolicy",
+          "default": {
+            "kind": "kill_vms"
+          }
+        },
         "protocol_versions": {
           "description": "Versioni del protocollo supportate.",
           "type": "array",
@@ -528,6 +535,57 @@
         }
       ]
     },
+    "ParentLossPolicy": {
+      "description": "Sorte delle VM quando la UI che ha avviato il servizio termina senza\narresto controllato (crash, terminazione forzata). ADR-0015 parte B.",
+      "oneOf": [
+        {
+          "description": "Emergency Stop di tutte le VM, poi arresto del servizio (predefinita).",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "kill_vms"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "Spegnimento ordinato (ACPI) con attesa limitata, poi `quit` e\nterminazione; infine arresto del servizio.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "shutdown_vms"
+            },
+            "powerdown_s": {
+              "description": "Attesa dello spegnimento ACPI per VM, in secondi\n([`MIN_PARENT_LOSS_POWERDOWN_S`]..=[`MAX_PARENT_LOSS_POWERDOWN_S`]).",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "kind",
+            "powerdown_s"
+          ]
+        },
+        {
+          "description": "Le VM restano accese e il servizio resta attivo senza UI.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "keep_vms"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        }
+      ]
+    },
     "ProtocolError": {
       "description": "Errore di protocollo: distinto dagli errori operativi (ROADMAP 9).",
       "type": "object",
@@ -850,6 +908,24 @@
           "$ref": "#/$defs/EmergencyStopReport",
           "required": [
             "kind"
+          ]
+        },
+        {
+          "description": "Politica alla perdita della UI in vigore dopo `set_parent_loss_policy`.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "parent_loss_policy"
+            },
+            "policy": {
+              "description": "Politica attiva.",
+              "$ref": "#/$defs/ParentLossPolicy"
+            }
+          },
+          "required": [
+            "kind",
+            "policy"
           ]
         },
         {

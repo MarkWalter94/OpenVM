@@ -33,6 +33,7 @@ fn connesso(vms: Vec<VmSummary>) -> StatoServizio {
         acceleratore: Some("whpx".into()),
         vms,
         ultimo_esito: None,
+        politica: Some(lightvm_proto::ipc::ParentLossPolicy::KillVms),
     }
 }
 
@@ -66,6 +67,7 @@ fn stato_e_acceleratore_sono_mostrati_come_testo() {
     h.get_by_label("lightvm-service (PID 4242): connesso");
     h.get_by_label("backend: qemu");
     h.get_by_label("acceleratore: whpx");
+    h.get_by_label("Alla chiusura anomala della UI: termina subito le VM");
     h.get_by_label("Nessuna VM nel catalogo del supervisor.");
 }
 

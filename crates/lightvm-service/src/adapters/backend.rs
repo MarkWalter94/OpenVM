@@ -42,9 +42,13 @@ use vm_core::ports::VmBackend;
 use vm_storage::CatalogLayout;
 
 use crate::engine::BackendPort;
-use crate::supervisor::{Backend, EmergencyOutcome, EmergencyStop, OrphanPolicy};
+use crate::supervisor::{Backend, EmergencyOutcome, EmergencyStop, ParentLossPolicy};
 
 type Registry = Arc<Mutex<BTreeMap<VmId, qemu_backend::EmergencyStop>>>;
+
+/// Politica di arresto imposta alla perdita della UI (`shutdown_vms`):
+/// sostituisce quella ordinaria per gli arresti che seguono.
+type StopOverride = Arc<Mutex<Option<ShutdownPolicy>>>;
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -208,6 +212,7 @@ pub fn probe(setup: QemuSetup) -> Result<(QemuHost, QemuVmBackend, HostCapacity)
         });
     let capacity = host_capacity(&caps, free_storage_gib);
     let registry: Registry = Arc::default();
+    let stop_override: StopOverride = Arc::default();
     let host = QemuHost {
         version: caps.version.to_string(),
         accelerator: caps
@@ -216,6 +221,7 @@ pub fn probe(setup: QemuSetup) -> Result<(QemuHost, QemuVmBackend, HostCapacity)
             .then(|| Accelerator::for_current_host().qemu_name().to_owned()),
         registry: registry.clone(),
         emergency_timeout: setup.emergency_timeout,
+        stop_override: stop_override.clone(),
     };
     let backend = QemuVmBackend {
         rt,
@@ -225,6 +231,7 @@ pub fn probe(setup: QemuSetup) -> Result<(QemuHost, QemuVmBackend, HostCapacity)
         setup,
         runs: BTreeMap::new(),
         registry,
+        stop_override,
     };
     Ok((host, backend, capacity))
 }
@@ -301,6 +308,7 @@ pub struct QemuVmBackend {
     setup: QemuSetup,
     runs: BTreeMap<VmId, QemuRun>,
     registry: Registry,
+    stop_override: StopOverride,
 }
 
 impl std::fmt::Debug for QemuVmBackend {
@@ -459,7 +467,7 @@ impl VmBackend for QemuVmBackend {
     }
 
     fn shutdown(&mut self, vm_id: VmId, run_id: RunId) -> Result<(), PublicError> {
-        let policy = self.setup.stop_policy;
+        let policy = lock(&self.stop_override).unwrap_or(self.setup.stop_policy);
         let r = {
             let run = self.run(vm_id, run_id)?;
             self.rt.block_on(run.shutdown(policy))
@@ -556,6 +564,7 @@ pub struct QemuHost {
     accelerator: Option<String>,
     registry: Registry,
     emergency_timeout: Duration,
+    stop_override: StopOverride,
 }
 
 #[derive(Debug)]
@@ -603,9 +612,14 @@ impl Backend for QemuHost {
         // Nessuna sessione agente in F1: connessioni e credenziali non UI sono
         // già revocate dal servizio; le sessioni del core arrivano con F4.
     }
-    fn on_parent_lost(&mut self, _policy: OrphanPolicy) {
-        // ADR-0015 parte B in sospeso: nessuna azione propria; con la politica
-        // predefinita segue l'arresto controllato (VM manuali arrestate).
+    fn on_parent_lost(&mut self, policy: ParentLossPolicy) {
+        if let ParentLossPolicy::ShutdownVms { powerdown_s } = policy {
+            *lock(&self.stop_override) = Some(ShutdownPolicy {
+                powerdown_timeout: Duration::from_secs(u64::from(powerdown_s)),
+                quit_timeout: Duration::from_secs(5),
+                kill_timeout: Duration::from_secs(10),
+            });
+        }
     }
     fn shutdown(&mut self) {
         // Il motore ha già arrestato le VM; restano solo esecuzioni non
@@ -693,7 +707,7 @@ impl Backend for UnavailableHost {
         Arc::new(NoProcesses)
     }
     fn stop_agent_sessions(&mut self, _reason: StopReason) {}
-    fn on_parent_lost(&mut self, _policy: OrphanPolicy) {}
+    fn on_parent_lost(&mut self, _policy: ParentLossPolicy) {}
     fn shutdown(&mut self) {}
 }
 

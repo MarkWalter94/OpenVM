@@ -19,6 +19,9 @@
 //!   `--servizio-exe PATH` (predefinito: accanto a questo eseguibile),
 //!   `--qemu-dir DIR`, `--runtime-dir DIR` e `--audit-log FILE` sono passati
 //!   al servizio.
+//! - `--impostazioni FILE`: file delle impostazioni della UI (predefinito nel
+//!   profilo utente, vedi `impostazioni.rs`); contiene la sorte delle VM se la
+//!   UI termina in modo anomalo, passata al servizio all'avvio.
 
 use std::cell::Cell;
 use std::io::Write as _;
@@ -28,8 +31,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use lightvm_desktop::LightVmApp;
+use lightvm_desktop::impostazioni::Impostazioni;
 use lightvm_desktop::render::{FPS_CONSOLE_DEGRADATA, InfoRendering, Piano, Tentativo};
 use lightvm_desktop::servizio::{ConfigServizio, Servizio};
+use lightvm_proto::ipc::ParentLossPolicy;
 
 #[derive(Debug)]
 struct Args {
@@ -51,6 +56,7 @@ struct ServizioArgs {
     qemu_dir: Option<String>,
     runtime_dir: Option<String>,
     audit_log: Option<String>,
+    impostazioni: Option<String>,
 }
 
 /// Parametri della console reale (F0-04). Nessuna configurazione QEMU: solo
@@ -165,6 +171,10 @@ fn parse_args() -> Result<Args, String> {
                 args.servizio.runtime_dir =
                     Some(it.next().ok_or("--runtime-dir richiede una directory")?)
             }
+            "--impostazioni" => {
+                args.servizio.impostazioni =
+                    Some(it.next().ok_or("--impostazioni richiede un file")?)
+            }
             "--audit-log" => {
                 args.servizio.audit_log = Some(it.next().ok_or("--audit-log richiede un file")?)
             }
@@ -174,7 +184,7 @@ fn parse_args() -> Result<Args, String> {
             "--help" | "-h" => {
                 println!(
                     "uso: lightvm-desktop [--smoke SECONDI] [--renderer auto|glow|wgpu|warp|glow,warp...] [--static] \
-                     [--wgpu-adapter cpu|auto] [--glow-hw preferred|required|off] \n                     [--vnc-socket S [--vnc-impl socket2|uds] | --vnc-tls 127.0.0.1:P --tls-dir D] \n                     --qmp-socket S [--capture-dir D] [--tmp-dir D] [--layout us|it] [--max-fps N] [--dump-fb PNG] \n                     [--catalogo DIR [--servizio-exe PATH] [--qemu-dir DIR] [--runtime-dir DIR] [--audit-log FILE]]"
+                     [--wgpu-adapter cpu|auto] [--glow-hw preferred|required|off] \n                     [--vnc-socket S [--vnc-impl socket2|uds] | --vnc-tls 127.0.0.1:P --tls-dir D] \n                     --qmp-socket S [--capture-dir D] [--tmp-dir D] [--layout us|it] [--max-fps N] [--dump-fb PNG] \n                     [--catalogo DIR [--servizio-exe PATH] [--qemu-dir DIR] [--runtime-dir DIR] [--audit-log FILE]] [--impostazioni FILE]"
                 );
                 std::process::exit(0);
             }
@@ -487,7 +497,26 @@ fn main() -> std::process::ExitCode {
             return std::process::ExitCode::from(2);
         }
     };
-    let piano = match Piano::da_argomenti(args.renderer.as_deref(), args.wgpu_cpu) {
+    // Impostazioni prima del piano di rendering: la preferenza salvata vale se
+    // `--renderer` non è indicato.
+    let percorso_impostazioni = args
+        .servizio
+        .impostazioni
+        .as_ref()
+        .map(PathBuf::from)
+        .or_else(lightvm_desktop::impostazioni::percorso_predefinito);
+    let (impostazioni, errore_impostazioni) = match &percorso_impostazioni {
+        Some(p) => Impostazioni::carica(p),
+        None => (Impostazioni::default(), None),
+    };
+    if let Some(e) = &errore_impostazioni {
+        eprintln!("impostazioni: {e}");
+    }
+    let renderer = args
+        .renderer
+        .clone()
+        .or_else(|| Some(impostazioni.rendering.come_argomento().to_owned()));
+    let piano = match Piano::da_argomenti(renderer.as_deref(), args.wgpu_cpu) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("errore: {e}");
@@ -508,7 +537,7 @@ fn main() -> std::process::ExitCode {
     #[cfg(not(target_os = "linux"))]
     let _ = args.salta_controllo_librerie;
 
-    let servizio = match servizio_config(&args.servizio) {
+    let servizio = match servizio_config(&args.servizio, impostazioni.politica_perdita_ui) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("errore: {e}");
@@ -547,6 +576,8 @@ fn main() -> std::process::ExitCode {
         };
         let console = console.clone();
         let servizio = servizio.clone();
+        let percorso_impostazioni = percorso_impostazioni.clone();
+        let errore_impostazioni = errore_impostazioni.clone();
         let dump_fb = args.console.dump_fb.clone();
         let animate = args.animate;
         let smoke = args.smoke;
@@ -578,6 +609,7 @@ fn main() -> std::process::ExitCode {
                     };
                     eprintln!("rendering: {}", info.spiegazione().replace('\n', "; "));
                     ui.rendering = info;
+                    ui.set_impostazioni(impostazioni, percorso_impostazioni, errore_impostazioni);
                     // Il supervisor parte solo a finestra creata: i tentativi
                     // di rendering falliti non lasciano servizi avviati.
                     if let Some(cfg) = &servizio {
@@ -650,7 +682,10 @@ fn main() -> std::process::ExitCode {
 }
 
 /// Configurazione del supervisor, se richiesta con `--catalogo`.
-fn servizio_config(a: &ServizioArgs) -> Result<Option<ConfigServizio>, String> {
+fn servizio_config(
+    a: &ServizioArgs,
+    politica: ParentLossPolicy,
+) -> Result<Option<ConfigServizio>, String> {
     let Some(catalogo) = &a.catalogo else {
         if a.eseguibile.is_some()
             || a.qemu_dir.is_some()
@@ -675,6 +710,7 @@ fn servizio_config(a: &ServizioArgs) -> Result<Option<ConfigServizio>, String> {
         qemu_dir: a.qemu_dir.as_ref().map(PathBuf::from),
         runtime_dir: a.runtime_dir.as_ref().map(PathBuf::from),
         audit_log: a.audit_log.as_ref().map(PathBuf::from),
+        politica,
     }))
 }
 

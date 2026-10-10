@@ -77,3 +77,32 @@ Causa del fallimento dell'arresto ordinato: alla perdita del genitore il servizi
 ## Decisioni proposte
 
 - **ADR-0015 parte B / budget di arresto:** alla perdita della UI usare per le VM una politica dedicata con attesa ACPI breve (per esempio pochi secondi, poi `quit` e kill) e rendere `shutdown_timeout` del servizio non inferiore alla somma dei passi della politica per il numero di VM arrestate in parallelo; in alternativa dichiarare che alla perdita della UI le VM sono terminate con Emergency Stop. La scelta spetta al responsabile del progetto: oggi il risultato finale (nessun orfano) dipende, secondo i tempi osservati, dalla chiusura del Job Object all'uscita del servizio.
+
+
+## Aggiornamento del 2026-10-10 (circa 10:10 UTC): politica alla perdita della UI come impostazione
+
+Sezione aggiunta in coda (regola 8 di `docs/verification/README.md`): l'esito "arresto ordinato fallito" della sezione precedente resta registrato. Decisione in ADR-0015 parte B.
+
+### Modifiche
+
+- `lightvm-proto`: `ParentLossPolicy` (`kill_vms` predefinita, `shutdown_vms { powerdown_s }` 1–300, `keep_vms`), richiesta `set_parent_loss_policy` (solo UI), politica attiva in `get_capabilities`; schemi rigenerati (`parent_loss_policy.json`, `ipc_*`).
+- `lightvm-service`: `--parent-loss-policy kill-vms|shutdown-vms|keep-vms` e `--parent-loss-powerdown-s N`; alla perdita della UI `kill_vms` esegue l'Emergency Stop e poi l'arresto, `shutdown_vms` impone al backend QEMU l'attesa ACPI scelta e allunga il timeout di arresto a `powerdown_s + 20` s; se il supervisor non conclude entro il timeout, Emergency Stop delle VM rimaste prima dell'uscita.
+- `apps/desktop`: impostazione in Settings (pulsanti di opzione e menu delle attese, nessun campo di testo), salvata in `impostazioni-ui.json` nel profilo utente (`--impostazioni FILE` per i test), passata al servizio all'avvio e inviata subito via IPC se cambia; "lascia le VM accese" disattivata nella UI finché manca il ricollegamento. Nella stessa sezione Settings: backend di rendering preferito (vale dal prossimo avvio, vedi `F1-05`).
+
+### Risultati
+
+| Voce | Esito | Evidenza |
+| --- | --- | --- |
+| **P-2, politica predefinita `kill_vms`**: VM terminata subito, servizio uscito, nessun orfano | verificato | `crash_ui_con_vm_reale`: QEMU terminato 105,0 ms e servizio 208,0 ms dopo il kill della UI; stderr `UI persa, Emergency Stop: 1 processi terminati, completato true`; audit `emergency_stop` `accepted` → `succeeded` |
+| **P-2, `shutdown_vms` con 3 s**: arresto ordinato concluso, nessun timeout | verificato | `crash_ui_con_vm_reale_spegnimento_ordinato`: QEMU 3,21 s, servizio 3,29 s; audit `vm_stop` `accepted` → `forwarded` → `succeeded`; nessun `timeout nell'arresto del supervisor` |
+| Tre politiche nel servizio (backend finto) | verificato | `ipc.rs`: `parent_lost_in_process_stops_agent_sessions_then_shuts_down` (Emergency Stop prima dello shutdown), `parent_lost_with_shutdown_vms_stops_without_emergency`, `parent_lost_with_keep_vms_leaves_the_service_running` |
+| `set_parent_loss_policy` solo dalla UI, validazione dei limiti, politica in `get_capabilities`, vale alla perdita successiva | verificato | `ipc.rs::parent_loss_policy_is_set_via_ipc_by_the_ui_only` (pairing → `permission_denied`; `powerdown_s: 0` → `invalid_argument` senza effetto) |
+| Forma JSON, predefinito, compatibilità con capacità senza il campo | verificato | `lightvm-proto` `ipc::tests::parent_loss_policy_wire_shape_default_and_limits` |
+| Impostazione in Settings salvata su file; file assente, parziale o non valido | verificato (headless) | `kittest_ui::settings_salva_politica_e_rendering`; `impostazioni::tests` (6 test, incluso `keep_vms` dal file → predefinita con avviso) |
+| Ruolo `keep_vms` con QEMU reale | non eseguito | disattivata nella UI |
+
+### Limiti
+
+- Un campione per politica, un solo host Windows; Linux non eseguito.
+- Con `kill_vms` lo stato dell'overlay della VM in esecuzione è perso (comportamento dell'Emergency Stop, sezione 7.3); la baseline non è toccata.
+- `shutdown_vms` provato con il firmware, che non risponde all'ACPI (scalata a `quit`); un guest reale che si spegne entro l'attesa non è stato provato.

@@ -6,7 +6,9 @@
 //!   è rifiutato con `unsupported`), `--audit-log <file>` (predefinito nel
 //!   profilo utente), `--runtime-dir <dir>` (socket IPC su Unix e directory
 //!   private dei socket QEMU), `--parent-watch stdin|none`,
-//!   `--orphan-policy shutdown|keep-manual-vms`;
+//!   `--parent-loss-policy kill-vms|shutdown-vms|keep-vms` (predefinita
+//!   `kill-vms`) e `--parent-loss-powerdown-s N` (attesa ACPI per
+//!   `shutdown-vms`, predefinita 10);
 //! - stdout: una sola riga JSON `{"event":"ready",...}` con endpoint e
 //!   credenziale iniziale della UI; stdout è una pipe anonima posseduta dal
 //!   genitore, quindi un canale privato;
@@ -34,12 +36,12 @@ use lightvm_service::adapters::catalog::{ManagedMediaInspector, SqliteStore};
 use lightvm_service::engine::{CoreEngine, VmEngine, core_config};
 use lightvm_service::parent::{self, ParentSignal};
 use lightvm_service::server::StartError;
-use lightvm_service::supervisor::{Backend, OrphanPolicy};
+use lightvm_service::supervisor::{Backend, ParentLossPolicy};
 use lightvm_service::{ServiceConfig, start};
 
 const USAGE: &str = "uso: lightvm-service --catalog <dir> [--qemu-dir <dir>] \
 [--audit-log <file>] [--runtime-dir <dir>] [--parent-watch stdin|none] \
-[--orphan-policy shutdown|keep-manual-vms]";
+[--parent-loss-policy kill-vms|shutdown-vms|keep-vms] [--parent-loss-powerdown-s N]";
 
 /// Messaggio per un catalogo già in uso (stesso testo del lock del servizio).
 const ALREADY_RUNNING: &str = "un'altra istanza di lightvm-service sta già usando questo catalogo";
@@ -51,7 +53,7 @@ struct Args {
     audit_log: Option<PathBuf>,
     runtime_dir: Option<PathBuf>,
     parent_watch: bool,
-    orphan_policy: OrphanPolicy,
+    parent_loss_policy: ParentLossPolicy,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -61,7 +63,8 @@ fn parse_args() -> Result<Args, String> {
     let mut audit_log = None;
     let mut runtime_dir = None;
     let mut parent_watch = true;
-    let mut orphan_policy = OrphanPolicy::ShutdownService;
+    let mut parent_loss: Option<String> = None;
+    let mut powerdown_s: u32 = 10;
     while let Some(a) = it.next() {
         let a = a
             .into_string()
@@ -79,12 +82,18 @@ fn parse_args() -> Result<Args, String> {
                     _ => return Err("--parent-watch: atteso stdin o none".into()),
                 }
             }
-            "--orphan-policy" => {
-                orphan_policy = match value()?.to_str() {
-                    Some("shutdown") => OrphanPolicy::ShutdownService,
-                    Some("keep-manual-vms") => OrphanPolicy::KeepManualVms,
-                    _ => return Err("--orphan-policy: atteso shutdown o keep-manual-vms".into()),
-                }
+            "--parent-loss-policy" => {
+                parent_loss = Some(
+                    value()?
+                        .into_string()
+                        .map_err(|_| "--parent-loss-policy: valore non UTF-8".to_string())?,
+                );
+            }
+            "--parent-loss-powerdown-s" => {
+                powerdown_s = value()?
+                    .to_str()
+                    .and_then(|v| v.parse().ok())
+                    .ok_or("--parent-loss-powerdown-s: atteso un numero di secondi")?;
             }
             "--version" => {
                 println!("lightvm-service {}", env!("CARGO_PKG_VERSION"));
@@ -98,13 +107,23 @@ fn parse_args() -> Result<Args, String> {
         }
     }
     let catalog = catalog.ok_or("--catalog obbligatorio")?;
+    let parent_loss_policy = match parent_loss.as_deref() {
+        None | Some("kill-vms") => ParentLossPolicy::KillVms,
+        Some("shutdown-vms") => ParentLossPolicy::ShutdownVms { powerdown_s },
+        Some("keep-vms") => ParentLossPolicy::KeepVms,
+        Some(_) => {
+            return Err("--parent-loss-policy: atteso kill-vms, shutdown-vms o keep-vms".into());
+        }
+    }
+    .validate()
+    .map_err(|e| format!("--parent-loss-powerdown-s: {}", e.message))?;
     Ok(Args {
         catalog,
         qemu_dir,
         audit_log,
         runtime_dir,
         parent_watch,
-        orphan_policy,
+        parent_loss_policy,
     })
 }
 
@@ -195,7 +214,7 @@ fn main() -> ExitCode {
 async fn run(args: Args, engine: Box<dyn VmEngine>, host: Box<dyn Backend>) -> ExitCode {
     let mut cfg = ServiceConfig::new(&args.catalog);
     cfg.runtime_dir = args.runtime_dir;
-    cfg.orphan_policy = args.orphan_policy;
+    cfg.parent_loss_policy = args.parent_loss_policy;
     let (handle, ui_credential) = match start(cfg, engine, host).await {
         Ok(x) => x,
         Err(e @ StartError::Lock(lightvm_service::lock::LockError::AlreadyRunning { .. })) => {

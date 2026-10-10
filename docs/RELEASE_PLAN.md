@@ -19,7 +19,7 @@ Legenda tipo: **B** = bloccante per l'uscita da F0; **NB** = avviata in F0, comp
 | F0-B07 | QMP su canale privato; arresto ordinario e forzato | B | 2 | da assegnare | `F0-02-qemu-whpx-qmp.md` | 0012 | completato: `F0-02` §4, §7; arresto ACPI non concluso dal live (D-7) |
 | F0-B08 | Console nativa con client RFB sul canale protetto, oppure ripiego screendump; input; screenshot | B | 3 | da assegnare | `F0-04-console-rfb-input.md` | 0003, 0013 | completato con pendenti P-4, P-5: `F0-04` |
 | F0-B09 | Ciclo baseline immutabile / overlay / ripristino con firmware persistente; prove di interruzione | B | 4 | da assegnare | `F0-05-baseline-overlay-firmware.md` | 0005, 0011 | completato: `F0-05` |
-| F0-B10 | Modello di processo del supervisor: QEMU figlio, terminazione OS dei figli, crash UI, crash supervisor | B | 4 | da assegnare | `F0-06-supervisore-processi.md` | 0002, 0009, 0015 | in parte: `F0-06` completo; crash della UI eseguito in `F1-09` (nessun orfano; arresto ordinato fallito per timeout, decisione ADR-0015 B aperta) |
+| F0-B10 | Modello di processo del supervisor: QEMU figlio, terminazione OS dei figli, crash UI, crash supervisor | B | 4 | da assegnare | `F0-06-supervisore-processi.md` | 0002, 0009, 0015 | completato su Windows: `F0-06`; crash della UI in `F1-09` (ADR-0015 B accettata il 2026-10-10) |
 | F0-B11 | Avvio su Linux/KVM se il laboratorio è disponibile, altrimenti registrazione "non eseguito" | B | 5 | da assegnare | `F0-07-linux-kvm.md` | 0016 | laboratorio assente: `F0-07`; esito proposto "verificato solo Windows" (P-1) |
 | F0-B12 | Limiti OS per CPU, memoria, storage; prima misura dei consumi | B | 5 | da assegnare | `F0-08-limiti-risorse-misure.md` | 0017, 0018 | completato con limiti: `F0-08` |
 | F0-B13 | Threat model, restrizioni MVP, matrice di supporto iniziale, definizione della fixture | B | 1, 6 | da assegnare | `docs/SECURITY.md`, `docs/COMPATIBILITY.md`, ADR-0019 | 0004, 0019 | completato: fixture in ADR-0019 |
@@ -97,7 +97,7 @@ Aggiornato il 2026-10-10 dalla lettura dei file di verifica e del codice, poi do
 | F1-08 | verificato su hardware (Windows) | `F1-03`: 18 rifiuti senza processi (percorsi, protocolli remoti, risorse, CPU, macchina), rilevatore NIC con `info network` e `query-pci`, nessuna NIC in 20 cicli |
 | F1-09 | in parte | parte storage verificata con test sintetici (`F1-02`); `qemu-backend/src/storage_guard.rs` senza evidenza; overlay in uso scrivibile da un altro processo dello stesso utente (decisione aperta) |
 | F1-10 | verificato con test | audit di creazione, avvio, arresto, Emergency Stop e dinieghi (`F1-01`; `F1-04`, `core_path`) |
-| F1-11 | in parte | supervisor headless e IPC verificati (`F1-04`); la UI avvia il supervisor come figlio e usa l'IPC (`F1-09`); P-2 eseguito: nessun orfano, arresto ordinato fallito per timeout (decisione ADR-0015 B); Linux non eseguito |
+| F1-11 | in parte | supervisor headless e IPC verificati (`F1-04`); la UI avvia il supervisor come figlio e usa l'IPC (`F1-09`); P-2 verificato con la politica impostabile (ADR-0015 B); Linux non eseguito |
 | F1-12 | eseguito, non valido come uscita | `F1-03`: creazione disco, 20 cicli reali senza orfani, acceleratore assente, nessuna NIC, rifiuti verificati sulle API del backend; il servizio crea ora il disco principale (`vms/<vm_id>/primary.qcow2`). Anche 20 cicli **attraverso il servizio** (IPC → core → QEMU) senza residui (`F1-03`, sezione del 2026-10-10). Non vale per il criterio di uscita finché F0 è aperta |
 | F1-13 | in parte | `F1-05`: nessun testo degli appunti host nella UI né al guest (test headless); **la lettura degli appunti dentro egui-winit resta** (decisione da prendere prima di F2); prova manuale non eseguita |
 | F1-14 | in parte | dipendenze Linux elencate (`F1-07`); job `smoke-render-software` non eseguito su GitHub; verifica a runtime non eseguita |
@@ -130,7 +130,7 @@ ADR in stato Proposta (dettagli in `docs/adr/`):
 
 | ADR | Decisione | Da chiudere entro | Motivo per cui resta aperta |
 | --- | --- | --- | --- |
-| 0015 | Terminazione dei figli su Linux e sorte delle VM manuali senza UI | F0 | parte B in attesa del crash della UI su Windows (P-2) |
+| 0015 | Terminazione dei figli su Linux (parte A) | F0 → R2a | parte B accettata il 2026-10-10; parte A da confermare su host Linux fisico (ADR-0016) |
 | 0017 | Limiti OS e budget storage | F0 | meccanismi identificati; soglie, riserva e prove sotto pressione mancanti; Linux su host fisico in R2a |
 | 0020 | Responsabilità di firma e revisione indipendente | F0 | dichiarazione dell'utente (P-6) |
 | 0022 | Framework di test UI | F1 | istantanee verificate su un host (`F1-05`); accettazione proposta, stabilità fra GPU da provare in CI |

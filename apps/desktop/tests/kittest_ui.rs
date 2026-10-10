@@ -105,3 +105,42 @@ fn nessun_campo_di_testo_con_console_reale_configurata() {
     // L'unico controllo d'azione della console è "Screenshot".
     h.get_by_role_and_label(Role::Button, "Screenshot");
 }
+
+/// Settings: politica alla chiusura anomala della UI e backend preferito,
+/// scelti con pulsanti di opzione e salvati su file.
+#[test]
+fn settings_salva_politica_e_rendering() {
+    use lightvm_desktop::impostazioni::{Impostazioni, PreferenzaRendering};
+    use lightvm_proto::ipc::ParentLossPolicy;
+    let dir = std::env::temp_dir().join(format!(
+        "lightvm-kittest-impostazioni-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    ));
+    let file = dir.join("impostazioni-ui.json");
+    let mut app = LightVmApp::new(false);
+    app.set_impostazioni(Impostazioni::default(), Some(file.clone()), None);
+    let mut h = harness(app);
+    h.run();
+    h.get_by_role_and_label(Role::Button, "Settings").click();
+    h.run();
+    assert_eq!(
+        h.state().impostazioni().politica_perdita_ui,
+        ParentLossPolicy::KillVms
+    );
+    h.get_by_label("Spegnimento ordinato, poi terminazione")
+        .click();
+    h.run();
+    h.get_by_label("wgpu (DX12/Vulkan) per primo: usa più memoria")
+        .click();
+    h.run();
+    let atteso = Impostazioni {
+        politica_perdita_ui: ParentLossPolicy::ShutdownVms { powerdown_s: 10 },
+        rendering: PreferenzaRendering::Wgpu,
+    };
+    assert_eq!(h.state().impostazioni(), atteso);
+    assert_eq!(Impostazioni::carica(&file), (atteso, None));
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -5,9 +5,9 @@
 //! ottenuto dall'host all'avvio e chiamabile da qualunque task (ROADMAP 7.3,
 //! ADR-0009); solo dopo la terminazione il supervisor la registra nel core.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 
 use lightvm_proto::ipc::{
     Capabilities, ResponseBody, SUPPORTED_PROTOCOL_VERSIONS, ServiceEvent, ServiceState, StopReason,
@@ -30,12 +30,10 @@ pub trait Backend: Send + 'static {
     fn emergency_handle(&self) -> Arc<dyn EmergencyStop>;
     /// Arresta le sessioni agente: nessun nuovo inoltro, coda dell'agente scartata.
     fn stop_agent_sessions(&mut self, reason: StopReason);
-    /// Hook per la sorte delle VM manuali dopo la perdita della UI.
-    ///
-    /// ADR-0015 parte B è in sospeso: il servizio chiama questo hook e poi
-    /// applica [`OrphanPolicy`]; con la politica predefinita segue l'arresto
-    /// controllato, che arresta anche le VM manuali.
-    fn on_parent_lost(&mut self, policy: OrphanPolicy);
+    /// Hook chiamato alla perdita della UI, prima che il servizio applichi
+    /// [`ParentLossPolicy`] (ADR-0015 parte B): con `shutdown_vms` il backend
+    /// adotta l'attesa ACPI indicata per l'arresto che segue.
+    fn on_parent_lost(&mut self, policy: ParentLossPolicy);
     /// Rilascio finale dell'host (chiamato durante lo shutdown, dopo l'arresto
     /// delle VM da parte del motore).
     fn shutdown(&mut self);
@@ -57,17 +55,7 @@ pub struct EmergencyOutcome {
     pub completed: bool,
 }
 
-/// Comportamento dopo la perdita del processo genitore (UI).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum OrphanPolicy {
-    /// Arresto controllato del servizio dopo l'arresto delle sessioni agente.
-    /// Predefinito: senza UI la credenziale iniziale non è recuperabile, quindi
-    /// nessun ricollegamento è possibile in F1.
-    #[default]
-    ShutdownService,
-    /// Le VM manuali restano; il servizio resta attivo (ADR-0015 parte B).
-    KeepManualVms,
-}
+pub use lightvm_proto::ipc::ParentLossPolicy;
 
 /// Richieste servite dal thread del supervisor.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,7 +95,7 @@ pub(crate) enum Command {
     /// L'Emergency Stop ha già terminato i processi: registrazione nel core.
     EmergencyReconcile,
     ParentLost {
-        policy: OrphanPolicy,
+        policy: ParentLossPolicy,
         done: oneshot::Sender<()>,
     },
     Shutdown {
@@ -137,6 +125,7 @@ pub(crate) struct SupervisorThread {
     pub(crate) events: broadcast::Sender<ServiceEvent>,
     pub(crate) max_frame: u32,
     pub(crate) emergency_epoch: Arc<AtomicU64>,
+    pub(crate) parent_loss_policy: Arc<Mutex<ParentLossPolicy>>,
 }
 
 impl SupervisorThread {
@@ -226,6 +215,10 @@ impl SupervisorThread {
                 backend: self.backend.name(),
                 accelerator: self.backend.accelerator(),
                 max_frame_bytes: self.max_frame,
+                parent_loss_policy: *self
+                    .parent_loss_policy
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
             })),
             SupervisorRequest::ListVms => self
                 .engine
