@@ -152,3 +152,29 @@ cargo test -p qemu-backend --test real_qemu -- --ignored --nocapture reale_boot_
 - Un solo campione di boot con `Skylake-Client-v4`; `Haswell-v4` non provato.
 - I 20 cicli attraverso il servizio usano una politica di arresto ridotta (`system_powerdown` 1 s) impostata dal test; la politica predefinita del servizio (60 s) non è stata usata nei cicli.
 - Validità per il criterio di uscita: invariata rispetto alle sezioni precedenti (F0 aperta).
+
+## Aggiornamento del 2026-10-10 (dalle 11:25 alle 11:40 circa UTC): installazione su disco, boot dal disco e arresto ACPI (F1-17)
+
+Sezione aggiunta in coda (regola 8 di `docs/verification/README.md`). Stesso host, QEMU e ISO; `-cpu Skylake-Client-v4`.
+
+### Procedura
+
+1. Configurazione autoinstall in `lab/vms/f1-17/user-data` (utente di prova `lvm`, password casuale conservata solo in `lab/`, hash SHA-512 nel file; `storage.layout: direct`; `shutdown: poweroff`; `interactive-sections: []`), volume `CIDATA` generato con `pycdlib` (`lab/media/f1-17-cidata.iso`, SHA-256 `85145f96…a476f1`) sul secondo CD-ROM.
+2. `cargo test -p qemu-backend --test real_qemu -- --ignored --nocapture reale_f1_17_installazione`: disco qcow2 da 32 GiB e variabili UEFI persistenti in `lab/vms/f1-17/`, 4 vCPU, 6144 MiB, ISO Ubuntu + `CIDATA`. L'installatore desktop legge l'autoinstall ma chiede conferma nel riepilogo: il test fa clic su "Install" via QMP a 140 s (primo tentativo senza clic fermato a mano a 2 minuti, nessuna scrittura sul disco).
+3. `cargo test … reale_f1_17_boot_da_disco_e_arresto_acpi`: avvio dal disco senza ISO (4096 MiB), screenshot ogni 15 s per 120 s, poi arresto ordinario con `system_powerdown` (attesa 90 s, poi `quit` e kill).
+
+### Risultati
+
+| Voce | Esito | Evidenza |
+| --- | --- | --- |
+| Autoinstall letto dall'installatore desktop | verificato | screenshot del riepilogo "Review your choices" con identità, layout, `shutdown: poweroff` |
+| Installazione su disco conclusa e spegnimento del guest da solo | verificato | `esito dopo 482.18s: Some((GuestShutdown, Some(0)))`; disco `disco.qcow2` 6 915 817 472 byte |
+| **Boot dal disco** fino alla schermata di accesso | verificato | a 30 s schermata GDM con l'utente "LightVM prova" (`…-f1-17-boot-030s.png`), stabile fino a 120 s |
+| **Arresto ACPI ordinario di un guest reale** | verificato | `fase Powerdown, causa GuestShutdown, codice Some(0), durata 3.55s`; nessun orfano |
+
+Con questa sezione F1-17 è completo sul primo host: CPU nominale più ricca di `qemu64`, installazione su disco, boot dal disco. Il disco installato in `lab/vms/f1-17/` è il guest di riferimento per le misure con guest reale (tetto CPU sotto carico, arresti ordinati, fixture F3).
+
+### Limiti
+
+- Un campione; il clic su "Install" dipende dalla posizione del pulsante a 1280×800 (installatore di Ubuntu 26.04.1).
+- Nessun accesso alla sessione grafica del guest provato in questa sezione.

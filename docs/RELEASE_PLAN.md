@@ -103,7 +103,7 @@ Aggiornato il 2026-10-10 dalla lettura dei file di verifica e del codice, poi do
 | F1-14 | in parte | dipendenze Linux elencate (`F1-07`); job `smoke-render-software` non eseguito su GitHub; verifica a runtime non eseguita |
 | F1-15 | in parte | probe D-Bus `StartTransientUnit` verificato in WSL2 (`F1-08`); non implementato in `qemu-backend` (`TODO(F1/R2a)` in `process/mod.rs`) |
 | F1-16 | in parte | `F1-05`: auto → glow, ripiego glow → wgpu DX12 e → WARP con indicatore verificati su hardware; prova in RDP non eseguita |
-| F1-17 | in parte | `F1-03` (sezione del 2026-10-10): con `Skylake-Client-v4` desktop live raggiunto a 101 s; installazione su disco e boot dal disco non eseguiti |
+| F1-17 | verificato su hardware (Windows) | `F1-03` (sezioni del 2026-10-10): `Skylake-Client-v4` fino al desktop live; installazione automatica su disco in 8 min; boot dal disco alla schermata di accesso; arresto ACPI ordinario in 3,6 s |
 | F1-18 | in parte | `F1-05`: idle UI + supervisor 5 min (glow: CPU ≤ 0,14 % di un core, private ≤ 106 MiB; wgpu: CPU ≤ 0,07 %, private ≈ 492 MiB, D-12), 20 avvii a caldo per backend (primo frame p95 139 ms glow, 248 ms wgpu); avvii a freddo non eseguiti |
 | F1-19 | in parte | SDK MCP (`F1-06`, ADR-0021 accettata per l'SDK), licenze (`F1-07`, ADR-0023 accettata in parte); 6 istantanee egui_kittest verificate sullo stesso host (`F1-05`; ADR-0022 Proposta, accettazione proposta) |
 

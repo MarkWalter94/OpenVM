@@ -54,7 +54,7 @@ Avviato prima della chiusura di F0 e quindi **non utilizzabile per il criterio d
 | SDK MCP su stdio | `lightvm-mcp` | `F1-06` | verificato in simulazione/test; nessun client MCP reale |
 | Licenze e `cargo deny` | workspace | `F1-07` | verificato |
 | CI e delega cgroup | `.github/workflows/ci.yml` | `F1-08` | validata in locale; **mai eseguita su GitHub** |
-| Probe, processi, QMP, input, screenshot, profilo offline, 20 cicli reali, disco del servizio | `qemu-backend`, `lightvm-service` | `F1-03` | verificato su hardware (Windows, WHPX; VM nel firmware) |
+| Probe, processi, QMP, input, screenshot, profilo offline, 20 cicli reali (anche via servizio), disco del servizio, installazione su disco e boot dal disco (F1-17) | `qemu-backend`, `lightvm-service` | `F1-03` | verificato su hardware (Windows, WHPX) |
 | UI che avvia il supervisor e usa l'IPC; crash della UI con VM reale | `apps/desktop`, `lightvm-service` | `F1-09` | verificato su hardware; politica alla perdita della UI come impostazione (ADR-0015 B) |
 | Limiti per VM (CPU, memoria, budget storage), impostazioni della VM, `--apri-vm` | `lightvm-proto`, `vm-core`, `qemu-backend`, `lightvm-service`, `apps/desktop` | `F1-10` | verificato su hardware (Windows); storage completo in F3 |
 | UI: appunti, backend di rendering, istantanee, misure | `apps/desktop` | `F1-05` | verificato in simulazione/test (appunti, istantanee) e su hardware (ripiego di rendering, misure); lettura degli appunti in egui-winit non bloccata; memoria con wgpu oltre l'obiettivo (D-12) |
