@@ -34,6 +34,12 @@ egui_extras = { workspace = true }
 # Console reale F0-04: client RFB in sola lettura e QMP dello spike.
 rfb-client = { path = "../../crates/rfb-client" }
 f0-console = { path = "../../spikes/f0-console" }
+# Supervisor come processo figlio e IPC (F1-11): solo il lato client del
+# servizio, senza `qemu-backend` (ADR-0024).
+lightvm-proto = { path = "../../crates/lightvm-proto" }
+lightvm-service = { path = "../../crates/lightvm-service", default-features = false }
+serde_json = "=1.0.151"
+tokio = { version = "=1.53.2", features = ["rt", "sync", "time", "macros"] }
 
 [dev-dependencies]
 # `snapshot` + `wgpu`: istantanee grafiche confrontate con i file in

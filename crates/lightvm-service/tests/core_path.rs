@@ -417,8 +417,8 @@ async fn pairing_role_cannot_touch_vms() {
 /// End-to-end reale e senza UI: handshake → crea VM → avvia (QEMU reale con
 /// acceleratore, nessun ripiego TCG) → stato → arresta → Emergency Stop.
 /// Richiede `LIGHTVM_E2E_QEMU_DIR` con la distribuzione QEMU approvata
-/// (hash in `qemu_backend::probe`); la VM non ha disco né ISO e resta nel
-/// firmware UEFI. Eseguire con `cargo test -p lightvm-service --test core_path
+/// (hash in `qemu_backend::probe`); la VM ha il disco principale qcow2 creato
+/// dal servizio al primo avvio (vuoto), nessuna ISO, e resta nel firmware UEFI. Eseguire con `cargo test -p lightvm-service --test core_path
 /// -- --ignored --nocapture`.
 #[test]
 #[ignore = "richiede QEMU approvato e un acceleratore (LIGHTVM_E2E_QEMU_DIR)"]
@@ -497,8 +497,16 @@ fn e2e_real_qemu_create_start_status_stop() {
         eprintln!("arresto: {:?} → {m:?}", t.elapsed());
         expect_succeeded(&m);
         assert_eq!(state_of(&mut c, vm_id).await, VmState::Stopped);
+        let disk = dir
+            .join("vms")
+            .join(vm_id.to_string())
+            .join("primary.qcow2");
+        let size = std::fs::metadata(&disk)
+            .unwrap_or_else(|e| panic!("disco principale assente {}: {e}", disk.display()))
+            .len();
+        eprintln!("disco principale: {} ({size} byte)", disk.display());
 
-        // Secondo avvio ed Emergency Stop sul processo reale.
+        // Secondo avvio (stesso disco) ed Emergency Stop sul processo reale.
         expect_succeeded(&submit(&mut c, vm_id, VmAction::Start).await);
         let t = std::time::Instant::now();
         match c.request(Request::EmergencyStop).await.unwrap() {

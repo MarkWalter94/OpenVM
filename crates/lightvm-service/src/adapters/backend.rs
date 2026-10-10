@@ -31,13 +31,15 @@ use lightvm_proto::{
     BackendObservation, DisplayGeometry, HostCapacity, InputEvent, MediaId, PublicError, RunId,
     Screenshot, VmId, VmRecord,
 };
+use qemu_backend::cmdline::{DiskFormat, DiskSpec};
 use qemu_backend::probe::{ProbeConfig, probe_accelerator, probe_host};
 use qemu_backend::{
     Accelerator, BackendError, CpuModel, ExitCause, HostCapabilities, MachineType, ManagedPath,
-    ManagedPaths, ProcessState, QemuRun, RunConfig, ShutdownPolicy, VmLaunchSpec,
+    ManagedPaths, ProcessState, QemuRun, RunConfig, ShutdownPolicy, VmLaunchSpec, prepare,
 };
 use vm_core::media::VerifiedMedia;
 use vm_core::ports::VmBackend;
+use vm_storage::CatalogLayout;
 
 use crate::engine::BackendPort;
 use crate::supervisor::{Backend, EmergencyOutcome, EmergencyStop, OrphanPolicy};
@@ -91,10 +93,9 @@ pub struct QemuSetup {
     pub run_config: RunConfig,
     /// Configurazione del probe (hash dei binari approvati, timeout).
     pub probe: ProbeConfig,
-    /// Spazio libero dichiarato per il catalogo in GiB.
-    ///
-    /// TODO(F1): nessuna API di probe dello spazio libero in `qemu-backend` o
-    /// `vm-storage`; il valore limita soltanto `disk_gib` alla creazione.
+    /// Spazio libero per il catalogo in GiB, usato solo se la misura sul
+    /// volume del catalogo (`prepare::host_resources`) non riesce. Limita
+    /// soltanto `disk_gib` alla creazione.
     pub free_storage_gib: u64,
 }
 
@@ -195,7 +196,17 @@ pub fn probe(setup: QemuSetup) -> Result<(QemuHost, QemuVmBackend, HostCapacity)
             caps.accelerator.public_message()
         );
     }
-    let capacity = host_capacity(&caps, setup.free_storage_gib);
+    let free_storage_gib = ManagedPath::verify(setup.catalog_root.clone())
+        .and_then(|root| prepare::host_resources(&root))
+        .map(|r| r.free_disk_bytes >> 30)
+        .unwrap_or_else(|e| {
+            crate::diag!(
+                "lightvm-service: spazio libero del catalogo non misurato ({e}): uso {} GiB",
+                setup.free_storage_gib
+            );
+            setup.free_storage_gib
+        });
+    let capacity = host_capacity(&caps, free_storage_gib);
     let registry: Registry = Arc::default();
     let host = QemuHost {
         version: caps.version.to_string(),
@@ -225,6 +236,7 @@ struct RunPaths {
     qemu_system: ManagedPath,
     firmware_code: ManagedPath,
     firmware_vars: ManagedPath,
+    disk: ManagedPath,
     run_dir: ManagedPath,
     private_dir: ManagedPath,
     media: BTreeMap<MediaId, ManagedPath>,
@@ -253,7 +265,7 @@ impl ManagedPaths for RunPaths {
     }
     fn disk(&self, run: &RunId) -> qemu_backend::error::Result<Option<ManagedPath>> {
         self.check(run)?;
-        Ok(None)
+        Ok(Some(self.disk.clone()))
     }
     fn protected_readonly(&self, run: &RunId) -> qemu_backend::error::Result<Vec<ManagedPath>> {
         self.check(run)?;
@@ -327,6 +339,38 @@ impl QemuVmBackend {
         }
     }
 
+    /// Disco principale della VM (`vms/<vm_id>/primary.qcow2`, disposizione
+    /// di `vm-storage`): creato con `qemu-img` al primo avvio con la
+    /// dimensione di `disk_gib`, poi riusato. La creazione non passa ancora dal
+    /// journal del catalogo (F3): un file preesistente è usato così com'è.
+    fn primary_disk(&self, vm: &VmRecord) -> Result<ManagedPath, PublicError> {
+        let path = managed_abs(
+            &self.setup.catalog_root,
+            CatalogLayout::primary_disk(&vm.id).as_str(),
+        );
+        let disk = ManagedPath::verify(&path).map_err(|e| public(&e))?;
+        if std::fs::symlink_metadata(&path).is_ok() {
+            return Ok(disk);
+        }
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| io_public("directory della VM", &e))?;
+        }
+        let size_mib = vm
+            .config
+            .disk_gib
+            .checked_mul(1024)
+            .ok_or_else(|| PublicError::resource_limit("disco fuori intervallo"))?;
+        prepare::create_disk(
+            &self.caps.qemu_img,
+            &disk,
+            DiskFormat::Qcow2,
+            size_mib,
+            prepare::QEMU_IMG_TIMEOUT,
+        )
+        .map_err(|e| public(&e))?;
+        Ok(disk)
+    }
+
     fn prepare(
         &self,
         vm: &VmRecord,
@@ -359,12 +403,13 @@ impl QemuVmBackend {
                 ManagedPath::verify(p).map_err(|e| public(&e))?,
             );
         }
-        let _ = vm;
+        let disk = self.primary_disk(vm)?;
         Ok(RunPaths {
             run_id,
             qemu_system: self.caps.qemu_system.clone(),
             firmware_code: ManagedPath::verify(fw.code.clone()).map_err(|e| public(&e))?,
             firmware_vars: ManagedPath::verify(vars).map_err(|e| public(&e))?,
+            disk,
             run_dir: ManagedPath::verify(run_dir).map_err(|e| public(&e))?,
             private_dir: ManagedPath::verify(private_dir).map_err(|e| public(&e))?,
             media: media_paths,
@@ -393,8 +438,9 @@ impl VmBackend for QemuVmBackend {
             vcpus: vm.config.vcpus,
             memory_mib: u32::try_from(vm.config.memory_mib)
                 .map_err(|_| PublicError::resource_limit("memoria fuori intervallo"))?,
-            // TODO(F1-12): disco principale non ancora creato né registrato.
-            disk: None,
+            disk: Some(DiskSpec {
+                format: DiskFormat::Qcow2,
+            }),
             install_media: vm.config.install_media,
             data_media: vm.config.data_media,
         };

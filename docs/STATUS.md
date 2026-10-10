@@ -36,7 +36,7 @@ La decisione diventa efficace con la conferma dell'utente (U-5) e con la chiusur
 | ID | Pendente | Chi |
 | --- | --- | --- |
 | P-1 | Conferma che in F0 non è disponibile un host Linux fisico con KVM | utente |
-| P-2 | Crash della UI su Windows (UI che avvia il supervisor come processo separato); decisione ADR-0015 parte B | sviluppo |
+| P-2 | Crash della UI su Windows (UI che avvia il supervisor come processo separato); decisione ADR-0015 parte B | prova eseguita (`F1-09`: nessun orfano, arresto ordinato non concluso per timeout); **decisione ADR-0015 B: responsabile del progetto** |
 | P-4 | Tastiera fisica → winit → egui → QMP, inclusi AltGr, Ctrl+C/V, tastierino | utente con sviluppo |
 | P-5 | Test con secondo utente locale sui socket privati, oppure decisione di registrarlo come limite | utente |
 | P-6 | Disponibilità di firma del codice e revisione indipendente (ADR-0020) | utente |
@@ -54,14 +54,15 @@ Avviato prima della chiusura di F0 e quindi **non utilizzabile per il criterio d
 | SDK MCP su stdio | `lightvm-mcp` | `F1-06` | verificato in simulazione/test; nessun client MCP reale |
 | Licenze e `cargo deny` | workspace | `F1-07` | verificato |
 | CI e delega cgroup | `.github/workflows/ci.yml` | `F1-08` | validata in locale; **mai eseguita su GitHub** |
-| Probe, processi, QMP, input, screenshot, profilo offline, cicli reali | `qemu-backend` | file `F1-03` non scritto | implementato (in parte); non verificato |
-| UI: appunti, backend di rendering, istantanee, misure | `apps/desktop` | file `F1-05` non scritto | implementato (in parte); non verificato |
+| Probe, processi, QMP, input, screenshot, profilo offline, 20 cicli reali, disco del servizio | `qemu-backend`, `lightvm-service` | `F1-03` | verificato su hardware (Windows, WHPX; VM nel firmware) |
+| UI che avvia il supervisor e usa l'IPC; crash della UI con VM reale | `apps/desktop`, `lightvm-service` | `F1-09` | verificato su hardware, con un esito fallito (arresto ordinato alla perdita della UI) |
+| UI: appunti, backend di rendering, istantanee, misure | `apps/desktop` | file `F1-05` non scritto | test automatici verdi; prove manuali e misure non eseguite |
 
 Punti critici emersi dal riesame del 2026-10-10:
 
-- **Criterio di uscita F1 (F1-12) non eseguito**: il test `reale_cicli_start_stop` esiste ma non ha un'esecuzione registrata; il servizio non crea ancora il disco principale.
-- **La UI apre direttamente il socket QMP** e non avvia il supervisor né usa l'IPC: contrasta con l'unico proprietario QMP (F1-06, ADR-0012) ed è il presupposto mancante di P-2.
-- **Workspace non ritestato** dopo l'ultimo commit di codice (`aa04ccd`); sull'host di sviluppo attuale Rust e QEMU non sono installati (I-10).
+- **Criterio di uscita F1 (F1-12) eseguito ma non valido**: le prove reali di `F1-03` passano sul primo host, ma per la sezione 10 non contano finché F0 non è chiusa; i 20 cicli attraverso il servizio restano da eseguire.
+- **Arresto alla perdita della UI non coerente** (`F1-09`): attesa ACPI della VM 60 s contro timeout di arresto del supervisor 30 s; nessun orfano, ma la VM non è arrestata in modo ordinato. Decisione in ADR-0015 parte B.
+- **La console dello spike apre ancora direttamente il socket QMP**: il percorso di prodotto della console passa dal supervisor in F2 (ADR-0012, ADR-0013).
 
 ## Esito del laboratorio Linux
 
@@ -91,7 +92,7 @@ Punti critici emersi dal riesame del 2026-10-10:
 | I-7 | Build MSVC richiede l'ambiente di Build Tools 2022 caricato esplicitamente | aperto | sviluppo e CI devono impostare l'ambiente; correzione locale a scelta dell'utente | `F0-01` §4.1 |
 | I-8 | Nessun secondo account locale per i test negativi multiutente | aperto | P-5 | `F0-04` §6 |
 | I-9 | Host condiviso con altri agenti durante le misure | dichiarato | le latenze F0 non sono misure di release | `F0-06`, `F0-08` |
-| I-10 | Host di sviluppo attuale senza toolchain Rust 1.99.0 e senza QEMU 11.1.0 (presente Visual Studio 2022 Community) | aperto | build, test e prove reali impossibili finché la toolchain e il laboratorio non sono installati o si torna all'host F0 | — |
+| I-10 | Host di sviluppo attuale senza toolchain Rust 1.99.0 e senza QEMU 11.1.0; Visual Studio 2022 Community senza librerie MSVC x64 desktop | risolto | Rust 1.99.0 installato (rustup, senza modifica del PATH), componente MSVC x64 aggiunto (UAC), QEMU 11.1.0 e ISO scaricati con hash uguali a F0 | `F1-03` §Ambiente |
 
 Il silenzio su un impedimento non equivale alla sua risoluzione (sezione 14, ultima riga).
 

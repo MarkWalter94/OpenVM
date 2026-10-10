@@ -19,7 +19,7 @@ Legenda tipo: **B** = bloccante per l'uscita da F0; **NB** = avviata in F0, comp
 | F0-B07 | QMP su canale privato; arresto ordinario e forzato | B | 2 | da assegnare | `F0-02-qemu-whpx-qmp.md` | 0012 | completato: `F0-02` §4, §7; arresto ACPI non concluso dal live (D-7) |
 | F0-B08 | Console nativa con client RFB sul canale protetto, oppure ripiego screendump; input; screenshot | B | 3 | da assegnare | `F0-04-console-rfb-input.md` | 0003, 0013 | completato con pendenti P-4, P-5: `F0-04` |
 | F0-B09 | Ciclo baseline immutabile / overlay / ripristino con firmware persistente; prove di interruzione | B | 4 | da assegnare | `F0-05-baseline-overlay-firmware.md` | 0005, 0011 | completato: `F0-05` |
-| F0-B10 | Modello di processo del supervisor: QEMU figlio, terminazione OS dei figli, crash UI, crash supervisor | B | 4 | da assegnare | `F0-06-supervisore-processi.md` | 0002, 0009, 0015 | in parte: `F0-06` completo; crash della UI non eseguito (P-2) |
+| F0-B10 | Modello di processo del supervisor: QEMU figlio, terminazione OS dei figli, crash UI, crash supervisor | B | 4 | da assegnare | `F0-06-supervisore-processi.md` | 0002, 0009, 0015 | in parte: `F0-06` completo; crash della UI eseguito in `F1-09` (nessun orfano; arresto ordinato fallito per timeout, decisione ADR-0015 B aperta) |
 | F0-B11 | Avvio su Linux/KVM se il laboratorio è disponibile, altrimenti registrazione "non eseguito" | B | 5 | da assegnare | `F0-07-linux-kvm.md` | 0016 | laboratorio assente: `F0-07`; esito proposto "verificato solo Windows" (P-1) |
 | F0-B12 | Limiti OS per CPU, memoria, storage; prima misura dei consumi | B | 5 | da assegnare | `F0-08-limiti-risorse-misure.md` | 0017, 0018 | completato con limiti: `F0-08` |
 | F0-B13 | Threat model, restrizioni MVP, matrice di supporto iniziale, definizione della fixture | B | 1, 6 | da assegnare | `docs/SECURITY.md`, `docs/COMPATIBILITY.md`, ADR-0019 | 0004, 0019 | completato: fixture in ADR-0019 |
@@ -83,22 +83,22 @@ Derivato dalla sezione 10 F1 e dalle azioni richieste nei file F0 (riesame in `F
 
 ### Avanzamento F1
 
-Aggiornato il 2026-10-10 dalla lettura dei file di verifica e del codice al commit `8c1f26e`. "Codice presente" non vale come verifica (sezione 16, punto 8): senza un file in `docs/verification/` la voce resta `non eseguito`. Nessuna voce vale per il criterio di uscita F1 finché F0 non è chiusa (sezione 10).
+Aggiornato il 2026-10-10 dalla lettura dei file di verifica e del codice, poi dopo le prove reali di `F1-03` e `F1-09` dello stesso giorno. "Codice presente" non vale come verifica (sezione 16, punto 8): senza un file in `docs/verification/` la voce resta `non eseguito`. Nessuna voce vale per il criterio di uscita F1 finché F0 non è chiusa (sezione 10).
 
 | ID | Stato | Evidenza o motivo |
 | --- | --- | --- |
 | F1-01 | in parte | tipi, schemi, errori e migrazioni verificati con test sintetici (`F1-01`, `F1-02`); build e test in CI su GitHub non eseguiti |
 | F1-02 | in parte | workflow completo validato in locale (`F1-08`); mai eseguito su GitHub |
-| F1-03 | codice presente, evidenza assente | `qemu-backend/src/probe.rs`, test `real_qemu::reale_probe_hash_e_acceleratore_assente` (`#[ignore]`); file `F1-03` non scritto |
+| F1-03 | verificato su hardware (Windows) | `F1-03`: probe con hash approvati, hash non approvato rifiutato, acceleratore assente → `unsupported` senza TCG |
 | F1-04 | in parte | modello e registro verificati con test sintetici (`F1-01`, `F1-02`); identità OS del file e apertura protetta contro reparse point non collegate nel servizio (`TODO(F1)` in `lightvm-service/src/adapters/catalog.rs`) |
-| F1-05 | codice presente, evidenza assente | `qemu-backend/src/process/`, `sys/windows.rs`, `run.rs`; end-to-end reale con 2 esecuzioni in `F1-04` (sezione in coda); perdita del genitore con QEMU reale non eseguita |
-| F1-06 | in parte | client QMP in `qemu-backend/src/qmp/` con test simulati (`tests/qmp_mock.rs`), evidenza non registrata; **la UI apre ancora direttamente il socket QMP** (`apps/desktop/src/console.rs`, `qmp_worker`): va portata sull'IPC del supervisor per rispettare l'unico proprietario QMP (ADR-0012) |
-| F1-07 | codice presente, evidenza assente | `qemu-backend/src/input.rs`, `screenshot.rs` |
-| F1-08 | codice presente, evidenza assente | `qemu-backend/src/cmdline.rs`, `run::check_no_nic`, test `real_qemu::reale_rilevatore_nic` (`#[ignore]`) |
+| F1-05 | verificato su hardware (Windows) | `F1-03`: Job Object con un processo, scalata `powerdown` → `quit` → kill, classificazione delle uscite, identità PID + tempo di creazione, 20 cicli senza orfani; perdita del genitore con QEMU reale in `F1-09` (nessun orfano, arresto ordinato non concluso) |
+| F1-06 | in parte | client QMP verificato con QMP simulato (`tests/qmp_mock.rs`) e reale (`F1-03`: socket orfano rimosso, riconciliazione, screendump, input); **la console dello spike nella UI apre ancora direttamente il socket QMP** (`apps/desktop/src/console.rs`, `qmp_worker`): va portata sull'IPC del supervisor con il trasporto del display di F2 (ADR-0012, ADR-0013) |
+| F1-07 | in parte | `F1-03`: screendump reale in directory privata, PNG, limite di dimensione, input con rilascio dei tasti, rifiuti di geometria e `run_id`; tabella scancode US/IT non provata con QEMU reale |
+| F1-08 | verificato su hardware (Windows) | `F1-03`: 18 rifiuti senza processi (percorsi, protocolli remoti, risorse, CPU, macchina), rilevatore NIC con `info network` e `query-pci`, nessuna NIC in 20 cicli |
 | F1-09 | in parte | parte storage verificata con test sintetici (`F1-02`); `qemu-backend/src/storage_guard.rs` senza evidenza; overlay in uso scrivibile da un altro processo dello stesso utente (decisione aperta) |
 | F1-10 | verificato con test | audit di creazione, avvio, arresto, Emergency Stop e dinieghi (`F1-01`; `F1-04`, `core_path`) |
-| F1-11 | in parte | supervisor headless e IPC con named pipe e ACL verificati (`F1-04`); **la UI non avvia il supervisor e non usa l'IPC**: presupposto di P-2 non realizzato |
-| F1-12 | non eseguito | test `real_qemu::reale_cicli_start_stop` scritto (`LIGHTVM_F1_CYCLES`, predefinito 20) ma senza esecuzione registrata; creazione e registrazione del disco principale mancanti nel servizio (`TODO(F1-12)` in `lightvm-service/src/adapters/backend.rs`) |
+| F1-11 | in parte | supervisor headless e IPC verificati (`F1-04`); la UI avvia il supervisor come figlio e usa l'IPC (`F1-09`); P-2 eseguito: nessun orfano, arresto ordinato fallito per timeout (decisione ADR-0015 B); Linux non eseguito |
+| F1-12 | eseguito, non valido come uscita | `F1-03`: creazione disco, 20 cicli reali senza orfani, acceleratore assente, nessuna NIC, rifiuti verificati sulle API del backend; il servizio crea ora il disco principale (`vms/<vm_id>/primary.qcow2`). Non vale per il criterio di uscita finché F0 è aperta; i 20 cicli attraverso il servizio non sono eseguiti |
 | F1-13 | codice presente, evidenza assente | `apps/desktop/src/appunti.rs`, `tests/appunti_ui.rs`; prova manuale non eseguita |
 | F1-14 | in parte | dipendenze Linux elencate (`F1-07`); job `smoke-render-software` non eseguito su GitHub; verifica a runtime non eseguita |
 | F1-15 | in parte | probe D-Bus `StartTransientUnit` verificato in WSL2 (`F1-08`); non implementato in `qemu-backend` (`TODO(F1/R2a)` in `process/mod.rs`) |
@@ -107,7 +107,7 @@ Aggiornato il 2026-10-10 dalla lettura dei file di verifica e del codice al comm
 | F1-18 | non eseguito | nessuna misura con processi di prodotto |
 | F1-19 | in parte | SDK MCP (`F1-06`, ADR-0021 accettata per l'SDK), licenze (`F1-07`, ADR-0023 accettata in parte); istantanee egui_kittest presenti in `apps/desktop/tests/snapshots/` senza evidenza (ADR-0022 Proposta) |
 
-Stato del workspace: secondo il commit `aa04ccd`, `cargo check --workspace --all-targets` passa; i test completi del workspace non sono stati rieseguiti dopo le ultime modifiche. Sull'host di sviluppo attuale (2026-10-10) Rust e QEMU non sono installati: nessuna build né test eseguiti.
+Stato del workspace (2026-10-10, host Windows 11 con Rust 1.99.0 MSVC): `cargo fmt --check`, `cargo clippy -D warnings` (workspace, varianti `glow`/`wgpu` della UI, servizio senza `supervisore`) e `cargo test --workspace --locked` verdi: 328 passati, 0 falliti, 7 ignorati (prove con QEMU reale, eseguite a parte in `F1-03` e `F1-09`).
 
 ### Punti aperti da F0 per le fasi successive
 
