@@ -18,6 +18,10 @@
 //!   l'unico gancio precedente è il `msg_hook` Win32 di winit, che riceve un
 //!   `*const MSG` e richiede codice `unsafe` (vietato nell'app).
 //!
+//! Dal 2026-10-10 la lettura è rimossa a monte con una copia patchata di
+//! egui-winit (`vendor/egui-winit`, `vendor/README.md`): questo modulo resta
+//! come seconda difesa.
+//!
 //! Il blocco a monte resta quindi un'azione fuori dal perimetro dell'app
 //! (vedi `docs/verification/F1-05-desktop-egui.md`). Questo modulo applica il
 //! blocco più a monte possibile **dentro** l'app: in `App::raw_input_hook`,

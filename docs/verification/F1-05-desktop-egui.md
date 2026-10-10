@@ -120,3 +120,27 @@ Su richiesta del responsabile del progetto il backend di rendering è un'imposta
 ## Decisioni proposte
 
 - **ADR-0022:** accettare `egui_kittest` con istantanee come framework di test UI per F1–F2, con il rischio dichiarato della stabilità fra GPU diverse da verificare in CI.
+
+
+## Aggiornamento del 2026-10-10 (circa 12:00 UTC): lettura degli appunti host bloccata in egui-winit (F1-13)
+
+Sezione aggiunta in coda (regola 8). L'esito "lettura degli appunti host non bloccata" della sezione Risultati è superato da questa prova.
+
+### Modifica
+
+`egui-winit` 0.36.2 è sostituito, tramite `[patch.crates-io]`, da una copia in `vendor/egui-winit` con due modifiche (descritte in `vendor/README.md`, marcate `LightVM` nei sorgenti): `Clipboard::get()` restituisce sempre `None` (copre anche `State::clipboard_text()`, usata da eframe per `RequestPaste`) e la combinazione di incolla non viene più trasformata in `Event::Paste`: prosegue come `Event::Key`, che la console inoltra al guest. Nessun `unsafe`. Il filtro dell'app (`apps/desktop/src/appunti.rs`) resta come seconda difesa.
+
+### Procedura
+
+Script nella scratchpad della sessione: imposta negli appunti di Windows un testo di riconoscimento, avvia `apps/desktop/scripts/prova-tastiera-u4.ps1 -Smoke 45` (console reale sulla ISO Ubuntu), porta in primo piano la finestra "LightVM" e invia con `WScript.Shell.SendKeys` tre Ctrl+V e uno Shift+Insert (eventi di tastiera reali di Windows → winit → egui-winit). Stessa prova con la patch disattivata (riga di `[patch.crates-io]` commentata), poi ripristinata.
+
+### Risultati
+
+| Voce | Esito | Evidenza (`lab/logs/f1-13-ctrl-v*.txt`) |
+| --- | --- | --- |
+| **Senza patch**: egui-winit legge gli appunti e genera `Paste` | verificato (riferimento) | `appunti_scartati=2` (eventi `Paste` intercettati e azzerati dal filtro dell'app) |
+| **Con patch**: nessuna lettura degli appunti, nessun `Paste` | verificato | `appunti_scartati=0` con le stesse combinazioni |
+| Workspace con la patch | verificato | `cargo test --workspace`: 356 passati, 0 falliti; clippy `-D warnings` pulito (workspace, varianti glow e wgpu) |
+| Combinazione inoltrata al guest come tasti | non eseguito con tastiera di sistema | `eventi_input=0` in entrambe le prove: la console non aveva il focus della tastiera (serve un clic sull'immagine); coperto da P-4 (prova manuale) e dai test headless |
+
+Limite: la patch va riapplicata a ogni aggiornamento di egui/eframe (ADR-0014, ADR-0023). Nota: la prova ha sovrascritto il contenuto degli appunti di Windows dell'host.

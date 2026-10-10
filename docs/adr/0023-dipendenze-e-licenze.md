@@ -28,6 +28,10 @@ Criteri:
 2. Advisory noti controllati a ogni modifica. — job `cargo-deny` definito; verificato in locale, CI non ancora eseguita (`F1-08`).
 3. Inventario riproducibile dal lockfile. — soddisfatto (`F1-07`, procedura).
 
+### Dipendenze patchate (2026-10-10)
+
+`egui-winit` 0.36.2 (MIT OR Apache-2.0) è usato in una copia patchata in `vendor/egui-winit` (`[patch.crates-io]`, `vendor/README.md`) per non leggere mai gli appunti dell'host (F1-13). Regole: patch minime e marcate, stessa versione fissata in ADR-0014, licenza originale invariata, riapplicazione e riverifica a ogni aggiornamento; l'inventario delle licenze conta la copia come la dipendenza originale.
+
 ## Alternative considerate
 
 `cargo-deny` per licenze e advisory (scelto), `cargo-audit` per advisory (coperto da `cargo-deny`), `cargo-about` o `cargo-cyclonedx` per inventario e SBOM (da provare in F6). La scelta degli strumenti non sostituisce la revisione umana delle licenze non standard.

@@ -57,7 +57,7 @@ Avviato prima della chiusura di F0 e quindi **non utilizzabile per il criterio d
 | Probe, processi, QMP, input, screenshot, profilo offline, 20 cicli reali (anche via servizio), disco del servizio, installazione su disco e boot dal disco (F1-17) | `qemu-backend`, `lightvm-service` | `F1-03` | verificato su hardware (Windows, WHPX) |
 | UI che avvia il supervisor e usa l'IPC; crash della UI con VM reale | `apps/desktop`, `lightvm-service` | `F1-09` | verificato su hardware; politica alla perdita della UI come impostazione (ADR-0015 B) |
 | Limiti per VM (CPU, memoria, budget storage), impostazioni della VM, `--apri-vm` | `lightvm-proto`, `vm-core`, `qemu-backend`, `lightvm-service`, `apps/desktop` | `F1-10` | verificato su hardware (Windows); storage completo in F3 |
-| UI: appunti, backend di rendering, istantanee, misure | `apps/desktop` | `F1-05` | verificato in simulazione/test (appunti, istantanee) e su hardware (ripiego di rendering, misure); lettura degli appunti in egui-winit non bloccata; memoria con wgpu oltre l'obiettivo (D-12) |
+| UI: appunti, backend di rendering, istantanee, misure | `apps/desktop` | `F1-05` | verificato su hardware (ripiego di rendering, misure, **lettura degli appunti host bloccata** con egui-winit patchato) e headless (istantanee); memoria con wgpu oltre l'obiettivo (D-12) |
 
 Punti critici emersi dal riesame del 2026-10-10:
 
