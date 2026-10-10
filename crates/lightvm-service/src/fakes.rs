@@ -17,7 +17,7 @@ use vm_core::media::{ObservedMediaFacts, VerifiedMedia};
 use vm_core::ports::{AuditSink, CatalogStore, MediaInspector, VmBackend};
 
 use crate::engine::{BackendPort, CoreEngine, VmEngine, core_config};
-use crate::supervisor::{Backend, EmergencyOutcome, EmergencyStop, OrphanPolicy};
+use crate::supervisor::{Backend, EmergencyOutcome, EmergencyStop, ParentLossPolicy};
 
 /// Registro delle chiamate ricevute dalle implementazioni finte.
 pub type Calls = Arc<Mutex<Vec<String>>>;
@@ -288,7 +288,7 @@ impl Backend for FakeHost {
     fn stop_agent_sessions(&mut self, reason: StopReason) {
         push(&self.calls, format!("stop_agent_sessions:{reason:?}"));
     }
-    fn on_parent_lost(&mut self, policy: OrphanPolicy) {
+    fn on_parent_lost(&mut self, policy: ParentLossPolicy) {
         push(&self.calls, format!("on_parent_lost:{policy:?}"));
     }
     fn shutdown(&mut self) {

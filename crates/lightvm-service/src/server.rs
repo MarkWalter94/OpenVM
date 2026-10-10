@@ -24,7 +24,7 @@ use crate::frame::{self, FrameError};
 use crate::lock::{InstanceLock, LockError};
 use crate::ratelimit::{RateLimit, TokenBucket};
 use crate::supervisor::{
-    Backend, Command, EmergencyStop, OrphanPolicy, SupervisorRequest, SupervisorThread,
+    Backend, Command, EmergencyStop, ParentLossPolicy, SupervisorRequest, SupervisorThread,
     unauthenticated,
 };
 use crate::transport::{Accepted, BoxedStream, EndpointOptions, Listener, PeerInfo};
@@ -50,8 +50,8 @@ pub struct ServiceConfig {
     pub pairing_ttl: Duration,
     /// Attesa massima del supervisor durante l'arresto.
     pub shutdown_timeout: Duration,
-    /// Comportamento alla perdita della UI.
-    pub orphan_policy: OrphanPolicy,
+    /// Sorte delle VM alla perdita della UI (modificabile via IPC).
+    pub parent_loss_policy: ParentLossPolicy,
 }
 
 impl ServiceConfig {
@@ -67,7 +67,7 @@ impl ServiceConfig {
             handshake_timeout: Duration::from_secs(5),
             pairing_ttl: Duration::from_secs(600),
             shutdown_timeout: Duration::from_secs(30),
-            orphan_policy: OrphanPolicy::default(),
+            parent_loss_policy: ParentLossPolicy::default(),
         }
     }
 }
@@ -119,6 +119,8 @@ struct Shared {
     /// Generazione dell'Emergency Stop: le mutazioni accodate prima di un
     /// Emergency Stop vengono scartate dal supervisor.
     emergency_epoch: Arc<AtomicU64>,
+    /// Politica alla perdita della UI in vigore (condivisa col supervisor).
+    parent_loss_policy: Arc<Mutex<ParentLossPolicy>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -228,16 +230,41 @@ impl Shared {
         if self.stopping.load(Ordering::SeqCst) {
             return;
         }
+        let policy = *lock(&self.parent_loss_policy);
         self.revoke_non_ui();
         let (done_tx, done_rx) = oneshot::channel();
         if self.send_cmd(Command::ParentLost {
-            policy: self.cfg.orphan_policy,
+            policy,
             done: done_tx,
         }) {
             let _ = tokio::time::timeout(self.cfg.shutdown_timeout, done_rx).await;
         }
-        if self.cfg.orphan_policy == OrphanPolicy::ShutdownService {
-            self.trigger_shutdown();
+        match policy {
+            ParentLossPolicy::KillVms => {
+                // Percorso prioritario: le VM terminano subito con primitive OS
+                // e il core registra l'Emergency Stop; poi arresto del servizio.
+                let r = self.emergency_stop().await;
+                crate::diag!(
+                    "lightvm-service: UI persa, Emergency Stop: {} processi terminati, completato {}",
+                    r.processes_terminated,
+                    r.completed
+                );
+                self.trigger_shutdown();
+            }
+            ParentLossPolicy::ShutdownVms { .. } => self.trigger_shutdown(),
+            ParentLossPolicy::KeepVms => {}
+        }
+    }
+
+    /// Attesa del supervisor durante l'arresto: con `shutdown_vms` copre
+    /// almeno l'attesa ACPI più `quit` e terminazione (20 s).
+    fn shutdown_budget(&self) -> Duration {
+        match *lock(&self.parent_loss_policy) {
+            ParentLossPolicy::ShutdownVms { powerdown_s } => self
+                .cfg
+                .shutdown_timeout
+                .max(Duration::from_secs(u64::from(powerdown_s) + 20)),
+            _ => self.cfg.shutdown_timeout,
         }
     }
 }
@@ -282,7 +309,7 @@ impl ServiceHandle {
     }
 
     /// Processo genitore perso: arresto delle sessioni agente, hook del backend
-    /// e poi [`OrphanPolicy`].
+    /// e poi [`ParentLossPolicy`].
     pub async fn parent_lost(&self) {
         self.shared.parent_lost().await;
     }
@@ -333,12 +360,14 @@ pub async fn start(
     let (cmd_tx, cmd_rx) = mpsc::channel();
     let emergency = backend.emergency_handle();
     let emergency_epoch = Arc::new(AtomicU64::new(0));
+    let parent_loss_policy = Arc::new(Mutex::new(cfg.parent_loss_policy));
     let sup = SupervisorThread {
         engine,
         backend,
         events: events.clone(),
         max_frame: cfg.max_frame,
         emergency_epoch: emergency_epoch.clone(),
+        parent_loss_policy: parent_loss_policy.clone(),
     };
     // Pubblicato prima di qualunque iscrizione possibile: nessun client lo
     // riceve in ritardo, dopo eventi successivi (corsa con `subscribe`).
@@ -368,6 +397,7 @@ pub async fn start(
         closing,
         stopping: AtomicBool::new(false),
         emergency_epoch,
+        parent_loss_policy,
     });
 
     // Ciclo di accettazione.
@@ -417,16 +447,25 @@ pub async fn start(
         //    arresta il backend.
         let (done_tx, done_rx) = oneshot::channel();
         let finished = drv.send_cmd(Command::Shutdown { done: done_tx })
-            && tokio::time::timeout(drv.cfg.shutdown_timeout, done_rx)
+            && tokio::time::timeout(drv.shutdown_budget(), done_rx)
                 .await
                 .is_ok();
         lock(&drv.cmd_tx).take();
         if finished {
             let _ = tokio::task::spawn_blocking(move || sup_thread.join()).await;
         } else {
-            // Supervisor bloccato: non si attende il thread; il lock viene
-            // comunque rilasciato e il processo può terminare.
+            // Supervisor bloccato: non si attende il thread; le VM ancora vive
+            // terminano con il percorso prioritario (non con la sola chiusura
+            // del Job Object all'uscita), poi il lock viene rilasciato.
             crate::diag!("lightvm-service: timeout nell'arresto del supervisor");
+            let handle = drv.emergency.clone();
+            let outcome = tokio::task::spawn_blocking(move || handle.emergency_stop_all())
+                .await
+                .unwrap_or_default();
+            crate::diag!(
+                "lightvm-service: Emergency Stop dopo il timeout: {} processi terminati",
+                outcome.processes_terminated
+            );
         }
         // 3. Attesa breve della chiusura delle connessioni.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
@@ -859,6 +898,15 @@ async fn dispatch(
             // thread del supervisor.
             let report = shared.emergency_stop().await;
             return Dispatch::Reply(Ok(ResponseBody::EmergencyStop(report)));
+        }
+        Request::SetParentLossPolicy { policy } => {
+            return Dispatch::Reply(match policy.validate() {
+                Ok(policy) => {
+                    *lock(&shared.parent_loss_policy) = policy;
+                    Ok(ResponseBody::ParentLossPolicy { policy })
+                }
+                Err(e) => Err(ReplyError::Operational(e)),
+            });
         }
         Request::Shutdown => return Dispatch::ReplyThenShutdown(ResponseBody::ShuttingDown),
     };

@@ -122,6 +122,12 @@ pub enum Request {
     CreatePairingCredential,
     /// Emergency Stop: percorso prioritario, non passa dalla coda (solo UI).
     EmergencyStop,
+    /// Sorte delle VM se la UI termina senza arresto controllato (solo UI).
+    /// Vale subito; la UI la ripassa a ogni avvio del servizio.
+    SetParentLossPolicy {
+        /// Nuova politica.
+        policy: ParentLossPolicy,
+    },
     /// Arresto controllato del servizio (solo UI).
     Shutdown,
 }
@@ -142,6 +148,7 @@ impl Request {
             Self::RevokeConnection { .. } => "revoke_connection",
             Self::CreatePairingCredential => "create_pairing_credential",
             Self::EmergencyStop => "emergency_stop",
+            Self::SetParentLossPolicy { .. } => "set_parent_loss_policy",
             Self::Shutdown => "shutdown",
         }
     }
@@ -172,6 +179,50 @@ pub struct Capabilities {
     pub accelerator: Option<String>,
     /// Limite di byte per frame.
     pub max_frame_bytes: u32,
+    /// Politica attiva alla perdita della UI.
+    #[serde(default)]
+    pub parent_loss_policy: ParentLossPolicy,
+}
+
+/// Attesa minima ammessa per lo spegnimento ordinato alla perdita della UI.
+pub const MIN_PARENT_LOSS_POWERDOWN_S: u32 = 1;
+/// Attesa massima ammessa per lo spegnimento ordinato alla perdita della UI.
+pub const MAX_PARENT_LOSS_POWERDOWN_S: u32 = 300;
+
+/// Sorte delle VM quando la UI che ha avviato il servizio termina senza
+/// arresto controllato (crash, terminazione forzata). ADR-0015 parte B.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ParentLossPolicy {
+    /// Emergency Stop di tutte le VM, poi arresto del servizio (predefinita).
+    #[default]
+    KillVms,
+    /// Spegnimento ordinato (ACPI) con attesa limitata, poi `quit` e
+    /// terminazione; infine arresto del servizio.
+    ShutdownVms {
+        /// Attesa dello spegnimento ACPI per VM, in secondi
+        /// ([`MIN_PARENT_LOSS_POWERDOWN_S`]..=[`MAX_PARENT_LOSS_POWERDOWN_S`]).
+        powerdown_s: u32,
+    },
+    /// Le VM restano accese e il servizio resta attivo senza UI.
+    KeepVms,
+}
+
+impl ParentLossPolicy {
+    /// Validazione dei limiti.
+    pub fn validate(self) -> Result<Self, crate::PublicError> {
+        match self {
+            Self::ShutdownVms { powerdown_s }
+                if !(MIN_PARENT_LOSS_POWERDOWN_S..=MAX_PARENT_LOSS_POWERDOWN_S)
+                    .contains(&powerdown_s) =>
+            {
+                Err(crate::PublicError::invalid_argument(format!(
+                    "powerdown_s fuori dall'intervallo {MIN_PARENT_LOSS_POWERDOWN_S}..={MAX_PARENT_LOSS_POWERDOWN_S}"
+                )))
+            }
+            p => Ok(p),
+        }
+    }
 }
 
 /// Connessione attiva, per `list_connections`.
@@ -251,6 +302,11 @@ pub enum ResponseBody {
     },
     /// Esito dell'Emergency Stop.
     EmergencyStop(EmergencyStopReport),
+    /// Politica alla perdita della UI in vigore dopo `set_parent_loss_policy`.
+    ParentLossPolicy {
+        /// Politica attiva.
+        policy: ParentLossPolicy,
+    },
     /// Arresto accettato.
     ShuttingDown,
 }
@@ -380,6 +436,7 @@ pub fn schemas() -> Vec<(&'static str, Schema)> {
     vec![
         ("ipc_client_message", generate::<ClientMessage>()),
         ("ipc_server_message", generate::<ServerMessage>()),
+        ("parent_loss_policy", generate::<ParentLossPolicy>()),
     ]
 }
 
@@ -387,6 +444,42 @@ pub fn schemas() -> Vec<(&'static str, Schema)> {
 mod tests {
     use super::*;
     use crate::{ErrorCode, ProtocolError, ProtocolErrorCode, PublicError};
+
+    #[test]
+    fn parent_loss_policy_wire_shape_default_and_limits() {
+        assert_eq!(ParentLossPolicy::default(), ParentLossPolicy::KillVms);
+        assert_eq!(
+            serde_json::to_string(&ParentLossPolicy::KillVms).unwrap(),
+            r#"{"kind":"kill_vms"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ParentLossPolicy::ShutdownVms { powerdown_s: 10 }).unwrap(),
+            r#"{"kind":"shutdown_vms","powerdown_s":10}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ParentLossPolicy::KeepVms).unwrap(),
+            r#"{"kind":"keep_vms"}"#
+        );
+        for ok in [1, 10, 300] {
+            assert!(
+                ParentLossPolicy::ShutdownVms { powerdown_s: ok }
+                    .validate()
+                    .is_ok()
+            );
+        }
+        for bad in [0, 301, u32::MAX] {
+            let e = ParentLossPolicy::ShutdownVms { powerdown_s: bad }
+                .validate()
+                .unwrap_err();
+            assert_eq!(e.code, ErrorCode::InvalidArgument);
+        }
+        // Capacità di un servizio precedente senza il campo: politica predefinita.
+        let c: Capabilities = serde_json::from_str(
+            r#"{"protocol_versions":[1],"backend":"x","accelerator":null,"max_frame_bytes":1}"#,
+        )
+        .unwrap();
+        assert_eq!(c.parent_loss_policy, ParentLossPolicy::KillVms);
+    }
 
     #[test]
     fn error_json_shape_uses_proto_types() {

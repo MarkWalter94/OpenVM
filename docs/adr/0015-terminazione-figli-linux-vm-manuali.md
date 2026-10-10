@@ -1,7 +1,7 @@
 # ADR-0015 — Terminazione dei figli su Linux e sorte delle VM manuali senza UI
 
-- Stato: Proposta
-- Data: 2026-10-09
+- Stato: Proposta per la parte A (Linux, R2a); **parte B Accettata il 2026-10-10** (decisione del responsabile del progetto)
+- Data: 2026-10-09; parte B: 2026-10-10
 - Responsabile: da assegnare
 - Da chiudere entro: F0
 
@@ -38,13 +38,33 @@ Da prendere, in due parti.
 
 Da decidere ancora: creazione dello scope delegato (`systemd-run --user --scope -p Delegate=yes` all'avvio, oppure `StartTransientUnit` via D-Bus dal supervisor) e scope per VM o sotto-cgroup dello scope del supervisor (provato il secondo). Prova successiva in WSL2 (`docs/verification/F1-08-ci.md` §3, valida solo per i processi): lo scope delegato si crea con `StartTransientUnit` via D-Bus senza `systemd-run`; se lo scope contiene solo la VM, systemd lo rimuove alla sua uscita, quindi supervisor e foglie VM devono stare nello stesso scope; senza sessione utente systemd il bus non è raggiungibile, si ripiega sul gruppo di processi e la modalità agente resta disabilitata. La parte A resta Proposta fino alla scelta esplicita. La conferma con QEMU reale e KVM su host fisico è rinviata a R2a (ADR-0016).
 
-**B. VM manuali dopo crash della UI — aperta.**
+**B. VM manuali dopo crash della UI — decisa il 2026-10-10** (sezione "Decisione della parte B" in coda). Stato precedente alla decisione:
 
 - Windows: la morte del supervisor termina sempre QEMU tramite il Job Object (p50 118,9 ms con `abort()`, 110,4 ms con `TerminateProcess`, max 143,9 ms, 10 cicli, `F0-06` §2a): il ricollegamento è possibile solo se il supervisor sopravvive alla UI; se il supervisor muore la VM manuale è persa e il suo overlay non è uno stato pulito. Il **crash della UI non è stato eseguito** su Windows perché la UI non avvia ancora il supervisor come processo separato (pendente P-2 in `F0-09`).
 - Linux, solo **[processi]**: il supervisor rileva la morte della UI con un pidfd e arresta la VM (SIGTERM, 2 s, SIGKILL): p95 1,769 ms fino alla fine di VM e supervisor, 30 campioni (`F0-07` §4).
 - Proposta da confermare con la prova Windows: arresto controllato come comportamento iniziale (`system_powerdown` con timeout, poi `quit`, poi terminazione con primitive OS), perché verificabile senza IPC; il ricollegamento resta un'alternativa da provare quando esiste l'IPC autenticato.
 
-L'ADR resta Proposta finché la parte B non ha la prova su Windows.
+Prova su Windows eseguita il 2026-10-10: `docs/verification/F1-09-ui-supervisore-crash-ui.md`.
+
+### Decisione della parte B (2026-10-10)
+
+Scelta del responsabile del progetto: la sorte delle VM alla perdita della UI è **un'impostazione dell'utente**, con predefinito **terminare subito le VM**.
+
+| Politica (`ParentLossPolicy`) | Comportamento | Disponibilità |
+| --- | --- | --- |
+| `kill_vms` (predefinita) | revoca delle sessioni agente, Emergency Stop di tutte le VM con primitive OS (registrato nell'audit e nel core), arresto del servizio | UI e servizio |
+| `shutdown_vms { powerdown_s }` | revoca delle sessioni agente, `system_powerdown` con attesa `powerdown_s` (1–300, nella UI 5/10/30/60/120/300 s), poi `quit` 5 s e terminazione 10 s; il timeout di arresto del servizio copre almeno `powerdown_s + 20` s | UI e servizio |
+| `keep_vms` | VM e servizio restano attivi senza UI | solo servizio (`--parent-loss-policy keep-vms`, test); **disattivata nella UI** finché non esiste il ricollegamento di una nuova UI (criterio 4) |
+
+Motivazioni e lettura della roadmap:
+
+- La sezione 6.1 ammette "arresto controllato" o "ricollegamento della UI". `kill_vms` è letto come arresto controllato **dal supervisor** con attesa zero: la terminazione è richiesta, osservata e registrata dal supervisor con lo stesso percorso dell'Emergency Stop (sezione 7.3). Può perdere lo stato dell'overlay della VM, mai la baseline. È una scelta esplicita del responsabile del progetto, non un ripiego tecnico.
+- `shutdown_vms` è l'arresto controllato "gentile con timeout, poi forzato" previsto fra le alternative.
+- `keep_vms` senza ricollegamento lascerebbe VM che nessuna UI può più comandare: non rientra nelle alternative finché il criterio 4 non è soddisfatto.
+- Criteri 1–2: in ogni politica le sessioni agente sono revocate prima e non vengono riattivate. Criterio 3: la chiusura manuale dell'app resta un arresto controllato separato; la politica vale solo per la perdita anomala della UI.
+- Indipendentemente dalla politica, se il supervisor non conclude l'arresto entro il proprio timeout le VM rimaste sono terminate con l'Emergency Stop prima dell'uscita (non più affidate alla sola chiusura del Job Object).
+
+Prove (Windows, QEMU reale, `F1-09` sezione del 2026-10-10): `kill_vms` → QEMU terminato 105 ms e servizio 208 ms dopo il kill della UI, audit `emergency_stop succeeded`; `shutdown_vms` con 3 s → QEMU 3,21 s, servizio 3,29 s, audit `vm_stop succeeded`. Linux: rinviato a R2a con la parte A.
 
 ## Alternative considerate
 

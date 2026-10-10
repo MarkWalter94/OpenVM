@@ -274,6 +274,57 @@
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     },
+    "ParentLossPolicy": {
+      "description": "Sorte delle VM quando la UI che ha avviato il servizio termina senza\narresto controllato (crash, terminazione forzata). ADR-0015 parte B.",
+      "oneOf": [
+        {
+          "description": "Emergency Stop di tutte le VM, poi arresto del servizio (predefinita).",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "kill_vms"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "Spegnimento ordinato (ACPI) con attesa limitata, poi `quit` e\nterminazione; infine arresto del servizio.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "shutdown_vms"
+            },
+            "powerdown_s": {
+              "description": "Attesa dello spegnimento ACPI per VM, in secondi\n([`MIN_PARENT_LOSS_POWERDOWN_S`]..=[`MAX_PARENT_LOSS_POWERDOWN_S`]).",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "kind",
+            "powerdown_s"
+          ]
+        },
+        {
+          "description": "Le VM restano accese e il servizio resta attivo senza UI.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "keep_vms"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        }
+      ]
+    },
     "PointerButton": {
       "description": "Pressione o rilascio di un pulsante del puntatore.",
       "type": "object",
@@ -487,6 +538,24 @@
           },
           "required": [
             "op"
+          ]
+        },
+        {
+          "description": "Sorte delle VM se la UI termina senza arresto controllato (solo UI).\nVale subito; la UI la ripassa a ogni avvio del servizio.",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "set_parent_loss_policy"
+            },
+            "policy": {
+              "description": "Nuova politica.",
+              "$ref": "#/$defs/ParentLossPolicy"
+            }
+          },
+          "required": [
+            "op",
+            "policy"
           ]
         },
         {

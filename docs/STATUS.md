@@ -36,7 +36,7 @@ La decisione diventa efficace con la conferma dell'utente (U-5) e con la chiusur
 | ID | Pendente | Chi |
 | --- | --- | --- |
 | P-1 | Conferma che in F0 non è disponibile un host Linux fisico con KVM | utente |
-| P-2 | Crash della UI su Windows (UI che avvia il supervisor come processo separato); decisione ADR-0015 parte B | prova eseguita (`F1-09`: nessun orfano, arresto ordinato non concluso per timeout); **decisione ADR-0015 B: responsabile del progetto** |
+| P-2 | Crash della UI su Windows (UI che avvia il supervisor come processo separato); decisione ADR-0015 parte B | **chiuso il 2026-10-10**: ADR-0015 B accettata (impostazione, predefinito terminare le VM); prova `F1-09` verificata con entrambe le politiche |
 | P-4 | Tastiera fisica → winit → egui → QMP, inclusi AltGr, Ctrl+C/V, tastierino | utente con sviluppo |
 | P-5 | Test con secondo utente locale sui socket privati, oppure decisione di registrarlo come limite | utente |
 | P-6 | Disponibilità di firma del codice e revisione indipendente (ADR-0020) | utente |
@@ -55,13 +55,13 @@ Avviato prima della chiusura di F0 e quindi **non utilizzabile per il criterio d
 | Licenze e `cargo deny` | workspace | `F1-07` | verificato |
 | CI e delega cgroup | `.github/workflows/ci.yml` | `F1-08` | validata in locale; **mai eseguita su GitHub** |
 | Probe, processi, QMP, input, screenshot, profilo offline, 20 cicli reali, disco del servizio | `qemu-backend`, `lightvm-service` | `F1-03` | verificato su hardware (Windows, WHPX; VM nel firmware) |
-| UI che avvia il supervisor e usa l'IPC; crash della UI con VM reale | `apps/desktop`, `lightvm-service` | `F1-09` | verificato su hardware, con un esito fallito (arresto ordinato alla perdita della UI) |
+| UI che avvia il supervisor e usa l'IPC; crash della UI con VM reale | `apps/desktop`, `lightvm-service` | `F1-09` | verificato su hardware; politica alla perdita della UI come impostazione (ADR-0015 B) |
 | UI: appunti, backend di rendering, istantanee, misure | `apps/desktop` | `F1-05` | verificato in simulazione/test (appunti, istantanee) e su hardware (ripiego di rendering, misure); lettura degli appunti in egui-winit non bloccata; memoria con wgpu oltre l'obiettivo (D-12) |
 
 Punti critici emersi dal riesame del 2026-10-10:
 
 - **Criterio di uscita F1 (F1-12) eseguito ma non valido**: le prove reali di `F1-03` (anche 20 cicli attraverso il servizio) passano sul primo host, ma per la sezione 10 non contano finché F0 non è chiusa.
-- **Arresto alla perdita della UI non coerente** (`F1-09`): attesa ACPI della VM 60 s contro timeout di arresto del supervisor 30 s; nessun orfano, ma la VM non è arrestata in modo ordinato. Decisione in ADR-0015 parte B.
+- **Arresto alla perdita della UI** risolto il 2026-10-10: impostazione con predefinito "termina subito le VM" (ADR-0015 B), prove in `F1-09`.
 - **La console dello spike apre ancora direttamente il socket QMP**: il percorso di prodotto della console passa dal supervisor in F2 (ADR-0012, ADR-0013).
 
 ## Esito del laboratorio Linux
@@ -77,7 +77,7 @@ Punti critici emersi dal riesame del 2026-10-10:
 | `docs/COMPATIBILITY.md` | riga Windows 11 → Linux "sperimentale" con i dati F0; riga Ubuntu "non verificato"; completato nel commit `aa04ccd` |
 | `docs/TESTING.md` | misure F0 registrate; egui_kittest provato; completato nel commit `aa04ccd`; misure F1-18 assenti |
 | `docs/RELEASE_PLAN.md` | backlog F0 con esiti; backlog F1 con avanzamento per voce |
-| `docs/adr/` | 21 ADR Accettata, di cui 0016 condizionata alla conferma dell'utente e 0021, 0023 accettate in parte; 5 ADR Proposta (0015, 0017, 0020, 0022, 0026) |
+| `docs/adr/` | 21 ADR Accettata, di cui 0016 condizionata alla conferma dell'utente e 0021, 0023 accettate in parte; 5 ADR Proposta (0015 solo parte A — parte B accettata il 2026-10-10, 0017, 0020, 0022, 0026) |
 
 ## Impedimenti e punti aperti
 

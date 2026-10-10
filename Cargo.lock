@@ -2036,6 +2036,7 @@ dependencies = [
  "lightvm-proto",
  "lightvm-service",
  "rfb-client",
+ "serde",
  "serde_json",
  "tokio",
 ]

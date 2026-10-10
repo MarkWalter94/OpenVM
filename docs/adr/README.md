@@ -68,7 +68,7 @@ Quando un ADR Proposta viene chiuso si aggiornano: lo stato e la sezione Decisio
 | [0012](0012-canale-qmp-privato.md) | Canale QMP privato | Accettata (Windows; Linux in R2a) | 6.3, 7.2, 17 |
 | [0013](0013-trasporto-console-protetto.md) | Trasporto console protetto e ripiego | Accettata (Windows; Linux in R2a) | 6.4, 17 |
 | [0014](0014-egui-eframe-versioni-backend.md) | Versioni di egui/eframe e backend di rendering | Accettata (Windows; backend Linux in R2a) | 6.0, 14, 17 |
-| [0015](0015-terminazione-figli-linux-vm-manuali.md) | Terminazione dei figli su Linux e sorte delle VM manuali senza UI | Proposta | 6.1, 7.3, 17 |
+| [0015](0015-terminazione-figli-linux-vm-manuali.md) | Terminazione dei figli su Linux e sorte delle VM manuali senza UI | Parte B Accettata (2026-10-10); parte A Proposta (Linux, R2a) | 6.1, 7.3, 17 |
 | [0016](0016-esito-laboratorio-linux.md) | Esito del laboratorio Linux | Accettata, condizionata alla conferma dell'utente | 5, 10 F0, 17 |
 | [0017](0017-limiti-os-budget-storage.md) | Limiti OS e budget storage | Proposta | 7.2, 8, 17 |
 | [0018](0018-hardware-di-riferimento.md) | Hardware di riferimento | Accettata | 13, 17 |

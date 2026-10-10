@@ -19,7 +19,7 @@ use lightvm_service::frame::FrameError;
 use lightvm_service::lock::{InstanceLock, LockError};
 use lightvm_service::ratelimit::RateLimit;
 use lightvm_service::server::StartError;
-use lightvm_service::supervisor::Backend;
+use lightvm_service::supervisor::{Backend, ParentLossPolicy};
 use lightvm_service::test_support::temp_dir;
 use lightvm_service::{ServiceConfig, ServiceHandle, start};
 
@@ -623,7 +623,14 @@ async fn parent_lost_in_process_stops_agent_sessions_then_shuts_down() {
     tokio::time::timeout(T, svc.handle.wait()).await.unwrap();
     let calls = calls(&svc);
     assert_eq!(calls[0], "stop_agent_sessions:ParentLost");
-    assert_eq!(calls[1], "on_parent_lost:ShutdownService");
+    assert_eq!(calls[1], "on_parent_lost:KillVms");
+    // Politica predefinita: Emergency Stop prima dell'arresto del servizio.
+    let kill = calls.iter().position(|c| c == "emergency_stop_all");
+    let stop = calls.iter().position(|c| c == "shutdown");
+    assert!(
+        matches!((kill, stop), (Some(k), Some(s)) if k < s),
+        "{calls:?}"
+    );
     // Il client di pairing è stato revocato prima dell'arresto.
     match tokio::time::timeout(T, p.recv()).await.unwrap().unwrap() {
         ServerMessage::Closing {
@@ -642,6 +649,117 @@ async fn parent_lost_in_process_stops_agent_sessions_then_shuts_down() {
         }
     }
     assert!(saw_agents_stopped);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn parent_lost_with_shutdown_vms_stops_without_emergency() {
+    let svc = start_with(
+        "parent-shutdown-vms",
+        |c| c.parent_loss_policy = ParentLossPolicy::ShutdownVms { powerdown_s: 7 },
+        None,
+    )
+    .await;
+    svc.handle.parent_lost().await;
+    tokio::time::timeout(T, svc.handle.wait()).await.unwrap();
+    let calls = calls(&svc);
+    assert_eq!(calls[1], "on_parent_lost:ShutdownVms { powerdown_s: 7 }");
+    assert!(
+        !calls.iter().any(|c| c == "emergency_stop_all"),
+        "{calls:?}"
+    );
+    assert!(calls.iter().any(|c| c == "shutdown"), "{calls:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn parent_lost_with_keep_vms_leaves_the_service_running() {
+    let svc = start_with(
+        "parent-keep-vms",
+        |c| c.parent_loss_policy = ParentLossPolicy::KeepVms,
+        None,
+    )
+    .await;
+    svc.handle.parent_lost().await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), svc.handle.wait())
+            .await
+            .is_err(),
+        "il servizio non deve fermarsi con keep_vms"
+    );
+    let calls = calls(&svc);
+    assert_eq!(calls[1], "on_parent_lost:KeepVms");
+    assert!(
+        !calls
+            .iter()
+            .any(|c| c == "emergency_stop_all" || c == "shutdown")
+    );
+    svc.handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn parent_loss_policy_is_set_via_ipc_by_the_ui_only() {
+    let svc = start_default("parent-policy-ipc").await;
+    let (mut ui, _) = connect_ui(&svc).await;
+    let caps = |m: ServerMessage| match m {
+        ServerMessage::Response {
+            result: ResponseBody::Capabilities(c),
+            ..
+        } => c.parent_loss_policy,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(
+        caps(ui.request(Request::GetCapabilities).await.unwrap()),
+        ParentLossPolicy::KillVms
+    );
+    let nuova = ParentLossPolicy::ShutdownVms { powerdown_s: 15 };
+    match ui
+        .request(Request::SetParentLossPolicy { policy: nuova })
+        .await
+        .unwrap()
+    {
+        ServerMessage::Response {
+            result: ResponseBody::ParentLossPolicy { policy },
+            ..
+        } => assert_eq!(policy, nuova),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        caps(ui.request(Request::GetCapabilities).await.unwrap()),
+        nuova
+    );
+    // Fuori intervallo: rifiutata senza effetto.
+    let m = ui
+        .request(Request::SetParentLossPolicy {
+            policy: ParentLossPolicy::ShutdownVms { powerdown_s: 0 },
+        })
+        .await
+        .unwrap();
+    assert_eq!(public_error(&m), Some(ErrorCode::InvalidArgument));
+    assert_eq!(
+        caps(ui.request(Request::GetCapabilities).await.unwrap()),
+        nuova
+    );
+    // Ruolo di pairing: nessun permesso.
+    let pairing = svc.handle.issue_pairing_credential().unwrap();
+    let mut p = connect(&svc).await;
+    p.hello(&pairing).await.unwrap();
+    let m = p
+        .request(Request::SetParentLossPolicy {
+            policy: ParentLossPolicy::KeepVms,
+        })
+        .await
+        .unwrap();
+    assert_eq!(public_error(&m), Some(ErrorCode::PermissionDenied));
+    assert_eq!(
+        caps(ui.request(Request::GetCapabilities).await.unwrap()),
+        nuova
+    );
+    // La politica cambiata vale alla perdita della UI.
+    svc.handle.parent_lost().await;
+    tokio::time::timeout(T, svc.handle.wait()).await.unwrap();
+    assert_eq!(
+        calls(&svc)[1],
+        "on_parent_lost:ShutdownVms { powerdown_s: 15 }"
+    );
 }
 
 // --- Test sul binario reale -------------------------------------------------

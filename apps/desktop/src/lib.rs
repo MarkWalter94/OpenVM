@@ -22,12 +22,14 @@ use std::time::{Duration, Instant};
 
 pub mod appunti;
 pub mod console;
+pub mod impostazioni;
 pub mod keymap;
 pub mod librerie;
 pub mod render;
 pub mod servizio;
 
 use console::{ConsoleConfig, LiveConsole};
+use impostazioni::Impostazioni;
 use render::InfoRendering;
 use servizio::{Comando, Servizio, StatoServizio};
 
@@ -116,6 +118,9 @@ pub struct LightVmApp {
     elenco_vm: Vec<VmRiga>,
     servizio: Option<Servizio>,
     errore_servizio: Option<String>,
+    impostazioni: Impostazioni,
+    percorso_impostazioni: Option<std::path::PathBuf>,
+    errore_impostazioni: Option<String>,
     appunti_scartati: u64,
     /// Backend di rendering effettivo, impostato dal ciclo eframe (F1-16).
     pub rendering: InfoRendering,
@@ -146,6 +151,9 @@ impl LightVmApp {
             elenco_vm: Vec::new(),
             servizio: None,
             errore_servizio: None,
+            impostazioni: Impostazioni::default(),
+            percorso_impostazioni: None,
+            errore_impostazioni: None,
             appunti_scartati: 0,
             rendering: InfoRendering::default(),
         }
@@ -175,6 +183,45 @@ impl LightVmApp {
     /// Registra un avvio del supervisor non riuscito, mostrato nella Dashboard.
     pub fn set_errore_servizio(&mut self, errore: String) {
         self.errore_servizio = Some(errore);
+    }
+
+    /// Impostazioni lette all'avvio, file su cui salvarle ed eventuale
+    /// problema di lettura da mostrare in Settings.
+    pub fn set_impostazioni(
+        &mut self,
+        impostazioni: Impostazioni,
+        percorso: Option<std::path::PathBuf>,
+        errore: Option<String>,
+    ) {
+        self.impostazioni = impostazioni;
+        self.percorso_impostazioni = percorso;
+        self.errore_impostazioni = errore;
+    }
+
+    /// Impostazioni correnti.
+    pub fn impostazioni(&self) -> Impostazioni {
+        self.impostazioni
+    }
+
+    fn salva_impostazioni(&mut self) {
+        if let Some(p) = &self.percorso_impostazioni {
+            self.errore_impostazioni = self
+                .impostazioni
+                .salva(p)
+                .err()
+                .map(|e| format!("impostazioni non salvate: {e}"));
+        }
+    }
+
+    /// Applica una nuova politica alla perdita della UI: la salva su file e,
+    /// se il supervisor è collegato, la invia subito.
+    fn cambia_politica(&mut self) {
+        self.salva_impostazioni();
+        if let Some(s) = &self.servizio {
+            s.invia(Comando::ImpostaPolitica(
+                self.impostazioni.politica_perdita_ui,
+            ));
+        }
     }
 
     /// Supervisor collegato, se presente.
@@ -296,6 +343,18 @@ impl LightVmApp {
                     ui.selectable_value(&mut self.theme, UiTheme::Light, "Chiaro");
                 });
                 ui.checkbox(&mut self.animate, "Aggiorna il framebuffer simulato");
+                ui.separator();
+                if impostazioni::politica_ui(ui, &mut self.impostazioni.politica_perdita_ui) {
+                    self.cambia_politica();
+                }
+                ui.separator();
+                let attivo = self.rendering.etichetta();
+                if impostazioni::rendering_ui(ui, &mut self.impostazioni.rendering, &attivo) {
+                    self.salva_impostazioni();
+                }
+                if let Some(e) = &self.errore_impostazioni {
+                    ui.colored_label(ui.visuals().warn_fg_color, e);
+                }
             }
         });
     }
@@ -484,6 +543,12 @@ pub fn servizio_ui(
             scelta = Some(Comando::EmergencyStop);
         }
     });
+    if let Some(p) = stato.politica {
+        ui.label(format!(
+            "Alla chiusura anomala della UI: {}",
+            impostazioni::descrivi(p)
+        ));
+    }
     if let Some(e) = &stato.ultimo_esito {
         ui.label(format!("Ultima azione: {e}"));
     }

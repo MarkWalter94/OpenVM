@@ -113,6 +113,10 @@ In tutte e quattro le esecuzioni, a fine smoke la UI ha arrestato il supervisor 
 3. Avvio a freddo dopo riavvio dell'host (20 campioni) e sessione RDP (U-8).
 4. Prova manuale degli appunti con la console reale insieme a P-4.
 
+## Aggiornamento del 2026-10-10: backend preferito come impostazione
+
+Su richiesta del responsabile del progetto il backend di rendering è un'impostazione in Settings (salvata in `impostazioni-ui.json`, vale dal prossimo avvio; `--renderer` ha la precedenza): automatico (predefinito: glow → wgpu → WARP), glow per primo, wgpu per primo (memoria più alta, D-12), solo WARP. Ogni scelta tranne WARP mantiene il ripiego sugli altri backend. Verifica: `impostazioni::tests::ogni_preferenza_produce_un_piano_valido`, `campi_assenti_valgono_come_predefiniti`, `kittest_ui::settings_salva_politica_e_rendering` (headless). Lettura degli appunti host: **nessuna impostazione** — la roadmap esclude la clipboard dall'MVP (sezioni 4, 6.4, 7.2) e un ADR non può derogarvi; il blocco della lettura dentro egui-winit resta l'azione 1.
+
 ## Decisioni proposte
 
 - **ADR-0022:** accettare `egui_kittest` con istantanee come framework di test UI per F1–F2, con il rischio dichiarato della stabilità fra GPU diverse da verificare in CI.
