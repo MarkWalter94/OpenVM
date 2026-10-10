@@ -15,6 +15,8 @@ default-members = [
     "apps/desktop",
     "crates/*",
 ]
+# Copie patchate di dipendenze (vedi `vendor/README.md`): non sono membri.
+exclude = ["vendor"]
 
 [workspace.package]
 version = "0.0.0"
@@ -49,3 +51,9 @@ undocumented_unsafe_blocks = "deny"
 [profile.release]
 # Simboli di debug separati restano utili per la diagnostica dello spike.
 debug = "line-tables-only"
+
+# F1-13: egui-winit 0.36.2 senza lettura degli appunti dell'host (patch in
+# `vendor/egui-winit`, descritta in `vendor/README.md`). Da riallineare a ogni
+# aggiornamento di egui/eframe (ADR-0014).
+[patch.crates-io]
+egui-winit = { path = "vendor/egui-winit" }
