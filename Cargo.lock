@@ -2069,7 +2069,7 @@ dependencies = [
 name = "lightvm-service"
 version = "0.0.0"
 dependencies = [
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "interprocess",
  "lightvm-proto",
  "qemu-backend",
