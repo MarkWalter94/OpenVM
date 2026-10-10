@@ -2033,7 +2033,11 @@ dependencies = [
  "egui_extras",
  "egui_kittest",
  "f0-console",
+ "lightvm-proto",
+ "lightvm-service",
  "rfb-client",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

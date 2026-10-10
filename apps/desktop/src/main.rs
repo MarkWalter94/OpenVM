@@ -14,14 +14,22 @@
 //!   (`off` su Windows fa fallire glow: serve a provare il ripiego).
 //! - `--salta-controllo-librerie` (solo Linux): non esegue il controllo
 //!   preventivo delle librerie caricate con `dlopen` (F1-14).
+//! - `--catalogo DIR` (F1-11): avvia `lightvm-service` come processo figlio sul
+//!   catalogo indicato e mostra nella Dashboard le VM del servizio;
+//!   `--servizio-exe PATH` (predefinito: accanto a questo eseguibile),
+//!   `--qemu-dir DIR`, `--runtime-dir DIR` e `--audit-log FILE` sono passati
+//!   al servizio.
 
 use std::cell::Cell;
 use std::io::Write as _;
+use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use lightvm_desktop::LightVmApp;
 use lightvm_desktop::render::{FPS_CONSOLE_DEGRADATA, InfoRendering, Piano, Tentativo};
+use lightvm_desktop::servizio::{ConfigServizio, Servizio};
 
 #[derive(Debug)]
 struct Args {
@@ -32,6 +40,17 @@ struct Args {
     glow_hw: String,
     salta_controllo_librerie: bool,
     console: ConsoleArgs,
+    servizio: ServizioArgs,
+}
+
+/// Parametri del supervisor avviato dalla UI (F1-11).
+#[derive(Debug, Default)]
+struct ServizioArgs {
+    catalogo: Option<String>,
+    eseguibile: Option<String>,
+    qemu_dir: Option<String>,
+    runtime_dir: Option<String>,
+    audit_log: Option<String>,
 }
 
 /// Parametri della console reale (F0-04). Nessuna configurazione QEMU: solo
@@ -59,6 +78,7 @@ fn parse_args() -> Result<Args, String> {
         wgpu_cpu: false,
         glow_hw: "preferred".to_owned(),
         console: ConsoleArgs::default(),
+        servizio: ServizioArgs::default(),
     };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -131,13 +151,30 @@ fn parse_args() -> Result<Args, String> {
                 }
                 args.console.max_fps = Some(n);
             }
+            "--catalogo" => {
+                args.servizio.catalogo = Some(it.next().ok_or("--catalogo richiede una directory")?)
+            }
+            "--servizio-exe" => {
+                args.servizio.eseguibile =
+                    Some(it.next().ok_or("--servizio-exe richiede un percorso")?)
+            }
+            "--qemu-dir" => {
+                args.servizio.qemu_dir = Some(it.next().ok_or("--qemu-dir richiede una directory")?)
+            }
+            "--runtime-dir" => {
+                args.servizio.runtime_dir =
+                    Some(it.next().ok_or("--runtime-dir richiede una directory")?)
+            }
+            "--audit-log" => {
+                args.servizio.audit_log = Some(it.next().ok_or("--audit-log richiede un file")?)
+            }
             "--dump-fb" => {
                 args.console.dump_fb = Some(it.next().ok_or("--dump-fb richiede un percorso PNG")?)
             }
             "--help" | "-h" => {
                 println!(
                     "uso: lightvm-desktop [--smoke SECONDI] [--renderer auto|glow|wgpu|warp|glow,warp...] [--static] \
-                     [--wgpu-adapter cpu|auto] [--glow-hw preferred|required|off] \n                     [--vnc-socket S [--vnc-impl socket2|uds] | --vnc-tls 127.0.0.1:P --tls-dir D] \n                     --qmp-socket S [--capture-dir D] [--tmp-dir D] [--layout us|it] [--max-fps N] [--dump-fb PNG]"
+                     [--wgpu-adapter cpu|auto] [--glow-hw preferred|required|off] \n                     [--vnc-socket S [--vnc-impl socket2|uds] | --vnc-tls 127.0.0.1:P --tls-dir D] \n                     --qmp-socket S [--capture-dir D] [--tmp-dir D] [--layout us|it] [--max-fps N] [--dump-fb PNG] \n                     [--catalogo DIR [--servizio-exe PATH] [--qemu-dir DIR] [--runtime-dir DIR] [--audit-log FILE]]"
                 );
                 std::process::exit(0);
             }
@@ -200,6 +237,9 @@ impl eframe::App for DesktopApp {
             if !self.reported {
                 self.reported = true;
                 self.report(&ctx, elapsed);
+                if let Some((codice, forzato)) = self.ui.arresta_servizio() {
+                    println!("SMOKE servizio_arresto codice={codice:?} forzato={forzato}");
+                }
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         } else {
@@ -291,6 +331,19 @@ impl DesktopApp {
                 }
             }
         }
+        if let Some(srv) = self.ui.servizio() {
+            let st = srv.stato();
+            let _ = writeln!(
+                out,
+                "SMOKE servizio pid={} connesso={} backend={} acceleratore={} vm={} connessione=\"{}\"",
+                srv.pid(),
+                st.connesso,
+                st.backend.as_deref().unwrap_or("-"),
+                st.acceleratore.as_deref().unwrap_or("-"),
+                st.vms.len(),
+                st.connessione.replace('"', "'"),
+            );
+        }
         for (cause, n) in &self.repaint_causes {
             let _ = writeln!(out, "SMOKE causa_repaint n={n} {cause}");
         }
@@ -366,30 +419,26 @@ fn opzioni(t: Tentativo, args: &Args) -> eframe::NativeOptions {
                 if cfg!(windows) {
                     create.instance_descriptor.backends = wgpu::Backends::DX12;
                 }
-                create.native_adapter_selector =
-                    Some(std::sync::Arc::new(move |adapters, _surface| {
-                        for a in adapters {
-                            let i = a.get_info();
-                            eprintln!(
-                                "wgpu adattatore disponibile: {:?} \"{}\" {:?}",
-                                i.backend, i.name, i.device_type
-                            );
-                        }
-                        adapters
-                            .iter()
-                            .find(|a| {
-                                (a.get_info().device_type == wgpu::DeviceType::Cpu) == software
-                            })
-                            .cloned()
-                            .ok_or_else(|| {
-                                if software {
-                                    "nessun adattatore wgpu di tipo CPU (WARP) disponibile"
-                                        .to_owned()
-                                } else {
-                                    "nessun adattatore wgpu hardware disponibile".to_owned()
-                                }
-                            })
-                    }));
+                create.native_adapter_selector = Some(Arc::new(move |adapters, _surface| {
+                    for a in adapters {
+                        let i = a.get_info();
+                        eprintln!(
+                            "wgpu adattatore disponibile: {:?} \"{}\" {:?}",
+                            i.backend, i.name, i.device_type
+                        );
+                    }
+                    adapters
+                        .iter()
+                        .find(|a| (a.get_info().device_type == wgpu::DeviceType::Cpu) == software)
+                        .cloned()
+                        .ok_or_else(|| {
+                            if software {
+                                "nessun adattatore wgpu di tipo CPU (WARP) disponibile".to_owned()
+                            } else {
+                                "nessun adattatore wgpu hardware disponibile".to_owned()
+                            }
+                        })
+                }));
             }
         }
         #[allow(unreachable_patterns, reason = "dipende dalle feature compilate")]
@@ -459,6 +508,14 @@ fn main() -> std::process::ExitCode {
     #[cfg(not(target_os = "linux"))]
     let _ = args.salta_controllo_librerie;
 
+    let servizio = match servizio_config(&args.servizio) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("errore: {e}");
+            return std::process::ExitCode::from(2);
+        }
+    };
+
     let console = match console_config(&args.console) {
         Ok(c) => c,
         Err(e) => {
@@ -489,6 +546,7 @@ fn main() -> std::process::ExitCode {
             forzato: piano.forzato,
         };
         let console = console.clone();
+        let servizio = servizio.clone();
         let dump_fb = args.console.dump_fb.clone();
         let animate = args.animate;
         let smoke = args.smoke;
@@ -509,7 +567,6 @@ fn main() -> std::process::ExitCode {
                     if let Some(gl) = &cc.gl {
                         (info.dettaglio, info.adattatore_cpu) = glow_info(gl);
                     }
-                    let _ = cc;
                     let mut ui = match console {
                         Some(mut cfg) => {
                             if info.degradato() {
@@ -521,6 +578,21 @@ fn main() -> std::process::ExitCode {
                     };
                     eprintln!("rendering: {}", info.spiegazione().replace('\n', "; "));
                     ui.rendering = info;
+                    // Il supervisor parte solo a finestra creata: i tentativi
+                    // di rendering falliti non lasciano servizi avviati.
+                    if let Some(cfg) = &servizio {
+                        let ctx = cc.egui_ctx.clone();
+                        match Servizio::avvia(cfg, Arc::new(move || ctx.request_repaint())) {
+                            Ok(s) => {
+                                eprintln!("servizio: lightvm-service avviato (PID {})", s.pid());
+                                ui.set_servizio(s);
+                            }
+                            Err(e) => {
+                                eprintln!("servizio: {e}");
+                                ui.set_errore_servizio(e.to_string());
+                            }
+                        }
+                    }
                     Ok(Box::new(DesktopApp {
                         ui,
                         started,
@@ -575,6 +647,35 @@ fn main() -> std::process::ExitCode {
         }
     }
     std::process::ExitCode::FAILURE
+}
+
+/// Configurazione del supervisor, se richiesta con `--catalogo`.
+fn servizio_config(a: &ServizioArgs) -> Result<Option<ConfigServizio>, String> {
+    let Some(catalogo) = &a.catalogo else {
+        if a.eseguibile.is_some()
+            || a.qemu_dir.is_some()
+            || a.runtime_dir.is_some()
+            || a.audit_log.is_some()
+        {
+            return Err(
+                "--servizio-exe, --qemu-dir, --runtime-dir e --audit-log richiedono --catalogo"
+                    .into(),
+            );
+        }
+        return Ok(None);
+    };
+    let eseguibile = match &a.eseguibile {
+        Some(p) => PathBuf::from(p),
+        None => ConfigServizio::eseguibile_accanto()
+            .ok_or("percorso dell'eseguibile della UI non disponibile: usare --servizio-exe")?,
+    };
+    Ok(Some(ConfigServizio {
+        eseguibile,
+        catalogo: PathBuf::from(catalogo),
+        qemu_dir: a.qemu_dir.as_ref().map(PathBuf::from),
+        runtime_dir: a.runtime_dir.as_ref().map(PathBuf::from),
+        audit_log: a.audit_log.as_ref().map(PathBuf::from),
+    }))
 }
 
 fn save_png(fb: &rfb_client::Framebuffer, path: &str) -> Result<f64, String> {

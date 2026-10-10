@@ -45,8 +45,10 @@ Esempi: `F0-01-toolchain-eframe.md`, `F0-02-qemu-whpx-qmp.md`, `F1-04-cicli-star
 | `F1-06-mcp-sdk.md` | F1 (backlog F1-19, SDK MCP) | parziale: SDK `rmcp` provato su stdio; nessun client MCP reale | completo |
 | `F1-07-licenze-packaging.md` | F1 (backlog F1-19 licenze, F1-14 packaging) | verificato per inventario e `cargo deny`; SBOM e librerie Linux a runtime non eseguiti | completo |
 | `F1-08-ci.md` | F1 (backlog F1-02, F1-15) | parziale: workflow validato in locale, non eseguito su GitHub; delega cgroup provata in WSL2 | completo |
+| `F1-03-qemu-backend-reale.md` | F1 (backlog F1-03, F1-05…F1-08, F1-12) | parziale: probe, rifiuti, NIC, 20 cicli start/stop senza orfani e disco del servizio verificati su hardware (Windows, WHPX); VM nel firmware; non vale come criterio di uscita finché F0 è aperta | completo |
+| `F1-09-ui-supervisore-crash-ui.md` | F1 (backlog F1-11); pendente F0 P-2 | parziale: UI → supervisor figlio → IPC verificato; crash della UI senza orfani verificato, arresto ordinato della VM fallito (timeout del supervisor); Linux non eseguito | completo |
 
-File F1 non ancora scritti (flussi interrotti nel commit `aa04ccd`, codice presente ma senza evidenza registrata): numeri `F1-03` (`qemu-backend`: probe, processi, QMP, cicli reali del criterio di uscita) e `F1-05` (`apps/desktop`: appunti, backend di rendering, istantanee, misure). Finché questi file mancano, le relative voci sono `non eseguito`.
+File non ancora scritto: `F1-05` (`apps/desktop`: appunti, backend di rendering, istantanee, misure; flusso interrotto nel commit `aa04ccd`). I test automatici relativi passano (`cargo test --workspace`), ma prova manuale degli appunti, prova in RDP e misure F1-18 restano `non eseguito`.
 
 ## Template
 

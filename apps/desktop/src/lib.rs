@@ -25,9 +25,11 @@ pub mod console;
 pub mod keymap;
 pub mod librerie;
 pub mod render;
+pub mod servizio;
 
 use console::{ConsoleConfig, LiveConsole};
 use render::InfoRendering;
+use servizio::{Comando, Servizio, StatoServizio};
 
 /// Riga dell'elenco delle VM mostrato nella Dashboard.
 ///
@@ -112,6 +114,8 @@ pub struct LightVmApp {
     frames: u64,
     live: Option<LiveConsole>,
     elenco_vm: Vec<VmRiga>,
+    servizio: Option<Servizio>,
+    errore_servizio: Option<String>,
     appunti_scartati: u64,
     /// Backend di rendering effettivo, impostato dal ciclo eframe (F1-16).
     pub rendering: InfoRendering,
@@ -140,6 +144,8 @@ impl LightVmApp {
             frames: 0,
             live: None,
             elenco_vm: Vec::new(),
+            servizio: None,
+            errore_servizio: None,
             appunti_scartati: 0,
             rendering: InfoRendering::default(),
         }
@@ -156,6 +162,31 @@ impl LightVmApp {
     /// Sostituisce l'elenco delle VM mostrato nella Dashboard.
     pub fn set_elenco_vm(&mut self, righe: Vec<VmRiga>) {
         self.elenco_vm = righe;
+    }
+
+    /// Collega il supervisor avviato dalla UI (F1-11). La Dashboard mostra
+    /// allora le VM del catalogo del servizio al posto dell'elenco locale.
+    pub fn set_servizio(&mut self, servizio: Servizio) {
+        self.servizio = Some(servizio);
+        self.errore_servizio = None;
+        self.section = Section::Dashboard;
+    }
+
+    /// Registra un avvio del supervisor non riuscito, mostrato nella Dashboard.
+    pub fn set_errore_servizio(&mut self, errore: String) {
+        self.errore_servizio = Some(errore);
+    }
+
+    /// Supervisor collegato, se presente.
+    pub fn servizio(&self) -> Option<&Servizio> {
+        self.servizio.as_ref()
+    }
+
+    /// Arresto controllato del supervisor collegato, se presente.
+    /// Restituisce il codice di uscita e se è stato necessario forzare.
+    pub fn arresta_servizio(&mut self) -> Option<(Option<i32>, bool)> {
+        let mut s = self.servizio.take()?;
+        Some(s.arresta(servizio::ATTESA_ARRESTO))
     }
 
     /// Imposta la sezione visibile.
@@ -242,7 +273,19 @@ impl LightVmApp {
         egui::CentralPanel::default_margins().show(ui, |ui| match self.section {
             Section::Dashboard => {
                 ui.heading("Dashboard");
-                elenco_vm_ui(ui, &self.elenco_vm);
+                if let Some(srv) = &mut self.servizio {
+                    let vivo = srv.vivo();
+                    let stato = srv.stato();
+                    if let Some(c) = servizio_ui(ui, &stato, srv.pid(), vivo) {
+                        srv.invia(c);
+                    }
+                } else {
+                    if let Some(e) = &self.errore_servizio {
+                        ui.colored_label(ui.visuals().error_fg_color, format!("Supervisor: {e}"));
+                        ui.add_space(6.0);
+                    }
+                    elenco_vm_ui(ui, &self.elenco_vm);
+                }
             }
             Section::Console => self.console_ui(ui, &ctx),
             Section::Settings => {
@@ -392,6 +435,96 @@ pub fn elenco_vm_ui(ui: &mut egui::Ui, righe: &[VmRiga]) {
                 ui.end_row();
             }
         });
+}
+
+/// Pannello del supervisor (F1-11): stato della connessione, VM del catalogo
+/// con avvio e arresto, Emergency Stop. Restituisce l'azione scelta; non
+/// esegue nulla da sé, così si può provare senza processi.
+pub fn servizio_ui(
+    ui: &mut egui::Ui,
+    stato: &StatoServizio,
+    pid: u32,
+    vivo: bool,
+) -> Option<Comando> {
+    let mut scelta = None;
+    ui.label(egui::RichText::new("Supervisor").strong());
+    ui.horizontal_wrapped(|ui| {
+        let testo = if vivo {
+            format!("lightvm-service (PID {pid}): {}", stato.connessione)
+        } else {
+            format!("lightvm-service (PID {pid}) terminato")
+        };
+        ui.label(testo);
+        if let Some(b) = &stato.backend {
+            ui.separator();
+            ui.label(format!("backend: {b}"));
+        }
+        ui.separator();
+        ui.label(format!(
+            "acceleratore: {}",
+            stato.acceleratore.as_deref().unwrap_or("non rilevato")
+        ));
+    });
+    let attivo = vivo && stato.connesso;
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(attivo, egui::Button::new("Aggiorna"))
+            .clicked()
+        {
+            scelta = Some(Comando::Aggiorna);
+        }
+        let stop = egui::Button::new(
+            egui::RichText::new("⏹ Emergency Stop").color(ui.visuals().error_fg_color),
+        );
+        if ui
+            .add_enabled(attivo, stop)
+            .on_hover_text("Termina subito tutte le VM e revoca le sessioni agente")
+            .clicked()
+        {
+            scelta = Some(Comando::EmergencyStop);
+        }
+    });
+    if let Some(e) = &stato.ultimo_esito {
+        ui.label(format!("Ultima azione: {e}"));
+    }
+    ui.add_space(8.0);
+    ui.label(egui::RichText::new("Macchine virtuali").strong());
+    if stato.vms.is_empty() {
+        ui.label("Nessuna VM nel catalogo del supervisor.");
+        return scelta;
+    }
+    egui::Grid::new("lightvm_vm_servizio")
+        .num_columns(3)
+        .striped(true)
+        .spacing([24.0, 6.0])
+        .show(ui, |ui| {
+            ui.label(egui::RichText::new("Nome").strong());
+            ui.label(egui::RichText::new("Stato").strong());
+            ui.label(egui::RichText::new("Azioni").strong());
+            ui.end_row();
+            for v in &stato.vms {
+                ui.label(v.name.as_str());
+                ui.label(v.state.as_str());
+                ui.horizontal(|ui| {
+                    let ferma = v.state == lightvm_proto::VmState::Stopped;
+                    let attiva = v.state == lightvm_proto::VmState::Running;
+                    if ui
+                        .add_enabled(attivo && ferma, egui::Button::new("Avvia"))
+                        .clicked()
+                    {
+                        scelta = Some(Comando::Avvia(v.vm_id));
+                    }
+                    if ui
+                        .add_enabled(attivo && attiva, egui::Button::new("Arresta"))
+                        .clicked()
+                    {
+                        scelta = Some(Comando::Arresta(v.vm_id));
+                    }
+                });
+                ui.end_row();
+            }
+        });
+    scelta
 }
 
 /// Barra di stato: backend di rendering effettivo e modalità degradata
