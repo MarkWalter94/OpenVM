@@ -1,9 +1,8 @@
 # ADR-0026 — Codici pubblici per autenticazione e autorizzazione
 
-- Stato: Proposta
-- Data: 2026-10-09
-- Responsabile: da assegnare
-- Da chiudere entro: F1
+- Stato: Accettata (2026-10-10, responsabile del progetto)
+- Data: 2026-10-09; accettazione: 2026-10-10
+- Responsabile: responsabile del progetto
 
 ## Contesto
 
@@ -11,7 +10,7 @@ La sezione 6.3 della roadmap fissa errori pubblici stabili (`permission_denied`,
 
 Fino a questo ADR `lightvm-proto` usava `permission_denied` sia per credenziali assenti o non valide sia per chiamanti identificati ma non autorizzati, e aveva in più un codice di **protocollo** `unauthenticated` per la credenziale IPC. Il servizio IPC (`docs/verification/F1-04-service-ipc-ci.md`) usa `permission_denied` per l'handshake e segnala la differenza come punto da allineare.
 
-## Decisione (proposta)
+## Decisione
 
 1. Nuovo codice operativo `unauthenticated` in `ErrorCode`, aggiunto in coda (i nove codici precedenti restano invariati, schema rigenerato).
 2. Ordine e significato dei tre codici:

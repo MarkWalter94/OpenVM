@@ -132,6 +132,40 @@ type Composed = (Box<dyn VmEngine>, Box<dyn Backend>);
 
 /// Composizione sincrona, fuori dal runtime tokio del servizio: il probe di
 /// QEMU usa il runtime proprio del backend.
+/// Spazio riservato sotto la radice privata per i socket di QEMU:
+/// separatore, sottodirectory per esecuzione (12 caratteri), separatore e
+/// `qmp.sock`/`vnc.sock`.
+const RISERVA_SOCKET: usize = 22;
+
+/// Radice delle directory private dei socket QEMU: `--runtime-dir` oppure
+/// `<catalogo>/p`. Se il percorso è troppo lungo per i socket (107 byte,
+/// `UNIX_SOCKET_PATH_MAX`) si usa una directory corta nella cartella
+/// temporanea dell'utente, segnalandolo, invece di un probe che fallisce.
+fn private_root(
+    runtime_dir: Option<&std::path::Path>,
+    root: &std::path::Path,
+) -> Result<PathBuf, (u8, String)> {
+    let max = qemu_backend::validate::UNIX_SOCKET_PATH_MAX;
+    let entra = |p: &std::path::Path| p.as_os_str().len() + RISERVA_SOCKET <= max;
+    let candidato = runtime_dir.map_or_else(|| root.join("p"), std::path::Path::to_path_buf);
+    if entra(&candidato) {
+        return Ok(candidato);
+    }
+    let corta = std::env::temp_dir().join(format!("lightvm-p-{}", std::process::id()));
+    if !entra(&corta) {
+        return Err((
+            4,
+            "percorsi del catalogo e della cartella temporanea troppo lunghi per i socket di QEMU: scegliere un catalogo con un percorso più corto".into(),
+        ));
+    }
+    lightvm_service::diag!(
+        "lightvm-service: percorso {} troppo lungo per i socket di QEMU, directory privata {}",
+        candidato.display(),
+        corta.display()
+    );
+    Ok(corta)
+}
+
 fn compose(args: &Args) -> Result<Composed, (u8, String)> {
     let store = match SqliteStore::open(&args.catalog) {
         Ok(s) => s,
@@ -153,9 +187,9 @@ fn compose(args: &Args) -> Result<Composed, (u8, String)> {
     let audit = FileAuditSink::open(&audit_path)
         .map_err(|e| (4, format!("audit {}: {e}", audit_path.display())))?;
     let inspector = ManagedMediaInspector::new(root.clone());
-    let private_root = args.runtime_dir.clone().unwrap_or_else(|| root.join("p"));
     match &args.qemu_dir {
         Some(dir) => {
+            let private_root = private_root(args.runtime_dir.as_deref(), &root)?;
             let setup = QemuSetup::new(dir.clone(), root, private_root);
             let (host, vm_backend, capacity) =
                 backend::probe(setup).map_err(|e| (4, format!("backend QEMU: {e}")))?;

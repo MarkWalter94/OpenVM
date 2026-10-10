@@ -139,8 +139,62 @@ fn settings_salva_politica_e_rendering() {
     let atteso = Impostazioni {
         politica_perdita_ui: ParentLossPolicy::ShutdownVms { powerdown_s: 10 },
         rendering: PreferenzaRendering::Wgpu,
+        ..Impostazioni::default()
     };
-    assert_eq!(h.state().impostazioni(), atteso);
+    assert_eq!(h.state().impostazioni(), &atteso);
     assert_eq!(Impostazioni::carica(&file), (atteso, None));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Settings, sezione Supervisor: cartelle scelte con il selettore (finto nel
+/// test), mostrate come testo non modificabile e salvate; avvio automatico.
+#[test]
+fn settings_supervisor_sceglie_cartelle_senza_campi_di_testo() {
+    use lightvm_desktop::impostazioni::Impostazioni;
+    use std::path::PathBuf;
+    let dir = std::env::temp_dir().join(format!(
+        "lightvm-kittest-supervisor-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    ));
+    let file = dir.join("impostazioni-ui.json");
+    let mut app = LightVmApp::new(false);
+    app.set_impostazioni(Impostazioni::default(), Some(file.clone()), None);
+    let scelte = std::rc::Rc::new(std::cell::RefCell::new(vec![
+        PathBuf::from(r"D:\qemu-11.1.0"),
+        PathBuf::from(r"D:m\catalogo"),
+    ]));
+    let s2 = scelte.clone();
+    app.set_selettore(Some(Box::new(move |_titolo: &str| s2.borrow_mut().pop())));
+    let mut h = harness(app);
+    h.run();
+    h.get_by_role_and_label(Role::Button, "Settings").click();
+    h.run();
+    h.get_by_label("Stato: non avviato");
+    h.get_by_label("non impostata: le VM non si possono avviare");
+    // Primo "Sfoglia…" = catalogo, secondo = QEMU.
+    h.get_by_role_and_label(Role::Button, "Sfoglia…").click();
+    h.run();
+    h.get_by_role_and_label(Role::Button, "Sfoglia… ").click();
+    h.run();
+    h.get_by_label("Avvia il supervisor all'apertura di LightVM")
+        .click();
+    h.run();
+    let i = h.state().impostazioni().clone();
+    assert_eq!(i.catalogo, Some(PathBuf::from(r"D:m\catalogo")));
+    assert_eq!(i.qemu_dir, Some(PathBuf::from(r"D:\qemu-11.1.0")));
+    assert!(!i.avvio_supervisor);
+    h.get_by_label(r"D:m\catalogo");
+    h.get_by_label(r"D:\qemu-11.1.0");
+    assert_eq!(Impostazioni::carica(&file), (i, None));
+    // "Nessuna" e "Predefinito" riportano ai valori iniziali.
+    h.get_by_role_and_label(Role::Button, "Nessuna").click();
+    h.run();
+    h.get_by_role_and_label(Role::Button, "Predefinito").click();
+    h.run();
+    assert_eq!(h.state().impostazioni().qemu_dir, None);
+    assert_eq!(h.state().impostazioni().catalogo, None);
     let _ = std::fs::remove_dir_all(&dir);
 }

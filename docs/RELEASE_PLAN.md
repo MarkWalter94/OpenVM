@@ -132,10 +132,7 @@ ADR in stato Proposta (dettagli in `docs/adr/`):
 | --- | --- | --- | --- |
 | 0015 | Terminazione dei figli su Linux (parte A) | F0 → R2a | parte B accettata il 2026-10-10; parte A da confermare su host Linux fisico (ADR-0016) |
 | 0017 | Limiti OS e budget storage | F0 | meccanismi identificati; soglie, riserva e prove sotto pressione mancanti; Linux su host fisico in R2a |
-| 0020 | Responsabilità di firma e revisione indipendente | F0 | dichiarazione dell'utente (P-6) |
-| 0022 | Framework di test UI | F1 | istantanee verificate su un host (`F1-05`); accettazione proposta, stabilità fra GPU da provare in CI |
-| 0026 | Codici pubblici per autenticazione e autorizzazione | F1 | `unauthenticated` adottato nel codice (`F1-01`, `F1-04`), decisione non ancora accettata |
 
 Accettate in parte: ADR-0021 (SDK `rmcp` 3.5.1 accettato; client MCP aperti fino a F5) e ADR-0023 (politica e controlli accettati; SBOM e font di egui aperti fino a F6).
 
-ADR-0016 è Accettata ma diventa efficace solo con la conferma dell'utente (P-1). Dettagli operativi del supporto dati approvato (sezione 17): da registrare in ADR-0008 (P-7).
+Accettate il 2026-10-10 dal responsabile del progetto: ADR-0016 (verificato solo Windows), ADR-0020 (firma e revisione non disponibili: pubblicazione F6 bloccata), ADR-0022 (egui_kittest), ADR-0026 (codici di autenticazione), ADR-0015 parte B. ADR-0017: direzione indicata dal responsabile (limiti nelle impostazioni della VM, impostabili anche da riga di comando all'apertura di una VM e da MCP), da completare. Dettagli operativi del supporto dati approvato (sezione 17): da registrare in ADR-0008 (P-7).

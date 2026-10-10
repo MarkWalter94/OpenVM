@@ -42,6 +42,12 @@ serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 tokio = { version = "=1.53.2", features = ["rt", "sync", "time", "macros"] }
 
+# Selettore di cartelle nativo per la pagina Settings (nessun campo di testo):
+# solo Windows, target dell'MVP; altrove i percorsi arrivano dalla riga di
+# comando.
+[target.'cfg(windows)'.dependencies]
+rfd = { version = "=0.15.4", default-features = false }
+
 [dev-dependencies]
 # `snapshot` + `wgpu`: istantanee grafiche confrontate con i file in
 # `tests/snapshots/` (F1-19, ADR-0022); tolleranza in `kittest.toml`.

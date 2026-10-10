@@ -1,7 +1,7 @@
 # ADR-0016 — Esito del laboratorio Linux
 
-- Stato: Accettata, condizionata alla conferma dell'utente che in F0 non è disponibile un host Linux fisico con KVM; fino alla conferma l'esito non è registrato
-- Data: 2026-10-09
+- Stato: Accettata (2026-10-10): **verificato solo Windows** per l'MVP; host Linux fisico disponibile in seguito per R2a
+- Data: 2026-10-09; conferma: 2026-10-10
 - Responsabile: da assegnare
 
 ## Contesto
@@ -36,6 +36,12 @@ Condizioni per l'efficacia:
 3. Limiti cgroup applicati a QEMU con KVM (memoria del guest, vCPU, `cgroup.kill`).
 4. Build eframe con toolchain standard Ubuntu e smoke con GPU reale, Wayland e X11 nativi.
 5. Pacchetti Linux e policy host (sezione 5, righe Ubuntu e Debian/Fedora).
+
+### Conferma del 2026-10-10
+
+Il responsabile del progetto conferma (azione U-5) che in F0 non è disponibile un host Linux fisico con KVM; un server Linux per le prove sarà reperito **dopo**, per R2a. Esito registrato: **verificato solo Windows**; cella Ubuntu di `docs/COMPATIBILITY.md` "non verificato".
+
+Indicazione del responsabile: provare Linux nel prossimo passo anche eseguendo LightVM dentro una VM Linux su Windows. Per la sezione 10 (paragrafo "Laboratorio Linux assente") una macchina virtuale annidata **non sostituisce** l'host fisico: la VM su Windows si usa per build, test indipendenti dall'acceleratore e meccanismi di processo (etichette **[build]** e **[processi]**, come WSL2 in `F0-07`), non per qualificare la cella Ubuntu né per chiudere R2a. Le prove rinviate restano quelle elencate sopra, sul server fisico.
 
 ## Alternative considerate
 

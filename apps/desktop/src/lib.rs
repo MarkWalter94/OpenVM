@@ -29,9 +29,26 @@ pub mod render;
 pub mod servizio;
 
 use console::{ConsoleConfig, LiveConsole};
-use impostazioni::Impostazioni;
+use impostazioni::{AzioneSupervisor, Impostazioni, StatoSupervisorUi};
 use render::InfoRendering;
-use servizio::{Comando, Servizio, StatoServizio};
+use servizio::{Comando, ConfigServizio, Servizio, StatoServizio};
+
+/// Selettore di cartelle: riceve il titolo, restituisce la cartella scelta.
+pub type Selettore = Box<dyn FnMut(&str) -> Option<std::path::PathBuf>>;
+
+/// Selettore nativo (solo Windows; altrove nessun selettore).
+pub fn selettore_nativo() -> Option<Selettore> {
+    #[cfg(windows)]
+    {
+        Some(Box::new(|titolo: &str| {
+            rfd::FileDialog::new().set_title(titolo).pick_folder()
+        }))
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
 
 /// Riga dell'elenco delle VM mostrato nella Dashboard.
 ///
@@ -121,6 +138,10 @@ pub struct LightVmApp {
     impostazioni: Impostazioni,
     percorso_impostazioni: Option<std::path::PathBuf>,
     errore_impostazioni: Option<String>,
+    eseguibile_servizio: Option<std::path::PathBuf>,
+    /// Catalogo e cartella QEMU con cui è stato avviato il supervisor.
+    servizio_applicato: Option<(std::path::PathBuf, Option<std::path::PathBuf>)>,
+    selettore: Option<Selettore>,
     appunti_scartati: u64,
     /// Backend di rendering effettivo, impostato dal ciclo eframe (F1-16).
     pub rendering: InfoRendering,
@@ -154,6 +175,9 @@ impl LightVmApp {
             impostazioni: Impostazioni::default(),
             percorso_impostazioni: None,
             errore_impostazioni: None,
+            eseguibile_servizio: None,
+            servizio_applicato: None,
+            selettore: None,
             appunti_scartati: 0,
             rendering: InfoRendering::default(),
         }
@@ -172,12 +196,137 @@ impl LightVmApp {
         self.elenco_vm = righe;
     }
 
-    /// Collega il supervisor avviato dalla UI (F1-11). La Dashboard mostra
-    /// allora le VM del catalogo del servizio al posto dell'elenco locale.
-    pub fn set_servizio(&mut self, servizio: Servizio) {
+    /// Collega il supervisor avviato dalla UI (F1-11) con la configurazione
+    /// usata. La Dashboard mostra allora le VM del catalogo del servizio.
+    pub fn set_servizio(&mut self, servizio: Servizio, cfg: &ConfigServizio) {
         self.servizio = Some(servizio);
+        self.servizio_applicato = Some((cfg.catalogo.clone(), cfg.qemu_dir.clone()));
         self.errore_servizio = None;
         self.section = Section::Dashboard;
+    }
+
+    /// Eseguibile del supervisor (`--servizio-exe`); senza, quello accanto
+    /// all'eseguibile della UI.
+    pub fn set_eseguibile_servizio(&mut self, p: Option<std::path::PathBuf>) {
+        self.eseguibile_servizio = p;
+    }
+
+    /// Selettore di cartelle della pagina Settings (nativo nell'app, finto
+    /// nei test).
+    pub fn set_selettore(&mut self, s: Option<Selettore>) {
+        self.selettore = s;
+    }
+
+    /// Configurazione del supervisor dalle impostazioni correnti.
+    pub fn config_servizio(&self) -> Result<ConfigServizio, String> {
+        let eseguibile = self
+            .eseguibile_servizio
+            .clone()
+            .or_else(ConfigServizio::eseguibile_accanto)
+            .ok_or("eseguibile del supervisor non trovato")?;
+        let catalogo = self
+            .impostazioni
+            .catalogo_effettivo()
+            .ok_or("cartella del catalogo non determinabile: sceglierla in Settings")?;
+        Ok(ConfigServizio {
+            eseguibile,
+            catalogo,
+            qemu_dir: self.impostazioni.qemu_dir.clone(),
+            runtime_dir: None,
+            audit_log: None,
+            politica: self.impostazioni.politica_perdita_ui,
+        })
+    }
+
+    /// (Ri)avvia il supervisor con le impostazioni correnti; un supervisor già
+    /// attivo è prima arrestato in modo controllato.
+    pub fn avvia_servizio(&mut self, ctx: &egui::Context) {
+        let _ = self.arresta_servizio();
+        let cfg = match self.config_servizio() {
+            Ok(c) => c,
+            Err(e) => {
+                self.errore_servizio = Some(e);
+                return;
+            }
+        };
+        let ctx = ctx.clone();
+        match Servizio::avvia(&cfg, std::sync::Arc::new(move || ctx.request_repaint())) {
+            Ok(s) => {
+                let section = self.section;
+                self.set_servizio(s, &cfg);
+                self.section = section;
+            }
+            Err(e) => self.errore_servizio = Some(e.to_string()),
+        }
+    }
+
+    fn stato_supervisor_ui(&mut self) -> StatoSupervisorUi {
+        let attuale = self
+            .impostazioni
+            .catalogo_effettivo()
+            .map(|c| (c, self.impostazioni.qemu_dir.clone()));
+        let selettore = self.selettore.is_some();
+        match &mut self.servizio {
+            Some(s) => {
+                let vivo = s.vivo();
+                let st = s.stato();
+                StatoSupervisorUi {
+                    descrizione: if vivo {
+                        format!("in esecuzione (PID {}), {}", s.pid(), st.connessione)
+                    } else {
+                        "terminato".into()
+                    },
+                    attivo: vivo,
+                    vm_accese: st
+                        .vms
+                        .iter()
+                        .filter(|v| v.state != lightvm_proto::VmState::Stopped)
+                        .count(),
+                    da_applicare: attuale != self.servizio_applicato,
+                    selettore,
+                }
+            }
+            None => StatoSupervisorUi {
+                descrizione: self
+                    .errore_servizio
+                    .as_ref()
+                    .map_or_else(|| "non avviato".into(), |e| format!("non avviato: {e}")),
+                attivo: false,
+                vm_accese: 0,
+                da_applicare: false,
+                selettore,
+            },
+        }
+    }
+
+    fn esegui_azione_supervisor(&mut self, a: AzioneSupervisor, ctx: &egui::Context) {
+        let mut scegli = |titolo: &str| self.selettore.as_mut().and_then(|f| f(titolo));
+        match a {
+            AzioneSupervisor::ScegliCatalogo => {
+                if let Some(p) = scegli("Cartella del catalogo delle VM") {
+                    self.impostazioni.catalogo = Some(p);
+                    self.salva_impostazioni();
+                }
+            }
+            AzioneSupervisor::ScegliQemu => {
+                if let Some(p) = scegli("Cartella della distribuzione QEMU") {
+                    self.impostazioni.qemu_dir = Some(p);
+                    self.salva_impostazioni();
+                }
+            }
+            AzioneSupervisor::CatalogoPredefinito => {
+                self.impostazioni.catalogo = None;
+                self.salva_impostazioni();
+            }
+            AzioneSupervisor::RimuoviQemu => {
+                self.impostazioni.qemu_dir = None;
+                self.salva_impostazioni();
+            }
+            AzioneSupervisor::Riavvia => self.avvia_servizio(ctx),
+            AzioneSupervisor::Arresta => {
+                let _ = self.arresta_servizio();
+            }
+        }
     }
 
     /// Registra un avvio del supervisor non riuscito, mostrato nella Dashboard.
@@ -199,8 +348,8 @@ impl LightVmApp {
     }
 
     /// Impostazioni correnti.
-    pub fn impostazioni(&self) -> Impostazioni {
-        self.impostazioni
+    pub fn impostazioni(&self) -> &Impostazioni {
+        &self.impostazioni
     }
 
     fn salva_impostazioni(&mut self) {
@@ -343,6 +492,16 @@ impl LightVmApp {
                     ui.selectable_value(&mut self.theme, UiTheme::Light, "Chiaro");
                 });
                 ui.checkbox(&mut self.animate, "Aggiorna il framebuffer simulato");
+                ui.separator();
+                let stato = self.stato_supervisor_ui();
+                let (azione, cambiato) =
+                    impostazioni::supervisor_ui(ui, &mut self.impostazioni, &stato);
+                if cambiato {
+                    self.salva_impostazioni();
+                }
+                if let Some(a) = azione {
+                    self.esegui_azione_supervisor(a, &ctx);
+                }
                 ui.separator();
                 if impostazioni::politica_ui(ui, &mut self.impostazioni.politica_perdita_ui) {
                     self.cambia_politica();

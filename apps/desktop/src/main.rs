@@ -20,8 +20,10 @@
 //!   `--qemu-dir DIR`, `--runtime-dir DIR` e `--audit-log FILE` sono passati
 //!   al servizio.
 //! - `--impostazioni FILE`: file delle impostazioni della UI (predefinito nel
-//!   profilo utente, vedi `impostazioni.rs`); contiene la sorte delle VM se la
-//!   UI termina in modo anomalo, passata al servizio all'avvio.
+//!   profilo utente, vedi `impostazioni.rs`), scritto dalla pagina Settings.
+//!   Senza `--catalogo` il supervisor parte con le impostazioni della pagina
+//!   Settings, se l'avvio automatico è attivo (predefinito);
+//!   `--senza-supervisor` lo impedisce (smoke e misure).
 
 use std::cell::Cell;
 use std::io::Write as _;
@@ -57,6 +59,8 @@ struct ServizioArgs {
     runtime_dir: Option<String>,
     audit_log: Option<String>,
     impostazioni: Option<String>,
+    /// `--senza-supervisor`: non avviare il supervisor (smoke e misure).
+    nessuno: bool,
 }
 
 /// Parametri della console reale (F0-04). Nessuna configurazione QEMU: solo
@@ -171,6 +175,7 @@ fn parse_args() -> Result<Args, String> {
                 args.servizio.runtime_dir =
                     Some(it.next().ok_or("--runtime-dir richiede una directory")?)
             }
+            "--senza-supervisor" => args.servizio.nessuno = true,
             "--impostazioni" => {
                 args.servizio.impostazioni =
                     Some(it.next().ok_or("--impostazioni richiede un file")?)
@@ -184,7 +189,7 @@ fn parse_args() -> Result<Args, String> {
             "--help" | "-h" => {
                 println!(
                     "uso: lightvm-desktop [--smoke SECONDI] [--renderer auto|glow|wgpu|warp|glow,warp...] [--static] \
-                     [--wgpu-adapter cpu|auto] [--glow-hw preferred|required|off] \n                     [--vnc-socket S [--vnc-impl socket2|uds] | --vnc-tls 127.0.0.1:P --tls-dir D] \n                     --qmp-socket S [--capture-dir D] [--tmp-dir D] [--layout us|it] [--max-fps N] [--dump-fb PNG] \n                     [--catalogo DIR [--servizio-exe PATH] [--qemu-dir DIR] [--runtime-dir DIR] [--audit-log FILE]] [--impostazioni FILE]"
+                     [--wgpu-adapter cpu|auto] [--glow-hw preferred|required|off] \n                     [--vnc-socket S [--vnc-impl socket2|uds] | --vnc-tls 127.0.0.1:P --tls-dir D] \n                     --qmp-socket S [--capture-dir D] [--tmp-dir D] [--layout us|it] [--max-fps N] [--dump-fb PNG] \n                     [--catalogo DIR [--servizio-exe PATH] [--qemu-dir DIR] [--runtime-dir DIR] [--audit-log FILE]] [--impostazioni FILE] [--senza-supervisor]"
                 );
                 std::process::exit(0);
             }
@@ -578,6 +583,9 @@ fn main() -> std::process::ExitCode {
         let servizio = servizio.clone();
         let percorso_impostazioni = percorso_impostazioni.clone();
         let errore_impostazioni = errore_impostazioni.clone();
+        let impostazioni = impostazioni.clone();
+        let eseguibile_servizio = args.servizio.eseguibile.as_ref().map(PathBuf::from);
+        let nessun_servizio = args.servizio.nessuno;
         let dump_fb = args.console.dump_fb.clone();
         let animate = args.animate;
         let smoke = args.smoke;
@@ -609,20 +617,30 @@ fn main() -> std::process::ExitCode {
                     };
                     eprintln!("rendering: {}", info.spiegazione().replace('\n', "; "));
                     ui.rendering = info;
+                    let avvio_da_impostazioni = impostazioni.avvio_supervisor;
                     ui.set_impostazioni(impostazioni, percorso_impostazioni, errore_impostazioni);
+                    ui.set_eseguibile_servizio(eseguibile_servizio);
+                    ui.set_selettore(lightvm_desktop::selettore_nativo());
                     // Il supervisor parte solo a finestra creata: i tentativi
-                    // di rendering falliti non lasciano servizi avviati.
+                    // di rendering falliti non lasciano servizi avviati. Con
+                    // `--catalogo` vale la riga di comando, altrimenti la
+                    // pagina Settings (avvio automatico predefinito).
                     if let Some(cfg) = &servizio {
                         let ctx = cc.egui_ctx.clone();
                         match Servizio::avvia(cfg, Arc::new(move || ctx.request_repaint())) {
                             Ok(s) => {
                                 eprintln!("servizio: lightvm-service avviato (PID {})", s.pid());
-                                ui.set_servizio(s);
+                                ui.set_servizio(s, cfg);
                             }
                             Err(e) => {
                                 eprintln!("servizio: {e}");
                                 ui.set_errore_servizio(e.to_string());
                             }
+                        }
+                    } else if avvio_da_impostazioni && !nessun_servizio {
+                        ui.avvia_servizio(&cc.egui_ctx);
+                        if let Some(s) = ui.servizio() {
+                            eprintln!("servizio: lightvm-service avviato (PID {})", s.pid());
                         }
                     }
                     Ok(Box::new(DesktopApp {

@@ -1,9 +1,8 @@
 # ADR-0022 — Framework di test UI
 
-- Stato: Proposta
-- Data: 2026-10-09
-- Responsabile: da assegnare
-- Da chiudere entro: F1 (avviata in F0, attività non bloccante)
+- Stato: Accettata (2026-10-10, responsabile del progetto): egui_kittest con istantanee
+- Data: 2026-10-09; accettazione: 2026-10-10
+- Responsabile: responsabile del progetto
 
 ## Contesto
 
@@ -20,6 +19,10 @@ Criteri:
 3. Interazione tramite albero AccessKit (verifica indiretta dell'accessibilità).
 4. Istantanee confrontabili e stabili tra esecuzioni.
 5. Nessun gancio di automazione incluso nell'artefatto pubblico.
+
+### Decisione del 2026-10-10
+
+Accettato **egui_kittest 0.36.2** (stessa versione di egui, ADR-0014) con istantanee grafiche in `apps/desktop/tests/snapshots/` e tolleranza in `apps/desktop/kittest.toml`. Prove: `docs/verification/F1-05-desktop-egui.md` (6 istantanee, test headless della UI tramite AccessKit, nessun gancio di automazione nell'artefatto pubblico: `egui_kittest` è solo `dev-dependency`). Rischio dichiarato: la stabilità delle istantanee fra GPU e runner diversi (criterio 4) non è ancora provata in CI; se fallisce, le istantanee si rigenerano per runner o si alza la tolleranza, senza rinunciare ai test AccessKit.
 
 ## Alternative considerate
 
