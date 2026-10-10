@@ -291,3 +291,38 @@ fn config_revision_is_checked() {
         .unwrap_err();
     assert!(matches!(err, StorageError::StateConflict(_)));
 }
+
+/// v4: la sessione agente di un'operazione è conservata e riletta; le
+/// operazioni dell'utente restano senza sessione.
+#[test]
+fn operation_session_is_persisted() {
+    use vm_storage::{OperationId, OperationRecord, OperationState, SessionId};
+    let dir = common::tempdir();
+    let mut cat = Catalog::open(dir.path()).unwrap();
+    let vm = common::new_vm(&mut cat, "vm");
+    let session = SessionId::new_v7();
+    let agente = OperationId::new_v7();
+    let utente = OperationId::new_v7();
+    let now = now_rfc3339();
+    for (id, session_id) in [(agente, Some(session)), (utente, None)] {
+        cat.with_tx(|tx| {
+            tx.insert_operation(&OperationRecord {
+                operation_id: id,
+                vm_id: vm,
+                run_id: None,
+                session_id,
+                kind: "start".into(),
+                state: OperationState::Queued,
+                revision: 1,
+                error_code: None,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            })
+        })
+        .unwrap();
+    }
+    let a = cat.read(|tx| tx.operation(&agente)).unwrap();
+    let u = cat.read(|tx| tx.operation(&utente)).unwrap();
+    assert_eq!(a.session_id, Some(session));
+    assert_eq!(u.session_id, None);
+}

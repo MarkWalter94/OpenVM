@@ -143,3 +143,18 @@ Misure di prestazione: nessuna in questo file. La verifica dell'hash della basel
 - Per **ADR-0025**: pubblicazione dei file gestiti con collegamento fisico + rimozione del temporaneo (nessuna sovrascrittura anche con destinazioni comparse dopo il controllo) e verifica dell'hash della baseline attraverso lo stesso handle di guardia, così che tra verifica e avvio il contenuto non possa cambiare. Da registrare nell'ADR se accettata.
 - Per **ADR-0005**: stato `needs_review` del journal come esito esplicito di una riconciliazione non riuscita, con VM bloccata fino alla risoluzione.
 - Nessuna proposta sulla protezione dell'overlay in uso: la scelta spetta all'utente (Punti aperti, punto 1).
+
+
+## Aggiornamento del 2026-10-10: sessione dell'operazione (migrazione v4)
+
+Sezione aggiunta in coda (regola 8 di `docs/verification/README.md`). Eseguito sull'host di `F1-03-qemu-backend-reale.md` (Windows 11, Rust 1.99.0 MSVC).
+
+- Migrazione `0004_operation_session.sql`: `ALTER TABLE operations ADD COLUMN session_id TEXT` (nullable, senza vincolo verso `sessions`: le sessioni agente vivono nel core, F4). `OperationRecord` di `vm-storage` ha il campo `session_id`; l'adattatore del servizio lo scrive e lo rilegge (chiuso il `TODO(F1)` in `lightvm-service/src/adapters/catalog.rs`).
+
+| Voce | Esito | Evidenza |
+| --- | --- | --- |
+| Aggiornamento da v1, v2 e v3 a v4 con schema identico a un catalogo nuovo e dati conservati | verificato (sintetico) | `migrations.rs::upgrade_from_every_previous_version_matches_a_fresh_schema` e gli altri test di `migrations.rs`, verdi con `LATEST_VERSION = 4` |
+| Sessione salvata e riletta; operazioni dell'utente senza sessione | verificato (sintetico) | `constraints.rs::operation_session_is_persisted` |
+| Test di `vm-storage` e `lightvm-service` | verificato | `cargo test -p vm-storage -p lightvm-service`: tutti verdi |
+
+Resta aperto: identità OS del file e apertura protetta contro reparse point nell'ispezione dei media (`ManagedMediaInspector`, `TODO(F1-04)`): `vm-storage` non espone l'identità del file con API stabili (vedi `src/media.rs`).

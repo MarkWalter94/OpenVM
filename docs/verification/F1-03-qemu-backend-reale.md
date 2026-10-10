@@ -118,3 +118,37 @@ Tempi (20 campioni, host non dedicato): overlay min 86,0 / mediana 96,1 / p95 10
 ## Decisioni proposte
 
 Nessuna nuova decisione: i risultati confermano ADR-0007 (nessun ripiego TCG), ADR-0009 (Emergency Stop con primitive OS), ADR-0012 (QMP privato) sul nuovo host.
+
+## Aggiornamento del 2026-10-10 (dalle 09:25 alle 09:35 circa UTC): cicli attraverso il servizio e boot con modello CPU nominale
+
+Sezione aggiunta in coda (regola 8 di `docs/verification/README.md`): le sezioni precedenti restano come registrate. Stesso host, toolchain, QEMU, firmware e ISO.
+
+### Procedura
+
+```text
+set LIGHTVM_E2E_QEMU_DIR=<workspace>/lab/qemu/qemu-11.1.0
+cargo test -p lightvm-service --test core_path -- --ignored --nocapture e2e_real_qemu_cicli
+
+set LIGHTVM_QEMU_DIR=<workspace>/lab/qemu/qemu-11.1.0
+cargo test -p qemu-backend --test real_qemu -- --ignored --nocapture reale_boot_live
+```
+
+- `core_path::e2e_real_qemu_cicli_attraverso_il_servizio` (nuovo): IPC → core → SQLite → `qemu-backend` → QEMU, una VM (1 vCPU, 1024 MiB, disco 8 GiB creato al primo avvio, nessuna ISO) avviata e arrestata 20 volte; cicli dispari `force_stop`, pari `stop` (politica del servizio in prova: `system_powerdown` 1 s → `quit` 10 s → kill 10 s), ciclo 20 Emergency Stop; dopo ogni arresto, processi `qemu-system-x86_64.exe` figli del processo di prova contati con `Win32_Process`. Log: `lab/logs/f1-12-cicli-servizio.txt`.
+- `real_qemu::reale_boot_live_cpu_nominale` (nuovo): `-cpu Skylake-Client-v4`, 2 vCPU, 4096 MiB, ISO live, overlay su base da 1024 MiB, uno screendump ogni 10 s per 240 s, poi Emergency Stop. Log: `lab/logs/f1-17-boot-skylake.txt`, `lab/logs/f1-03/s1791624568749-boot-cpu.log` e 24 PNG.
+
+### Risultati
+
+| Voce | Esito | Evidenza |
+| --- | --- | --- |
+| 20 cicli start/stop **attraverso il servizio**, un processo QEMU per avvio, nessun residuo dopo ogni arresto e dopo l'arresto del servizio | verificato | `ciclo i: … residui 0` per i = 1…20; `test result: ok. 1 passed` in 47,7 s |
+| Stato riconciliato e audit | verificato | `running` dopo ogni avvio e `stopped` dopo ogni arresto (via `vm_status`); audit `succeeded`: `vm_start` 20, `vm_stop` 19 (include `force_stop`), `emergency_stop` 1 |
+| Disco principale riusato fra i cicli | verificato | `vms/<vm_id>/primary.qcow2` presente a fine prova; creato una sola volta |
+| Tempi | registrati | avvio (IPC → `running`) min 139,3 / mediana 154,1 / p95 1181,1 / max 1820,9 ms; `force_stop` (10) mediana 55,9, max 1149,3 ms; `stop` (9) mediana 1122,1, max 3101,7 ms; Emergency Stop 49,6 ms. I cicli 7–11 sono più lenti (fino a 1,8 s di avvio): causa non indagata, host non dedicato; nessun errore né timeout |
+| F1-17: boot con `Skylake-Client-v4` fino al desktop | verificato | processo vivo per 245 s; firmware e boot loader fino a t≈80 s, a t=101 s desktop GNOME live con la finestra "Welcome to Ubuntu" (screendump SHA-256 `a1c329f9…0b96`, 99,93 % non nero); deviazione D-1 superata con un modello nominale più ricco di `qemu64` (`-cpu host` resta rifiutato) |
+| F1-17: installazione di Ubuntu su disco e boot dal disco | non eseguito | richiede di pilotare l'installer (o un `autoinstall` dal boot loader); non tentato in questa sessione |
+
+### Limiti
+
+- Un solo campione di boot con `Skylake-Client-v4`; `Haswell-v4` non provato.
+- I 20 cicli attraverso il servizio usano una politica di arresto ridotta (`system_powerdown` 1 s) impostata dal test; la politica predefinita del servizio (60 s) non è stata usata nei cicli.
+- Validità per il criterio di uscita: invariata rispetto alle sezioni precedenti (F0 aperta).

@@ -98,14 +98,14 @@ Aggiornato il 2026-10-10 dalla lettura dei file di verifica e del codice, poi do
 | F1-09 | in parte | parte storage verificata con test sintetici (`F1-02`); `qemu-backend/src/storage_guard.rs` senza evidenza; overlay in uso scrivibile da un altro processo dello stesso utente (decisione aperta) |
 | F1-10 | verificato con test | audit di creazione, avvio, arresto, Emergency Stop e dinieghi (`F1-01`; `F1-04`, `core_path`) |
 | F1-11 | in parte | supervisor headless e IPC verificati (`F1-04`); la UI avvia il supervisor come figlio e usa l'IPC (`F1-09`); P-2 eseguito: nessun orfano, arresto ordinato fallito per timeout (decisione ADR-0015 B); Linux non eseguito |
-| F1-12 | eseguito, non valido come uscita | `F1-03`: creazione disco, 20 cicli reali senza orfani, acceleratore assente, nessuna NIC, rifiuti verificati sulle API del backend; il servizio crea ora il disco principale (`vms/<vm_id>/primary.qcow2`). Non vale per il criterio di uscita finché F0 è aperta; i 20 cicli attraverso il servizio non sono eseguiti |
-| F1-13 | codice presente, evidenza assente | `apps/desktop/src/appunti.rs`, `tests/appunti_ui.rs`; prova manuale non eseguita |
+| F1-12 | eseguito, non valido come uscita | `F1-03`: creazione disco, 20 cicli reali senza orfani, acceleratore assente, nessuna NIC, rifiuti verificati sulle API del backend; il servizio crea ora il disco principale (`vms/<vm_id>/primary.qcow2`). Anche 20 cicli **attraverso il servizio** (IPC → core → QEMU) senza residui (`F1-03`, sezione del 2026-10-10). Non vale per il criterio di uscita finché F0 è aperta |
+| F1-13 | in parte | `F1-05`: nessun testo degli appunti host nella UI né al guest (test headless); **la lettura degli appunti dentro egui-winit resta** (decisione da prendere prima di F2); prova manuale non eseguita |
 | F1-14 | in parte | dipendenze Linux elencate (`F1-07`); job `smoke-render-software` non eseguito su GitHub; verifica a runtime non eseguita |
 | F1-15 | in parte | probe D-Bus `StartTransientUnit` verificato in WSL2 (`F1-08`); non implementato in `qemu-backend` (`TODO(F1/R2a)` in `process/mod.rs`) |
-| F1-16 | codice presente, evidenza assente | `apps/desktop/src/render.rs`; prova in RDP non eseguita |
-| F1-17 | non avviato | `Skylake-Client-v4` accettato dalla validazione, nessuna prova di boot al desktop né installazione su disco |
-| F1-18 | non eseguito | nessuna misura con processi di prodotto |
-| F1-19 | in parte | SDK MCP (`F1-06`, ADR-0021 accettata per l'SDK), licenze (`F1-07`, ADR-0023 accettata in parte); istantanee egui_kittest presenti in `apps/desktop/tests/snapshots/` senza evidenza (ADR-0022 Proposta) |
+| F1-16 | in parte | `F1-05`: auto → glow, ripiego glow → wgpu DX12 e → WARP con indicatore verificati su hardware; prova in RDP non eseguita |
+| F1-17 | in parte | `F1-03` (sezione del 2026-10-10): con `Skylake-Client-v4` desktop live raggiunto a 101 s; installazione su disco e boot dal disco non eseguiti |
+| F1-18 | in parte | `F1-05`: idle UI + supervisor 5 min (glow: CPU ≤ 0,14 % di un core, private ≤ 106 MiB; wgpu: CPU ≤ 0,07 %, private ≈ 492 MiB, D-12), 20 avvii a caldo per backend (primo frame p95 139 ms glow, 248 ms wgpu); avvii a freddo non eseguiti |
+| F1-19 | in parte | SDK MCP (`F1-06`, ADR-0021 accettata per l'SDK), licenze (`F1-07`, ADR-0023 accettata in parte); 6 istantanee egui_kittest verificate sullo stesso host (`F1-05`; ADR-0022 Proposta, accettazione proposta) |
 
 Stato del workspace (2026-10-10, host Windows 11 con Rust 1.99.0 MSVC): `cargo fmt --check`, `cargo clippy -D warnings` (workspace, varianti `glow`/`wgpu` della UI, servizio senza `supervisore`) e `cargo test --workspace --locked` verdi: 328 passati, 0 falliti, 7 ignorati (prove con QEMU reale, eseguite a parte in `F1-03` e `F1-09`).
 
@@ -133,7 +133,7 @@ ADR in stato Proposta (dettagli in `docs/adr/`):
 | 0015 | Terminazione dei figli su Linux e sorte delle VM manuali senza UI | F0 | parte B in attesa del crash della UI su Windows (P-2) |
 | 0017 | Limiti OS e budget storage | F0 | meccanismi identificati; soglie, riserva e prove sotto pressione mancanti; Linux su host fisico in R2a |
 | 0020 | Responsabilità di firma e revisione indipendente | F0 | dichiarazione dell'utente (P-6) |
-| 0022 | Framework di test UI | F1 | istantanee scritte, evidenza non registrata |
+| 0022 | Framework di test UI | F1 | istantanee verificate su un host (`F1-05`); accettazione proposta, stabilità fra GPU da provare in CI |
 | 0026 | Codici pubblici per autenticazione e autorizzazione | F1 | `unauthenticated` adottato nel codice (`F1-01`, `F1-04`), decisione non ancora accettata |
 
 Accettate in parte: ADR-0021 (SDK `rmcp` 3.5.1 accettato; client MCP aperti fino a F5) e ADR-0023 (politica e controlli accettati; SBOM e font di egui aperti fino a F6).

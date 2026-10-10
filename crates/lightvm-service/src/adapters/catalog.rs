@@ -294,6 +294,7 @@ impl CatalogStore for SqliteStore {
             operation_id: op.id,
             vm_id: sid,
             run_id: op.run_id,
+            session_id: op.session_id,
             kind: snake(&op.kind)?,
             state,
             revision: 1,
@@ -324,8 +325,7 @@ impl CatalogStore for SqliteStore {
             id: row.operation_id,
             vm_id,
             run_id: row.run_id,
-            // TODO(F1): lo storage non conserva la sessione dell'operazione.
-            session_id: None,
+            session_id: row.session_id,
             kind,
             status: op_status(row.state),
             error: row.error_code.as_deref().and_then(from_snake),
