@@ -262,7 +262,7 @@
       ]
     },
     "ConsoleTicket": {
-      "description": "Per-run display ticket for the console (ADR-0013, ROADMAP 6.4).\n\nThe UI connects to `socket_path` (a Unix socket in a directory private to\nthe user), writes `token` followed by `\\n` and then speaks RFB. The\nsupervisor forwards the stream to QEMU's display only after checking the\ntoken; the ticket is distinct from the QMP channel and from the IPC\ncredential, valid for one run, and revoked with it.",
+      "description": "Per-run display ticket for the console (ADR-0013, ROADMAP 6.4).\n\nThe UI connects to `socket_path` (a Unix socket in a directory private to\nthe user), writes `token` followed by `\\n` and then speaks RFB. The\nsupervisor forwards the stream to QEMU's display only after checking the\ntoken; the ticket is distinct from the QMP channel and from the IPC\ncredential, valid for one run, and revoked with it.\n\n`Debug` redacts the token (it ends up in logs and panic messages).",
       "type": "object",
       "properties": {
         "geometry": {

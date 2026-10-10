@@ -248,6 +248,11 @@
           "description": "Issue of a per-run console display ticket (never the token).",
           "type": "string",
           "const": "console_open"
+        },
+        {
+          "description": "Revocation of a console display ticket (run ended, UI connection\nclosed or revoked, Emergency Stop, new ticket, shutdown); the cause is\nin `termination`.",
+          "type": "string",
+          "const": "console_revoke"
         }
       ]
     },

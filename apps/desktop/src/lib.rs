@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 pub mod clipboard;
 pub mod console;
 pub mod dashboard;
+pub mod diag;
 pub mod dialogs;
 pub mod keymap;
 pub mod libraries;
@@ -175,10 +176,21 @@ struct ConfirmDialog {
 /// Close of the app with running VMs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Closing {
-    Ask { focus: bool },
-    Stopping { started: Instant },
+    Ask {
+        focus: bool,
+    },
+    /// Orderly stop of the VMs that were active when the user confirmed
+    /// (only those are waited for).
+    Stopping {
+        started: Instant,
+        vms: Vec<VmId>,
+    },
     Finishing,
 }
+
+/// Wait for the OS to apply a full screen change before the window state
+/// reported by the OS wins again.
+const FULLSCREEN_SETTLE: Duration = Duration::from_secs(1);
 
 /// Console ticket requested by the console page.
 #[derive(Clone, Copy, Debug)]
@@ -208,6 +220,8 @@ pub struct LightVmApp {
     ticket_request: Option<TicketRequest>,
     console_max_fps: u32,
     fullscreen: bool,
+    /// Full screen change sent to the OS and not yet reported back by it.
+    fullscreen_request: Option<(bool, Instant)>,
     chord_swallow: Vec<egui::Key>,
     screenshot_status: Option<(String, theme::Tone)>,
     service: Option<Box<dyn Supervisor>>,
@@ -265,6 +279,7 @@ impl LightVmApp {
             ticket_request: None,
             console_max_fps: console::DEFAULT_MAX_FPS,
             fullscreen: false,
+            fullscreen_request: None,
             chord_swallow: Vec::new(),
             screenshot_status: None,
             service: None,
@@ -403,7 +418,7 @@ impl LightVmApp {
                 self.section = section;
             }
             Err(e) => {
-                eprintln!("service: {e}");
+                diag::log(&format!("service: {e}"));
                 self.service_error = Some(e.to_string());
             }
         }
@@ -476,7 +491,7 @@ impl LightVmApp {
                 self.section = section;
             }
             Some(Err(e)) => {
-                eprintln!("service: {e}");
+                diag::log(&format!("service: {e}"));
                 self.service_error = Some(e);
             }
             None => {}
@@ -639,7 +654,7 @@ impl LightVmApp {
                     .take()
                     .unwrap_or_else(|| "supervisor not started".into());
                 let e = format!("cannot open VM \"{name}\": {cause}");
-                eprintln!("service: {e}");
+                diag::log(&format!("service: {e}"));
                 self.service_error = Some(e);
             }
         }
@@ -687,6 +702,20 @@ impl LightVmApp {
     /// Console open on the Console page, if any.
     pub fn live_console(&self) -> Option<&LiveConsole> {
         self.live.as_ref()
+    }
+
+    /// Console open on the Console page, mutable (headless tests).
+    #[doc(hidden)]
+    pub fn live_console_mut(&mut self) -> Option<&mut LiveConsole> {
+        self.live.as_mut()
+    }
+
+    /// Console input waits to be sent (at most one batch every
+    /// [`console::INPUT_INTERVAL`]).
+    pub fn console_input_pending(&self) -> bool {
+        self.live
+            .as_ref()
+            .is_some_and(LiveConsole::has_pending_input)
     }
 
     /// The Console page is in full screen.
@@ -763,12 +792,16 @@ impl LightVmApp {
         }
         self.track_keyboard_navigation(&ctx);
         self.collect_restart();
+        self.sync_fullscreen(&ctx);
         self.handle_close_request(&ctx);
 
         // Console chords, removed from the input before any widget sees them.
         let chords = if self.section == Section::Console {
             let mut swallow = std::mem::take(&mut self.chord_swallow);
-            let c = ctx.input_mut(|i| console::take_chords(&mut i.events, &mut swallow));
+            let live = self.live.as_ref();
+            let forwarded = |k: egui::Key| live.is_some_and(|l| l.is_forwarded(k));
+            let c =
+                ctx.input_mut(|i| console::take_chords(&mut i.events, &mut swallow, &forwarded));
             self.chord_swallow = swallow;
             c
         } else {
@@ -796,7 +829,11 @@ impl LightVmApp {
             if let Some(live) = &mut self.live {
                 live.on_hidden();
             }
-            self.flush_console_input();
+            self.flush_console_input(&ctx);
+            // A ticket that arrives after the page was left is not kept.
+            if let Some(s) = &self.service {
+                s.discard_console_ticket();
+            }
             if self.fullscreen {
                 self.set_fullscreen(&ctx, false);
             }
@@ -1169,7 +1206,7 @@ impl LightVmApp {
         if !ctx.input(|i| i.viewport().close_requested()) || self.allow_close {
             return;
         }
-        let running = self.state().map_or(0, |s| s.active_vms().count());
+        let running = self.reachable_active_vms().len();
         if running == 0 && self.closing.is_none() {
             self.allow_close = true;
             return;
@@ -1180,28 +1217,56 @@ impl LightVmApp {
         }
     }
 
+    /// VMs with a process according to a supervisor that can still be
+    /// asked to stop them: none if it is gone, terminated or disconnected
+    /// (its state is stale, and the VMs follow its UI loss policy anyway).
+    fn reachable_active_vms(&mut self) -> Vec<VmId> {
+        let Some(s) = &mut self.service else {
+            return Vec::new();
+        };
+        if !s.is_alive() {
+            return Vec::new();
+        }
+        let st = s.state();
+        if !st.connected {
+            return Vec::new();
+        }
+        st.active_vms().map(|v| v.vm_id).collect()
+    }
+
+    /// The close goes on without (more) waiting: supervisor shut down in
+    /// the background, then the window closes.
+    fn finish_close(&mut self, ctx: &egui::Context) {
+        self.restart_in_background(ctx, false);
+        self.closing = Some(Closing::Finishing);
+        ctx.request_repaint();
+    }
+
     fn close_dialog_ui(&mut self, ui: &egui::Ui, ctx: &egui::Context) {
         let Some(c) = self.closing.clone() else {
             return;
         };
+        let reachable = self.reachable_active_vms();
         let state = self.state().unwrap_or_default();
         let view = match &c {
             Closing::Ask { .. } => {
-                let names: Vec<String> = state
-                    .active_vms()
-                    .map(|v| v.name.as_str().to_owned())
-                    .collect();
-                if names.is_empty() && self.service.is_some() {
-                    // Stopped meanwhile: nothing to ask.
-                    self.closing = None;
+                if reachable.is_empty() {
+                    // Stopped meanwhile, or the supervisor is gone: nothing
+                    // to ask, the close requested by the user goes on.
+                    self.finish_close(ctx);
                     return;
                 }
+                let names: Vec<String> = reachable
+                    .iter()
+                    .filter_map(|id| state.vm(*id))
+                    .map(|v| v.name.as_str().to_owned())
+                    .collect();
                 dialogs::CloseView::Ask { names }
             }
-            Closing::Stopping { started } => {
-                let vms: Vec<(String, String)> = state
-                    .vms
+            Closing::Stopping { started, vms } => {
+                let rows: Vec<(String, String)> = vms
                     .iter()
+                    .filter_map(|id| state.vm(*id))
                     .map(|v| {
                         (
                             v.name.as_str().to_owned(),
@@ -1209,17 +1274,17 @@ impl LightVmApp {
                         )
                     })
                     .collect();
-                let active = state.active_vms().count();
+                // Only the VMs active when the user confirmed are waited for.
+                let active = vms.iter().filter(|id| reachable.contains(id)).count();
                 let elapsed = started.elapsed();
-                if self.service.is_none() || active == 0 || elapsed > CLOSE_STOP_TIMEOUT {
-                    self.restart_in_background(ctx, false);
-                    self.closing = Some(Closing::Finishing);
+                if active == 0 || elapsed > CLOSE_STOP_TIMEOUT {
+                    self.finish_close(ctx);
                 } else {
                     ctx.request_repaint_after(Duration::from_millis(250));
                 }
                 dialogs::CloseView::Stopping {
                     stopped: vms.len().saturating_sub(active),
-                    vms,
+                    vms: rows,
                     elapsed_s: elapsed.as_secs(),
                 }
             }
@@ -1241,11 +1306,12 @@ impl LightVmApp {
             Some(dialogs::Choice::Cancel) => self.closing = None,
             Some(dialogs::Choice::Confirm) => {
                 self.close_console();
-                for v in state.active_vms() {
-                    self.send(ServiceCommand::Stop(v.vm_id));
+                for id in &reachable {
+                    self.send(ServiceCommand::Stop(*id));
                 }
                 self.closing = Some(Closing::Stopping {
                     started: Instant::now(),
+                    vms: reachable,
                 });
                 ctx.request_repaint();
             }
@@ -1271,35 +1337,66 @@ impl LightVmApp {
         self.send(ServiceCommand::OpenConsole(vm_id));
     }
 
-    /// Closes the display session and sends the key releases.
+    /// Closes the display session and sends the key releases; a console
+    /// ticket received and not used is discarded.
     fn close_console(&mut self) {
         if let Some(mut live) = self.live.take() {
             for b in live.close() {
                 self.send(ServiceCommand::Input(b));
             }
         }
+        if let Some(s) = &self.service {
+            s.discard_console_ticket();
+        }
         self.ticket_request = None;
     }
 
-    fn flush_console_input(&mut self) {
+    /// Sends the next console input batch, if due, and schedules a frame
+    /// for the following one (at most one batch every
+    /// [`console::INPUT_INTERVAL`]).
+    fn flush_console_input(&mut self, ctx: &egui::Context) {
         let Some(live) = &mut self.live else { return };
-        let batches = live.take_input();
-        for b in batches {
+        let now = Instant::now();
+        let batch = live.take_input(now);
+        let next = live.next_input_in(now);
+        if let Some(b) = batch {
             self.send(ServiceCommand::Input(b));
+        }
+        if let Some(d) = next {
+            ctx.request_repaint_after(d);
         }
     }
 
     fn set_fullscreen(&mut self, ctx: &egui::Context, on: bool) {
         if self.fullscreen != on {
             self.fullscreen = on;
+            self.fullscreen_request = Some((on, Instant::now()));
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(on));
         }
+    }
+
+    /// Follows the full screen state reported by the OS (the user can leave
+    /// full screen with OS shortcuts, or the OS can refuse it); a change
+    /// requested by LightVM wins until the OS reports it or
+    /// [`FULLSCREEN_SETTLE`] passes.
+    fn sync_fullscreen(&mut self, ctx: &egui::Context) {
+        let Some(os) = ctx.input(|i| i.viewport().fullscreen) else {
+            return;
+        };
+        if let Some((wanted, at)) = self.fullscreen_request {
+            if os != wanted && at.elapsed() < FULLSCREEN_SETTLE {
+                ctx.request_repaint_after(FULLSCREEN_SETTLE);
+                return;
+            }
+            self.fullscreen_request = None;
+        }
+        self.fullscreen = os;
     }
 
     /// Keeps the console aligned with the VM: connects with a fresh ticket
     /// when the VM runs (new run after a restart, or after a display
     /// disconnection), closes it when the VM stops.
-    fn sync_console(&mut self, state: &ServiceState) {
+    fn sync_console(&mut self, ctx: &egui::Context, state: &ServiceState) {
         let Some(vm_id) = self.console_vm else { return };
         let Some(vm) = state.vm(vm_id) else {
             self.close_console();
@@ -1314,10 +1411,13 @@ impl LightVmApp {
         }
         if let Some(live) = &self.live {
             let same_run = Some(live.target().run_id) == vm.run_id;
-            let dropped = live
-                .disconnected_at()
-                .is_some_and(|t| t.elapsed() >= RECONNECT_AFTER);
+            let since = live.disconnected_at().map(|t| t.elapsed());
+            let dropped = since.is_some_and(|e| e >= RECONNECT_AFTER);
             if same_run && !dropped {
+                // Display dropped: the reconnection happens without input.
+                if let Some(e) = since {
+                    ctx.request_repaint_after(RECONNECT_AFTER.saturating_sub(e));
+                }
                 return;
             }
             self.close_console();
@@ -1349,7 +1449,7 @@ impl LightVmApp {
 
     fn console_page(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, chords: console::Chords) {
         if let Some(state) = self.state() {
-            self.sync_console(&state);
+            self.sync_console(ctx, &state);
             if self.live.is_none() && self.console_vm.is_some() {
                 ctx.request_repaint_after(Duration::from_millis(500));
             }
@@ -1373,11 +1473,18 @@ impl LightVmApp {
                 }
             }
             let (layout, fullscreen) = (self.settings.keyboard_layout, self.fullscreen);
-            let action = self
-                .live
-                .as_mut()
-                .and_then(|live| live.ui(ui, layout, fullscreen, chords, input_error.as_deref()));
-            self.flush_console_input();
+            let modal_open = self.dialog.is_some() || self.closing.is_some();
+            let action = self.live.as_mut().and_then(|live| {
+                live.ui(
+                    ui,
+                    layout,
+                    fullscreen,
+                    chords,
+                    input_error.as_deref(),
+                    modal_open,
+                )
+            });
+            self.flush_console_input(ctx);
             match action {
                 Some(ConsoleAction::ToggleFullscreen) => self.set_fullscreen(ctx, !fullscreen),
                 Some(ConsoleAction::ExitFullscreen) => self.set_fullscreen(ctx, false),

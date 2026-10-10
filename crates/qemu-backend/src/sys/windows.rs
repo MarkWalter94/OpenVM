@@ -548,6 +548,93 @@ pub(crate) fn pid_status(pid: u32, expected_creation_time: u64) -> io::Result<Pi
     })
 }
 
+/// `false` only if no running process has this PID (`OpenProcess` fails
+/// with `ERROR_INVALID_PARAMETER`, or the process already exited); any other
+/// outcome (access denied, error) counts as running.
+pub(crate) fn pid_may_be_running(pid: u32) -> bool {
+    // SAFETY: OpenProcess accepts any PID; on error it returns a null handle,
+    // handled right below. No pointer is passed.
+    let h = unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            0,
+            pid,
+        )
+    };
+    if h.is_null() {
+        let code = io::Error::last_os_error().raw_os_error().map(|c| c as u32);
+        return code != Some(windows_sys::Win32::Foundation::ERROR_INVALID_PARAMETER);
+    }
+    match owned(h) {
+        Ok(h) => !matches!(wait_process(&h, Some(0)), Ok(Some(_))),
+        Err(_) => true,
+    }
+}
+
+/// Path of an open file as resolved by the system
+/// (`GetFinalPathNameByHandleW`, normalized, DOS volume name): every link,
+/// junction, mount point, `subst` or mapped drive on the way is resolved;
+/// a file on a network share has the `\\?\UNC\` form.
+pub(crate) fn final_path_by_handle(file: &std::fs::File) -> io::Result<OsString> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_NAME_NORMALIZED, GetFinalPathNameByHandleW, VOLUME_NAME_DOS,
+    };
+    let h = file.as_raw_handle() as HANDLE;
+    let mut buf = vec![0u16; 512];
+    loop {
+        let cap = u32::try_from(buf.len()).unwrap_or(u32::MAX);
+        // SAFETY: `h` is the valid handle of `file`, borrowed for the call;
+        // `buf` is a writable buffer of `cap` UTF-16 units.
+        let n = unsafe {
+            GetFinalPathNameByHandleW(
+                h,
+                buf.as_mut_ptr(),
+                cap,
+                FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
+            )
+        };
+        if n == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let n = n as usize;
+        if n < buf.len() {
+            buf.truncate(n);
+            return Ok(OsString::from_wide(&buf));
+        }
+        // Too small: `n` is the required size including the terminator.
+        if n > 32 * 1024 {
+            return Err(io::Error::other("final path too long"));
+        }
+        buf = vec![0u16; n + 1];
+    }
+}
+
+/// Mount root (with the final separator) of the volume containing `path`
+/// (`GetVolumePathNameW`): `C:\`, or the folder where a volume is mounted.
+pub(crate) fn volume_path_name(path: &Path) -> io::Result<OsString> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::Storage::FileSystem::GetVolumePathNameW;
+    let w = wide(path.as_os_str());
+    let mut buf = vec![0u16; w.len().max(4) + 2];
+    let cap = u32::try_from(buf.len()).unwrap_or(u32::MAX);
+    // SAFETY: zero-terminated UTF-16 input valid for the call; `buf` is a
+    // writable buffer of `cap` units, at least as long as the input path
+    // (the mount root is a prefix of it).
+    check(unsafe { GetVolumePathNameW(w.as_ptr(), buf.as_mut_ptr(), cap) })?;
+    let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    buf.truncate(end);
+    Ok(OsString::from_wide(&buf))
+}
+
+/// `GetDriveTypeW` of a volume root (`DRIVE_*` constants).
+pub(crate) fn drive_type(root: &Path) -> u32 {
+    use windows_sys::Win32::Storage::FileSystem::GetDriveTypeW;
+    let w = wide(root.as_os_str());
+    // SAFETY: zero-terminated UTF-16 string valid for the duration of the call.
+    unsafe { GetDriveTypeW(w.as_ptr()) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

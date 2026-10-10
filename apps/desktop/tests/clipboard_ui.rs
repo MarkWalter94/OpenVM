@@ -70,6 +70,13 @@ fn harness(draw_app: bool) -> (Harness<'static, Fixture>, Handles) {
     (h, rx)
 }
 
+/// Frames until the UI is idle and the console sent its input (one batch
+/// every `INPUT_INTERVAL`).
+fn run(h: &mut Harness<'_, Fixture>) {
+    h.run_steps(4);
+    common::settle(h, |f| &f.app);
+}
+
 fn ctrl() -> egui::Modifiers {
     egui::Modifiers {
         ctrl: true,
@@ -93,11 +100,11 @@ fn key(h: &Harness<'_, Fixture>, k: egui::Key, pressed: bool, modifiers: egui::M
 #[test]
 fn copy_does_not_write_the_host_clipboard() {
     let (mut h, _rx) = harness(true);
-    h.run();
+    run(&mut h);
     h.get_by_role(Role::TextInput).click();
-    h.run();
+    run(&mut h);
     h.get_by_role(Role::TextInput).type_text("abc");
-    h.run();
+    run(&mut h);
     h.key_press_modifiers(ctrl(), egui::Key::A);
     h.event(egui::Event::Copy);
     h.step();
@@ -168,22 +175,22 @@ fn sent_events(rx: &Handles) -> Vec<InputEvent> {
 #[test]
 fn control_without_app_paste_inserts_text() {
     let (mut h, _rx) = harness(false);
-    h.run();
+    run(&mut h);
     h.get_by_role(Role::TextInput).click();
-    h.run();
+    run(&mut h);
     h.event(egui::Event::Paste(SECRET.into()));
-    h.run();
+    run(&mut h);
     assert_eq!(h.state().field, SECRET);
 }
 
 #[test]
 fn paste_produces_no_text_in_other_widgets() {
     let (mut h, rx) = harness(true);
-    h.run();
+    run(&mut h);
     h.get_by_role(Role::TextInput).click();
-    h.run();
+    run(&mut h);
     ctrl_v_like_egui_winit(&mut h);
-    h.run();
+    run(&mut h);
     assert_eq!(h.state().field, "", "the clipboard text reached the field");
     assert_eq!(h.state().app.discarded_pastes(), 1);
     // The console did not have focus: no key forwarded (the click on the
@@ -194,12 +201,12 @@ fn paste_produces_no_text_in_other_widgets() {
 #[test]
 fn paste_with_focused_console_becomes_ctrl_v_via_qmp() {
     let (mut h, rx) = harness(true);
-    h.run();
+    run(&mut h);
     h.get_by_label("Console of ubuntu-dev").click();
-    h.run();
+    run(&mut h);
     let _ = sent_events(&rx); // pointer movement and click
     ctrl_v_like_egui_winit(&mut h);
-    h.run();
+    run(&mut h);
     let ev = sent_events(&rx);
     assert_eq!(
         keys_only(&ev),
@@ -215,16 +222,16 @@ fn paste_with_focused_console_becomes_ctrl_v_via_qmp() {
 #[test]
 fn shift_insert_becomes_shift_insert_via_qmp() {
     let (mut h, rx) = harness(true);
-    h.run();
+    run(&mut h);
     h.get_by_label("Console of ubuntu-dev").click();
-    h.run();
+    run(&mut h);
     let _ = sent_events(&rx);
     let shift = egui::Modifiers {
         shift: true,
         ..Default::default()
     };
     paste_like_egui_winit(&mut h, egui::Key::ShiftLeft, shift, egui::Key::Insert);
-    h.run();
+    run(&mut h);
     assert_eq!(
         keys_only(&sent_events(&rx)),
         vec![

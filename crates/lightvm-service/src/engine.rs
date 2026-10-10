@@ -24,9 +24,10 @@ use std::path::{Path, PathBuf};
 
 use lightvm_proto::ipc::VmSummary;
 use lightvm_proto::{
-    Actor, Admission, BackendObservation, Caller, DisplayGeometry, HostCapacity, InputEvent, Label,
-    MediaEntry, MediaKind, MediaRecord, OperationId, OperationRecord, PolicyLayer, PublicError,
-    ResourceLimits, RunId, VmAction, VmConfig, VmId, VmRecord, VmRequest, VmState,
+    Actor, Admission, BackendObservation, Caller, DisplayGeometry, ErrorCode, HostCapacity,
+    InputEvent, Label, MediaEntry, MediaKind, MediaRecord, OperationId, OperationRecord,
+    PolicyLayer, PublicError, ResourceLimits, RunId, TerminationCause, VmAction, VmConfig, VmId,
+    VmRecord, VmRequest, VmState,
 };
 use vm_core::ports::{AuditSink, CatalogStore, IdGenerator, MediaInspector, VmBackend};
 use vm_core::{Core, CoreConfig, DispatchOutcome, VmStatus};
@@ -65,8 +66,14 @@ pub trait VmEngine: Send + 'static {
     fn vms_with_process(&self) -> usize;
     /// Stops the running VMs (controlled service shutdown).
     fn stop_all(&mut self);
-    /// State changes since the last call, for the `vm_state` events.
+    /// State changes since the last call, for the `vm_state` events: a VM
+    /// is reported when its state **or its run** changed (a run replaced
+    /// within one command, `running → stopped → running`, is a change).
     fn state_changes(&mut self) -> Vec<(VmId, VmState)>;
+    /// Current run of every VM with a process, `None` for the others,
+    /// according to the last [`Self::state_changes`]: the supervisor revokes
+    /// the console tickets of any other run.
+    fn current_runs(&self) -> Vec<(VmId, Option<RunId>)>;
     /// Approved media of the registry.
     fn list_media(&mut self, caller: &Caller) -> Result<Vec<MediaRecord>, PublicError>;
     /// First step of a media import (checks of the path chosen by the user,
@@ -85,6 +92,15 @@ pub trait VmEngine: Send + 'static {
         caller: &Caller,
         copied: ImportCopied,
     ) -> Result<MediaRecord, PublicError>;
+    /// Cancels a media import whose copy ended (connection revoked or
+    /// closed, Emergency Stop): the copy is discarded (intent aborted,
+    /// temporary removed), the import is audited as failed; returns `reason`.
+    fn abort_import(
+        &mut self,
+        caller: &Caller,
+        copied: ImportCopied,
+        reason: PublicError,
+    ) -> PublicError;
     /// Deletion of a stopped VM with its files.
     fn delete_vm(
         &mut self,
@@ -92,8 +108,20 @@ pub trait VmEngine: Send + 'static {
         vm_id: VmId,
         expected_revision: u64,
     ) -> Result<(), PublicError>;
-    /// Console of a running VM: run, QEMU display socket, geometry.
+    /// Console of a running VM: run, QEMU display socket, geometry. Only a
+    /// refusal is audited here; the outcome of issuing the ticket is
+    /// recorded with [`Self::console_opened`].
     fn open_console(&mut self, caller: &Caller, vm_id: VmId) -> Result<ConsoleTarget, PublicError>;
+    /// Audit of the outcome of issuing a console ticket (`console_open`).
+    fn console_opened(
+        &mut self,
+        caller: &Caller,
+        vm_id: VmId,
+        run_id: RunId,
+        result: Result<(), ErrorCode>,
+    );
+    /// Audit of console tickets revoked (`console_revoke`, with the cause).
+    fn console_revoked(&mut self, actor: Actor, runs: &[(VmId, RunId)], cause: TerminationCause);
     /// Releases the keys and buttons still pressed on a run (console lost).
     fn release_input(&mut self, vm_id: VmId, run_id: RunId);
     /// Host capacity used by the core.
@@ -143,6 +171,8 @@ pub trait MediaImportPort {
     ) -> Result<ImportJob, PublicError>;
     /// Publishes the copy made by the job.
     fn finish_import(&mut self, copied: ImportCopied) -> Result<MediaEntry, PublicError>;
+    /// Discards the copy made by the job without publishing it.
+    fn abort_import(&mut self, copied: ImportCopied) -> Result<(), PublicError>;
 }
 
 /// Data for a console ticket.
@@ -190,6 +220,10 @@ pub trait BackendPort: VmBackend + Send + 'static {
 /// Safety bound of [`VmEngine::stop_all`] beyond the escalation of each stop.
 const STOP_ALL_LIMIT: std::time::Duration = std::time::Duration::from_secs(300);
 
+/// Minimum interval between two display geometry refreshes (a capture) for
+/// the same run, whatever the input traffic.
+pub const GEOMETRY_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Core configuration for the service.
 pub fn core_config(host: HostCapacity) -> CoreConfig {
     CoreConfig {
@@ -221,7 +255,10 @@ where
     backend: B,
     inspector: M,
     ids: SystemIds,
-    last: BTreeMap<VmId, VmState>,
+    /// State and run of every VM at the last [`VmEngine::state_changes`].
+    last: BTreeMap<VmId, (VmState, Option<RunId>)>,
+    /// Last display geometry refresh per VM (run, instant): debounce.
+    last_refresh: BTreeMap<VmId, (RunId, std::time::Instant)>,
     /// Graceful stops forwarded and still running in the backend: VM →
     /// (operation, run). The operation stays forwarded in the core (VM in
     /// `stopping`) until the backend reports the outcome.
@@ -273,6 +310,7 @@ where
             inspector,
             ids: SystemIds::default(),
             last: BTreeMap::new(),
+            last_refresh: BTreeMap::new(),
             pending_stops: BTreeMap::new(),
         };
         let _ = e.state_changes();
@@ -339,7 +377,13 @@ where
     /// known to the core: the geometry is re-read from the backend once (the
     /// guest may have changed resolution); the core then still rejects a
     /// batch whose geometry differs from the current one (stale coordinates).
-    fn refresh_geometry_for(&mut self, req: &VmRequest) {
+    ///
+    /// The re-read is a capture (`screendump`): it runs only for a caller
+    /// the core authorizes for input on the VM (side-effect-free check, the
+    /// admission repeats it with audit) and at most once per
+    /// [`GEOMETRY_REFRESH_INTERVAL`] per run, so neither an unauthorized
+    /// caller nor a flood of stale batches can drive captures.
+    fn refresh_geometry_for(&mut self, caller: &Caller, req: &VmRequest) {
         let VmAction::Input(batch) = &req.action else {
             return;
         };
@@ -350,15 +394,29 @@ where
         {
             return;
         }
+        if !self
+            .core
+            .is_authorized(caller, req.vm_id, req.action.capability())
+        {
+            return;
+        }
         let Ok(st) = self.core.vm_status(&Caller::User, req.vm_id) else {
             return;
         };
-        if !matches!(st.state, VmState::Running | VmState::Stopping)
+        if !vm_core::input_allowed_for(caller, st.state)
             || st.run_id != Some(batch.run_id)
             || st.geometry == Some(batch.geometry)
         {
             return;
         }
+        let now = std::time::Instant::now();
+        if let Some((run, at)) = self.last_refresh.get(&req.vm_id)
+            && *run == batch.run_id
+            && now.duration_since(*at) < GEOMETRY_REFRESH_INTERVAL
+        {
+            return;
+        }
+        self.last_refresh.insert(req.vm_id, (batch.run_id, now));
         if let Some(g) = self.backend.refresh_geometry(req.vm_id, batch.run_id) {
             let _ = self.core.observe_geometry(req.vm_id, batch.run_id, g);
         }
@@ -430,7 +488,7 @@ where
         self.apply_observations();
         let vm_id = req.vm_id;
         let op = req.operation_id;
-        self.refresh_geometry_for(&req);
+        self.refresh_geometry_for(caller, &req);
         let admission = self.core.submit(caller, req)?;
         // Execution is synchronous on the supervisor thread: a single owner of
         // the core and the backend (ARCHITECTURE 5).
@@ -461,7 +519,7 @@ where
     }
 
     fn vms_with_process(&self) -> usize {
-        self.last.values().filter(|s| s.has_process()).count()
+        self.last.values().filter(|(s, _)| s.has_process()).count()
     }
 
     fn stop_all(&mut self) {
@@ -501,12 +559,23 @@ where
             return Vec::new();
         };
         let mut out = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
         for vm in vms {
-            if self.last.insert(vm.vm_id, vm.state) != Some(vm.state) {
+            seen.insert(vm.vm_id);
+            let now = (vm.state, vm.run_id);
+            if self.last.insert(vm.vm_id, now) != Some(now) {
                 out.push((vm.vm_id, vm.state));
             }
         }
+        self.last.retain(|id, _| seen.contains(id));
         out
+    }
+
+    fn current_runs(&self) -> Vec<(VmId, Option<RunId>)> {
+        self.last
+            .iter()
+            .map(|(id, (state, run))| (*id, if state.has_process() { *run } else { None }))
+            .collect()
     }
 
     fn list_media(&mut self, caller: &Caller) -> Result<Vec<MediaRecord>, PublicError> {
@@ -523,7 +592,9 @@ where
         self.core.begin_media_import(caller, |store| {
             let origin = Label::parse(declared_origin)
                 .map_err(|_| PublicError::invalid_argument("invalid declared origin"))?;
-            let path = crate::adapters::catalog::validate_import_source(source, kind)?;
+            // Text only here: the file is opened and checked by the job, on
+            // the import worker thread.
+            let path = crate::adapters::catalog::validate_import_path(source)?;
             store.begin_import(&path, kind, &origin)
         })
     }
@@ -535,6 +606,24 @@ where
     ) -> Result<MediaRecord, PublicError> {
         self.core
             .finish_media_import(caller, |store| store.finish_import(copied))
+    }
+
+    fn abort_import(
+        &mut self,
+        caller: &Caller,
+        copied: ImportCopied,
+        reason: PublicError,
+    ) -> PublicError {
+        let r = self.core.finish_media_import(caller, |store| {
+            if let Err(e) = store.abort_import(copied) {
+                crate::diag!("lightvm-service: cancelled import not rolled back: {e}");
+            }
+            Err(reason)
+        });
+        match r {
+            Err(e) => e,
+            Ok(_) => PublicError::infrastructure("import cancelled"),
+        }
     }
 
     fn delete_vm(
@@ -570,6 +659,23 @@ where
             display_socket: self.backend.display_socket(vm_id, run_id),
             geometry,
         })
+    }
+
+    fn console_opened(
+        &mut self,
+        caller: &Caller,
+        vm_id: VmId,
+        run_id: RunId,
+        result: Result<(), ErrorCode>,
+    ) {
+        self.core.record_console_open(caller, vm_id, run_id, result);
+    }
+
+    fn console_revoked(&mut self, actor: Actor, runs: &[(VmId, RunId)], cause: TerminationCause) {
+        for (vm_id, run_id) in runs {
+            self.core
+                .record_console_revoke(actor, *vm_id, *run_id, cause);
+        }
     }
 
     fn release_input(&mut self, vm_id: VmId, run_id: RunId) {

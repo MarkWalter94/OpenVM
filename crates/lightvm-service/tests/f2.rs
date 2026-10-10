@@ -452,13 +452,38 @@ async fn console_ticket_is_checked_and_revoked_with_the_run() {
         "{elapsed:?}"
     );
 
-    // Right token: RFB greeting from the display, then a transparent stream.
+    // Right token: RFB greeting from the display, then the client's RFB
+    // stream, filtered (the fake display echoes what reaches it): the
+    // version is forwarded, a KeyEvent closes the connection unforwarded.
     let (path, line) = (t.socket_path.clone(), token_line(&t));
     let first = blocking(move || {
         let s = viewer(&path, &line).unwrap();
         assert_eq!(read_some(&s, GREETING.len()), GREETING);
-        (&s).write_all(b"ping").unwrap();
-        assert_eq!(read_some(&s, 4), b"ping");
+        (&s).write_all(GREETING).unwrap();
+        assert_eq!(read_some(&s, GREETING.len()), GREETING);
+        s
+    })
+    .await;
+    let (path, line) = (t.socket_path.clone(), token_line(&t));
+    blocking(move || {
+        let s = viewer(&path, &line).unwrap();
+        assert_eq!(read_some(&s, GREETING.len()), GREETING);
+        let key = [4u8, 1, 0, 0, 0, 0, 0, 0x61];
+        (&s).write_all(&[GREETING.as_slice(), b"\x01\x01", &key].concat())
+            .unwrap();
+        // At most the echo of the handshake, then EOF: the key never
+        // reached the display.
+        let hs = [GREETING.as_slice(), b"\x01\x01"].concat();
+        let got = read_some(&s, 64);
+        assert!(hs.starts_with(&got), "{got:?}");
+    })
+    .await;
+    // That connection replaced the first viewer: reconnect it.
+    drop(first);
+    let (path, line) = (t.socket_path.clone(), token_line(&t));
+    let first = blocking(move || {
+        let s = viewer(&path, &line).unwrap();
+        assert_eq!(read_some(&s, GREETING.len()), GREETING);
         s
     })
     .await;
@@ -1500,13 +1525,16 @@ fn e2e_real_qemu_import_console_input_stop_delete() {
         let events = read_audit(&dir);
         let count = |a: AuditAction| events.iter().filter(|e| e.action == a).count();
         eprintln!(
-            "audit: {} lines, vm_input {}, media_import {}, console_open {}, vm_delete {}",
+            "audit: {} lines, vm_input {}, media_import {}, console_open {}, console_revoke {}, vm_delete {}",
             events.len(),
             count(AuditAction::VmInput),
             count(AuditAction::MediaImport),
             count(AuditAction::ConsoleOpen),
+            count(AuditAction::ConsoleRevoke),
             count(AuditAction::VmDelete)
         );
+        // Tickets revoked with their runs (and the replaced one) are audited.
+        assert!(count(AuditAction::ConsoleRevoke) >= 2);
         let text = std::fs::read_to_string(audit_path(&dir)).unwrap();
         assert!(!text.contains(&ticket.token), "token never audited");
     });

@@ -33,8 +33,8 @@ pub struct TlsConfig {
     pub server_name: String,
 }
 
-/// Transport to the QEMU VNC server.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Transport to the QEMU VNC server. `Debug` redacts the display ticket.
+#[derive(Clone, PartialEq, Eq)]
 pub enum Transport {
     /// Unix socket in a private directory (`-vnc unix:<path>`).
     Unix {
@@ -62,6 +62,29 @@ pub enum Transport {
         /// Certificates.
         tls: TlsConfig,
     },
+}
+
+impl std::fmt::Debug for Transport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unix { path, imp } => f
+                .debug_struct("Unix")
+                .field("path", path)
+                .field("imp", imp)
+                .finish(),
+            Self::Ticket { path, imp, .. } => f
+                .debug_struct("Ticket")
+                .field("path", path)
+                .field("imp", imp)
+                .field("token", &"<redacted>")
+                .finish(),
+            Self::VencryptTls { addr, tls } => f
+                .debug_struct("VencryptTls")
+                .field("addr", addr)
+                .field("tls", tls)
+                .finish(),
+        }
+    }
 }
 
 /// Nature of the channel on which the security handshake takes place.
@@ -289,4 +312,22 @@ pub(crate) fn tls_upgrade(
         conn.negotiated_cipher_suite().map(|c| c.suite())
     );
     Ok((Box::new(rustls::StreamOwned::new(conn, stream)), info))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ticket_debug_redacts_the_token() {
+        let token = "0123456789abcdef".repeat(4);
+        let t = Transport::Ticket {
+            path: PathBuf::from("d.sock"),
+            imp: UnixImpl::Socket2,
+            token: token.clone(),
+        };
+        let d = format!("{t:?}");
+        assert!(!d.contains(&token), "{d}");
+        assert!(d.contains("redacted") && d.contains("d.sock"));
+    }
 }

@@ -340,7 +340,7 @@ pub fn legacy_default_path() -> Option<PathBuf> {
     profile_dir().map(|d| d.join(LEGACY_FILE))
 }
 
-fn profile_dir() -> Option<PathBuf> {
+pub(crate) fn profile_dir() -> Option<PathBuf> {
     #[cfg(windows)]
     {
         std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("LightVM"))

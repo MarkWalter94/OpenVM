@@ -200,6 +200,90 @@ fn copy_and_hash(
     Ok((crate::hex(&h.finalize()), total))
 }
 
+/// Import reserved by [`Catalog::reserve_media_import`]: the `import_media`
+/// intent is recorded but the source is **not** opened yet. Every access to
+/// the user's file (open, checks, copy) happens in
+/// [`Self::open_and_copy`], which needs no catalog and runs on a worker
+/// thread: a slow or hanging source (network, removable media) never blocks
+/// the thread that owns the catalog.
+#[derive(Debug)]
+pub struct MediaImportReservation {
+    source: PathBuf,
+    limits: MediaLimits,
+    meta: ImportMeta,
+}
+
+impl MediaImportReservation {
+    /// Ends the reservation without touching the source (refused by the
+    /// caller's own checks): [`Catalog::finish_media_import`] returns
+    /// `reason` and aborts the intent.
+    pub fn refuse(self, reason: StorageError) -> CopiedMedia {
+        CopiedMedia {
+            meta: self.meta,
+            outcome: Err(reason),
+        }
+    }
+
+    /// Opens the source once (shared for reading only, without following a
+    /// reparse point on the last component), checks type and size on the
+    /// handle, runs `check` on the same handle (for example the volume and
+    /// final-path checks of the caller), then copies and hashes from that
+    /// handle as [`MediaImportJob::copy`] does. Any failure is in the
+    /// outcome: [`Catalog::finish_media_import`] then aborts the intent.
+    pub fn open_and_copy(self, check: impl FnOnce(&File) -> Result<()>) -> CopiedMedia {
+        let Self {
+            source,
+            limits,
+            meta,
+        } = self;
+        let outcome = (|| {
+            let (mut src, expected_len) = open_source(&source, limits)?;
+            check(&src)?;
+            {
+                use std::io::Seek as _;
+                src.seek(std::io::SeekFrom::Start(0))
+                    .map_err(|e| StorageError::io(&source, e))?;
+            }
+            let (sha, size) = copy_and_hash(&mut src, &source, &meta.intent.temp_path, limits)?;
+            if size == expected_len {
+                Ok((sha, size))
+            } else {
+                Err(StorageError::IntegrityMismatch {
+                    path: SOURCE_LABEL.into(),
+                    detail: format!("read {size} bytes, expected {expected_len}"),
+                })
+            }
+        })();
+        CopiedMedia { meta, outcome }
+    }
+}
+
+/// Opens the source of an import and checks type and size on the handle.
+fn open_source(source: &Path, limits: MediaLimits) -> Result<(File, u64)> {
+    let src = fsx::open_regular(source, Share::ReadOnly, SOURCE_LABEL)?;
+    let len = src
+        .metadata()
+        .map_err(|e| StorageError::io(source, e))?
+        .len();
+    if len > limits.max_bytes {
+        return Err(StorageError::ResourceLimit(format!(
+            "medium of {len} bytes over the limit of {}",
+            limits.max_bytes
+        )));
+    }
+    Ok((src, len))
+}
+
+fn check_origin(declared_origin: &str) -> Result<()> {
+    if declared_origin.len() > MAX_DECLARED_ORIGIN || declared_origin.chars().any(char::is_control)
+    {
+        return Err(StorageError::Constraint(
+            "declared origin too long or contains control characters".into(),
+        ));
+    }
+    Ok(())
+}
+
 impl Catalog {
     /// Approves a medium: read-only managed copy, hash and registry row.
     /// `source` is the file chosen by the user with the native picker (never
@@ -247,24 +331,48 @@ impl Catalog {
         declared_origin: &str,
         limits: MediaLimits,
     ) -> Result<MediaImportJob> {
-        if declared_origin.len() > MAX_DECLARED_ORIGIN
-            || declared_origin.chars().any(char::is_control)
-        {
-            return Err(StorageError::Constraint(
-                "declared origin too long or contains control characters".into(),
-            ));
-        }
-        let src = fsx::open_regular(source, Share::ReadOnly, SOURCE_LABEL)?;
-        let expected_len = src
-            .metadata()
-            .map_err(|e| StorageError::io(source, e))?
-            .len();
-        if expected_len > limits.max_bytes {
-            return Err(StorageError::ResourceLimit(format!(
-                "medium of {expected_len} bytes over the limit of {}",
-                limits.max_bytes
-            )));
-        }
+        check_origin(declared_origin)?;
+        let (src, expected_len) = open_source(source, limits)?;
+        let meta = self.import_intent(kind, declared_origin)?;
+        Ok(MediaImportJob {
+            src,
+            source: source.to_path_buf(),
+            expected_len,
+            limits,
+            meta,
+        })
+    }
+
+    /// First step of an import that never touches the source: checks the
+    /// declared origin and records the `import_media` intent. The source is
+    /// opened, checked and copied later by
+    /// [`MediaImportReservation::open_and_copy`] (on any thread), and the
+    /// import ends with [`Self::finish_media_import`] or
+    /// [`Self::abort_media_import`]. A reservation never finished leaves a
+    /// `pending` intent that reconciliation rolls back at the next start.
+    pub fn reserve_media_import(
+        &mut self,
+        source: &Path,
+        kind: MediaKind,
+        declared_origin: &str,
+        limits: MediaLimits,
+    ) -> Result<MediaImportReservation> {
+        check_origin(declared_origin)?;
+        let meta = self.import_intent(kind, declared_origin)?;
+        Ok(MediaImportReservation {
+            source: source.to_path_buf(),
+            limits,
+            meta,
+        })
+    }
+
+    /// Discards a copy without publishing it (import cancelled): the intent
+    /// is aborted and the temporary file removed.
+    pub fn abort_media_import(&mut self, copied: CopiedMedia) -> Result<()> {
+        self.abort(&copied.meta.intent)
+    }
+
+    fn import_intent(&mut self, kind: MediaKind, declared_origin: &str) -> Result<ImportMeta> {
         let media_id = MediaId::new_v7();
         let final_rel = CatalogLayout::media_file(&media_id, "iso")?;
         let intent = self.begin_intent(IntentSpec {
@@ -276,18 +384,12 @@ impl Catalog {
             final_path: Some(final_rel.clone()),
             read_only: true,
         })?;
-        Ok(MediaImportJob {
-            src,
-            source: source.to_path_buf(),
-            expected_len,
-            limits,
-            meta: ImportMeta {
-                intent,
-                media_id,
-                final_rel,
-                kind,
-                declared_origin: declared_origin.to_owned(),
-            },
+        Ok(ImportMeta {
+            intent,
+            media_id,
+            final_rel,
+            kind,
+            declared_origin: declared_origin.to_owned(),
         })
     }
 

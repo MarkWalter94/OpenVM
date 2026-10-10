@@ -227,7 +227,9 @@ fn close_with_running_vms_asks_then_stops_them() {
         ]
     );
     h.get_by_label("Stopping the VMs…");
-    h.get_by_label_contains("1 of 3 stopped");
+    // Only the VMs running at the confirmation are counted.
+    h.get_by_label_contains("0 of 2 stopped");
+    assert!(h.query_by_label("off: Stopped").is_none());
     hs.update(|s| s.vms[0].state = VmState::Stopping);
     h.run_steps(4);
     h.get_by_label("web: Stopping");
@@ -253,4 +255,92 @@ fn close_with_running_vms_asks_then_stops_them() {
         .get(&egui::ViewportId::ROOT)
         .is_some_and(|o| o.commands.contains(&egui::ViewportCommand::Close));
     assert!(closed, "close command sent");
+}
+
+/// Waits (stepping the UI) until the app agreed to close and sent `Close`.
+fn wait_closed(h: &mut Harness<'_, LightVmApp>, within: std::time::Duration) {
+    let t0 = std::time::Instant::now();
+    while !h.state().close_allowed() {
+        assert!(t0.elapsed() < within, "close not completed");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        h.step();
+    }
+}
+
+/// Finding 2: VMs listed as running by a supervisor that is terminated or
+/// disconnected do not hold the close (no 90 s wait).
+#[test]
+fn close_with_a_dead_or_disconnected_supervisor_is_immediate() {
+    let (mut h, hs) = harness(connected(vec![vm(1, "web", VmState::Running)]));
+    h.run_steps(4);
+    *hs.stopped.lock().unwrap() = true;
+    request_close(&mut h);
+    assert!(
+        h.state().close_allowed(),
+        "dead supervisor: immediate close"
+    );
+    assert!(!h.state().closing());
+
+    let (mut h, hs) = harness(connected(vec![vm(1, "web", VmState::Running)]));
+    h.run_steps(4);
+    hs.update(|s| {
+        s.connected = false;
+        s.connection = "event channel closed".into();
+    });
+    request_close(&mut h);
+    assert!(h.state().close_allowed(), "disconnected: immediate close");
+}
+
+/// Finding 2: the supervisor dies while the VMs are being stopped: the
+/// close completes without waiting for the timeout.
+#[test]
+fn supervisor_lost_while_stopping_finishes_the_close() {
+    let (mut h, hs) = harness(connected(vec![vm(1, "web", VmState::Running)]));
+    h.run_steps(4);
+    request_close(&mut h);
+    h.get_by_role_and_label(Role::Button, "Stop them and quit")
+        .click();
+    h.run_steps(4);
+    h.get_by_label("Stopping the VMs…");
+    *hs.stopped.lock().unwrap() = true;
+    wait_closed(&mut h, std::time::Duration::from_secs(5));
+}
+
+/// Finding 12: the running VMs stop while the question is shown: the
+/// close requested by the user goes on instead of being dropped.
+#[test]
+fn vms_stopped_while_asking_let_the_close_proceed() {
+    let (mut h, hs) = harness(connected(vec![vm(1, "web", VmState::Running)]));
+    h.run_steps(4);
+    request_close(&mut h);
+    h.get_by_label("1 VM is running");
+    hs.update(|s| s.vms[0].state = VmState::Stopped);
+    wait_closed(&mut h, std::time::Duration::from_secs(5));
+    assert!(hs.actions().is_empty(), "nothing to stop");
+    assert!(
+        *hs.stopped.lock().unwrap(),
+        "supervisor stopped before closing"
+    );
+}
+
+/// Finding 12: a VM started after the confirmation is not waited for (the
+/// supervisor shutdown stops it).
+#[test]
+fn only_vms_active_at_confirmation_are_waited_for() {
+    let (mut h, hs) = harness(connected(vec![
+        vm(1, "web", VmState::Running),
+        vm(2, "later", VmState::Stopped),
+    ]));
+    h.run_steps(4);
+    request_close(&mut h);
+    h.get_by_role_and_label(Role::Button, "Stop them and quit")
+        .click();
+    h.run_steps(4);
+    assert_eq!(hs.actions(), [ServiceCommand::Stop(common::vm_id(1))]);
+    hs.update(|s| {
+        s.vms[0].state = VmState::Stopped;
+        s.vms[1].state = VmState::Running;
+        s.vms[1].run_id = Some(common::run_id(2));
+    });
+    wait_closed(&mut h, std::time::Duration::from_secs(5));
 }

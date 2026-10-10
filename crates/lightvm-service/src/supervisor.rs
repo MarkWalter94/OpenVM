@@ -4,17 +4,35 @@
 //! go through here: it uses [`EmergencyStop`], obtained from the host at
 //! startup and callable from any task (ROADMAP 7.3, ADR-0009); only after the
 //! termination does the supervisor record it in the core.
+//!
+//! Robustness of the loop:
+//! - **panic containment**: each command (and each observation round) is
+//!   served under `catch_unwind`; a panic is logged, the waiting request
+//!   receives an `infrastructure_error`, and the thread keeps running with
+//!   the engine and the host it owns (runs, processes and Job Objects are
+//!   never dropped because of a bug in one request);
+//! - **observation deadline**: process exits are observed at least every
+//!   [`OBSERVE_INTERVAL`], whatever the request traffic;
+//! - **revocation**: a request whose connection was revoked or closed (the
+//!   revocation sender gone counts as revoked) is not executed, and a
+//!   mutation queued before an Emergency Stop is discarded (media imports
+//!   included, also when their copy ends after the revocation or the
+//!   Emergency Stop: the copy is then discarded and the import audited as
+//!   failed).
 
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use lightvm_proto::ipc::{
     Capabilities, ConsoleTicket, ResponseBody, SUPPORTED_PROTOCOL_VERSIONS, ServiceEvent,
     ServiceState, StopReason,
 };
 use lightvm_proto::{
-    Actor, Caller, MediaKind, PublicError, ReplyError, RunId, VmConfig, VmId, VmRequest,
+    Actor, Caller, MediaKind, PublicError, ReplyError, RunId, TerminationCause, VmConfig, VmId,
+    VmRequest,
 };
 use tokio::sync::{OwnedSemaphorePermit, broadcast, oneshot, watch};
 
@@ -104,6 +122,7 @@ impl SupervisorRequest {
             Self::CreateVm(_)
                 | Self::UpdateVm { .. }
                 | Self::SubmitVm(_)
+                | Self::ImportMedia { .. }
                 | Self::DeleteVm { .. }
                 | Self::OpenConsole(_)
         )
@@ -120,7 +139,7 @@ pub(crate) enum Command {
         /// Connection that sent the request (owner of a console ticket).
         connection_id: u64,
         /// Connection revocation: checked again immediately before executing
-        /// (double check, ROADMAP 7.3).
+        /// (double check, ROADMAP 7.3). A closed channel counts as revoked.
         revoked: watch::Receiver<bool>,
         /// Emergency Stop generation at the time of queueing.
         epoch: u64,
@@ -143,10 +162,20 @@ pub(crate) enum Command {
         caller: Caller,
         copied: ImportCopied,
         reply: Reply,
+        /// Revocation of the connection that asked for the import.
+        revoked: watch::Receiver<bool>,
+        /// Emergency Stop generation when the import was queued.
+        epoch: u64,
     },
-    /// Console lost (ticket revoked with its UI connection): release the
-    /// keys and buttons still pressed on these runs.
-    ReleaseInput(Vec<(VmId, RunId)>),
+    /// Console tickets revoked outside the supervisor thread (UI connection
+    /// revoked or closed, Emergency Stop): audit and, for a lost console,
+    /// release of the keys and buttons still pressed on these runs.
+    ConsolesRevoked {
+        runs: Vec<(VmId, RunId)>,
+        actor: Actor,
+        cause: TerminationCause,
+        release_input: bool,
+    },
 }
 
 impl std::fmt::Debug for Command {
@@ -157,7 +186,9 @@ impl std::fmt::Debug for Command {
             Self::ParentLost { policy, .. } => write!(f, "ParentLost({policy:?})"),
             Self::Shutdown { .. } => write!(f, "Shutdown"),
             Self::FinishImport { .. } => write!(f, "FinishImport"),
-            Self::ReleaseInput(v) => write!(f, "ReleaseInput({})", v.len()),
+            Self::ConsolesRevoked { runs, cause, .. } => {
+                write!(f, "ConsolesRevoked({}, {cause:?})", runs.len())
+            }
         }
     }
 }
@@ -165,6 +196,12 @@ impl std::fmt::Debug for Command {
 /// Error for a credential or connection that is no longer valid.
 pub(crate) fn unauthenticated(message: &str) -> ReplyError {
     ReplyError::Operational(PublicError::unauthenticated(message))
+}
+
+/// `true` if the connection was revoked, or closed (its revocation sender
+/// is gone: nobody can revoke it any more, so nothing queued by it runs).
+pub(crate) fn is_revoked(rx: &watch::Receiver<bool>) -> bool {
+    *rx.borrow() || rx.has_changed().is_err()
 }
 
 pub(crate) struct SupervisorThread {
@@ -184,155 +221,278 @@ pub(crate) struct SupervisorThread {
     pub(crate) imports: usize,
 }
 
-/// Interval at which, without commands, the supervisor observes process exits
-/// (shutdown from the guest, crash) and publishes their events.
-const OBSERVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+/// Maximum interval between two observations of the process exits (shutdown
+/// from the guest, crash) and publications of their events, with or without
+/// request traffic.
+pub(crate) const OBSERVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Outcome of serving one command.
+enum Served {
+    Continue,
+    Exit,
+}
+
+fn panic_text(p: &(dyn std::any::Any + Send)) -> &str {
+    p.downcast_ref::<&str>()
+        .copied()
+        .or_else(|| p.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("non-textual panic")
+}
 
 impl SupervisorThread {
     pub(crate) fn run(mut self, rx: mpsc::Receiver<Command>) {
+        let mut next_observe = Instant::now() + OBSERVE_INTERVAL;
         loop {
-            let cmd = match rx.recv_timeout(OBSERVE_INTERVAL) {
-                Ok(cmd) => cmd,
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    self.engine.observe();
-                    self.publish_state_changes();
-                    continue;
+            let wait = next_observe.saturating_duration_since(Instant::now());
+            match rx.recv_timeout(wait) {
+                Ok(cmd) => {
+                    let what = format!("{cmd:?}");
+                    let exiting = matches!(cmd, Command::Shutdown { .. });
+                    let mut slot: Option<Reply> = None;
+                    let r = catch_unwind(AssertUnwindSafe(|| self.serve(cmd, &rx, &mut slot)));
+                    match r {
+                        Ok(Served::Continue) => {}
+                        Ok(Served::Exit) => return,
+                        Err(p) => {
+                            crate::diag!(
+                                "lightvm-service: supervisor: panic while serving {what}: {}; the supervisor keeps running",
+                                panic_text(p.as_ref())
+                            );
+                            if let Some(reply) = slot.take() {
+                                let _ = reply.send(Err(ReplyError::Operational(
+                                    PublicError::infrastructure(
+                                        "internal error while serving the request",
+                                    ),
+                                )));
+                            }
+                            if exiting {
+                                return;
+                            }
+                        }
+                    }
                 }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => return,
-            };
-            match cmd {
-                Command::Request {
-                    req,
-                    caller,
-                    connection_id,
-                    revoked,
-                    epoch,
-                    reply,
-                    _permit,
-                } => {
-                    let res = if *revoked.borrow() {
-                        Err(unauthenticated("connection revoked"))
-                    } else if req.is_mutation()
-                        && epoch != self.emergency_epoch.load(Ordering::SeqCst)
-                    {
-                        Err(ReplyError::Operational(PublicError::state_conflict(
-                            "request discarded by the Emergency Stop",
-                        )))
-                    } else if let SupervisorRequest::ImportMedia {
-                        source_path,
-                        media_kind,
-                        declared_origin,
-                    } = req
-                    {
-                        // The reply is sent when the copy ends.
+            }
+            let observe = Instant::now() >= next_observe;
+            if observe {
+                next_observe = Instant::now() + OBSERVE_INTERVAL;
+            }
+            let r = catch_unwind(AssertUnwindSafe(|| {
+                if observe {
+                    self.engine.observe();
+                }
+                self.publish_state_changes();
+            }));
+            if let Err(p) = r {
+                crate::diag!(
+                    "lightvm-service: supervisor: panic while observing the VMs: {}",
+                    panic_text(p.as_ref())
+                );
+            }
+        }
+    }
+
+    /// Serves one command. A reply sender waiting for the outcome is kept in
+    /// `slot` while the command runs, so that after a panic the caller can
+    /// still answer it.
+    fn serve(
+        &mut self,
+        cmd: Command,
+        rx: &mpsc::Receiver<Command>,
+        slot: &mut Option<Reply>,
+    ) -> Served {
+        match cmd {
+            Command::Request {
+                req,
+                caller,
+                connection_id,
+                revoked,
+                epoch,
+                reply,
+                _permit,
+            } => {
+                *slot = Some(reply);
+                let res = if is_revoked(&revoked) {
+                    Err(unauthenticated("connection revoked"))
+                } else if req.is_mutation() && epoch != self.emergency_epoch.load(Ordering::SeqCst)
+                {
+                    Err(ReplyError::Operational(PublicError::state_conflict(
+                        "request discarded by the Emergency Stop",
+                    )))
+                } else if let SupervisorRequest::ImportMedia {
+                    source_path,
+                    media_kind,
+                    declared_origin,
+                } = req
+                {
+                    // The reply is sent when the copy ends.
+                    if let Some(reply) = slot.take() {
                         self.start_import(
                             caller,
                             &source_path,
                             media_kind,
                             &declared_origin,
-                            reply,
+                            (reply, revoked, epoch),
                         );
-                        self.publish_state_changes();
-                        continue;
-                    } else {
-                        self.handle(req, caller.as_ref(), connection_id)
-                    };
+                    }
+                    return Served::Continue;
+                } else {
+                    self.handle(req, caller.as_ref(), connection_id)
+                };
+                if let Some(reply) = slot.take() {
                     let _ = reply.send(res);
+                }
+            }
+            Command::FinishImport {
+                caller,
+                copied,
+                reply,
+                revoked,
+                epoch,
+            } => {
+                *slot = Some(reply);
+                self.imports = self.imports.saturating_sub(1);
+                let res = if is_revoked(&revoked) {
+                    Err(self.engine.abort_import(
+                        &caller,
+                        copied,
+                        PublicError::unauthenticated("connection revoked: import cancelled"),
+                    ))
+                } else if epoch != self.emergency_epoch.load(Ordering::SeqCst) {
+                    Err(self.engine.abort_import(
+                        &caller,
+                        copied,
+                        PublicError::state_conflict("import cancelled by the Emergency Stop"),
+                    ))
+                } else {
+                    self.engine.finish_import(&caller, copied)
+                };
+                let res = res
+                    .map(|media| ResponseBody::MediaImported { media })
+                    .map_err(ReplyError::Operational);
+                if let Some(reply) = slot.take() {
+                    let _ = reply.send(res);
+                }
+            }
+            Command::ConsolesRevoked {
+                runs,
+                actor,
+                cause,
+                release_input,
+            } => {
+                self.engine.console_revoked(actor, &runs, cause);
+                if release_input {
+                    for (vm_id, run_id) in runs {
+                        self.engine.release_input(vm_id, run_id);
+                    }
+                }
+            }
+            Command::EmergencyReconcile(actor) => self.engine.after_emergency_stop(actor),
+            Command::ParentLost { policy, done } => {
+                self.backend.stop_agent_sessions(StopReason::ParentLost);
+                self.backend.on_parent_lost(policy);
+                let _ = self.events.send(ServiceEvent::AgentSessionsStopped {
+                    reason: StopReason::ParentLost,
+                });
+                let _ = done.send(());
+            }
+            Command::Shutdown { done } => {
+                self.shutdown(rx);
+                let _ = done.send(());
+                return Served::Exit;
+            }
+        }
+        Served::Continue
+    }
+
+    fn shutdown(&mut self, rx: &mpsc::Receiver<Command>) {
+        let _ = self.events.send(ServiceEvent::ServiceState {
+            state: ServiceState::Stopping,
+        });
+        // Requests still in the queue are not executed.
+        while let Ok(pending) = rx.try_recv() {
+            match pending {
+                Command::Request { reply, .. } => {
+                    let _ = reply.send(Err(ReplyError::Operational(PublicError::state_conflict(
+                        "service shutting down",
+                    ))));
+                }
+                Command::EmergencyReconcile(actor) => {
+                    self.engine.after_emergency_stop(actor);
+                }
+                Command::ParentLost { done, .. } | Command::Shutdown { done } => {
+                    let _ = done.send(());
                 }
                 Command::FinishImport {
                     caller,
                     copied,
                     reply,
+                    ..
                 } => {
-                    self.imports = self.imports.saturating_sub(1);
-                    let res = self
-                        .engine
-                        .finish_import(&caller, copied)
-                        .map(|media| ResponseBody::MediaImported { media })
-                        .map_err(ReplyError::Operational);
-                    let _ = reply.send(res);
+                    // The copy is not published.
+                    let e = self.engine.abort_import(
+                        &caller,
+                        copied,
+                        PublicError::state_conflict("service shutting down"),
+                    );
+                    let _ = reply.send(Err(ReplyError::Operational(e)));
                 }
-                Command::ReleaseInput(runs) => {
-                    for (vm_id, run_id) in runs {
-                        self.engine.release_input(vm_id, run_id);
-                    }
-                }
-                Command::EmergencyReconcile(actor) => self.engine.after_emergency_stop(actor),
-                Command::ParentLost { policy, done } => {
-                    self.backend.stop_agent_sessions(StopReason::ParentLost);
-                    self.backend.on_parent_lost(policy);
-                    let _ = self.events.send(ServiceEvent::AgentSessionsStopped {
-                        reason: StopReason::ParentLost,
-                    });
-                    let _ = done.send(());
-                }
-                Command::Shutdown { done } => {
-                    let _ = self.events.send(ServiceEvent::ServiceState {
-                        state: ServiceState::Stopping,
-                    });
-                    // Requests still in the queue are not executed.
-                    while let Ok(pending) = rx.try_recv() {
-                        match pending {
-                            Command::Request { reply, .. } => {
-                                let _ = reply.send(Err(ReplyError::Operational(
-                                    PublicError::state_conflict("service shutting down"),
-                                )));
-                            }
-                            Command::EmergencyReconcile(actor) => {
-                                self.engine.after_emergency_stop(actor);
-                            }
-                            Command::ParentLost { done, .. } | Command::Shutdown { done } => {
-                                let _ = done.send(());
-                            }
-                            Command::FinishImport { reply, .. } => {
-                                // The copy is not published: the open intent is
-                                // rolled back by the next catalog open.
-                                let _ = reply.send(Err(ReplyError::Operational(
-                                    PublicError::state_conflict("service shutting down"),
-                                )));
-                            }
-                            Command::ReleaseInput(_) => {}
-                        }
-                    }
-                    self.display.revoke_all();
-                    self.backend.stop_agent_sessions(StopReason::Shutdown);
-                    self.backend.prepare_shutdown();
-                    self.engine.stop_all();
-                    self.publish_state_changes();
-                    self.backend.shutdown();
-                    let _ = done.send(());
-                    return;
-                }
+                Command::ConsolesRevoked {
+                    runs, actor, cause, ..
+                } => self.engine.console_revoked(actor, &runs, cause),
             }
-            self.publish_state_changes();
         }
+        let runs = self.display.revoke_all();
+        self.engine
+            .console_revoked(Actor::System, &runs, TerminationCause::Completed);
+        self.backend.stop_agent_sessions(StopReason::Shutdown);
+        self.backend.prepare_shutdown();
+        self.engine.stop_all();
+        self.publish_state_changes();
+        self.backend.shutdown();
     }
 
-    fn publish_state_changes(&mut self) {
-        for (vm_id, state) in self.engine.state_changes() {
-            // The display ticket lives only as long as the run: a state
-            // without a process revokes it (stopped, failed, reconciliation);
-            // during a graceful stop (`stopping`) the console stays open.
-            if !state.has_process() {
-                self.display.revoke_vm(vm_id);
+    pub(crate) fn publish_state_changes(&mut self) {
+        let changes = self.engine.state_changes();
+        // The display ticket lives only as long as its run: every ticket of
+        // a run other than the VM's current one (run ended, or replaced by
+        // another run within the same command) is revoked, as are the
+        // tickets of VMs that no longer exist. During a graceful stop
+        // (`stopping`) the run is still current and the console stays open.
+        let runs = self.engine.current_runs();
+        let mut revoked = Vec::new();
+        for (vm_id, run) in &runs {
+            revoked.extend(self.display.revoke_other_runs(*vm_id, *run));
+        }
+        for (vm_id, _) in self.display.active() {
+            if !runs.iter().any(|(v, _)| *v == vm_id) {
+                revoked.extend(self.display.revoke_vm(vm_id));
             }
+        }
+        if !revoked.is_empty() {
+            self.engine
+                .console_revoked(Actor::System, &revoked, TerminationCause::VmTerminated);
+        }
+        for (vm_id, state) in changes {
             let _ = self.events.send(ServiceEvent::VmState { vm_id, state });
         }
         self.vms_with_process
             .store(self.engine.vms_with_process(), Ordering::SeqCst);
     }
 
-    /// First step of a media import on this thread, copy on a worker
-    /// thread, last step back here with [`Command::FinishImport`]: the
+    /// First step of a media import on this thread (text checks and journal
+    /// intent, no access to the file), copy on a worker thread (open, file
+    /// checks, copy), last step back here with [`Command::FinishImport`]: the
     /// supervisor keeps serving the VMs (console input included) while a
-    /// multi-GiB ISO is copied.
+    /// multi-GiB ISO is copied, and a slow source never blocks it.
     fn start_import(
         &mut self,
         caller: Option<Caller>,
         source: &str,
         kind: MediaKind,
         origin: &str,
-        reply: Reply,
+        (reply, revoked, epoch): (Reply, watch::Receiver<bool>, u64),
     ) {
         let Some(caller) = caller else {
             let _ = reply.send(Err(ReplyError::Operational(
@@ -364,6 +524,8 @@ impl SupervisorThread {
                     caller,
                     copied,
                     reply,
+                    revoked,
+                    epoch,
                 });
             });
         match spawned {
@@ -373,7 +535,8 @@ impl SupervisorThread {
     }
 
     /// Console ticket: the core checks the caller and the VM state, the
-    /// display registry starts the per-run proxy owned by the connection.
+    /// display registry starts the per-run proxy owned by the connection;
+    /// the outcome is audited only once the proxy is up (or failed).
     fn open_console(
         &mut self,
         caller: &Caller,
@@ -381,33 +544,53 @@ impl SupervisorThread {
         connection_id: u64,
     ) -> Result<ResponseBody, PublicError> {
         let target = self.engine.open_console(caller, vm_id)?;
-        let socket = target
-            .display_socket
-            .ok_or_else(|| PublicError::unsupported("console not available on this backend"))?;
-        let ticket = self
-            .display
-            .issue(vm_id, target.run_id, connection_id, &socket)
-            .map_err(|e| {
-                crate::diag!("lightvm-service: display proxy not started: {e}");
-                PublicError::infrastructure("display proxy not available")
-            })?;
-        let socket_path = ticket
-            .socket_path
-            .to_str()
-            .ok_or_else(|| PublicError::infrastructure("display socket path not UTF-8"))?
-            .to_owned();
+        let run_id = target.run_id;
+        let issued = (|| {
+            let socket = target
+                .display_socket
+                .as_deref()
+                .ok_or_else(|| PublicError::unsupported("console not available on this backend"))?;
+            let ticket = self
+                .display
+                .issue(vm_id, run_id, connection_id, socket)
+                .map_err(|e| {
+                    crate::diag!("lightvm-service: display proxy not started: {e}");
+                    PublicError::infrastructure("display proxy not available")
+                })?;
+            if let Some(prev) = ticket.replaced {
+                self.engine.console_revoked(
+                    caller.actor(),
+                    &[(vm_id, prev)],
+                    TerminationCause::Completed,
+                );
+            }
+            let Some(socket_path) = ticket.socket_path.to_str().map(str::to_owned) else {
+                self.display.revoke_vm(vm_id);
+                return Err(PublicError::infrastructure("display socket path not UTF-8"));
+            };
+            Ok((socket_path, ticket.token))
+        })();
+        let (socket_path, token) = match issued {
+            Ok(t) => t,
+            Err(e) => {
+                self.engine
+                    .console_opened(caller, vm_id, run_id, Err(e.code));
+                return Err(e);
+            }
+        };
+        self.engine.console_opened(caller, vm_id, run_id, Ok(()));
         Ok(ResponseBody::Console {
             ticket: ConsoleTicket {
                 vm_id,
-                run_id: target.run_id,
+                run_id,
                 socket_path,
-                token: ticket.token,
+                token,
                 geometry: target.geometry,
             },
         })
     }
 
-    fn handle(
+    pub(crate) fn handle(
         &mut self,
         req: SupervisorRequest,
         caller: Option<&Caller>,
@@ -480,3 +663,6 @@ impl SupervisorThread {
         r.map_err(ReplyError::Operational)
     }
 }
+
+#[cfg(test)]
+mod tests;

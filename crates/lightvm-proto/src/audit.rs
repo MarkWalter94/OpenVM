@@ -50,6 +50,10 @@ pub enum AuditAction {
     MediaImport,
     /// Issue of a per-run console display ticket (never the token).
     ConsoleOpen,
+    /// Revocation of a console display ticket (run ended, UI connection
+    /// closed or revoked, Emergency Stop, new ticket, shutdown); the cause is
+    /// in `termination`.
+    ConsoleRevoke,
 }
 
 /// Recorded outcome.

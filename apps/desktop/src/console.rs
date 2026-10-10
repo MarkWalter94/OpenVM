@@ -15,9 +15,10 @@
 //! - `Ctrl+Alt+Esc`: leave the console: exits full screen and releases the
 //!   keyboard focus ([`LEAVE_CHORD`]).
 
+use std::collections::VecDeque;
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use lightvm_proto::ipc::ConsoleTicket;
 use lightvm_proto::{
@@ -36,6 +37,12 @@ pub const LEAVE_CHORD: &str = "Ctrl+Alt+Esc";
 
 /// Maximum console updates per second in normal mode.
 pub const DEFAULT_MAX_FPS: u32 = 30;
+
+/// Minimum interval between two input batches sent to the supervisor: at
+/// most 50 requests per second, half of the per-connection rate limit of the
+/// service (100 requests/s, burst 50), so a fast mouse or a high refresh
+/// rate never makes the service refuse a batch with key releases in it.
+pub const INPUT_INTERVAL: Duration = Duration::from_millis(20);
 
 /// VM and run a console belongs to.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -63,15 +70,24 @@ fn is_chord(m: egui::Modifiers) -> bool {
 
 /// Removes the LightVM chords from the events (press and release of the
 /// final key), so that neither the guest nor egui sees them.
-pub fn take_chords(events: &mut Vec<egui::Event>, swallow: &mut Vec<egui::Key>) -> Chords {
+///
+/// Only a fresh press (not an autorepeat) is a chord, and a key whose press
+/// already reached the guest (`forwarded`) is never swallowed: holding Enter
+/// and then adding Ctrl+Alt neither toggles full screen at every autorepeat
+/// nor eats the Enter release the guest is waiting for.
+pub fn take_chords(
+    events: &mut Vec<egui::Event>,
+    swallow: &mut Vec<egui::Key>,
+    forwarded: &dyn Fn(egui::Key) -> bool,
+) -> Chords {
     let mut c = Chords::default();
     events.retain(|e| {
         let egui::Event::Key {
             key,
             physical_key,
             pressed,
+            repeat,
             modifiers,
-            ..
         } = e
         else {
             return true;
@@ -80,7 +96,10 @@ pub fn take_chords(events: &mut Vec<egui::Event>, swallow: &mut Vec<egui::Key>) 
         if !matches!(k, egui::Key::Enter | egui::Key::Escape) {
             return true;
         }
-        if *pressed && is_chord(*modifiers) {
+        if forwarded(k) && !swallow.contains(&k) {
+            return true;
+        }
+        if *pressed && !*repeat && is_chord(*modifiers) {
             if k == egui::Key::Enter {
                 c.toggle_fullscreen = true;
             } else {
@@ -95,7 +114,8 @@ pub fn take_chords(events: &mut Vec<egui::Event>, swallow: &mut Vec<egui::Key>) 
             swallow.remove(i);
             return false;
         }
-        // Autorepeat of a swallowed key.
+        // Autorepeat of a swallowed key; any other press or release passes
+        // (an autorepeat with Ctrl+Alt of a key held before is not a chord).
         !(*pressed && swallow.contains(&k))
     });
     c
@@ -131,6 +151,25 @@ pub struct InputState {
     /// Pointer over the console image: only then does the wheel go to the
     /// guest.
     pointer_inside: bool,
+    /// Wheel movement not yet sent, in notches (touchpads report fractions).
+    wheel_acc: f32,
+}
+
+/// Points of a [`egui::MouseWheelUnit::Point`] scroll that make one wheel
+/// notch (touchpads and precise wheels report points).
+pub const WHEEL_POINTS_PER_NOTCH: f32 = 50.0;
+/// Notches of a [`egui::MouseWheelUnit::Page`] scroll.
+pub const WHEEL_NOTCHES_PER_PAGE: f32 = 5.0;
+/// Most notches sent for a single wheel event.
+const MAX_NOTCHES_PER_EVENT: u32 = 10;
+
+/// Wheel movement in notches (positive: up).
+pub fn wheel_notches(unit: egui::MouseWheelUnit, delta_y: f32) -> f32 {
+    match unit {
+        egui::MouseWheelUnit::Point => delta_y / WHEEL_POINTS_PER_NOTCH,
+        egui::MouseWheelUnit::Line => delta_y,
+        egui::MouseWheelUnit::Page => delta_y * WHEEL_NOTCHES_PER_PAGE,
+    }
 }
 
 fn egui_button(b: egui::PointerButton) -> Option<MouseButton> {
@@ -156,6 +195,20 @@ impl InputState {
     /// Keys currently pressed towards the guest.
     pub fn pressed_keys(&self) -> &[&'static str] {
         &self.pressed_keys
+    }
+
+    /// The press of this physical key was forwarded and its release not yet.
+    pub fn is_forwarded(&self, key: egui::Key) -> bool {
+        keymap::qcode(key).is_some_and(|q| self.pressed_keys.contains(&q))
+    }
+
+    /// Sets whether the pointer is over the console image (from its current
+    /// position, before the events of the frame are translated).
+    pub fn set_pointer_inside(&mut self, inside: bool) {
+        if !inside {
+            self.wheel_acc = 0.0;
+        }
+        self.pointer_inside = inside;
     }
 
     /// Translates the egui events of a frame into guest input events.
@@ -208,7 +261,10 @@ impl InputState {
                         self.push_abs(&mut out, x, y, geom);
                     }
                 }
-                egui::Event::PointerGone => self.pointer_inside = false,
+                egui::Event::PointerGone => {
+                    self.pointer_inside = false;
+                    self.wheel_acc = 0.0;
+                }
                 egui::Event::PointerButton {
                     pos,
                     button,
@@ -231,13 +287,31 @@ impl InputState {
                         out.push(btn(b, false));
                     }
                 }
-                egui::Event::MouseWheel { delta, .. } if self.pointer_inside && delta.y != 0.0 => {
-                    let b = if delta.y > 0.0 {
+                egui::Event::MouseWheel { unit, delta, .. } => {
+                    if !self.pointer_inside || !delta.y.is_finite() {
+                        self.wheel_acc = 0.0;
+                        continue;
+                    }
+                    let notches = wheel_notches(*unit, delta.y);
+                    if notches == 0.0 {
+                        continue;
+                    }
+                    // A change of direction drops the remainder of the other one.
+                    if notches.signum() != self.wheel_acc.signum() {
+                        self.wheel_acc = 0.0;
+                    }
+                    self.wheel_acc += notches;
+                    let whole = self.wheel_acc.trunc();
+                    if whole == 0.0 {
+                        continue;
+                    }
+                    self.wheel_acc -= whole;
+                    let b = if whole > 0.0 {
                         MouseButton::WheelUp
                     } else {
                         MouseButton::WheelDown
                     };
-                    let n = (delta.y.abs().round() as u32).clamp(1, 5);
+                    let n = (whole.abs() as u32).min(MAX_NOTCHES_PER_EVENT);
                     for _ in 0..n {
                         out.push(btn(b, true));
                         out.push(btn(b, false));
@@ -343,7 +417,11 @@ pub struct LiveConsole {
     link: Link,
     input: InputState,
     had_focus: bool,
-    outgoing: Vec<InputBatch>,
+    /// Input not sent yet, oldest first: the last batch keeps growing until
+    /// it is sent (see [`INPUT_INTERVAL`]).
+    pending: VecDeque<InputBatch>,
+    /// Instant the last batch was handed over for sending.
+    last_sent: Option<Instant>,
     /// Frame to upload (tests only: no connection).
     synthetic: Option<egui::ColorImage>,
     /// Copy of the synthetic frame, for screenshots in tests.
@@ -351,6 +429,9 @@ pub struct LiveConsole {
     /// Rectangle of the image in the last frame.
     image_rect: Option<egui::Rect>,
     disconnected_at: Option<Instant>,
+    /// A popup (layout list) was open in the previous frame: the click that
+    /// closes it does not reach the guest either.
+    popup_was_open: bool,
     /// Counters.
     pub stats: ConsoleStats,
 }
@@ -381,11 +462,13 @@ impl LiveConsole {
             link: Link::Connecting,
             input: InputState::default(),
             had_focus: false,
-            outgoing: Vec::new(),
+            pending: VecDeque::new(),
+            last_sent: None,
             synthetic: None,
             synthetic_copy: None,
             image_rect: None,
             disconnected_at: None,
+            popup_was_open: false,
             stats: ConsoleStats::default(),
         }
     }
@@ -431,6 +514,15 @@ impl LiveConsole {
         c
     }
 
+    /// Marks the display session as ended at `at` (headless tests of the
+    /// reconnection; the real console learns it from the RFB session).
+    #[doc(hidden)]
+    pub fn simulate_disconnect(&mut self, at: Instant) {
+        self.link = Link::Disconnected(Some("test disconnection".into()));
+        self.disconnected_at = Some(at);
+        self.release_all();
+    }
+
     /// VM and run of the console.
     pub fn target(&self) -> &ConsoleTarget {
         &self.target
@@ -456,14 +548,47 @@ impl LiveConsole {
         self.image_rect
     }
 
+    /// The press of this physical key reached the guest and its release
+    /// not yet.
+    pub fn is_forwarded(&self, key: egui::Key) -> bool {
+        self.input.is_forwarded(key)
+    }
+
     /// The console image had keyboard focus in the last frame.
     pub fn has_focus(&self) -> bool {
         self.had_focus
     }
 
-    /// Input batches to send to the supervisor (drained).
-    pub fn take_input(&mut self) -> Vec<InputBatch> {
-        std::mem::take(&mut self.outgoing)
+    /// Next input batch to send to the supervisor, if one is waiting and
+    /// [`INPUT_INTERVAL`] has passed since the previous one. Events queued
+    /// meanwhile accumulate in the batch (consecutive pointer moves are
+    /// coalesced into the last one; keys and buttons are never dropped).
+    pub fn take_input(&mut self, now: Instant) -> Option<InputBatch> {
+        if self.pending.is_empty() || self.next_input_in(now).is_some_and(|d| !d.is_zero()) {
+            return None;
+        }
+        self.last_sent = Some(now);
+        self.pending.pop_front()
+    }
+
+    /// Wait before the next batch can be sent; `None` if nothing waits.
+    pub fn next_input_in(&self, now: Instant) -> Option<Duration> {
+        if self.pending.is_empty() {
+            return None;
+        }
+        Some(self.last_sent.map_or(Duration::ZERO, |t| {
+            (t + INPUT_INTERVAL).saturating_duration_since(now)
+        }))
+    }
+
+    /// Input is waiting to be sent.
+    pub fn has_pending_input(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    /// All the waiting batches at once, regardless of the interval (close).
+    fn drain_input(&mut self) -> Vec<InputBatch> {
+        self.pending.drain(..).collect()
     }
 
     fn display_geometry(&self) -> Option<DisplayGeometry> {
@@ -478,13 +603,28 @@ impl LiveConsole {
             return;
         };
         self.stats.input_events += events.len() as u64;
-        for chunk in events.chunks(MAX_INPUT_EVENTS_PER_REQUEST) {
-            self.outgoing.push(InputBatch {
-                vm_id: self.target.vm_id,
-                run_id: self.target.run_id,
-                geometry,
-                events: chunk.to_vec(),
+        for ev in events {
+            let open = self.pending.back_mut().filter(|b| {
+                b.geometry == geometry && b.events.len() < MAX_INPUT_EVENTS_PER_REQUEST
             });
+            match open {
+                Some(b) => {
+                    // Absolute positions: only the last of consecutive moves counts.
+                    if matches!(ev, InputEvent::PointerMove(_))
+                        && let Some(last @ InputEvent::PointerMove(_)) = b.events.last_mut()
+                    {
+                        *last = ev;
+                    } else {
+                        b.events.push(ev);
+                    }
+                }
+                None => self.pending.push_back(InputBatch {
+                    vm_id: self.target.vm_id,
+                    run_id: self.target.run_id,
+                    geometry,
+                    events: vec![ev],
+                }),
+            }
         }
     }
 
@@ -509,7 +649,7 @@ impl LiveConsole {
         if let Some(mut s) = self.session.take() {
             s.stop();
         }
-        self.take_input()
+        self.drain_input()
     }
 
     /// PNG of the current framebuffer.
@@ -539,7 +679,9 @@ impl LiveConsole {
     }
 
     fn start(&mut self, ctx: &egui::Context) {
-        let Some(transport) = self.transport.clone() else {
+        // The transport (with the display token) moves into the session: no
+        // copy of the token stays in the console.
+        let Some(transport) = self.transport.take() else {
             return;
         };
         let (tx, rx) = channel();
@@ -643,7 +785,8 @@ impl LiveConsole {
 
     /// Draws the console: toolbar (state, geometry, layout, screenshot, full
     /// screen) and the framebuffer. `chords` are the LightVM chords already
-    /// removed from the input of this frame by the app.
+    /// removed from the input of this frame by the app; `modal_open`: a
+    /// dialog of the app covers the window, so the pointer belongs to it.
     pub fn ui(
         &mut self,
         ui: &mut egui::Ui,
@@ -651,13 +794,14 @@ impl LiveConsole {
         fullscreen: bool,
         chords: Chords,
         input_error: Option<&str>,
+        modal_open: bool,
     ) -> Option<ConsoleAction> {
         let ctx = ui.ctx().clone();
         if let Some(frame) = self.synthetic.take() {
             self.texture =
                 Some(ctx.load_texture("console-synthetic", frame, egui::TextureOptions::LINEAR));
             self.stats.texture_uploads += 1;
-        } else if self.session.is_none() && self.transport.is_some() && self.events.is_none() {
+        } else if self.session.is_none() && self.transport.is_some() {
             self.start(&ctx);
         }
         self.pump_updates(&ctx);
@@ -725,7 +869,23 @@ impl LiveConsole {
 
         let connected = matches!(self.link, Link::Connected(_));
         if connected && let Some(g) = self.display_geometry() {
-            let to_fb = move |p: egui::Pos2| to_framebuffer(rect, geom, p);
+            // The pointer belongs to the guest only over the image itself:
+            // not over a popup (layout list, menus), a tooltip area or a
+            // dialog drawn above it, and not while a dialog is open.
+            let layer = ui.layer_id();
+            let popup_open = ctx.any_popup_open();
+            let blocked = modal_open || popup_open || self.popup_was_open;
+            self.popup_was_open = popup_open;
+            let ctx2 = ctx.clone();
+            let to_fb = move |p: egui::Pos2| {
+                if blocked || ctx2.layer_id_at(p).is_some_and(|l| l != layer) {
+                    return None;
+                }
+                to_framebuffer(rect, geom, p)
+            };
+            let hover = ctx.input(|i| i.pointer.hover_pos());
+            self.input
+                .set_pointer_inside(hover.and_then(&to_fb).is_some());
             let events = ctx.input(|i| i.events.clone());
             let out = self.input.translate(&events, focused, &to_fb, g);
             self.queue(out);
@@ -966,15 +1126,292 @@ mod tests {
             },
             k(egui::Key::A, true),
         ];
-        let c = take_chords(&mut ev, &mut swallow);
+        let c = take_chords(&mut ev, &mut swallow, &|_| false);
         assert!(c.toggle_fullscreen && !c.leave);
         assert_eq!(ev.len(), 1);
         let mut ev = vec![k(egui::Key::Enter, false)];
-        assert_eq!(take_chords(&mut ev, &mut swallow), Chords::default());
+        assert_eq!(
+            take_chords(&mut ev, &mut swallow, &|_| false),
+            Chords::default()
+        );
         assert!(ev.is_empty(), "release of the chord key not forwarded");
         // Plain Enter is not a chord.
         let mut ev = vec![k(egui::Key::Enter, true), k(egui::Key::Enter, false)];
-        assert_eq!(take_chords(&mut ev, &mut swallow), Chords::default());
+        assert_eq!(
+            take_chords(&mut ev, &mut swallow, &|_| false),
+            Chords::default()
+        );
         assert_eq!(ev.len(), 2);
+    }
+
+    fn key_mod(
+        k: egui::Key,
+        pressed: bool,
+        repeat: bool,
+        modifiers: egui::Modifiers,
+    ) -> egui::Event {
+        egui::Event::Key {
+            key: k,
+            physical_key: Some(k),
+            pressed,
+            repeat,
+            modifiers,
+        }
+    }
+
+    fn ctrl_alt() -> egui::Modifiers {
+        egui::Modifiers {
+            ctrl: true,
+            alt: true,
+            command: true,
+            ..Default::default()
+        }
+    }
+
+    /// Finding 4: an autorepeat is never a chord, and a key whose press
+    /// reached the guest keeps its release.
+    #[test]
+    fn autorepeat_is_not_a_chord_and_forwarded_keys_keep_their_release() {
+        let mut swallow = Vec::new();
+        // Enter held (forwarded to the guest), then Ctrl+Alt added: the
+        // autorepeats carry Ctrl+Alt.
+        let held = |k: egui::Key| k == egui::Key::Enter;
+        let mut ev = vec![
+            key_mod(egui::Key::Enter, true, true, ctrl_alt()),
+            key_mod(egui::Key::Enter, true, true, ctrl_alt()),
+            key_mod(egui::Key::Enter, false, false, ctrl_alt()),
+        ];
+        let c = take_chords(&mut ev, &mut swallow, &held);
+        assert_eq!(c, Chords::default(), "autorepeat toggled full screen");
+        assert_eq!(ev.len(), 3, "events of a forwarded key swallowed");
+        assert!(swallow.is_empty());
+
+        // Even without the forwarded information, a repeat is not a chord.
+        let mut ev = vec![key_mod(egui::Key::Enter, true, true, ctrl_alt())];
+        assert_eq!(
+            take_chords(&mut ev, &mut swallow, &|_| false),
+            Chords::default()
+        );
+        assert_eq!(ev.len(), 1);
+
+        // A real chord: the press toggles once, its autorepeats and its
+        // release are swallowed.
+        let mut ev = vec![
+            key_mod(egui::Key::Enter, true, false, ctrl_alt()),
+            key_mod(egui::Key::Enter, true, true, ctrl_alt()),
+            key_mod(egui::Key::Enter, true, true, ctrl_alt()),
+        ];
+        let c = take_chords(&mut ev, &mut swallow, &|_| false);
+        assert!(c.toggle_fullscreen);
+        assert!(ev.is_empty());
+        let mut ev = vec![key_mod(egui::Key::Enter, false, false, ctrl_alt())];
+        take_chords(&mut ev, &mut swallow, &|_| false);
+        assert!(ev.is_empty());
+        assert!(swallow.is_empty());
+    }
+
+    /// Through `InputState`: Enter forwarded, then the autorepeat with
+    /// Ctrl+Alt, then the release reaches the guest.
+    #[test]
+    fn held_enter_is_released_in_the_guest() {
+        let mut st = InputState::default();
+        let none = |_p: egui::Pos2| None;
+        let mut swallow = Vec::new();
+        let mut frame = vec![key_mod(
+            egui::Key::Enter,
+            true,
+            false,
+            egui::Modifiers::NONE,
+        )];
+        take_chords(&mut frame, &mut swallow, &|k| st.is_forwarded(k));
+        let mut out = st.translate(&frame, true, &none, g(640, 480));
+        let mut frame = vec![
+            key_mod(egui::Key::Enter, true, true, ctrl_alt()),
+            key_mod(egui::Key::Enter, false, false, ctrl_alt()),
+        ];
+        let c = take_chords(&mut frame, &mut swallow, &|k| st.is_forwarded(k));
+        assert_eq!(c, Chords::default());
+        out.extend(st.translate(&frame, true, &none, g(640, 480)));
+        assert_eq!(out, vec![qk("ret", true), qk("ret", false)]);
+        assert!(st.pressed_keys().is_empty());
+    }
+
+    fn wheel(unit: egui::MouseWheelUnit, dy: f32) -> egui::Event {
+        egui::Event::MouseWheel {
+            unit,
+            delta: egui::vec2(0.0, dy),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    /// Finding 10: touchpad scrolling (points) becomes whole notches, with
+    /// the remainder kept; lines and pages are converted by their unit.
+    #[test]
+    fn wheel_is_converted_by_unit_and_accumulated() {
+        use egui::MouseWheelUnit::{Line, Page, Point};
+        let mut st = InputState::default();
+        let inside = |p: egui::Pos2| Some((p.x as u32, p.y as u32));
+        let mut tr = |ev: &[egui::Event]| st.translate(ev, false, &inside, g(100, 100));
+        let mut ev = vec![egui::Event::PointerMoved(egui::pos2(5.0, 5.0))];
+        // A touchpad gesture: 40 small events of 2.5 points = 100 points.
+        ev.extend((0..40).map(|_| wheel(Point, 2.5)));
+        let out = tr(&ev);
+        let ups = out
+            .iter()
+            .filter(|e| **e == btn(MouseButton::WheelUp, true))
+            .count();
+        assert_eq!(ups, 2, "100 points = 2 notches, not 40 clicks: {out:?}");
+        assert_eq!(out.len(), 1 + 2 * 2, "one move and two notches");
+        // Remainder kept: 30 + 20 points complete a notch.
+        assert!(tr(&[wheel(Point, 30.0)]).is_empty());
+        let up = vec![
+            btn(MouseButton::WheelUp, true),
+            btn(MouseButton::WheelUp, false),
+        ];
+        assert_eq!(tr(&[wheel(Point, 20.0)]), up);
+        // Lines: one notch each; pages: several; down is WheelDown.
+        assert_eq!(
+            tr(&[wheel(Line, -1.0)]),
+            vec![
+                btn(MouseButton::WheelDown, true),
+                btn(MouseButton::WheelDown, false)
+            ]
+        );
+        assert_eq!(
+            tr(&[wheel(Page, 1.0)]).len(),
+            2 * WHEEL_NOTCHES_PER_PAGE as usize
+        );
+        // Half a notch then the other direction: the remainder is dropped.
+        assert!(tr(&[wheel(Line, 0.6)]).is_empty());
+        let out = tr(&[wheel(Line, -0.6)]);
+        assert!(out.is_empty(), "{out:?}");
+    }
+
+    fn console() -> LiveConsole {
+        LiveConsole::synthetic(
+            ConsoleTarget {
+                vm_id: VmId::new_v7(),
+                vm_name: "t".into(),
+                run_id: RunId::new_v7(),
+            },
+            egui::ColorImage::filled([1280, 800], egui::Color32::BLACK),
+        )
+    }
+
+    /// Finding 1: 300 frames per second of mouse movement for two seconds,
+    /// with keys pressed and released meanwhile: at most one request every
+    /// 20 ms (≤ 50/s, under the service limit of 100/s), every key and
+    /// button event delivered in order, the last position delivered.
+    #[test]
+    fn input_is_paced_coalesced_and_never_drops_keys() {
+        let mut c = console();
+        let t0 = Instant::now();
+        let frame = Duration::from_micros(3333);
+        let mut sent: Vec<(Duration, InputBatch)> = Vec::new();
+        let mut expected = Vec::new();
+        let pos = |i: u32| PointerMove {
+            x: (i * 50 % 32768) as u16,
+            y: (i * 30 % 32768) as u16,
+        };
+        for i in 0..600u32 {
+            let now = t0 + frame * i;
+            let mut ev = vec![InputEvent::PointerMove(pos(i))];
+            if i % 7 == 0 {
+                let down = i % 14 == 0;
+                ev.push(qk("a", down));
+                expected.push(qk("a", down));
+            }
+            if i % 45 == 0 {
+                ev.push(btn(MouseButton::Left, true));
+                ev.push(InputEvent::PointerMove(PointerMove { x: 1, y: 1 }));
+                ev.push(btn(MouseButton::Left, false));
+                expected.push(btn(MouseButton::Left, true));
+                expected.push(btn(MouseButton::Left, false));
+            }
+            c.queue(ev);
+            if let Some(b) = c.take_input(now) {
+                sent.push((now - t0, b));
+            }
+        }
+        // Drain what is left at the pace of the interval.
+        let mut now = t0 + frame * 600;
+        while c.has_pending_input() {
+            now += c.next_input_in(now).unwrap();
+            if let Some(b) = c.take_input(now) {
+                sent.push((now - t0, b));
+            }
+        }
+        // Pace: no two requests closer than the interval, so at most 50 in
+        // any second (the service admits 100/s with a burst of 50).
+        for w in sent.windows(2) {
+            assert!(
+                w[1].0 - w[0].0 >= INPUT_INTERVAL,
+                "{:?} {:?}",
+                w[0].0,
+                w[1].0
+            );
+        }
+        for (i, (t, _)) in sent.iter().enumerate() {
+            let in_second = sent[i..]
+                .iter()
+                .take_while(|(u, _)| *u < *t + Duration::from_secs(1))
+                .count();
+            assert!(in_second <= 50, "{in_second} requests in one second");
+        }
+        // Every key and button event delivered, in order.
+        let all: Vec<InputEvent> = sent.iter().flat_map(|(_, b)| b.events.clone()).collect();
+        let delivered: Vec<InputEvent> = all
+            .iter()
+            .filter(|e| !matches!(e, InputEvent::PointerMove(_)))
+            .cloned()
+            .collect();
+        assert_eq!(delivered, expected);
+        // Coalesced: far fewer moves than the 600 frames, never two in a row.
+        let moves = all
+            .iter()
+            .filter(|e| matches!(e, InputEvent::PointerMove(_)))
+            .count();
+        assert!(moves < 300, "{moves} moves sent");
+        for (_, b) in &sent {
+            assert!(b.events.len() <= MAX_INPUT_EVENTS_PER_REQUEST);
+            for w in b.events.windows(2) {
+                assert!(
+                    !(matches!(w[0], InputEvent::PointerMove(_))
+                        && matches!(w[1], InputEvent::PointerMove(_))),
+                    "consecutive moves not coalesced"
+                );
+            }
+        }
+        // The last position reaches the guest.
+        assert_eq!(
+            all.iter()
+                .rev()
+                .find(|e| matches!(e, InputEvent::PointerMove(_))),
+            Some(&InputEvent::PointerMove(pos(599)))
+        );
+    }
+
+    /// A batch is split only above the per-request maximum.
+    #[test]
+    fn batches_split_only_above_the_maximum() {
+        let mut c = console();
+        let t0 = Instant::now();
+        let n = MAX_INPUT_EVENTS_PER_REQUEST + 10;
+        let ev: Vec<InputEvent> = (0..n).map(|i| qk("a", i % 2 == 0)).collect();
+        c.queue(ev);
+        let first = c.take_input(t0).unwrap();
+        assert_eq!(first.events.len(), MAX_INPUT_EVENTS_PER_REQUEST);
+        assert!(
+            c.take_input(t0 + Duration::from_millis(5)).is_none(),
+            "paced"
+        );
+        let second = c.take_input(t0 + INPUT_INTERVAL).unwrap();
+        assert_eq!(second.events.len(), 10);
+        assert!(!c.has_pending_input());
+        // Close hands over everything at once (key releases included).
+        c.queue(vec![qk("b", true)]);
+        c.queue(vec![qk("b", false)]);
+        assert_eq!(c.close().len(), 1);
     }
 }

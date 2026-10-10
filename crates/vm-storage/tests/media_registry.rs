@@ -300,3 +300,72 @@ fn import_in_three_steps_copies_outside_the_catalog() {
         1
     );
 }
+
+#[test]
+fn reserved_import_opens_the_source_only_on_the_worker() {
+    use vm_storage::MediaLimits;
+    let dir = common::tempdir();
+    let src_dir = common::tempdir();
+    let src = src_dir.path().join("late.iso");
+    let mut content = vec![0u8; 40 * 1024];
+    content[16 * 2048 + 1..16 * 2048 + 6].copy_from_slice(b"CD001");
+    let limits = MediaLimits {
+        max_bytes: 1 << 20,
+        optical_signature: true,
+    };
+    let mut cat = Catalog::open(dir.path()).unwrap();
+    // The reservation never touches the source: it may not exist yet.
+    let r = cat
+        .reserve_media_import(&src, MediaKind::Data, "x", limits)
+        .unwrap();
+    assert_eq!(cat.open_intents().unwrap().len(), 1);
+    std::fs::write(&src, &content).unwrap();
+    let mut checked = false;
+    let copied = r.open_and_copy(|f| {
+        checked = f.metadata().unwrap().len() == content.len() as u64;
+        Ok(())
+    });
+    assert!(checked);
+    let m = cat.finish_media_import(copied).unwrap();
+    assert_eq!(m.sha256, sha_hex(&content));
+    assert!(cat.open_intents().unwrap().is_empty());
+
+    // Rejected by the caller's check: nothing copied, intent aborted.
+    let r = cat
+        .reserve_media_import(&src, MediaKind::Data, "x", limits)
+        .unwrap();
+    let copied = r.open_and_copy(|_| Err(StorageError::Unsupported("remote volume")));
+    assert!(matches!(
+        cat.finish_media_import(copied),
+        Err(StorageError::Unsupported("remote volume"))
+    ));
+    assert!(cat.open_intents().unwrap().is_empty());
+
+    // Missing source: the error comes from the worker step.
+    let r = cat
+        .reserve_media_import(
+            &src_dir.path().join("missing.iso"),
+            MediaKind::Data,
+            "x",
+            limits,
+        )
+        .unwrap();
+    let copied = r.open_and_copy(|_| Ok(()));
+    assert!(cat.finish_media_import(copied).is_err());
+
+    // Cancelled after the copy: aborted, temporary removed, nothing published.
+    let r = cat
+        .reserve_media_import(&src, MediaKind::Data, "x", limits)
+        .unwrap();
+    let copied = r.open_and_copy(|_| Ok(()));
+    cat.abort_media_import(copied).unwrap();
+    assert!(cat.open_intents().unwrap().is_empty());
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("tmp")).unwrap().count(),
+        0
+    );
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("media")).unwrap().count(),
+        1
+    );
+}

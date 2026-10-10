@@ -31,6 +31,11 @@
 
 .PARAMETER Force
     Replaces an existing installation in the prefix.
+
+.PARAMETER EnvironmentKey
+    Registry key, under HKEY_CURRENT_USER, that holds the user PATH changed
+    by -AddToPath. Default: Environment. For tests only: point it to a
+    scratch key so that the real user PATH is not touched.
 #>
 [CmdletBinding()]
 param(
@@ -38,11 +43,53 @@ param(
     [string]$StartMenuDir = [Environment]::GetFolderPath('Programs'),
     [switch]$NoShortcut,
     [switch]$AddToPath,
-    [switch]$Force
+    [switch]$Force,
+    [string]$EnvironmentKey = 'Environment'
 )
 
 Set-StrictMode -Version 3.0
 $ErrorActionPreference = 'Stop'
+
+# The user PATH is a REG_EXPAND_SZ value: entries such as %USERPROFILE%\bin
+# must stay unexpanded, so it is read without expansion and written back
+# with its kind ([Environment]::SetEnvironmentVariable would expand it and
+# store a REG_SZ). The same functions are in uninstall.ps1.
+function Get-UserPathValue([string]$Key) {
+    $expand = [Microsoft.Win32.RegistryValueKind]::ExpandString
+    $k = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($Key)
+    if (-not $k) { return @{ Value = ''; Kind = $expand; Exists = $false } }
+    try {
+        $v = $k.GetValue('Path', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        if ($null -eq $v) { return @{ Value = ''; Kind = $expand; Exists = $false } }
+        $kind = $k.GetValueKind('Path')
+        if ($kind -ne [Microsoft.Win32.RegistryValueKind]::String) { $kind = $expand }
+        return @{ Value = [string]$v; Kind = $kind; Exists = $true }
+    } finally { $k.Close() }
+}
+
+function Set-UserPathValue([string]$Key, [string]$Value, [Microsoft.Win32.RegistryValueKind]$Kind) {
+    $type = if ($Kind -eq [Microsoft.Win32.RegistryValueKind]::String) { 'String' } else { 'ExpandString' }
+    $regPath = "HKCU:\$Key"
+    if (-not (Test-Path -LiteralPath $regPath)) { New-Item -Path $regPath -Force | Out-Null }
+    Set-ItemProperty -LiteralPath $regPath -Name 'Path' -Value $Value -Type $type
+}
+
+# Tells running programs (Explorer, new terminals) that the environment changed.
+function Send-EnvironmentChange {
+    try {
+        if (-not ('LightVM.NativeEnv' -as [type])) {
+            Add-Type -Namespace LightVM -Name NativeEnv -MemberDefinition @'
+[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+public static extern System.IntPtr SendMessageTimeout(System.IntPtr hWnd, uint Msg, System.UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out System.UIntPtr lpdwResult);
+'@
+        }
+        $r = [UIntPtr]::Zero
+        # HWND_BROADCAST, WM_SETTINGCHANGE "Environment", SMTO_ABORTIFHUNG, 5 s.
+        [void][LightVM.NativeEnv]::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, 'Environment', 2, 5000, [ref]$r)
+    } catch {
+        Write-Warning "Could not announce the PATH change ($_): it applies after signing out and in again."
+    }
+}
 
 $Source = $PSScriptRoot
 $Payload = @(
@@ -119,10 +166,11 @@ if (-not $NoShortcut) {
 # 4. Optional user PATH.
 $pathAdded = $false
 if ($AddToPath) {
-    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-    $parts = @(if ($userPath) { $userPath.Split(';') | Where-Object { $_ } })
+    $current = Get-UserPathValue $EnvironmentKey
+    $parts = @(if ($current.Value) { $current.Value.Split(';') | Where-Object { $_ } })
     if (-not ($parts | Where-Object { $_.TrimEnd('\') -ieq $Prefix.TrimEnd('\') })) {
-        [Environment]::SetEnvironmentVariable('Path', (($parts + $Prefix) -join ';'), 'User')
+        Set-UserPathValue $EnvironmentKey (($parts + $Prefix) -join ';') $current.Kind
+        Send-EnvironmentChange
         $pathAdded = $true
         Write-Host "Added to the user PATH: $Prefix (new terminals only)"
     }

@@ -6,7 +6,9 @@
 //! - stdout: a single JSON `ready` line with IPC endpoint and UI credential;
 //! - stdin: life pipe (EOF = UI terminated) and `shutdown` line for the
 //!   controlled stop;
-//! - stderr: inherited, diagnostics without secrets.
+//! - stderr: diagnostics without secrets; inherited, or appended to
+//!   `lightvm-service.log` when the app writes its diagnostic log
+//!   ([`crate::diag`]).
 //!
 //! After the `ready` line the UI talks to the service only via authenticated
 //! IPC, with four connections: requests (reply by `request_id`), events
@@ -19,9 +21,11 @@
 //! Stop go through the service core (ROADMAP 6.1). The console display is
 //! reached only with the per-run ticket of `open_console` (ADR-0013).
 
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write as _};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -29,8 +33,9 @@ use lightvm_proto::ipc::{
     ConsoleTicket, ParentLossPolicy, Request, ResponseBody, ServerMessage, ServiceEvent, VmSummary,
 };
 use lightvm_proto::{
-    ErrorCode, HostCapacity, InputBatch, MediaKind, MediaRecord, OperationId, OperationStatus,
-    ReplyError, RunId, VmAction, VmConfig, VmId, VmRequest,
+    ErrorCode, HostCapacity, InputBatch, InputEvent, KeyAction, MediaKind, MediaRecord,
+    MouseButton, OperationId, OperationStatus, PointerButton, ReplyError, RunId, VmAction,
+    VmConfig, VmId, VmRequest,
 };
 use lightvm_service::client::Client;
 use lightvm_service::credential::Credential;
@@ -42,6 +47,12 @@ pub const READY_TIMEOUT: Duration = Duration::from_secs(30);
 /// service stop timeout (30 s, then Emergency Stop of the remaining VMs), so
 /// the UI does not kill it halfway through the orderly stop.
 pub const STOP_TIMEOUT: Duration = Duration::from_secs(45);
+/// Wait before sending again an input batch refused by the service rate
+/// limit (`resource_limit`).
+pub const INPUT_RETRY_DELAY: Duration = Duration::from_millis(60);
+/// Commands waiting on the fast lane beyond which pointer-only input
+/// batches are dropped (keys, buttons and console tickets never are).
+pub const FAST_LANE_CAPACITY: usize = 32;
 
 /// Start parameters of the supervisor.
 #[derive(Clone, Debug)]
@@ -96,7 +107,7 @@ impl ServiceConfig {
         c.args(["--parent-watch", "stdin"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
+            .stderr(crate::diag::service_stderr().unwrap_or_else(Stdio::inherit));
         c
     }
 }
@@ -310,6 +321,9 @@ pub trait Supervisor: Send {
     fn stop(&mut self, timeout: Duration) -> (Option<i32>, bool);
     /// Hands over (once) the console ticket received for `vm_id`.
     fn take_console_ticket(&self, vm_id: VmId) -> Option<ConsoleTicket>;
+    /// Drops a console ticket received and not handed over (the console
+    /// was closed or its page left): the token does not stay in memory.
+    fn discard_console_ticket(&self);
 }
 
 /// Supervisor start errors.
@@ -386,7 +400,6 @@ type TicketSlot = Arc<Mutex<Option<ConsoleTicket>>>;
 
 /// Supervisor started by the UI. On drop it requests the controlled stop
 /// and, once [`STOP_TIMEOUT`] has expired, kills the process.
-#[derive(Debug)]
 pub struct Service {
     child: Child,
     stdin: Option<ChildStdin>,
@@ -394,6 +407,22 @@ pub struct Service {
     commands: mpsc::UnboundedSender<ServiceCommand>,
     state: Arc<Mutex<ServiceState>>,
     ticket: TicketSlot,
+}
+
+impl std::fmt::Debug for Service {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The ticket slot holds the display token: only whether it is full.
+        let ticket = if lock(&self.ticket).is_some() {
+            "<redacted>"
+        } else {
+            "none"
+        };
+        f.debug_struct("Service")
+            .field("pid", &self.pid)
+            .field("state", &self.state)
+            .field("console_ticket", &ticket)
+            .finish_non_exhaustive()
+    }
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -452,11 +481,13 @@ impl Service {
             endpoint,
             credential,
         } = ready;
+        // The IPC tasks keep only a weak sender: when the `Service` is
+        // dropped the command channel closes and the IPC thread ends.
         let lanes = Lanes {
             state: state.clone(),
             ticket: ticket.clone(),
             repaint,
-            tx: commands.clone(),
+            tx: commands.downgrade(),
         };
         std::thread::Builder::new()
             .name("service-ipc".into())
@@ -494,20 +525,12 @@ impl Service {
         lock(&self.state).clone()
     }
 
-    /// Queues an action. Returns `false` if the IPC channel is closed. The
-    /// requests whose outcome a view waits for become `Pending` right away,
-    /// so a stale outcome is never mistaken for the new one.
+    /// Queues an action. Returns `false` if the IPC channel is closed (the
+    /// connection to the supervisor ended). The requests whose outcome a
+    /// view waits for become `Pending` right away, so a stale outcome is
+    /// never mistaken for the new one.
     pub fn send(&self, c: ServiceCommand) -> bool {
-        mark_pending(&mut lock(&self.state), &self.ticket, &c);
-        let ok = self.commands.send(c.clone()).is_ok();
-        if !ok {
-            mark_failed(
-                &mut lock(&self.state),
-                &c,
-                Failure::new("supervisor connection closed"),
-            );
-        }
-        ok
+        send_command(&self.commands, &self.state, &self.ticket, c)
     }
 
     /// The service process is still alive.
@@ -562,6 +585,36 @@ impl Supervisor for Service {
             None
         }
     }
+    fn discard_console_ticket(&self) {
+        *lock(&self.ticket) = None;
+    }
+}
+
+/// Body of [`Service::send`].
+fn send_command(
+    commands: &mpsc::UnboundedSender<ServiceCommand>,
+    state: &Mutex<ServiceState>,
+    ticket: &Mutex<Option<ConsoleTicket>>,
+    c: ServiceCommand,
+) -> bool {
+    if commands.is_closed() {
+        mark_failed(
+            &mut lock(state),
+            &c,
+            Failure::new("supervisor connection closed"),
+        );
+        return false;
+    }
+    mark_pending(&mut lock(state), ticket, &c);
+    let ok = commands.send(c.clone()).is_ok();
+    if !ok {
+        mark_failed(
+            &mut lock(state),
+            &c,
+            Failure::new("supervisor connection closed"),
+        );
+    }
+    ok
 }
 
 impl Drop for Service {
@@ -594,6 +647,23 @@ pub fn mark_pending(
         }
         _ => {}
     }
+}
+
+/// Requests still waiting for an outcome when the connection ends fail:
+/// no view keeps waiting for a supervisor that is gone.
+fn fail_pending(s: &mut ServiceState, why: &str) {
+    fn fail<T>(r: &mut RequestStatus<T>, why: &str) {
+        if r.is_pending() {
+            *r = RequestStatus::Failed(Failure::new(why));
+        }
+    }
+    fail(&mut s.import, why);
+    fail(&mut s.create, why);
+    fail(&mut s.delete, why);
+    if let Some(r) = &mut s.console {
+        fail(&mut r.status, why);
+    }
+    s.connected = false;
 }
 
 fn mark_failed(s: &mut ServiceState, c: &ServiceCommand, f: Failure) {
@@ -660,13 +730,74 @@ struct Lanes {
     state: Arc<Mutex<ServiceState>>,
     ticket: TicketSlot,
     repaint: Arc<dyn Fn() + Send + Sync>,
-    tx: mpsc::UnboundedSender<ServiceCommand>,
+    /// Weak: the IPC tasks must not keep the command channel open.
+    tx: mpsc::WeakUnboundedSender<ServiceCommand>,
 }
 
 impl Lanes {
     fn update(&self, f: impl FnOnce(&mut ServiceState)) {
         f(&mut lock(&self.state));
         (self.repaint)();
+    }
+
+    /// Queues a follow-up command, if the service is still in use.
+    fn queue(&self, c: ServiceCommand) {
+        if let Some(tx) = self.tx.upgrade() {
+            let _ = tx.send(c);
+        }
+    }
+}
+
+/// Bounded queue of the fast lane (console tickets and input).
+#[derive(Default)]
+struct FastQueue {
+    items: Mutex<VecDeque<ServiceCommand>>,
+    wake: tokio::sync::Notify,
+    closed: AtomicBool,
+}
+
+/// Input batch made only of pointer moves: superseded by any later one
+/// (absolute positions), so it can be dropped when the lane is congested.
+fn pointer_only(c: &ServiceCommand) -> bool {
+    matches!(c, ServiceCommand::Input(b)
+        if b.events.iter().all(|e| matches!(e, InputEvent::PointerMove(_))))
+}
+
+/// Adds a command to the fast lane queue. Beyond [`FAST_LANE_CAPACITY`]
+/// the waiting pointer-only batches are dropped; key and button events
+/// and ticket requests are always kept.
+fn push_fast(q: &mut VecDeque<ServiceCommand>, c: ServiceCommand) {
+    if q.len() >= FAST_LANE_CAPACITY {
+        q.retain(|w| !pointer_only(w));
+        if q.len() >= FAST_LANE_CAPACITY && pointer_only(&c) {
+            return;
+        }
+    }
+    q.push_back(c);
+}
+
+impl FastQueue {
+    fn push(&self, c: ServiceCommand) {
+        push_fast(&mut lock(&self.items), c);
+        self.wake.notify_one();
+    }
+
+    fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+        self.wake.notify_one();
+    }
+
+    /// Next command; `None` once closed and empty.
+    async fn next(&self) -> Option<ServiceCommand> {
+        loop {
+            if let Some(c) = lock(&self.items).pop_front() {
+                return Some(c);
+            }
+            if self.closed.load(Ordering::SeqCst) {
+                return None;
+            }
+            self.wake.notified().await;
+        }
     }
 }
 
@@ -711,8 +842,8 @@ async fn ipc_loop(
         s.connection = "connected".into();
         s.connected = true;
     });
-    let _ = lanes.tx.send(ServiceCommand::Refresh);
-    let _ = lanes.tx.send(ServiceCommand::ListMedia);
+    lanes.queue(ServiceCommand::Refresh);
+    lanes.queue(ServiceCommand::ListMedia);
 
     let ev_lanes = lanes.clone();
     let event_reader = async move {
@@ -725,7 +856,7 @@ async fn ipc_loop(
                         }
                     });
                     // The run_id changes on start: the list is re-read.
-                    let _ = ev_lanes.tx.send(ServiceCommand::Refresh);
+                    ev_lanes.queue(ServiceCommand::Refresh);
                 }
                 Ok(Ok(_)) => {}
                 Ok(Err(m)) => {
@@ -747,25 +878,27 @@ async fn ipc_loop(
         }
     };
 
-    let (fast_tx, mut fast_rx) = mpsc::unbounded_channel::<ServiceCommand>();
+    let fast_queue = Arc::new(FastQueue::default());
     let (slow_tx, mut slow_rx) = mpsc::unbounded_channel::<ServiceCommand>();
     let main_lanes = lanes.clone();
+    let fast_in = fast_queue.clone();
+    // Ends when every strong sender is gone (the `Service` was dropped).
     let executor = async move {
         while let Some(c) = rx.recv().await {
             match c {
-                ServiceCommand::Input(_) | ServiceCommand::OpenConsole(_) => {
-                    let _ = fast_tx.send(c);
-                }
+                ServiceCommand::Input(_) | ServiceCommand::OpenConsole(_) => fast_in.push(c),
                 ServiceCommand::ImportMedia { .. } => {
                     let _ = slow_tx.send(c);
                 }
                 c => run(&mut requests, &main_lanes, c).await,
             }
         }
+        fast_in.close();
+        drop(slow_tx);
     };
     let fast_lanes = lanes.clone();
     let fast_lane = async move {
-        while let Some(c) = fast_rx.recv().await {
+        while let Some(c) = fast_queue.next().await {
             run(&mut fast, &fast_lanes, c).await;
         }
     };
@@ -775,7 +908,15 @@ async fn ipc_loop(
             run(&mut slow, &slow_lanes, c).await;
         }
     };
-    tokio::join!(event_reader, executor, fast_lane, slow_lane);
+    // The loop ends when the service is no longer used (executor and lanes
+    // done) or when the event connection closes (the supervisor is gone):
+    // the command channel is then dropped, so `Service::send` returns
+    // `false`, and the requests still waiting are marked as failed.
+    tokio::select! {
+        () = event_reader => {}
+        _ = async { tokio::join!(executor, fast_lane, slow_lane) } => {}
+    }
+    lanes.update(|s| fail_pending(s, "supervisor connection closed"));
 }
 
 /// Executes a command and records the failure where the views look for it.
@@ -864,7 +1005,7 @@ async fn execute(c: &mut Client, lanes: &Lanes, command: ServiceCommand) -> Resu
                         s.import = RequestStatus::Done(media);
                         s.last_outcome = Some("ISO imported".into());
                     }
-                    let _ = lanes.tx.send(ServiceCommand::ListMedia);
+                    lanes.queue(ServiceCommand::ListMedia);
                     Ok(())
                 }
                 m => Err(context("import", failure(&m))),
@@ -881,7 +1022,8 @@ async fn execute(c: &mut Client, lanes: &Lanes, command: ServiceCommand) -> Resu
                         s.last_outcome = Some(format!("created: {}", vm.config.name.as_str()));
                         s.create = RequestStatus::Done(vm.id);
                     }
-                    Box::pin(execute(c, lanes, ServiceCommand::Refresh)).await
+                    refresh_after(c, lanes).await;
+                    Ok(())
                 }
                 m => Err(context("creation", failure(&m))),
             }
@@ -904,7 +1046,8 @@ async fn execute(c: &mut Client, lanes: &Lanes, command: ServiceCommand) -> Resu
                         s.last_outcome =
                             Some(format!("deleted: {}", name.unwrap_or_else(|| "VM".into())));
                     }
-                    Box::pin(execute(c, lanes, ServiceCommand::Refresh)).await
+                    refresh_after(c, lanes).await;
+                    Ok(())
                 }
                 m => Err(context("deletion", failure(&m))),
             }
@@ -927,28 +1070,47 @@ async fn execute(c: &mut Client, lanes: &Lanes, command: ServiceCommand) -> Resu
             }
         }
         ServiceCommand::Input(batch) => {
-            let req = VmRequest {
-                operation_id: OperationId::new_v7(),
-                vm_id: batch.vm_id,
-                expected_run_id: Some(batch.run_id),
-                action: VmAction::Input(batch),
-            };
-            match request(c, Request::SubmitVm { request: req }).await? {
-                ServerMessage::Response {
-                    result: ResponseBody::Operation { operation, .. },
-                    ..
-                } => {
-                    let error = operation
-                        .and_then(|o| o.error)
-                        .map(|code| format!("input refused: {}", code.as_str()));
-                    let mut s = lock(state);
-                    if s.input_error != error {
-                        s.input_error = error;
-                    }
-                    Ok(())
-                }
-                m => Err(context("input", failure(&m))),
+            // Refused by the rate limit: the same batch once more after a
+            // short wait, then (if still refused) only its key and button
+            // releases, so the guest is not left with a key held down.
+            let releases = releases_of(&batch);
+            let mut attempts = vec![batch.clone(), batch];
+            if let Some(r) = releases {
+                attempts.push(r);
             }
+            let mut last = None;
+            for (i, b) in attempts.into_iter().enumerate() {
+                if i > 0 {
+                    tokio::time::sleep(INPUT_RETRY_DELAY).await;
+                }
+                let req = VmRequest {
+                    operation_id: OperationId::new_v7(),
+                    vm_id: b.vm_id,
+                    expected_run_id: Some(b.run_id),
+                    action: VmAction::Input(b),
+                };
+                match request(c, Request::SubmitVm { request: req }).await? {
+                    ServerMessage::Response {
+                        result: ResponseBody::Operation { operation, .. },
+                        ..
+                    } => {
+                        let error = operation
+                            .and_then(|o| o.error)
+                            .map(|code| format!("input refused: {}", code.as_str()));
+                        let mut s = lock(state);
+                        if s.input_error != error {
+                            s.input_error = error;
+                        }
+                        return Ok(());
+                    }
+                    m if rate_limited(&m) => last = Some(m),
+                    m => return Err(context("input", failure(&m))),
+                }
+            }
+            Err(context(
+                "input",
+                last.map_or_else(|| Failure::new("not sent"), |m| failure(&m)),
+            ))
         }
         ServiceCommand::SetPolicy(policy) => {
             match request(c, Request::SetParentLossPolicy { policy }).await? {
@@ -973,7 +1135,8 @@ async fn execute(c: &mut Client, lanes: &Lanes, command: ServiceCommand) -> Resu
             config,
         } => {
             update_vm(c, state, vm_id, revision, *config).await?;
-            Box::pin(execute(c, lanes, ServiceCommand::Refresh)).await
+            refresh_after(c, lanes).await;
+            Ok(())
         }
         ServiceCommand::OpenVm {
             name,
@@ -1027,8 +1190,9 @@ async fn execute(c: &mut Client, lanes: &Lanes, command: ServiceCommand) -> Resu
                 Ok(())
             };
             // The list is re-read even if the start fails: the saved changes
-            // stay visible.
-            Box::pin(execute(c, lanes, ServiceCommand::Refresh)).await?;
+            // stay visible. A failed re-read does not hide the outcome of
+            // the start.
+            refresh_after(c, lanes).await;
             start
         }
         ServiceCommand::Start(vm_id) => {
@@ -1058,6 +1222,56 @@ async fn execute(c: &mut Client, lanes: &Lanes, command: ServiceCommand) -> Resu
             m => Err(failure(&m)),
         },
     }
+}
+
+/// Re-reads the list after a successful change: a failure is reported in
+/// `last_outcome` only, the change itself stays successful.
+async fn refresh_after(c: &mut Client, lanes: &Lanes) {
+    if let Err(f) = Box::pin(execute(c, lanes, ServiceCommand::Refresh)).await {
+        lock(&lanes.state).last_outcome = Some(format!("VM list not refreshed: {f}"));
+    }
+}
+
+/// The service refused the request because of its rate limit.
+fn rate_limited(m: &ServerMessage) -> bool {
+    matches!(m, ServerMessage::Error {
+        error: ReplyError::Operational(e),
+        ..
+    } if e.code == ErrorCode::ResourceLimit)
+}
+
+/// Key and button releases of a batch, as a batch of their own (`None` if
+/// there are none, or if the batch has nothing else).
+fn releases_of(b: &InputBatch) -> Option<InputBatch> {
+    let events: Vec<InputEvent> = b
+        .events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                InputEvent::Key(KeyAction { down: false, .. })
+                    | InputEvent::PointerButton(PointerButton { down: false, .. })
+            )
+        })
+        .cloned()
+        .collect();
+    // Wheel "releases" are part of a click, not a held button.
+    let events: Vec<InputEvent> = events
+        .into_iter()
+        .filter(|e| {
+            !matches!(
+                e,
+                InputEvent::PointerButton(PointerButton {
+                    button: MouseButton::WheelUp | MouseButton::WheelDown,
+                    ..
+                })
+            )
+        })
+        .collect();
+    (!events.is_empty() && events.len() < b.events.len()).then(|| InputBatch {
+        events,
+        ..b.clone()
+    })
 }
 
 async fn update_vm(
@@ -1190,5 +1404,423 @@ mod tests {
             Failure::new("x"),
         );
         assert_eq!(s.delete, RequestStatus::Failed(Failure::new("x")));
+    }
+
+    /// In-process IPC server speaking the real framing on the real local
+    /// transport, with scripted replies: drives `ipc_loop` without a
+    /// supervisor process.
+    mod fake {
+        use super::*;
+        use lightvm_proto::ipc::{ClientMessage, Role};
+        use lightvm_service::frame;
+        use lightvm_service::transport::{Accepted, BoxedStream, EndpointOptions, Listener};
+
+        pub(super) type Script =
+            Arc<dyn Fn(&Request) -> Result<ResponseBody, ReplyError> + Send + Sync>;
+
+        pub(super) struct Server {
+            pub(super) endpoint: String,
+            pub(super) requests: Arc<Mutex<Vec<Request>>>,
+            /// Set: the event connection is closed (supervisor gone).
+            pub(super) close_events: Arc<AtomicBool>,
+        }
+
+        pub(super) fn start(script: Script) -> Server {
+            let dir = std::env::temp_dir().join(format!(
+                "lightvm-fake-ipc-{}-{}",
+                std::process::id(),
+                OperationId::new_v7()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let opts = EndpointOptions {
+                runtime_dir: Some(dir.clone()),
+                catalog_dir: dir,
+            };
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let close_events = Arc::new(AtomicBool::new(false));
+            let (r2, c2) = (requests.clone(), close_events.clone());
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                rt.block_on(async move {
+                    let listener = Listener::bind(&opts).unwrap();
+                    tx.send(listener.endpoint().to_owned()).unwrap();
+                    loop {
+                        if let Ok(Accepted::Ok(stream, _)) = listener.accept().await {
+                            tokio::spawn(serve(stream, script.clone(), r2.clone(), c2.clone()));
+                        }
+                    }
+                });
+            });
+            Server {
+                endpoint: rx.recv_timeout(Duration::from_secs(10)).unwrap(),
+                requests,
+                close_events,
+            }
+        }
+
+        async fn serve(
+            mut s: BoxedStream,
+            script: Script,
+            requests: Arc<Mutex<Vec<Request>>>,
+            close: Arc<AtomicBool>,
+        ) {
+            let max = frame::DEFAULT_MAX_FRAME;
+            loop {
+                let Ok(m) = frame::read_frame::<_, ClientMessage>(&mut s, max).await else {
+                    return;
+                };
+                let reply = match m {
+                    ClientMessage::Hello { request_id, .. } => ServerMessage::HelloOk {
+                        request_id,
+                        protocol_version: 1,
+                        connection_id: 1,
+                        role: Role::Ui,
+                    },
+                    ClientMessage::Request { request_id, body } => {
+                        lock(&requests).push(body.clone());
+                        if body == Request::Subscribe {
+                            let ok = ServerMessage::Response {
+                                request_id,
+                                result: ResponseBody::Subscribed,
+                            };
+                            if frame::write_frame(&mut s, &ok, max).await.is_err() {
+                                return;
+                            }
+                            while !close.load(Ordering::SeqCst) {
+                                tokio::time::sleep(Duration::from_millis(10)).await;
+                            }
+                            return;
+                        }
+                        match script(&body) {
+                            Ok(result) => ServerMessage::Response { request_id, result },
+                            Err(error) => ServerMessage::Error {
+                                request_id: Some(request_id),
+                                error,
+                            },
+                        }
+                    }
+                };
+                if frame::write_frame(&mut s, &reply, max).await.is_err() {
+                    return;
+                }
+            }
+        }
+    }
+
+    struct Loop {
+        commands: Option<mpsc::UnboundedSender<ServiceCommand>>,
+        state: Arc<Mutex<ServiceState>>,
+        ticket: TicketSlot,
+        thread: std::thread::JoinHandle<()>,
+    }
+
+    impl Loop {
+        fn start(endpoint: String) -> Self {
+            let state = Arc::new(Mutex::new(ServiceState {
+                connection: CONNECTING.into(),
+                ..ServiceState::default()
+            }));
+            let ticket: TicketSlot = Arc::new(Mutex::new(None));
+            let (commands, rx) = mpsc::unbounded_channel();
+            let lanes = Lanes {
+                state: state.clone(),
+                ticket: ticket.clone(),
+                repaint: Arc::new(|| {}),
+                tx: commands.downgrade(),
+            };
+            let cred = Credential::generate().unwrap();
+            let thread = std::thread::spawn(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(ipc_loop(endpoint, cred, rx, lanes));
+            });
+            let l = Self {
+                commands: Some(commands),
+                state,
+                ticket,
+                thread,
+            };
+            l.wait("connection", |s| s.connected);
+            l
+        }
+
+        fn send(&self, c: ServiceCommand) -> bool {
+            send_command(
+                self.commands.as_ref().unwrap(),
+                &self.state,
+                &self.ticket,
+                c,
+            )
+        }
+
+        fn state(&self) -> ServiceState {
+            lock(&self.state).clone()
+        }
+
+        fn wait(&self, what: &str, ok: impl Fn(&ServiceState) -> bool) {
+            let t0 = Instant::now();
+            while !ok(&self.state()) {
+                assert!(
+                    t0.elapsed() < Duration::from_secs(10),
+                    "{what}: {:?}",
+                    self.state()
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        fn wait_thread_end(&self) {
+            let t0 = Instant::now();
+            while !self.thread.is_finished() {
+                assert!(
+                    t0.elapsed() < Duration::from_secs(10),
+                    "IPC thread still running"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
+    fn base_reply(r: &Request) -> Result<ResponseBody, ReplyError> {
+        match r {
+            Request::ListMedia => Ok(ResponseBody::MediaList { media: Vec::new() }),
+            // Everything else fails, the VM list included: every refresh fails.
+            _ => Err(ReplyError::Operational(lightvm_proto::PublicError::new(
+                ErrorCode::InfrastructureError,
+                "scripted failure",
+            ))),
+        }
+    }
+
+    fn operation_ok() -> ResponseBody {
+        ResponseBody::Operation {
+            admission: lightvm_proto::Admission {
+                operation_id: OperationId::new_v7(),
+                status: OperationStatus::Succeeded,
+                duplicate: false,
+            },
+            operation: None,
+        }
+    }
+
+    fn rate_limit() -> ReplyError {
+        ReplyError::Operational(lightvm_proto::PublicError::resource_limit(
+            "request rate over the limit",
+        ))
+    }
+
+    fn submitted_inputs(server: &fake::Server) -> Vec<InputBatch> {
+        lock(&server.requests)
+            .iter()
+            .filter_map(|r| match r {
+                Request::SubmitVm { request } => match &request.action {
+                    VmAction::Input(b) => Some(b.clone()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn batch(events: Vec<InputEvent>) -> InputBatch {
+        InputBatch {
+            vm_id: VmId::new_v7(),
+            run_id: RunId::new_v7(),
+            geometry: lightvm_proto::DisplayGeometry::new(640, 480).unwrap(),
+            events,
+        }
+    }
+
+    fn key(q: &str, down: bool) -> InputEvent {
+        InputEvent::Key(KeyAction {
+            qcode: lightvm_proto::QCode::parse(q).unwrap(),
+            down,
+        })
+    }
+
+    /// Finding 7: the deletion succeeded; the re-read of the list that
+    /// follows fails: the deletion is reported as done, the refresh failure
+    /// only in the last outcome.
+    #[test]
+    fn successful_delete_is_not_reported_failed_when_the_refresh_fails() {
+        let server = fake::start(Arc::new(|r: &Request| match r {
+            Request::DeleteVm { vm_id, .. } => Ok(ResponseBody::VmDeleted { vm_id: *vm_id }),
+            r => base_reply(r),
+        }));
+        let l = Loop::start(server.endpoint.clone());
+        let vm = VmId::new_v7();
+        assert!(l.send(ServiceCommand::Delete {
+            vm_id: vm,
+            revision: 1
+        }));
+        l.wait("deletion outcome", |s| !s.delete.is_pending());
+        assert_eq!(l.state().delete, RequestStatus::Done(vm));
+        // The refresh that follows fails: recorded in the last outcome only.
+        l.wait("refresh failure recorded", |s| {
+            s.last_outcome
+                .as_deref()
+                .is_some_and(|o| o.starts_with("VM list not refreshed"))
+        });
+        let s = l.state();
+        assert_eq!(s.delete, RequestStatus::Done(vm), "{s:?}");
+    }
+
+    /// Finding 1: an input batch refused by the rate limit is sent again
+    /// once after a short wait.
+    #[test]
+    fn rate_limited_input_is_retried() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let c2 = calls.clone();
+        let server = fake::start(Arc::new(move |r: &Request| match r {
+            Request::SubmitVm { .. } => {
+                if c2.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Err(rate_limit())
+                } else {
+                    Ok(operation_ok())
+                }
+            }
+            r => base_reply(r),
+        }));
+        let l = Loop::start(server.endpoint.clone());
+        let b = batch(vec![key("a", true), key("a", false)]);
+        assert!(l.send(ServiceCommand::Input(b.clone())));
+        let t0 = Instant::now();
+        while submitted_inputs(&server).len() < 2 {
+            assert!(t0.elapsed() < Duration::from_secs(10), "no retry");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        let sent = submitted_inputs(&server);
+        assert_eq!(sent, [b.clone(), b]);
+        assert_eq!(l.state().input_error, None);
+    }
+
+    /// Finding 1: still refused after the retry: the key and button
+    /// releases are sent on their own, so nothing stays held in the guest.
+    #[test]
+    fn releases_are_sent_alone_when_input_stays_refused() {
+        let server = fake::start(Arc::new(|r: &Request| match r {
+            Request::SubmitVm { request } => match &request.action {
+                VmAction::Input(b) if b.events.len() == 1 => Ok(operation_ok()),
+                _ => Err(rate_limit()),
+            },
+            r => base_reply(r),
+        }));
+        let l = Loop::start(server.endpoint.clone());
+        let b = batch(vec![
+            InputEvent::PointerMove(lightvm_proto::PointerMove { x: 5, y: 5 }),
+            key("ctrl", false),
+        ]);
+        assert!(l.send(ServiceCommand::Input(b.clone())));
+        let t0 = Instant::now();
+        while submitted_inputs(&server).len() < 3 {
+            assert!(t0.elapsed() < Duration::from_secs(10), "releases not sent");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let sent = submitted_inputs(&server);
+        assert_eq!(sent[2].events, [key("ctrl", false)]);
+    }
+
+    /// Finding 8: when the `Service` (the only strong sender) is dropped,
+    /// the IPC executor, its lanes and the thread end, even though the
+    /// event connection is still open.
+    #[test]
+    fn ipc_thread_ends_when_the_service_is_dropped() {
+        let server = fake::start(Arc::new(base_reply));
+        let mut l = Loop::start(server.endpoint.clone());
+        // The loop is idle, the event connection open.
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!l.thread.is_finished());
+        drop(l.commands.take());
+        l.wait_thread_end();
+    }
+
+    /// Finding 8: once the supervisor is gone (event connection closed) the
+    /// loop ends, `send` returns `false` and waiting requests fail.
+    #[test]
+    fn send_returns_false_once_the_supervisor_is_gone() {
+        let server = fake::start(Arc::new(base_reply));
+        let l = Loop::start(server.endpoint.clone());
+        // A console ticket request that never gets an answer in time.
+        lock(&l.state).console = Some(ConsoleRequest {
+            vm_id: VmId::new_v7(),
+            status: RequestStatus::Pending,
+        });
+        server.close_events.store(true, Ordering::SeqCst);
+        l.wait_thread_end();
+        let s = l.state();
+        assert!(!s.connected);
+        assert!(matches!(
+            s.console.map(|c| c.status),
+            Some(RequestStatus::Failed(_))
+        ));
+        assert!(!l.send(ServiceCommand::Delete {
+            vm_id: VmId::new_v7(),
+            revision: 1
+        }));
+        assert!(matches!(l.state().delete, RequestStatus::Failed(_)));
+    }
+
+    /// The fast lane stays bounded: pointer-only batches are dropped when
+    /// it is congested, keys and ticket requests never.
+    #[test]
+    fn fast_lane_is_bounded_and_keeps_keys() {
+        let mut q = VecDeque::new();
+        let mv = || {
+            ServiceCommand::Input(batch(vec![InputEvent::PointerMove(
+                lightvm_proto::PointerMove { x: 1, y: 1 },
+            )]))
+        };
+        for i in 0..200 {
+            push_fast(&mut q, mv());
+            if i % 10 == 0 {
+                push_fast(&mut q, ServiceCommand::Input(batch(vec![key("a", false)])));
+            }
+            assert!(q.len() <= FAST_LANE_CAPACITY + 20, "{}", q.len());
+        }
+        let keys = q.iter().filter(|c| !pointer_only(c)).count();
+        assert_eq!(keys, 20, "key batches dropped");
+        push_fast(&mut q, ServiceCommand::OpenConsole(VmId::new_v7()));
+        assert!(matches!(q.back(), Some(ServiceCommand::OpenConsole(_))));
+    }
+
+    /// Finding 14: `Debug` of the service does not show the display token,
+    /// and the ticket can be discarded.
+    #[test]
+    fn debug_redacts_the_console_ticket() {
+        let token = "feedface".repeat(8);
+        let child = Command::new(std::env::current_exe().unwrap())
+            .arg("--list")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let (commands, _rx) = mpsc::unbounded_channel();
+        let s = Service {
+            child,
+            stdin: None,
+            pid: 1,
+            commands,
+            state: Arc::new(Mutex::new(ServiceState::default())),
+            ticket: Arc::new(Mutex::new(Some(ConsoleTicket {
+                vm_id: VmId::new_v7(),
+                run_id: RunId::new_v7(),
+                socket_path: "display".into(),
+                token: token.clone(),
+                geometry: None,
+            }))),
+        };
+        let shown = format!("{s:?}");
+        assert!(!shown.contains(&token), "{shown}");
+        assert!(shown.contains("<redacted>"));
+        s.discard_console_ticket();
+        assert!(lock(&s.ticket).is_none());
     }
 }

@@ -51,7 +51,7 @@ Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform
 
 To check the state (also as administrator): `Get-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform` → `State : Enabled`.
 
-Note: on the project's test PC the feature was reported as *Disabled* while the accelerator worked anyway (Hyper-V and virtualization-based security were active). LightVM does not trust the reported state: it asks QEMU which accelerators really work and shows the result on the Dashboard (**Acceleration**). LightVM never falls back to slow software emulation (TCG): if the accelerator does not work, VMs do not start and you get an explicit error.
+Note: on the project's test PC the feature was reported as *Disabled* while the accelerator worked anyway (Hyper-V and virtualization-based security were active). LightVM does not trust the reported state: it asks QEMU which accelerators really work and shows the result on the Dashboard (**Acceleration**, in the supervisor card at the top). LightVM never falls back to slow software emulation (TCG): if the accelerator does not work, VMs do not start and you get an explicit error.
 
 ---
 
@@ -148,7 +148,7 @@ The alpha is distributed as a zip archive, `LightVM-<version>-windows-x64.zip`, 
 
    `-ExecutionPolicy Bypass` applies only to that one PowerShell process: the downloaded script is not signed. `install.ps1` checks every file of the package against `SHA256SUMS.txt`, copies them into `%LOCALAPPDATA%\Programs\LightVM`, creates the Start Menu shortcut **LightVM** and writes `install-manifest.json` (used by the uninstaller).
 
-   Options: `-Prefix <folder>` installs elsewhere; `-NoShortcut` skips the shortcut; `-AddToPath` adds the folder to your user `PATH` (off by default); `-Force` replaces an existing installation.
+   Options: `-Prefix <folder>` installs elsewhere; `-NoShortcut` skips the shortcut; `-AddToPath` adds the folder to your user `PATH` (off by default; the other entries are kept exactly as they are, including ones such as `%USERPROFILE%\bin`; new terminals see the change); `-Force` replaces an existing installation.
 
 3. The package contains: `lightvm-desktop.exe` (the app), `lightvm-service.exe` (the supervisor, started by the app; the two files must stay in the same folder), `README.md`, `USER_GUIDE.md` (this guide), `LICENSE.txt`, `THIRD-PARTY-LICENSES.txt`, `BUILDINFO.txt` (commit and toolchain of the build), `SHA256SUMS.txt`, `install.ps1`, `uninstall.ps1`.
 
@@ -160,15 +160,15 @@ If a `LightVM-<version>-windows-x64-setup.exe` (Inno Setup, per user) is publish
 
 1. Start **LightVM** from the Start Menu.
    - On the first run, Windows SmartScreen may show *Windows protected your PC* because the app is not signed. If, and only if, you verified the checksum in section 3, choose **More info** → **Run anyway**.
-   - In this alpha a console window with diagnostic messages opens together with LightVM. Leave it open: closing it closes LightVM.
+   - LightVM opens without a console window. Its diagnostic messages go to log files in `%LOCALAPPDATA%\LightVM\logs` (see [Troubleshooting](#13-troubleshooting)).
 2. LightVM opens on the **Dashboard**. Without QEMU it cannot start VMs yet.
 3. Open **Settings** (left navigation). In the **Supervisor** section:
    - **QEMU distribution** → **Browse…** → select the QEMU folder from section 2 (the one that contains `qemu-system-x86_64.exe`).
    - **VM catalog** shows where VMs are stored (default `%LOCALAPPDATA%\LightVM\catalog`). Leave the default unless you need another drive.
    - Press **Apply and restart the supervisor** (or **Start the supervisor** if it is not running).
-4. Back on the **Dashboard**, the header shows **Backend** and **Acceleration**. Acceleration must report WHPX. If it reports an error, see [Troubleshooting](#13-troubleshooting).
+4. Back on the **Dashboard**, the supervisor card at the top (**Supervisor · PID …**) shows the connection state, **Backend**, **Acceleration** and **If the UI closes**. **Acceleration** must read `whpx`; *not detected* means VMs cannot use the hardware accelerator. **Settings** → **Host capacity** → **Hardware acceleration** says the same. If it does not work, see [Troubleshooting](#13-troubleshooting).
 
-Also in **Settings**: **Appearance** → **Theme** (**Dark**, the default, or **Light**), and **If LightVM closes unexpectedly** (what happens to running VMs if the app crashes; the default stops them).
+Also in **Settings**: **Appearance** → **Theme** (**Dark**, the default, or **Light**); **Console** → **Guest keyboard layout** and the list of **Console shortcuts**; **If LightVM closes unexpectedly** (what happens to running VMs if the app crashes; the default, **Terminate the VMs immediately**, stops them).
 
 ---
 
@@ -199,7 +199,7 @@ Other Ubuntu versions may work but are not tested by the project.
 
 1. On the **Dashboard**, press **New VM**. The wizard opens; move between steps with **Next** and **Back**, or leave with **Cancel**.
 2. **Name**: type a name for the VM, for example `ubuntu`. This is the only text field in LightVM; the name is used only inside LightVM. The wizard says when the name is not valid or already used.
-3. **System**: **Ubuntu LTS** (the reference guest). **Other Linux** is listed but not tested by the project.
+3. **System**: **Ubuntu LTS (x86-64)** (the reference guest). **Other Linux (x86-64)** is listed but not tested by the project.
 4. **Installation media**: press **Import ISO…** and select `ubuntu-26.04.1-desktop-amd64.iso` in the file picker. LightVM **copies** the image into its catalog and records its SHA-256; the original file is not modified and you can delete it afterwards. Importing a 6 GiB image takes a while. Images imported earlier are listed and can be chosen again for other VMs.
 5. **Data media** (optional): keep **No data media**. (A data ISO, imported with **Import data ISO…**, is attached to the VM as a read-only CD; it is not needed for the installation.)
 6. **Resources**: **Virtual processors**, **Memory** and **Disk**. The defaults (2 vCPUs, 4 GiB, 32 GiB disk) suit Ubuntu Desktop; the wizard does not offer more than the host can give. The disk file grows on the host only as the guest writes data.
@@ -213,11 +213,14 @@ The new VM appears on the Dashboard as **Stopped**, with system, CPU, memory, vi
 ## 7. Install Ubuntu in the VM
 
 1. On the Dashboard, press **Start** on the VM. The state goes to **Starting**, then **Running**.
-2. Press **Console** on the VM (or open the **Console** page in the navigation). The guest screen appears inside LightVM once the console shows **Connected**; click on it to send keyboard and mouse to the VM.
-   - **Full screen** / **Exit full screen** in the console toolbar.
-   - **Screenshot** saves the current guest screen as a PNG file.
-   - **Guest keyboard layout** (toolbar, **US** or **IT**): set it to the layout configured inside the guest.
+2. Press **Console** on the VM (or open the **Console** page in the navigation and press **Open console**). The guest screen appears inside LightVM once the console shows **Connected**; click on it to send keyboard and mouse to the VM (a coloured border shows that the console has the keyboard).
+   - **Ctrl+Alt+Esc** gives the keyboard and mouse back to LightVM (and leaves full screen). Use it, for example, before pressing Tab to move between LightVM's own buttons.
+   - **Ctrl+Alt+Enter** switches full screen on and off; the **Full screen** / **Exit full screen** button in the console toolbar does the same. Neither shortcut reaches the guest.
+   - **Screenshot** saves the current guest screen as a PNG file (you choose where).
+   - **Guest keyboard layout** (toolbar, **US** or **IT**; also in **Settings** → **Console**): set it to the layout configured inside the guest.
+   - Clicks on LightVM's own menus and dialogs never reach the guest, even when they are drawn over the guest screen.
    - There is **no clipboard** between Windows and the VM (by design in the MVP).
+   - If the display connection drops while the VM keeps running, the console reconnects by itself after a couple of seconds.
 3. Ubuntu boots from the installation image. Choose **Try or Install Ubuntu** in the boot menu (or wait), then **Install Ubuntu** in the installer.
 4. Practical tips:
    - **Keyboard layout**: choose in the Ubuntu installer the same layout as your physical keyboard (for example *Italian* or *English (US)*), and select the same one (**IT** or **US**) in the console toolbar. LightVM sends keys by their physical position, so the layouts must match. Italian and English (US) are the layouts the alpha targets.
@@ -233,7 +236,7 @@ The new VM appears on the Dashboard as **Stopped**, with system, CPU, memory, vi
 1. When Ubuntu asks to remove the installation medium, press **Enter** in the console.
 2. **The installation image stays attached and the VM tries it first.** In this alpha the installation ISO keeps priority in the boot order while it is attached to the VM, so after the restart the Ubuntu boot menu of the image may appear again. Two ways to boot the installed system:
    - in the boot menu of the image, choose **Boot from next volume** (if listed) to continue to the virtual disk; **do not** choose *Try or Install Ubuntu* again;
-   - or stop the VM, press **Edit** on the Dashboard and remove the installation media if your build offers it, then **Start** again.
+   - or stop the VM: once a VM that still has its installation media has run at least once, the Dashboard shows under it *Installation finished? Remove the installation media so the VM boots from its disk.* with a **Remove installation media…** button. Press it and confirm with **Remove media**, then **Start** again. (The same is possible with **Edit** → **Installation media** → **Remove** → **Save settings**.) The ISO stays in the registry and can be attached again from **Edit**.
 3. Log in to the installed Ubuntu.
 4. **Persistence check (the alpha's goal):** shut down Ubuntu from its own menu (or **Stop** in LightVM), close LightVM, start it again from the Start Menu: the Dashboard lists the VM, **Stopped**. Press **Start** and Ubuntu boots from the disk with your files.
 
@@ -246,12 +249,12 @@ The new VM appears on the Dashboard as **Stopped**, with system, CPU, memory, vi
 | **Stop** | Orderly shutdown: the guest is asked to power off (like pressing a PC's power button once) and LightVM waits for it. A guest that does not stop within the supervisor's timeout is terminated. | Normal way to turn a VM off. Saving work inside the guest first is still a good idea. |
 | **More** → **Force stop…** | Terminates the VM at once, like pulling the plug. Unsaved data in the guest is lost; the guest's file system may need a check at the next boot. | Only when the guest does not respond to **Stop**. |
 | **More** → **Reset…** | Restarts the guest at once, like a PC's reset button. | Guest frozen. |
-| **Emergency Stop** | Dashboard header button. Immediately terminates **all** VMs and revokes the agent sessions. | Anything looks wrong and you want everything to stop now. |
+| **Emergency Stop** | Button at the top right of the Dashboard. Immediately terminates **all** VMs and revokes the agent sessions. | Anything looks wrong and you want everything to stop now. |
 | **More** → **Delete…** | Removes the VM and its disk after a confirmation. Only possible while the VM is stopped (otherwise: *Stop the VM to delete it*). **Cannot be undone.** Imported installation images stay in the catalog. | VM no longer needed. |
 
 Resources and execution limits (**Virtual processors**, **Memory (RAM)**, **Disk**, **Maximum CPU**, **Memory margin**, **Storage budget**) are changed with **Edit** → **Save settings**, only while the VM is **Stopped**; the disk can only grow.
 
-Closing LightVM while VMs are running opens a dialog: **Stop them and quit** shuts the VMs down in an orderly way (terminating those that do not stop within the timeout) and then closes LightVM; **Cancel** keeps everything running. VMs are not left running in the background.
+Closing LightVM while VMs are running opens a dialog: **Stop them and quit** shuts the VMs down in an orderly way (terminating those that do not stop within the timeout) and then closes LightVM; **Cancel** keeps everything running. VMs are not left running in the background. If the VMs stop by themselves while the dialog is open, LightVM closes without asking further. If the supervisor has already stopped or lost its connection, LightVM closes at once: the VMs it was running follow the **If LightVM closes unexpectedly** setting.
 
 ---
 
@@ -263,6 +266,7 @@ Closing LightVM while VMs are running opens a dialog: **Stop them and quit** shu
 | VM catalog: database, VM disks, UEFI variables, imported images | `%LOCALAPPDATA%\LightVM\catalog` (or the folder chosen in **Settings** → **VM catalog**) |
 | App settings | `%LOCALAPPDATA%\LightVM\ui-settings.json` |
 | Audit log of the supervisor | `%LOCALAPPDATA%\LightVM\audit.jsonl` |
+| Diagnostic logs | `%LOCALAPPDATA%\LightVM\logs\lightvm-desktop.log` (the app) and `lightvm-service.log` (the supervisor); each is rotated at 1 MiB, keeping three older copies (`*.1.log` … `*.3.log`) |
 
 `%LOCALAPPDATA%` is usually `C:\Users\<you>\AppData\Local`. Do not edit or move files in the catalog by hand while LightVM is running; LightVM keeps a journal to recover from interruptions, but manual changes are not supported. To back up VMs, close LightVM and copy the whole catalog folder.
 
@@ -274,7 +278,7 @@ Closing LightVM while VMs are running opens a dialog: **Stop them and quit** shu
 powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Programs\LightVM\uninstall.ps1"
 ```
 
-Close LightVM first (and stop its VMs). The uninstaller removes exactly the files listed in `install-manifest.json`, the Start Menu shortcut and the `PATH` entry if `-AddToPath` was used. **Your VMs, catalog and settings in `%LOCALAPPDATA%\LightVM` are kept.**
+Close LightVM first (and stop its VMs). The uninstaller removes exactly the files listed in `install-manifest.json` (plain file names inside the installation folder only), the Start Menu shortcut (only from your Start Menu **Programs** folder) and the `PATH` entry if `-AddToPath` was used (the other entries are left untouched). **Your VMs, catalog, settings and logs in `%LOCALAPPDATA%\LightVM` are kept.**
 
 To delete them as well (all VMs and disks, irreversible): add `-RemoveUserData` (asks for confirmation). A catalog moved elsewhere in **Settings** is never removed by the script. QEMU is uninstalled separately (delete the extracted folder, or use *Installed apps* for options B and C).
 
@@ -294,7 +298,7 @@ If you used the setup `.exe`, uninstall from **Settings → Apps → Installed a
 - **CPU model**: the VM uses a generic CPU model, not the host's (`-cpu host` does not boot on the test PC), so some guest software may run slower or detect fewer CPU features.
 - **One reference guest**: Ubuntu 26.04.1 LTS Desktop. Other guests are not tested.
 - No baselines/snapshots and no AI agent sessions yet (later phases F3–F5).
-- A console window opens together with the app.
+- No console window: diagnostic messages are only in the log files (section 10).
 - Remote Desktop (RDP) sessions are not verified.
 
 ---
@@ -312,4 +316,4 @@ If you used the setup `.exe`, uninstall from **Settings → Apps → Installed a
 | Wrong characters when typing in the VM | The Ubuntu keyboard layout differs from your physical keyboard: change it in Ubuntu (**Settings → Keyboard**). |
 | The Ubuntu installer starts again after installation | The installation image is still attached: see section 8, step 2. |
 
-Diagnostic messages are printed in the console window opened with the app. The supervisor's actions are recorded in `%LOCALAPPDATA%\LightVM\audit.jsonl` (no passwords or guest contents).
+Diagnostic messages (start of the supervisor, rendering backend, errors) are written to `%LOCALAPPDATA%\LightVM\logs\lightvm-desktop.log`, and the supervisor's own messages to `lightvm-service.log` in the same folder; older copies are `*.1.log` … `*.3.log`. They contain no passwords, tokens, typed keys or guest contents. The supervisor's actions are recorded in `%LOCALAPPDATA%\LightVM\audit.jsonl` (no passwords or guest contents). Running `lightvm-desktop.exe` from a terminal with its output redirected (for example `cmd /c lightvm-desktop.exe > out.txt 2>&1`) also captures the messages there.

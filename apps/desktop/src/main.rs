@@ -36,8 +36,10 @@
 //!   first changes its resources and limits (saved in the VM settings; only
 //!   while the VM is stopped).
 //!
-//! Release builds use the Windows GUI subsystem (no console window). Output
-//! (`--smoke`, `--help`, diagnostics) still reaches redirected handles: pipe
+//! Release builds use the Windows GUI subsystem (no console window). The
+//! diagnostics are also appended to `%LOCALAPPDATA%\LightVM\logs\lightvm-desktop.log`
+//! (and the supervisor's to `lightvm-service.log`), rotated at 1 MiB, see
+//! `diag.rs`. Output (`--smoke`, `--help`, diagnostics) still reaches redirected handles: pipe
 //! it (`| Out-File`), use `cmd /c ... > file` or `Start-Process -Wait
 //! -RedirectStandardOutput`. PowerShell's `& exe ... > file` neither waits
 //! for a GUI program nor captures its output, and in an interactive console
@@ -449,10 +451,10 @@ fn options(t: Attempt, args: &Args) -> eframe::NativeOptions {
                 create.native_adapter_selector = Some(Arc::new(move |adapters, _surface| {
                     for a in adapters {
                         let i = a.get_info();
-                        eprintln!(
+                        lightvm_desktop::diag::log(&format!(
                             "wgpu adapter available: {:?} \"{}\" {:?}",
                             i.backend, i.name, i.device_type
-                        );
+                        ));
                     }
                     adapters
                         .iter()
@@ -510,10 +512,22 @@ fn main() -> std::process::ExitCode {
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("error: {e}");
+            lightvm_desktop::diag::log(&format!("error: {e}"));
             return std::process::ExitCode::from(2);
         }
     };
+    // Diagnostic log: in release builds (GUI subsystem) stderr is usually
+    // not visible, so the diagnostics also go to a rotated file.
+    if let Some(dir) = lightvm_desktop::diag::default_dir() {
+        match lightvm_desktop::diag::init(&dir) {
+            Ok(path) => lightvm_desktop::diag::log(&format!(
+                "LightVM {} starting; diagnostic log {}",
+                env!("CARGO_PKG_VERSION"),
+                path.display()
+            )),
+            Err(e) => eprintln!("diagnostic log not available in {}: {e}", dir.display()),
+        }
+    }
     // Settings before the rendering plan: the saved preference applies if
     // `--renderer` is not given. Without `--settings`, the file of earlier
     // versions is read if the new one does not exist yet (saving always
@@ -535,7 +549,7 @@ fn main() -> std::process::ExitCode {
         (None, _) => (UiSettings::default(), None),
     };
     if let Some(e) = &settings_error {
-        eprintln!("settings: {e}");
+        lightvm_desktop::diag::log(&format!("settings: {e}"));
     }
     let renderer = args
         .renderer
@@ -544,7 +558,7 @@ fn main() -> std::process::ExitCode {
     let plan = match Plan::from_args(renderer.as_deref(), args.wgpu_cpu) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("error: {e}");
+            lightvm_desktop::diag::log(&format!("error: {e}"));
             return std::process::ExitCode::from(2);
         }
     };
@@ -555,7 +569,7 @@ fn main() -> std::process::ExitCode {
     if !args.skip_library_check
         && let Err(msg) = lightvm_desktop::libraries::preflight_check()
     {
-        eprintln!("error: {msg}");
+        lightvm_desktop::diag::log(&format!("error: {msg}"));
         println!("SMOKE outcome=error detail=\"missing system libraries\"");
         return std::process::ExitCode::from(3);
     }
@@ -563,19 +577,21 @@ fn main() -> std::process::ExitCode {
     let _ = args.skip_library_check;
 
     if args.service.open_vm.is_none() && (!args.service.changes.is_empty() || args.service.create) {
-        eprintln!(
-            "error: --create, --vcpu, --ram, --disk, --cpu-max, --memory-margin and --disk-budget require --open-vm"
+        lightvm_desktop::diag::log(
+            "error: --create, --vcpu, --ram, --disk, --cpu-max, --memory-margin and --disk-budget require --open-vm",
         );
         return std::process::ExitCode::from(2);
     }
     if args.service.open_vm.is_some() && args.service.no_supervisor {
-        eprintln!("error: --open-vm requires the supervisor (incompatible with --no-supervisor)");
+        lightvm_desktop::diag::log(
+            "error: --open-vm requires the supervisor (incompatible with --no-supervisor)",
+        );
         return std::process::ExitCode::from(2);
     }
     let service = match service_config(&args.service, settings.ui_loss_policy) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("error: {e}");
+            lightvm_desktop::diag::log(&format!("error: {e}"));
             return std::process::ExitCode::from(2);
         }
     };
@@ -588,6 +604,11 @@ fn main() -> std::process::ExitCode {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let msg = panic_text(info.payload());
+        let at = info
+            .location()
+            .map(|l| format!(" at {}:{}", l.file(), l.line()))
+            .unwrap_or_default();
+        lightvm_desktop::diag::log(&format!("panic{at}: {msg}"));
         if !lightvm_desktop::libraries::is_library_panic(&msg) {
             default_hook(info);
         }
@@ -643,7 +664,10 @@ fn main() -> std::process::ExitCode {
                         // became the start page.
                         ui.set_section(lightvm_desktop::Section::Console);
                     }
-                    eprintln!("rendering: {}", info.explanation().replace('\n', "; "));
+                    lightvm_desktop::diag::log(&format!(
+                        "rendering: {}",
+                        info.explanation().replace('\n', "; ")
+                    ));
                     ui.rendering = info;
                     let start_from_settings = settings.start_supervisor;
                     ui.set_settings(settings, settings_path, settings_error);
@@ -664,18 +688,24 @@ fn main() -> std::process::ExitCode {
                         let ctx = cc.egui_ctx.clone();
                         match Service::start(cfg, Arc::new(move || ctx.request_repaint())) {
                             Ok(s) => {
-                                eprintln!("service: lightvm-service started (PID {})", s.pid());
+                                lightvm_desktop::diag::log(&format!(
+                                    "service: lightvm-service started (PID {})",
+                                    s.pid()
+                                ));
                                 ui.set_service(s, cfg);
                             }
                             Err(e) => {
-                                eprintln!("service: {e}");
+                                lightvm_desktop::diag::log(&format!("service: {e}"));
                                 ui.set_service_error(e.to_string());
                             }
                         }
                     } else if (start_from_settings || open_vm.is_some()) && !no_service {
                         ui.start_service(&cc.egui_ctx);
                         if let Some(s) = ui.service() {
-                            eprintln!("service: lightvm-service started (PID {})", s.pid());
+                            lightvm_desktop::diag::log(&format!(
+                                "service: lightvm-service started (PID {})",
+                                s.pid()
+                            ));
                         }
                     }
                     if let Some(name) = open_vm {
@@ -699,11 +729,11 @@ fn main() -> std::process::ExitCode {
             Ok(Ok(())) => return std::process::ExitCode::SUCCESS,
             Ok(Err(e)) if !created.get() && index + 1 < n => {
                 let e = e.to_string();
-                eprintln!(
+                lightvm_desktop::diag::log(&format!(
                     "rendering: attempt {} failed ({e}); falling back to {}",
                     t.name(),
                     plan.attempts[index + 1].name()
-                );
+                ));
                 failed.push((t, e));
             }
             Ok(Err(e)) => {
@@ -716,12 +746,15 @@ fn main() -> std::process::ExitCode {
                     "SMOKE outcome=error detail=\"{}\"",
                     list.join(" | ").replace('"', "'")
                 );
-                eprintln!("error: no usable rendering backend ({})", list.join("; "));
+                lightvm_desktop::diag::log(&format!(
+                    "error: no usable rendering backend ({})",
+                    list.join("; ")
+                ));
                 return std::process::ExitCode::FAILURE;
             }
             Err(p) => {
                 let msg = panic_text(p.as_ref());
-                eprintln!("error: {}", error_from_panic(&msg));
+                lightvm_desktop::diag::log(&format!("error: {}", error_from_panic(&msg)));
                 println!(
                     "SMOKE outcome=error detail=\"panic at startup: {}\"",
                     msg.replace('"', "'")
