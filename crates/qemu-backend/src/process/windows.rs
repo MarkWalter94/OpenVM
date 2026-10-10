@@ -3,7 +3,10 @@
 use crate::error::{BackendError, Result};
 use crate::sys::windows::{self as sys, ConsoleMode, Job};
 
-use super::{ChildProcess, ContainmentMechanism, ProcessContainer, ProcessIdentity, SpawnRequest};
+use super::{
+    ChildProcess, ContainmentMechanism, JobLimitReport, JobLimits, ProcessContainer,
+    ProcessIdentity, SpawnRequest,
+};
 
 /// Job Object anonimo con `KILL_ON_JOB_CLOSE`; QEMU senza console
 /// (`DETACHED_PROCESS`, nessun `conhost.exe`: decisione proposta in F0-06).
@@ -14,9 +17,10 @@ pub(crate) struct JobContainer {
 }
 
 impl JobContainer {
-    pub(crate) fn new() -> Result<Self> {
+    pub(crate) fn new(limits: &JobLimits) -> Result<Self> {
         Ok(Self {
-            job: Job::create().map_err(BackendError::Spawn)?,
+            job: Job::create(limits.cpu_rate, limits.job_memory_bytes)
+                .map_err(BackendError::Spawn)?,
             console: ConsoleMode::Detached,
         })
     }
@@ -85,5 +89,14 @@ impl ProcessContainer for JobContainer {
             ));
         }
         Ok(())
+    }
+
+    fn limit_report(&self) -> Result<JobLimitReport> {
+        let i = self.job.limit_info()?;
+        Ok(JobLimitReport {
+            cpu_rate: i.cpu_rate,
+            job_memory_bytes: i.job_memory,
+            peak_job_memory_bytes: i.peak_job_memory,
+        })
     }
 }

@@ -237,6 +237,18 @@ impl CatalogStore for SqliteStore {
         Ok(())
     }
 
+    fn update_vm(&mut self, vm: &VmRecord, expected_revision: u64) -> Result<(), PublicError> {
+        let sid = self.sid(vm.id)?;
+        let config = serde_json::to_value(StoredConfig { core: vm.clone() })
+            .map_err(|_| infra("configurazione non serializzabile"))?;
+        // La revisione del catalogo segue quella del core: entrambe partono
+        // da 1 e crescono di 1 a ogni modifica.
+        self.write(|tx| {
+            tx.update_vm_config(&sid, expected_revision, CONFIG_VERSION, &config)
+                .map(|_| ())
+        })
+    }
+
     fn get_vm(&self, id: VmId) -> Result<Option<VmRecord>, PublicError> {
         let Some(sid) = self.ids.get(&id).copied() else {
             return Ok(None);

@@ -94,6 +94,73 @@ pub struct VmConfig {
     /// Firmware; nel MVP solo `uefi`.
     #[serde(default)]
     pub firmware: Firmware,
+    /// Limiti di esecuzione applicati dal supervisor al processo QEMU
+    /// (ADR-0017); assenti nei cataloghi precedenti → valori predefiniti.
+    #[serde(default)]
+    pub limits: VmLimits,
+}
+
+/// Tetto CPU minimo ammesso, in percentuale della capacità dei vCPU.
+pub const MIN_CPU_MAX_PERCENT: u8 = 5;
+/// Margine di memoria minimo oltre la RAM guest, in MiB.
+pub const MIN_MEMORY_MARGIN_MIB: u32 = 256;
+/// Margine di memoria massimo oltre la RAM guest, in MiB.
+pub const MAX_MEMORY_MARGIN_MIB: u32 = 16_384;
+/// Budget di storage massimo per VM, in GiB.
+pub const MAX_STORAGE_BUDGET_GIB: u64 = 16_384;
+
+/// Limiti di esecuzione di una VM (ADR-0017), impostati dall'utente nelle
+/// impostazioni della VM e applicati dal supervisor, mai dal client.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct VmLimits {
+    /// Tetto di CPU in percentuale della capacità dei vCPU assegnati
+    /// ([`MIN_CPU_MAX_PERCENT`]..=100; 100 = nessun tetto). Applicato dal
+    /// sistema operativo all'intero processo QEMU.
+    pub cpu_max_percent: u8,
+    /// Memoria concessa al processo QEMU oltre la RAM del guest, in MiB
+    /// ([`MIN_MEMORY_MARGIN_MIB`]..=[`MAX_MEMORY_MARGIN_MIB`]). Superato il
+    /// limite, QEMU è terminato e l'uscita è classificata come limite di risorse.
+    pub memory_margin_mib: u32,
+    /// Spazio massimo in GiB per i file della VM oltre al disco principale
+    /// (overlay, baseline, variabili firmware); `None` = nessun budget dedicato.
+    /// Verificato a ogni avvio.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage_budget_gib: Option<u64>,
+}
+
+impl Default for VmLimits {
+    fn default() -> Self {
+        Self {
+            cpu_max_percent: 100,
+            memory_margin_mib: 1024,
+            storage_budget_gib: None,
+        }
+    }
+}
+
+impl VmLimits {
+    /// Validazione strutturale dei limiti.
+    pub fn validate(&self) -> Result<(), crate::PublicError> {
+        if !(MIN_CPU_MAX_PERCENT..=100).contains(&self.cpu_max_percent) {
+            return Err(crate::PublicError::invalid_argument(format!(
+                "cpu_max_percent fuori dall'intervallo {MIN_CPU_MAX_PERCENT}..=100"
+            )));
+        }
+        if !(MIN_MEMORY_MARGIN_MIB..=MAX_MEMORY_MARGIN_MIB).contains(&self.memory_margin_mib) {
+            return Err(crate::PublicError::invalid_argument(format!(
+                "memory_margin_mib fuori dall'intervallo {MIN_MEMORY_MARGIN_MIB}..={MAX_MEMORY_MARGIN_MIB}"
+            )));
+        }
+        if let Some(b) = self.storage_budget_gib
+            && !(1..=MAX_STORAGE_BUDGET_GIB).contains(&b)
+        {
+            return Err(crate::PublicError::invalid_argument(format!(
+                "storage_budget_gib fuori dall'intervallo 1..={MAX_STORAGE_BUDGET_GIB}"
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// VM del catalogo con revisione della configurazione e ultimo stato persistito.

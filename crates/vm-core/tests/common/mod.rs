@@ -66,6 +66,17 @@ impl CatalogStore for MemStore {
     fn get_vm(&self, id: VmId) -> Result<Option<VmRecord>, PublicError> {
         Ok(self.0.borrow().vms.get(&id).cloned())
     }
+    fn update_vm(&mut self, vm: &VmRecord, expected_revision: u64) -> Result<(), PublicError> {
+        let mut inner = self.0.borrow_mut();
+        match inner.vms.get_mut(&vm.id) {
+            Some(v) if v.config_revision == expected_revision => {
+                *v = vm.clone();
+                Ok(())
+            }
+            Some(_) => Err(PublicError::state_conflict("revisione diversa")),
+            None => Err(PublicError::not_found("VM inesistente")),
+        }
+    }
     fn list_vms(&self) -> Result<Vec<VmRecord>, PublicError> {
         Ok(self.0.borrow().vms.values().cloned().collect())
     }
@@ -362,6 +373,7 @@ impl Harness {
             install_media: media,
             data_media: None,
             firmware: Firmware::Uefi,
+            limits: Default::default(),
         }
     }
 

@@ -190,6 +190,8 @@ pub struct VmLaunchSpec {
     pub install_media: Option<MediaId>,
     /// Supporto dati in sola lettura, dal registro media.
     pub data_media: Option<MediaId>,
+    /// Limiti del Job Object (tetto CPU, memoria del job), ADR-0017.
+    pub limits: crate::process::JobLimits,
 }
 
 /// Comando QEMU pronto per lo spawn.
@@ -212,6 +214,8 @@ pub struct QemuCommand {
     pub stderr: ManagedPath,
     /// Directory privata (socket, screendump).
     pub private_dir: ManagedPath,
+    /// Limiti del contenitore del processo.
+    pub limits: crate::process::JobLimits,
 }
 
 struct Args(Vec<OsString>);
@@ -352,6 +356,7 @@ impl VmLaunchSpec {
             stdout: run_dir.join_file(names::STDOUT)?,
             stderr: run_dir.join_file(names::STDERR)?,
             private_dir,
+            limits: self.limits,
         })
     }
 }
@@ -414,6 +419,7 @@ pub fn build_probe_command(
         stdout: private_dir.join_file("probe.stdout.log")?,
         stderr: private_dir.join_file("probe.stderr.log")?,
         private_dir,
+        limits: crate::process::JobLimits::default(),
     })
 }
 
@@ -514,6 +520,7 @@ pub(crate) mod tests {
             }),
             install_media: Some(media_ubuntu()),
             data_media: None,
+            limits: crate::process::JobLimits::default(),
         }
     }
 

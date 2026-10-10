@@ -56,6 +56,12 @@ pub fn validate_config(config: &VmConfig, limits: &ResourceLimits) -> Result<(),
     if config.disk_gib > limits.max_disk_gib {
         return Err(over("disk_gib", config.disk_gib, limits.max_disk_gib));
     }
+    config.limits.validate()?;
+    if let Some(b) = config.limits.storage_budget_gib
+        && b > limits.max_disk_gib
+    {
+        return Err(over("storage_budget_gib", b, limits.max_disk_gib));
+    }
     if config.install_media.is_some() && config.install_media == config.data_media {
         return Err(PublicError::invalid_argument(
             "supporto di installazione e supporto dati devono essere distinti",

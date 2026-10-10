@@ -103,6 +103,16 @@ pub enum Request {
         /// Configurazione richiesta.
         config: VmConfig,
     },
+    /// Modifica della configurazione di una VM spenta: risorse e limiti
+    /// (solo UI; il disco si può solo ingrandire).
+    UpdateVm {
+        /// VM.
+        vm_id: VmId,
+        /// Revisione attesa: una modifica concorrente è rifiutata.
+        expected_revision: u64,
+        /// Nuova configurazione completa.
+        config: VmConfig,
+    },
     /// Azione su una VM esistente tramite la coda del core (solo UI in F1).
     /// La risposta arriva dopo l'esito del backend.
     SubmitVm {
@@ -142,6 +152,7 @@ impl Request {
             Self::ListVms => "list_vms",
             Self::VmStatus { .. } => "vm_status",
             Self::CreateVm { .. } => "create_vm",
+            Self::UpdateVm { .. } => "update_vm",
             Self::SubmitVm { .. } => "submit_vm",
             Self::Subscribe => "subscribe",
             Self::ListConnections => "list_connections",
@@ -166,6 +177,10 @@ pub struct VmSummary {
     /// Esecuzione corrente, se esiste un processo o l'ultima conclusa.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<RunId>,
+    /// Configurazione corrente (risorse e limiti), per le impostazioni della VM.
+    pub config: VmConfig,
+    /// Revisione della configurazione, da indicare in `update_vm`.
+    pub config_revision: u64,
 }
 
 /// Capacità riportate da `get_capabilities`.
@@ -270,6 +285,11 @@ pub enum ResponseBody {
     /// Risposta a `create_vm`.
     VmCreated {
         /// VM creata, con identificativo assegnato dal core.
+        vm: VmRecord,
+    },
+    /// Risposta a `update_vm`: VM con la nuova revisione.
+    VmUpdated {
+        /// VM aggiornata.
         vm: VmRecord,
     },
     /// Risposta a `submit_vm`: accettazione ed esito registrato.

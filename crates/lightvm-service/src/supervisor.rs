@@ -65,6 +65,11 @@ pub(crate) enum SupervisorRequest {
     ListVms,
     VmStatus(VmId),
     CreateVm(Box<VmConfig>),
+    UpdateVm {
+        vm_id: VmId,
+        expected_revision: u64,
+        config: Box<VmConfig>,
+    },
     SubmitVm(Box<VmRequest>),
 }
 
@@ -72,7 +77,10 @@ impl SupervisorRequest {
     /// Richiesta che modifica VM o catalogo: scartata se accodata prima di
     /// un Emergency Stop.
     fn is_mutation(&self) -> bool {
-        matches!(self, Self::CreateVm(_) | Self::SubmitVm(_))
+        matches!(
+            self,
+            Self::CreateVm(_) | Self::UpdateVm { .. } | Self::SubmitVm(_)
+        )
     }
 }
 
@@ -232,6 +240,14 @@ impl SupervisorThread {
                 .engine
                 .create_vm(who()?, *config)
                 .map(|vm| ResponseBody::VmCreated { vm }),
+            SupervisorRequest::UpdateVm {
+                vm_id,
+                expected_revision,
+                config,
+            } => self
+                .engine
+                .update_vm(who()?, vm_id, expected_revision, *config)
+                .map(|vm| ResponseBody::VmUpdated { vm }),
             SupervisorRequest::SubmitVm(req) => {
                 self.engine
                     .submit(who()?, *req)

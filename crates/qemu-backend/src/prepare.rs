@@ -79,6 +79,91 @@ pub fn create_disk(
     )
 }
 
+/// Dimensione virtuale in byte di un disco (`qemu-img info --output=json`,
+/// formato esplicito: nessuna rilevazione automatica).
+pub fn disk_virtual_size(
+    qemu_img: &ManagedPath,
+    disk: &ManagedPath,
+    format: DiskFormat,
+    timeout: Duration,
+) -> Result<u64> {
+    let o = run_capture(
+        qemu_img.as_path(),
+        &[
+            "info",
+            "-f",
+            format.driver(),
+            "--output=json",
+            disk.qemu_value(),
+        ],
+        timeout,
+    )?;
+    if o.code != Some(0) {
+        return Err(BackendError::Io(std::io::Error::other(format!(
+            "qemu-img info uscito con {:?}: {}",
+            o.code,
+            stderr_excerpt(&o.stderr)
+        ))));
+    }
+    let v: serde_json::Value = serde_json::from_str(&o.stdout)
+        .map_err(|e| BackendError::Io(std::io::Error::other(format!("qemu-img info: {e}"))))?;
+    v.get("virtual-size")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| {
+            BackendError::Io(std::io::Error::other("qemu-img info: virtual-size assente"))
+        })
+}
+
+/// Porta il disco a `size_mib` MiB (`qemu-img resize`). Solo ingrandimento:
+/// una dimensione minore di quella attuale è rifiutata (perdita di dati nel
+/// guest); una dimensione uguale non esegue nulla. Restituisce `true` se il
+/// disco è stato ingrandito.
+pub fn grow_disk(
+    qemu_img: &ManagedPath,
+    disk: &ManagedPath,
+    format: DiskFormat,
+    size_mib: u64,
+    timeout: Duration,
+) -> Result<bool> {
+    if !(MIN_DISK_MIB..=MAX_DISK_MIB).contains(&size_mib) {
+        return Err(BackendError::ResourceLimit(format!(
+            "disco di {size_mib} MiB fuori dall'intervallo {MIN_DISK_MIB}..={MAX_DISK_MIB}"
+        )));
+    }
+    let attuale = disk_virtual_size(qemu_img, disk, format, timeout)?;
+    let richiesto = size_mib << 20;
+    if richiesto < attuale {
+        return Err(BackendError::invalid(
+            "disk",
+            "riduzione del disco non supportata: si può solo ingrandire",
+        ));
+    }
+    if richiesto == attuale {
+        return Ok(false);
+    }
+    let size = format!("{size_mib}M");
+    let o = run_capture(
+        qemu_img.as_path(),
+        &[
+            "resize",
+            "-q",
+            "-f",
+            format.driver(),
+            disk.qemu_value(),
+            &size,
+        ],
+        timeout,
+    )?;
+    if o.code != Some(0) {
+        return Err(BackendError::Io(std::io::Error::other(format!(
+            "qemu-img resize uscito con {:?}: {}",
+            o.code,
+            stderr_excerpt(&o.stderr)
+        ))));
+    }
+    Ok(true)
+}
+
 /// Crea un overlay qcow2 su `base` con formato del backing esplicito
 /// (`-F`), senza rilevazione automatica. Il riferimento al backing è il
 /// percorso assoluto di `base`.

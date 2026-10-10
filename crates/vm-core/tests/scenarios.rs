@@ -1011,3 +1011,110 @@ fn reported_screenshot_must_match_request() {
     assert_eq!(rec.status, OperationStatus::Failed);
     assert_eq!(h.core.vm_status(&Caller::User, vm).unwrap().geometry, None);
 }
+
+// ----- impostazioni della VM: risorse e limiti (ADR-0017) ------------------
+
+#[test]
+fn update_vm_config_changes_resources_and_limits_of_a_stopped_vm() {
+    let mut h = Harness::new();
+    let vm = h.create_vm("modificabile");
+    let st = h.core.vm_status(&Caller::User, vm).unwrap();
+    assert_eq!(st.config_revision, 1);
+    assert_eq!(st.config.limits, VmLimits::default());
+    let mut cfg = st.config.clone();
+    cfg.vcpus = 4;
+    cfg.memory_mib = 6144;
+    cfg.disk_gib += 8;
+    cfg.limits = VmLimits {
+        cpu_max_percent: 50,
+        memory_margin_mib: 2048,
+        storage_budget_gib: Some(20),
+    };
+    let rec = h
+        .core
+        .update_vm_config(&Caller::User, vm, 1, cfg.clone())
+        .unwrap();
+    assert_eq!(rec.config_revision, 2);
+    assert_eq!(rec.config, cfg);
+    let st = h.core.vm_status(&Caller::User, vm).unwrap();
+    assert_eq!((st.config_revision, st.config), (2, cfg));
+    assert!(
+        h.audit_events()
+            .iter()
+            .any(|e| e.action == AuditAction::VmConfigure
+                && e.outcome == AuditOutcome::Succeeded
+                && e.vm_id == Some(vm))
+    );
+}
+
+#[test]
+fn update_vm_config_rejections_have_no_effect() {
+    let mut h = Harness::new();
+    let vm = h.create_vm("rifiuti");
+    let base = h.core.vm_status(&Caller::User, vm).unwrap().config;
+    // Revisione superata.
+    denied(
+        ErrorCode::StateConflict,
+        h.core.update_vm_config(&Caller::User, vm, 7, base.clone()),
+    );
+    // Disco ridotto.
+    let mut c = base.clone();
+    c.disk_gib -= 1;
+    denied(
+        ErrorCode::InvalidArgument,
+        h.core.update_vm_config(&Caller::User, vm, 1, c),
+    );
+    // Limiti fuori intervallo.
+    for limits in [
+        VmLimits {
+            cpu_max_percent: 0,
+            ..VmLimits::default()
+        },
+        VmLimits {
+            cpu_max_percent: 101,
+            ..VmLimits::default()
+        },
+        VmLimits {
+            memory_margin_mib: 10,
+            ..VmLimits::default()
+        },
+        VmLimits {
+            storage_budget_gib: Some(0),
+            ..VmLimits::default()
+        },
+    ] {
+        let mut c = base.clone();
+        c.limits = limits;
+        denied(
+            ErrorCode::InvalidArgument,
+            h.core.update_vm_config(&Caller::User, vm, 1, c),
+        );
+    }
+    // Risorse oltre i limiti effettivi.
+    let mut c = base.clone();
+    c.vcpus = 64;
+    denied(
+        ErrorCode::ResourceLimit,
+        h.core.update_vm_config(&Caller::User, vm, 1, c),
+    );
+    // Sessione agente: nessuna modifica.
+    let (_, agent) = h.session(&[vm], &[Capability::VmStart], 9);
+    denied(
+        ErrorCode::PermissionDenied,
+        h.core.update_vm_config(&agent, vm, 1, base.clone()),
+    );
+    // VM accesa.
+    h.start(vm);
+    denied(
+        ErrorCode::StateConflict,
+        h.core.update_vm_config(&Caller::User, vm, 1, base.clone()),
+    );
+    let st = h.core.vm_status(&Caller::User, vm).unwrap();
+    assert_eq!((st.config_revision, st.config), (1, base));
+    assert!(
+        h.audit_events()
+            .iter()
+            .filter(|e| e.action == AuditAction::VmConfigure)
+            .all(|e| e.outcome == AuditOutcome::Denied)
+    );
+}

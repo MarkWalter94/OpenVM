@@ -542,6 +542,102 @@ fn e2e_real_qemu_create_start_status_stop() {
     });
 }
 
+/// Impostazioni della VM via IPC (ADR-0017): risorse e limiti di una VM spenta,
+/// revisione attesa, persistenza in SQLite dopo il riavvio, audit
+/// `vm_configure`; ruolo di pairing senza permesso.
+#[tokio::test(flavor = "multi_thread")]
+async fn update_vm_via_ipc_is_persisted_and_audited() {
+    use lightvm_proto::VmLimits;
+    let dir = temp_dir("core-update-vm");
+    let svc = start_sqlite(&dir).await;
+    let mut ui = connect_ui(&svc).await;
+    let vm = match ui
+        .request(Request::CreateVm {
+            config: sample_config("impostazioni"),
+        })
+        .await
+        .unwrap()
+    {
+        ServerMessage::Response {
+            result: ResponseBody::VmCreated { vm },
+            ..
+        } => vm,
+        other => panic!("{other:?}"),
+    };
+    let mut cfg = vm.config.clone();
+    cfg.vcpus = 1;
+    cfg.disk_gib += 4;
+    cfg.limits = VmLimits {
+        cpu_max_percent: 40,
+        memory_margin_mib: 768,
+        storage_budget_gib: Some(12),
+    };
+    match ui
+        .request(Request::UpdateVm {
+            vm_id: vm.id,
+            expected_revision: 1,
+            config: cfg.clone(),
+        })
+        .await
+        .unwrap()
+    {
+        ServerMessage::Response {
+            result: ResponseBody::VmUpdated { vm },
+            ..
+        } => assert_eq!((vm.config_revision, &vm.config), (2, &cfg)),
+        other => panic!("{other:?}"),
+    }
+    // Stessa revisione una seconda volta: conflitto, nessun effetto.
+    let m = ui
+        .request(Request::UpdateVm {
+            vm_id: vm.id,
+            expected_revision: 1,
+            config: vm.config.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(error_code(&m), Some(ErrorCode::StateConflict));
+    // Il ruolo di pairing non modifica le VM.
+    let pairing = svc.handle.issue_pairing_credential().unwrap();
+    let mut p = Client::connect(svc.handle.endpoint()).await.unwrap();
+    p.hello(&pairing).await.unwrap();
+    let m = p
+        .request(Request::UpdateVm {
+            vm_id: vm.id,
+            expected_revision: 2,
+            config: vm.config.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(error_code(&m), Some(ErrorCode::PermissionDenied));
+    drop(p);
+    drop(ui);
+    svc.handle.shutdown().await;
+
+    // Dopo il riavvio la configurazione viene da SQLite.
+    let svc = start_sqlite(&dir).await;
+    let mut ui = connect_ui(&svc).await;
+    match ui
+        .request(Request::VmStatus { vm_id: vm.id })
+        .await
+        .unwrap()
+    {
+        ServerMessage::Response {
+            result: ResponseBody::Vm { vm: s },
+            ..
+        } => assert_eq!((s.config_revision, s.config), (2, cfg)),
+        other => panic!("{other:?}"),
+    }
+    svc.handle.shutdown().await;
+    let events = read_audit(&dir);
+    assert!(has(
+        &events,
+        AuditAction::VmConfigure,
+        AuditOutcome::Succeeded
+    ));
+    assert!(has(&events, AuditAction::VmConfigure, AuditOutcome::Denied));
+}
+
 /// Processi `qemu-system-x86_64.exe` figli di questo processo (il backend
 /// gira nel servizio in-process): PID.
 #[cfg(windows)]
@@ -705,5 +801,162 @@ fn e2e_real_qemu_cicli_attraverso_il_servizio() {
         qemu_children().is_empty(),
         "QEMU residui dopo l'arresto del servizio"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ADR-0017 attraverso il servizio con QEMU reale: modifica via IPC di una VM
+/// spenta (disco 8 → 10 GiB, tetto CPU, margine di memoria), riavvio con il
+/// disco ingrandito da `qemu-img resize`; budget di storage superato → avvio
+/// rifiutato con `resource_limit` senza processi QEMU.
+#[cfg(windows)]
+#[test]
+#[ignore = "richiede QEMU approvato e un acceleratore (LIGHTVM_E2E_QEMU_DIR)"]
+fn e2e_real_qemu_impostazioni_vm() {
+    use lightvm_proto::VmLimits;
+    use lightvm_service::adapters::backend::{QemuSetup, probe};
+    use qemu_backend::ShutdownPolicy;
+
+    let qemu_dir = PathBuf::from(
+        std::env::var_os("LIGHTVM_E2E_QEMU_DIR").expect("LIGHTVM_E2E_QEMU_DIR non impostata"),
+    );
+    let dir = temp_dir("e2e-impostazioni");
+    let private_root = std::env::temp_dir().join(format!("lvm-imp-{}", std::process::id()));
+    let store = SqliteStore::open(&dir).unwrap();
+    let mut setup = QemuSetup::new(qemu_dir.clone(), store.root(), private_root);
+    setup.stop_policy = ShutdownPolicy {
+        powerdown_timeout: Duration::from_secs(1),
+        quit_timeout: Duration::from_secs(10),
+        kill_timeout: Duration::from_secs(10),
+    };
+    let (host, vm_backend, capacity) = probe(setup).expect("probe di QEMU");
+    let audit = FileAuditSink::open(&audit_path(&dir)).unwrap();
+    let inspector = ManagedMediaInspector::new(store.root());
+    let engine =
+        CoreEngine::new(store, audit, vm_backend, inspector, core_config(capacity)).unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let dir2 = dir.clone();
+    rt.block_on(async move {
+        let (handle, ui) = start(config(&dir2), Box::new(engine), Box::new(host))
+            .await
+            .unwrap();
+        let svc = Svc {
+            handle,
+            ui,
+            calls: Calls::default(),
+        };
+        let mut c = connect_ui(&svc).await;
+        let mut cfg = sample_config("e2e-impostazioni");
+        cfg.vcpus = 2;
+        cfg.memory_mib = 1024;
+        cfg.disk_gib = 8;
+        let vm = match c.request(Request::CreateVm { config: cfg }).await.unwrap() {
+            ServerMessage::Response {
+                result: ResponseBody::VmCreated { vm },
+                ..
+            } => vm,
+            other => panic!("{other:?}"),
+        };
+        // Primo avvio: disco creato a 8 GiB.
+        expect_succeeded(&submit(&mut c, vm.id, VmAction::Start).await);
+        expect_succeeded(&submit(&mut c, vm.id, VmAction::ForceStop).await);
+        let disk = dir2
+            .join("vms")
+            .join(vm.id.to_string())
+            .join("primary.qcow2");
+        let qemu_img = qemu_backend::ManagedPath::verify(qemu_dir.join("qemu-img.exe")).unwrap();
+        let disk_mp = qemu_backend::ManagedPath::verify(&disk).unwrap();
+        let size = |m: &qemu_backend::ManagedPath| {
+            qemu_backend::prepare::disk_virtual_size(
+                &qemu_img,
+                m,
+                qemu_backend::cmdline::DiskFormat::Qcow2,
+                Duration::from_secs(30),
+            )
+            .unwrap()
+        };
+        assert_eq!(size(&disk_mp), 8 << 30);
+
+        // Impostazioni: disco 10 GiB, tetto CPU 25 %, margine 768 MiB.
+        let mut nuova = vm.config.clone();
+        nuova.disk_gib = 10;
+        nuova.limits = VmLimits {
+            cpu_max_percent: 25,
+            memory_margin_mib: 768,
+            storage_budget_gib: None,
+        };
+        let vm2 = match c
+            .request(Request::UpdateVm {
+                vm_id: vm.id,
+                expected_revision: 1,
+                config: nuova.clone(),
+            })
+            .await
+            .unwrap()
+        {
+            ServerMessage::Response {
+                result: ResponseBody::VmUpdated { vm },
+                ..
+            } => vm,
+            other => panic!("{other:?}"),
+        };
+        expect_succeeded(&submit(&mut c, vm.id, VmAction::Start).await);
+        assert_eq!(state_of(&mut c, vm.id).await, VmState::Running);
+        assert_eq!(qemu_children().len(), 1);
+        eprintln!("avvio con limiti {:?}: in esecuzione", nuova.limits);
+        expect_succeeded(&submit(&mut c, vm.id, VmAction::ForceStop).await);
+        assert_eq!(size(&disk_mp), 10 << 30);
+        eprintln!("disco ingrandito: {} byte", size(&disk_mp));
+
+        // Budget di storage di 1 GiB superato da un file di 2 GiB nella VM.
+        let mut con_budget = nuova.clone();
+        con_budget.limits.storage_budget_gib = Some(1);
+        match c
+            .request(Request::UpdateVm {
+                vm_id: vm.id,
+                expected_revision: vm2.config_revision,
+                config: con_budget,
+            })
+            .await
+            .unwrap()
+        {
+            ServerMessage::Response {
+                result: ResponseBody::VmUpdated { .. },
+                ..
+            } => {}
+            other => panic!("{other:?}"),
+        }
+        let extra = dir2.join("vms").join(vm.id.to_string()).join("overlays");
+        std::fs::create_dir_all(&extra).unwrap();
+        let f = std::fs::File::create(extra.join("riempimento.bin")).unwrap();
+        f.set_len(2 << 30).unwrap();
+        drop(f);
+        let m = submit(&mut c, vm.id, VmAction::Start).await;
+        eprintln!("avvio con budget superato: {m:?}");
+        let rifiutato = match &m {
+            ServerMessage::Response {
+                result:
+                    ResponseBody::Operation {
+                        operation: Some(op),
+                        ..
+                    },
+                ..
+            } => op.status == OperationStatus::Failed && op.error == Some(ErrorCode::ResourceLimit),
+            other => error_code(other) == Some(ErrorCode::ResourceLimit),
+        };
+        assert!(rifiutato, "{m:?}");
+        assert!(qemu_children().is_empty());
+        std::fs::remove_file(extra.join("riempimento.bin")).unwrap();
+        svc.handle.shutdown().await;
+        let events = read_audit(&dir2);
+        assert!(has(
+            &events,
+            AuditAction::VmConfigure,
+            AuditOutcome::Succeeded
+        ));
+    });
     let _ = std::fs::remove_dir_all(&dir);
 }
