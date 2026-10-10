@@ -1,6 +1,6 @@
 [package]
 name = "f0-storage"
-description = "Spike F0-05: baseline/overlay/firmware a VM spenta, prove di crash su qemu-img"
+description = "Spike F0-05: baseline/overlay/firmware with the VM off, crash tests on qemu-img"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

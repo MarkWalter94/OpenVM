@@ -1,8 +1,8 @@
-//! JSON Schema generati dalla fonte unica (ROADMAP 6.3).
+//! JSON Schemas generated from the single source (ROADMAP 6.3).
 //!
-//! [`public_schemas`] elenca ogni tipo pubblico con il nome del file in
-//! `crates/lightvm-proto/schema/`. Il test `schema_snapshot` confronta i file
-//! committati con quelli generati; con `LIGHTVM_UPDATE_SCHEMAS=1` li riscrive.
+//! [`public_schemas`] lists every public type with its file name in
+//! `crates/lightvm-proto/schema/`. The `schema_snapshot` test compares the committed
+//! files with the generated ones; with `LIGHTVM_UPDATE_SCHEMAS=1` it rewrites them.
 
 use schemars::{JsonSchema, Schema, generate::SchemaSettings};
 
@@ -14,9 +14,9 @@ fn generate<T: JsonSchema>() -> Schema {
         .into_root_schema_for::<T>()
 }
 
-/// Coppie (nome file senza estensione, schema) per tutti i tipi pubblici.
-/// L'ordine è stabile. Tipi solo interni (`MediaEntry`, `ManagedRelPath`,
-/// `FileIdentity`) sono esclusi di proposito.
+/// Pairs (file name without extension, schema) for all public types.
+/// The order is stable. Internal-only types (`MediaEntry`, `ManagedRelPath`,
+/// `FileIdentity`) are excluded on purpose.
 #[must_use]
 pub fn public_schemas() -> Vec<(&'static str, Schema)> {
     vec![
@@ -67,7 +67,7 @@ pub fn public_schemas() -> Vec<(&'static str, Schema)> {
     .collect()
 }
 
-/// Serializzazione canonica di uno schema (JSON indentato, `\n` finale).
+/// Canonical serialization of a schema (indented JSON, trailing `\n`).
 #[must_use]
 pub fn render(schema: &Schema) -> String {
     let mut s = serde_json::to_string_pretty(schema).unwrap_or_default();

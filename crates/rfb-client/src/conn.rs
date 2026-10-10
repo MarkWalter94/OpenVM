@@ -1,4 +1,4 @@
-//! Connessione RFB sincrona: handshake e lettura degli aggiornamenti.
+//! Synchronous RFB connection: handshake and reading of updates.
 
 use std::io::{BufReader, Read, Write};
 use std::time::Duration;
@@ -14,46 +14,46 @@ use crate::{Error, Framebuffer, MAX_DIMENSION, Rect, Transport};
 const SEC_NONE: u8 = 1;
 const SEC_VENCRYPT: u8 = 19;
 const VENCRYPT_X509NONE: u32 = 260;
-/// Limite ai testi ServerCutText scartati (oltre: errore di protocollo).
+/// Limit on discarded ServerCutText texts (beyond it: protocol error).
 const MAX_CUT_TEXT: u32 = 1024 * 1024;
-/// Timeout di lettura durante l'handshake: evita attese indefinite (per
-/// esempio un server VeNCrypt che non chiude dopo un certificato rifiutato).
+/// Read timeout during the handshake: avoids indefinite waits (for
+/// example a VeNCrypt server that does not close after a rejected certificate).
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-/// Contatori della connessione.
+/// Connection counters.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ConnectionStats {
-    /// Messaggi FramebufferUpdate elaborati.
+    /// Processed FramebufferUpdate messages.
     pub updates: u64,
-    /// Rettangoli ricevuti (inclusi pseudo-encoding).
+    /// Received rectangles (including pseudo-encodings).
     pub rects: u64,
-    /// Rettangoli per encoding: Raw, CopyRect, Hextile, ZRLE, DesktopSize.
+    /// Rectangles per encoding: Raw, CopyRect, Hextile, ZRLE, DesktopSize.
     pub rects_by_encoding: [u64; 5],
-    /// Pixel aggiornati (somma delle aree, escluso DesktopSize).
+    /// Updated pixels (sum of the areas, excluding DesktopSize).
     pub pixels: u64,
-    /// Ridimensionamenti ricevuti.
+    /// Received resizes.
     pub resizes: u64,
-    /// Messaggi Bell ignorati.
+    /// Ignored Bell messages.
     pub bells: u64,
-    /// Messaggi ServerCutText scartati (mai consegnati all'host).
+    /// Discarded ServerCutText messages (never delivered to the host).
     pub cut_text_discarded: u64,
-    /// Messaggi SetColourMapEntries ignorati.
+    /// Ignored SetColourMapEntries messages.
     pub colour_map_ignored: u64,
 }
 
-/// Esito di un FramebufferUpdate.
+/// Outcome of a FramebufferUpdate.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UpdateSummary {
-    /// Rettangoli modificati (dopo l'applicazione al framebuffer locale).
+    /// Modified rectangles (after applying them to the local framebuffer).
     pub rects: Vec<Rect>,
-    /// Il framebuffer è stato ridimensionato in questo aggiornamento.
+    /// The framebuffer was resized in this update.
     pub resized: bool,
-    /// Larghezza dopo l'aggiornamento.
+    /// Width after the update.
     pub width: u16,
-    /// Altezza dopo l'aggiornamento.
+    /// Height after the update.
     pub height: u16,
 }
 
-/// Connessione RFB in sola lettura.
+/// Read-only RFB connection.
 pub struct Connection {
     io: BufReader<Box<dyn Stream>>,
     control: Option<SocketControl>,
@@ -84,9 +84,9 @@ fn hs_write(s: &mut dyn Stream, b: &[u8]) -> Result<(), Error> {
 }
 
 impl Connection {
-    /// Apre il trasporto ed esegue l'handshake completo.
-    /// Le letture successive sono bloccanti; per interromperle da un altro
-    /// thread si chiude il socket (vedi [`crate::Session::stop`]).
+    /// Opens the transport and performs the full handshake.
+    /// Subsequent reads are blocking; to interrupt them from another
+    /// thread the socket is closed (see [`crate::Session::stop`]).
     pub fn connect(t: &Transport) -> Result<Self, Error> {
         let opened = transport::open(t)?;
         opened.control.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
@@ -96,8 +96,8 @@ impl Connection {
         Ok(c)
     }
 
-    /// Handshake su un flusso già aperto. `channel` descrive il trasporto reale
-    /// ed è deciso da chi apre il socket, mai dal server.
+    /// Handshake on an already open stream. `channel` describes the real transport
+    /// and is decided by whoever opens the socket, never by the server.
     pub(crate) fn handshake(
         mut s: Box<dyn Stream>,
         channel: ChannelKind,
@@ -108,7 +108,7 @@ impl Connection {
         let (major, minor) = parse_version(&ver)?;
         if (major, minor) < (3, 8) {
             return Err(Error::Unsupported(format!(
-                "versione RFB {major}.{minor} (richiesta 3.8)"
+                "RFB version {major}.{minor} (3.8 required)"
             )));
         }
         hs_write(&mut *s, b"RFB 003.008\n")?;
@@ -125,21 +125,21 @@ impl Connection {
             ChannelKind::PrivateUnixSocket => {
                 if !types.contains(&SEC_NONE) {
                     return Err(Error::Unsupported(format!(
-                        "tipi di sicurezza {types:?}: su socket Unix è previsto solo None"
+                        "security types {types:?}: only None is expected on a Unix socket"
                     )));
                 }
                 hs_write(&mut *s, &[SEC_NONE])?;
                 check_security_result(&mut s)?;
-                "None su socket Unix privato".to_owned()
+                "None on private Unix socket".to_owned()
             }
             ChannelKind::PlainTcp => {
                 if !types.contains(&SEC_VENCRYPT) {
                     return Err(Error::InsecureChannel(format!(
-                        "il server offre {types:?} su TCP senza VeNCrypt: None in chiaro rifiutato"
+                        "the server offers {types:?} on TCP without VeNCrypt: cleartext None refused"
                     )));
                 }
                 let tls = tls.ok_or_else(|| {
-                    Error::Config("VeNCrypt richiede la configurazione TLS".into())
+                    Error::Config("VeNCrypt requires the TLS configuration".into())
                 })?;
                 hs_write(&mut *s, &[SEC_VENCRYPT])?;
                 let vmaj = read_u8(&mut s)?;
@@ -149,7 +149,7 @@ impl Connection {
                 }
                 hs_write(&mut *s, &[0, 2])?;
                 if read_u8(&mut s)? != 0 {
-                    return Err(Error::Refused("versione VeNCrypt 0.2 rifiutata".into()));
+                    return Err(Error::Refused("VeNCrypt version 0.2 refused".into()));
                 }
                 let ns = read_u8(&mut s)?;
                 let mut subs = Vec::with_capacity(usize::from(ns));
@@ -158,12 +158,12 @@ impl Connection {
                 }
                 if !subs.contains(&VENCRYPT_X509NONE) {
                     return Err(Error::Unsupported(format!(
-                        "sottotipi VeNCrypt {subs:?}: richiesto X509None (260)"
+                        "VeNCrypt subtypes {subs:?}: X509None (260) required"
                     )));
                 }
                 hs_write(&mut *s, &VENCRYPT_X509NONE.to_be_bytes())?;
                 if read_u8(&mut s)? != 1 {
-                    return Err(Error::Refused("sottotipo X509None rifiutato".into()));
+                    return Err(Error::Refused("X509None subtype refused".into()));
                 }
                 let (tls_stream, info) = transport::tls_upgrade(s, tls)?;
                 s = tls_stream;
@@ -172,7 +172,7 @@ impl Connection {
             }
         };
 
-        // ClientInit: shared = 1 (non disconnette altri client).
+        // ClientInit: shared = 1 (does not disconnect other clients).
         hs_write(&mut *s, &[1])?;
         let mut io = BufReader::with_capacity(256 * 1024, s);
         let init = read_server_init(&mut io)?;
@@ -192,7 +192,7 @@ impl Connection {
         Ok(c)
     }
 
-    /// Unico percorso di scrittura dopo l'handshake.
+    /// The only write path after the handshake.
     fn send(&mut self, m: &ClientMessage) -> Result<(), Error> {
         let w = self.io.get_mut();
         w.write_all(&m.encode())?;
@@ -200,27 +200,27 @@ impl Connection {
         Ok(())
     }
 
-    /// Dati del ServerInit.
+    /// ServerInit data.
     pub fn server_init(&self) -> &ServerInit {
         &self.init
     }
 
-    /// Canale su cui è avvenuto l'handshake.
+    /// Channel on which the handshake took place.
     pub fn channel(&self) -> ChannelKind {
         self.channel
     }
 
-    /// Descrizione della sicurezza negoziata.
+    /// Description of the negotiated security.
     pub fn security(&self) -> &str {
         &self.security
     }
 
-    /// Framebuffer locale.
+    /// Local framebuffer.
     pub fn framebuffer(&self) -> &Framebuffer {
         &self.fb
     }
 
-    /// Contatori.
+    /// Counters.
     pub fn stats(&self) -> &ConnectionStats {
         &self.stats
     }
@@ -229,8 +229,8 @@ impl Connection {
         self.control.clone()
     }
 
-    /// Invia un FramebufferUpdateRequest: completo dopo connessione o
-    /// ridimensionamento, altrimenti incrementale.
+    /// Sends a FramebufferUpdateRequest: full after connection or
+    /// resize, incremental otherwise.
     pub fn request_update(&mut self) -> Result<(), Error> {
         let incremental = !self.pending_full;
         self.pending_full = false;
@@ -238,7 +238,7 @@ impl Connection {
         self.send(&ClientMessage::FramebufferUpdateRequest { incremental, rect })
     }
 
-    /// Legge messaggi dal server fino a un FramebufferUpdate e lo applica.
+    /// Reads messages from the server up to a FramebufferUpdate and applies it.
     pub fn read_update(&mut self) -> Result<UpdateSummary, Error> {
         loop {
             let t = read_u8(&mut self.io)?;
@@ -256,15 +256,15 @@ impl Connection {
                     skip(&mut self.io, 3)?;
                     let len = read_u32(&mut self.io)?;
                     if len > MAX_CUT_TEXT {
-                        return Err(Error::Protocol(format!("ServerCutText di {len} byte")));
+                        return Err(Error::Protocol(format!("ServerCutText of {len} bytes")));
                     }
-                    // Scartato: nessuna clipboard (ROADMAP 6.4, 7.2 punto 3).
+                    // Discarded: no clipboard (ROADMAP 6.4, 7.2 item 3).
                     skip(&mut self.io, u64::from(len))?;
                     self.stats.cut_text_discarded += 1;
                 }
                 other => {
                     return Err(Error::Unsupported(format!(
-                        "messaggio server di tipo {other}"
+                        "server message of type {other}"
                     )));
                 }
             }
@@ -284,7 +284,7 @@ impl Connection {
             let code = read_i32(&mut self.io)?;
             let rect = Rect::new(x, y, w, h);
             let enc = Encoding::from_code(code)
-                .ok_or_else(|| Error::Unsupported(format!("encoding {code} non annunciato")))?;
+                .ok_or_else(|| Error::Unsupported(format!("encoding {code} not announced")))?;
             self.stats.rects += 1;
             let idx = match enc {
                 Encoding::Raw => 0,
@@ -301,7 +301,7 @@ impl Connection {
                 Encoding::Zrle => decode::zrle(&mut self.io, &mut self.fb, rect, &mut self.zrle)?,
                 Encoding::DesktopSize => {
                     if w == 0 || h == 0 || w > MAX_DIMENSION || h > MAX_DIMENSION {
-                        return Err(Error::Protocol(format!("DesktopSize {w}x{h} non valido")));
+                        return Err(Error::Protocol(format!("invalid DesktopSize {w}x{h}")));
                     }
                     self.fb.resize(w, h);
                     self.init.width = w;
@@ -332,12 +332,7 @@ impl Connection {
 }
 
 fn parse_version(v: &[u8; 12]) -> Result<(u32, u32), Error> {
-    let bad = || {
-        Error::Protocol(format!(
-            "versione non valida: {:?}",
-            String::from_utf8_lossy(v)
-        ))
-    };
+    let bad = || Error::Protocol(format!("invalid version: {:?}", String::from_utf8_lossy(v)));
     if &v[0..4] != b"RFB " || v[7] != b'.' || v[11] != b'\n' {
         return Err(bad());
     }
@@ -353,7 +348,7 @@ fn parse_version(v: &[u8; 12]) -> Result<(u32, u32), Error> {
 fn check_security_result(s: &mut Box<dyn Stream>) -> Result<(), Error> {
     let r = read_u32(s)?;
     if r != 0 {
-        let reason = read_string(s, 4096).unwrap_or_else(|_| "nessun motivo".into());
+        let reason = read_string(s, 4096).unwrap_or_else(|_| "no reason".into());
         return Err(Error::Refused(format!("SecurityResult {r}: {reason}")));
     }
     Ok(())
@@ -365,7 +360,7 @@ mod tests {
     use std::io;
     use std::sync::{Arc, Mutex};
 
-    /// Flusso simulato: legge da un buffer preparato, registra ciò che il client scrive.
+    /// Simulated stream: reads from a prepared buffer, records what the client writes.
     struct Mock {
         input: io::Cursor<Vec<u8>>,
         written: Arc<Mutex<Vec<u8>>>,
@@ -408,28 +403,28 @@ mod tests {
         )
     }
 
-    /// Server che offre soltanto None su TCP in chiaro: il client rifiuta
-    /// senza scegliere alcun tipo di sicurezza.
+    /// Server that offers only None on cleartext TCP: the client refuses
+    /// without choosing any security type.
     #[test]
-    fn none_su_tcp_in_chiaro_rifiutato() {
+    fn none_on_cleartext_tcp_refused() {
         let mut input = b"RFB 003.008\n".to_vec();
         input.extend_from_slice(&[1, SEC_NONE]);
         let (s, written) = mock(input);
         let err = Connection::handshake(s, ChannelKind::PlainTcp, None).unwrap_err();
         assert!(matches!(err, Error::InsecureChannel(_)), "{err:?}");
-        // Il client ha scritto solo la propria versione, nessuna scelta di sicurezza.
+        // The client wrote only its own version, no security choice.
         assert_eq!(written.lock().unwrap().as_slice(), b"RFB 003.008\n");
     }
 
     #[test]
-    fn versione_precedente_alla_3_8_rifiutata() {
+    fn version_before_3_8_refused() {
         let (s, _) = mock(b"RFB 003.003\n".to_vec());
         let err = Connection::handshake(s, ChannelKind::PrivateUnixSocket, None).unwrap_err();
         assert!(matches!(err, Error::Unsupported(_)));
     }
 
     #[test]
-    fn vnc_auth_su_socket_unix_non_supportata() {
+    fn vnc_auth_on_unix_socket_unsupported() {
         let mut input = b"RFB 003.008\n".to_vec();
         input.extend_from_slice(&[1, 2]);
         let (s, _) = mock(input);
@@ -437,21 +432,21 @@ mod tests {
         assert!(matches!(err, Error::Unsupported(_)));
     }
 
-    /// Sessione completa simulata: handshake, aggiornamento Raw, DesktopSize,
-    /// ServerCutText e Bell. Tutti i byte scritti dal client dopo ClientInit
-    /// sono analizzati: devono essere solo messaggi di tipo 0, 2 e 3.
+    /// Full simulated session: handshake, Raw update, DesktopSize,
+    /// ServerCutText and Bell. All bytes written by the client after ClientInit
+    /// are parsed: they must be only messages of type 0, 2 and 3.
     #[test]
-    fn sessione_simulata_scrive_solo_tipi_0_2_3() {
+    fn simulated_session_writes_only_types_0_2_3() {
         let mut input = b"RFB 003.008\n".to_vec();
         input.extend_from_slice(&[1, SEC_NONE]);
         input.extend_from_slice(&0u32.to_be_bytes());
         input.extend_from_slice(&server_init(4, 2));
-        // ServerCutText "ciao" (deve essere scartato) e Bell.
+        // ServerCutText "ciao" (must be discarded) and Bell.
         input.extend_from_slice(&[3, 0, 0, 0]);
         input.extend_from_slice(&4u32.to_be_bytes());
         input.extend_from_slice(b"ciao");
         input.push(2);
-        // FramebufferUpdate: 1 rettangolo Raw 2x1 in (1,1).
+        // FramebufferUpdate: 1 Raw rectangle 2x1 at (1,1).
         input.extend_from_slice(&[0, 0, 0, 1]);
         for n in [1u16, 1, 2, 1] {
             input.extend_from_slice(&n.to_be_bytes());
@@ -483,7 +478,7 @@ mod tests {
         assert!(matches!(c.read_update(), Err(Error::Closed)));
 
         let w = written.lock().unwrap().clone();
-        // Versione, tipo di sicurezza None, ClientInit shared.
+        // Version, security type None, shared ClientInit.
         assert_eq!(&w[..14], b"RFB 003.008\n\x01\x01");
         let mut rest = &w[14..];
         let mut types = Vec::new();
@@ -498,20 +493,20 @@ mod tests {
                     requests.push((rest[1], u16::from_be_bytes([rest[6], rest[7]])));
                     10
                 }
-                other => panic!("il client ha scritto un messaggio di tipo {other}"),
+                other => panic!("the client wrote a message of type {other}"),
             };
             rest = &rest[len..];
         }
         assert!(types.iter().all(|t| CLIENT_TYPES.contains(t)));
         assert_eq!(types, vec![0, 2, 3, 3, 3]);
-        // Prima richiesta completa, poi incrementale, poi completa dopo il resize (larghezza 8).
+        // First request full, then incremental, then full after the resize (width 8).
         assert_eq!(requests, vec![(0, 4), (1, 4), (0, 8)]);
     }
 
     const CLIENT_TYPES: [u8; 3] = crate::CLIENT_MESSAGE_TYPES_SENT;
 
     #[test]
-    fn encoding_non_annunciato_rifiutato() {
+    fn unannounced_encoding_refused() {
         let mut input = b"RFB 003.008\n".to_vec();
         input.extend_from_slice(&[1, SEC_NONE]);
         input.extend_from_slice(&0u32.to_be_bytes());
@@ -520,7 +515,7 @@ mod tests {
         for n in [0u16, 0, 1, 1] {
             input.extend_from_slice(&n.to_be_bytes());
         }
-        input.extend_from_slice(&(-239i32).to_be_bytes()); // Cursor: non annunciato
+        input.extend_from_slice(&(-239i32).to_be_bytes()); // Cursor: not announced
         let (s, _) = mock(input);
         let mut c = Connection::handshake(s, ChannelKind::PrivateUnixSocket, None).unwrap();
         assert!(matches!(c.read_update(), Err(Error::Unsupported(_))));

@@ -1,18 +1,18 @@
-//! Layout su disco della radice del catalogo e lock di istanza singola.
+//! On-disk layout of the catalog root and single-instance lock.
 //!
 //! ```text
-//! <radice>/
-//!   catalog.sqlite3            database (WAL: anche -wal e -shm)
-//!   catalog.lock               lock esclusivo dell'istanza (sezione 6.1)
-//!   catalog.sqlite3.backup-v<N>-<UTC>   copie prima delle migrazioni
-//!   media/<media_id>.iso       copie gestite del registro media
-//!   vms/<vm_id>/manifest.json  manifest della VM
-//!   vms/<vm_id>/primary.qcow2  disco di lavoro
+//! <root>/
+//!   catalog.sqlite3            database (WAL: also -wal and -shm)
+//!   catalog.lock               exclusive instance lock (section 6.1)
+//!   catalog.sqlite3.backup-v<N>-<UTC>   copies taken before migrations
+//!   media/<media_id>.iso       managed copies of the media registry
+//!   vms/<vm_id>/manifest.json  VM manifest
+//!   vms/<vm_id>/primary.qcow2  working disk
 //!   vms/<vm_id>/base/<baseline_id>/{disk.qcow2,vars.fd,manifest.json}
 //!   vms/<vm_id>/overlays/<run_id>.qcow2
 //!   vms/<vm_id>/firmware/{primary.vars.fd,<run_id>.vars.fd}
 //!   runs/<run_id>/{artifacts,logs}/
-//!   tmp/                       temporanei del journal
+//!   tmp/                       journal temporary files
 //! ```
 
 use std::fs::{File, OpenOptions};
@@ -23,24 +23,24 @@ use crate::ids::{BaselineId, MediaId, RunId, VmId};
 use crate::paths::{ManagedPath, is_link, resolve_checked};
 use crate::time::UtcMillis;
 
-/// Nome del file di database.
+/// Name of the database file.
 pub const DB_FILE: &str = "catalog.sqlite3";
-/// Nome del file di lock.
+/// Name of the lock file.
 pub const LOCK_FILE: &str = "catalog.lock";
-/// Directory dei temporanei.
+/// Directory for temporary files.
 pub const TMP_DIR: &str = "tmp";
 
 const TOP_DIRS: &[&str] = &["media", "vms", "runs", TMP_DIR];
 
-/// Radice del catalogo con i percorsi canonici.
+/// Catalog root with the canonical paths.
 #[derive(Debug, Clone)]
 pub struct CatalogLayout {
     root: PathBuf,
 }
 
 impl CatalogLayout {
-    /// Prepara la radice (creandola se manca) e le directory di primo livello.
-    /// Rifiuta una radice o directory di primo livello che siano collegamenti.
+    /// Prepares the root (creating it if missing) and the top-level
+    /// directories. Rejects a root or top-level directory that is a link.
     pub fn prepare(root: &Path) -> Result<Self> {
         std::fs::create_dir_all(root).map_err(|e| StorageError::io(root, e))?;
         let meta = std::fs::symlink_metadata(root).map_err(|e| StorageError::io(root, e))?;
@@ -59,31 +59,31 @@ impl CatalogLayout {
         Ok(layout)
     }
 
-    /// Radice assoluta.
+    /// Absolute root.
     pub fn root(&self) -> &Path {
         &self.root
     }
 
-    /// Percorso del database.
+    /// Path of the database.
     pub fn db_path(&self) -> PathBuf {
         self.root.join(DB_FILE)
     }
 
-    /// Risolve un percorso gestito verificando l'assenza di collegamenti.
+    /// Resolves a managed path, checking that there are no links.
     pub fn resolve(&self, rel: &ManagedPath) -> Result<PathBuf> {
         resolve_checked(&self.root, rel)
     }
 
-    /// Converte un percorso assoluto (per esempio restituito da un altro
-    /// componente) nel percorso gestito corrispondente, rifiutando:
-    /// percorsi non assoluti o fuori dalla radice
-    /// ([`PathRejection::OutsideArea`]), componenti `..`/`.` o nomi non validi
-    /// (regole di [`ManagedPath::parse`]) e componenti esistenti che siano
-    /// collegamenti o reparse point ([`PathRejection::Link`]).
+    /// Converts an absolute path (for example one returned by another
+    /// component) into the corresponding managed path, rejecting: paths that
+    /// are not absolute or lie outside the root
+    /// ([`PathRejection::OutsideArea`]), `..`/`.` components or invalid names
+    /// (rules of [`ManagedPath::parse`]) and existing components that are
+    /// links or reparse points ([`PathRejection::Link`]).
     ///
-    /// Il confronto con la radice è per componenti e sensibile alle maiuscole:
-    /// una grafia diversa della radice è rifiutata (rifiuto in eccesso, mai
-    /// un'accettazione in eccesso).
+    /// The comparison with the root is per component and case-sensitive: a
+    /// different spelling of the root is rejected (over-rejection, never
+    /// over-acceptance).
     pub fn managed_from_absolute(&self, abs: &Path) -> Result<ManagedPath> {
         let label = abs.display().to_string();
         let outside = || StorageError::invalid_path(label.clone(), PathRejection::OutsideArea);
@@ -117,8 +117,8 @@ impl CatalogLayout {
         Ok(rel)
     }
 
-    /// Crea (se manca) una directory gestita, componente per componente,
-    /// rifiutando collegamenti esistenti.
+    /// Creates (if missing) a managed directory, component by component,
+    /// rejecting existing links.
     pub fn ensure_dir(&self, rel: &ManagedPath) -> Result<PathBuf> {
         let mut cur = self.root.clone();
         let mut acc = String::new();
@@ -136,10 +136,7 @@ impl CatalogLayout {
                 Ok(_) => {
                     return Err(StorageError::io(
                         &cur,
-                        std::io::Error::new(
-                            std::io::ErrorKind::AlreadyExists,
-                            "non è una directory",
-                        ),
+                        std::io::Error::new(std::io::ErrorKind::AlreadyExists, "not a directory"),
                     ));
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -204,10 +201,11 @@ impl CatalogLayout {
         ManagedPath::parse(&format!("media/{media}.{ext}"))
     }
 
-    /// Pulizia prudente di `tmp/`: rimuove soltanto file regolari direttamente
-    /// dentro `tmp/` con data di modifica anteriore a `started_at` e non in
-    /// `keep`. Non segue collegamenti, non scende nelle sottodirectory e non
-    /// tocca nulla fuori da `tmp/`; gli elementi saltati sono riportati.
+    /// Conservative cleanup of `tmp/`: removes only regular files directly
+    /// inside `tmp/` with a modification time earlier than `started_at` and
+    /// not in `keep`. Does not follow links, does not descend into
+    /// subdirectories and touches nothing outside `tmp/`; skipped entries are
+    /// reported.
     pub fn clean_tmp(&self, started_at: UtcMillis, keep: &[ManagedPath]) -> Result<TmpCleanup> {
         let tmp = self.resolve(&ManagedPath::parse(TMP_DIR)?)?;
         let mut report = TmpCleanup::default();
@@ -249,27 +247,27 @@ impl CatalogLayout {
 }
 
 fn mp(s: String) -> ManagedPath {
-    // Composti solo da costanti e UUID: sempre validi.
-    ManagedPath::parse(&s).unwrap_or_else(|e| unreachable!("percorso interno non valido: {e}"))
+    // Built only from constants and UUIDs: always valid.
+    ManagedPath::parse(&s).unwrap_or_else(|e| unreachable!("invalid internal path: {e}"))
 }
 
-/// Esito della pulizia di `tmp/`.
+/// Result of the `tmp/` cleanup.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct TmpCleanup {
-    /// File rimossi.
+    /// Files removed.
     pub removed: Vec<String>,
-    /// File recenti (non anteriori all'avvio) conservati.
+    /// Recent files (not older than startup) kept.
     pub kept_recent: Vec<String>,
-    /// Elementi saltati: collegamenti, directory, nomi non validi, file del journal aperto.
+    /// Skipped entries: links, directories, invalid names, files of the open journal.
     pub skipped: Vec<String>,
 }
 
-/// Lock esclusivo del catalogo (istanza singola, sezione 6.1).
+/// Exclusive catalog lock (single instance, section 6.1).
 ///
-/// Implementato con `File::try_lock` della libreria standard (`LockFileEx` su
-/// Windows, `flock` su Unix) su `catalog.lock`. Il lock è consultivo per gli
-/// altri processi che non lo usano e non protegge da un amministratore o da un
-/// processo dello stesso utente che ignori il protocollo.
+/// Implemented with the standard library's `File::try_lock` (`LockFileEx` on
+/// Windows, `flock` on Unix) on `catalog.lock`. The lock is advisory for other
+/// processes that do not use it and does not protect against an administrator
+/// or a process of the same user that ignores the protocol.
 #[derive(Debug)]
 pub struct CatalogLock {
     _file: File,
@@ -277,7 +275,7 @@ pub struct CatalogLock {
 }
 
 impl CatalogLock {
-    /// Acquisisce il lock senza attendere.
+    /// Acquires the lock without waiting.
     pub fn acquire(root: &Path) -> Result<Self> {
         let path = root.join(LOCK_FILE);
         let file = OpenOptions::new()
@@ -294,7 +292,7 @@ impl CatalogLock {
         }
     }
 
-    /// Percorso del file di lock.
+    /// Path of the lock file.
     pub fn path(&self) -> &Path {
         &self.path
     }

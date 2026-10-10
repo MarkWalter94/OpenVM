@@ -1,10 +1,10 @@
-//! Stabilità dei codici d'errore pubblici (ROADMAP 6.3).
+//! Stability of the public error codes (ROADMAP 6.3).
 
 use lightvm_proto::{ErrorCode, ProtocolError, ProtocolErrorCode, PublicError, ReplyError};
 use serde_json::json;
 
-/// Elenco congelato: modificare o riordinare le righe esistenti è un cambiamento
-/// incompatibile; i nuovi codici si aggiungono soltanto in coda.
+/// Frozen list: changing or reordering the existing rows is an incompatible
+/// change; new codes are only ever appended at the end.
 const FROZEN: [(ErrorCode, &str, bool); 10] = [
     (ErrorCode::PermissionDenied, "permission_denied", false),
     (ErrorCode::SessionExpired, "session_expired", false),
@@ -18,8 +18,8 @@ const FROZEN: [(ErrorCode, &str, bool); 10] = [
     (ErrorCode::Unauthenticated, "unauthenticated", false),
 ];
 
-/// Codici presenti nello schema committato `schema/error_code.json`: la tabella
-/// congelata, il tipo Rust e lo schema devono coincidere.
+/// Codes present in the committed schema `schema/error_code.json`: the frozen
+/// table, the Rust type and the schema must match.
 #[test]
 fn committed_error_code_schema_lists_every_code() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("schema/error_code.json");
@@ -53,10 +53,10 @@ fn collect_consts(v: &serde_json::Value, out: &mut Vec<String>) {
     }
 }
 
-/// Semantica di autenticazione e autorizzazione (documentata nel modulo
-/// `error` e in `docs/verification/F1-01-proto-core.md`): tre codici distinti,
-/// nessuno ritentabile automaticamente, e il codice operativo `unauthenticated`
-/// non è un codice di protocollo serializzato nella stessa famiglia.
+/// Authentication and authorization semantics (documented in the `error`
+/// module and in `docs/verification/F1-01-proto-core.md`): three distinct codes,
+/// none automatically retryable, and the operational code `unauthenticated`
+/// is not a protocol code serialized in the same family.
 #[test]
 fn authentication_codes_are_distinct_and_not_retryable() {
     let codes = [
@@ -67,18 +67,18 @@ fn authentication_codes_are_distinct_and_not_retryable() {
     for c in codes {
         assert!(!c.default_retryable(), "{c}");
     }
-    let e = PublicError::unauthenticated("credenziale non valida");
+    let e = PublicError::unauthenticated("invalid credential");
     assert_eq!(
         serde_json::to_value(&e).unwrap(),
-        json!({"code": "unauthenticated", "message": "credenziale non valida", "retryable": false})
+        json!({"code": "unauthenticated", "message": "invalid credential", "retryable": false})
     );
     let reply: ReplyError = e.into();
     assert_eq!(
         serde_json::to_value(&reply).unwrap()["kind"],
         json!("operational")
     );
-    // Lo stesso nome esiste anche tra i codici di protocollo (mantenuto per
-    // compatibilità, non emesso): le due famiglie restano separate dal `kind`.
+    // The same name also exists among the protocol codes (kept for
+    // compatibility, not emitted): the two families stay separated by `kind`.
     assert_eq!(
         ProtocolErrorCode::Unauthenticated.as_str(),
         "unauthenticated"
@@ -127,11 +127,11 @@ fn roadmap_codes_present() {
 
 #[test]
 fn public_error_wire_shape() {
-    let e = PublicError::vm_busy("operazione in corso").with_detail("vm", "x");
+    let e = PublicError::vm_busy("operation in progress").with_detail("vm", "x");
     let v = serde_json::to_value(&e).unwrap();
     assert_eq!(
         v,
-        json!({"code": "vm_busy", "message": "operazione in corso", "details": {"vm": "x"}, "retryable": true})
+        json!({"code": "vm_busy", "message": "operation in progress", "details": {"vm": "x"}, "retryable": true})
     );
     let plain = serde_json::to_value(PublicError::permission_denied("no")).unwrap();
     assert_eq!(
@@ -158,7 +158,7 @@ fn operational_and_protocol_errors_are_distinct() {
         serde_json::to_value(&proto).unwrap()["kind"],
         json!("protocol")
     );
-    // Un codice operativo non è accettato come codice di protocollo e viceversa.
+    // An operational code is not accepted as a protocol code and vice versa.
     assert!(serde_json::from_value::<ProtocolErrorCode>(json!("vm_busy")).is_err());
     assert!(serde_json::from_value::<ErrorCode>(json!("malformed_message")).is_err());
     let names: Vec<_> = ProtocolErrorCode::ALL.iter().map(|c| c.as_str()).collect();

@@ -1,19 +1,19 @@
-//! Client QMP asincrono su socket Unix (ROADMAP 6.3, 7.4; ADR-0012).
+//! Asynchronous QMP client over a Unix socket (ROADMAP 6.3, 7.4; ADR-0012).
 //!
-//! - Connessione AF_UNIX con `socket2` (su Windows `std::os::unix` non esiste;
-//!   F0-04 ha scelto `socket2`). QEMU serve un solo client QMP alla volta: il
-//!   backend è l'unico proprietario della connessione.
-//! - Greeting, `qmp_capabilities` con `oob` abilitato se offerto.
-//! - Ogni comando porta un `id` numerico; le risposte sono correlate per `id`
-//!   da un thread lettore dedicato, gli eventi vanno su un canale separato
+//! - AF_UNIX connection with `socket2` (on Windows `std::os::unix` does not exist;
+//!   F0-04 chose `socket2`). QEMU serves only one QMP client at a time: the
+//!   backend is the sole owner of the connection.
+//! - Greeting, `qmp_capabilities` with `oob` enabled if offered.
+//! - Every command carries a numeric `id`; responses are correlated by `id`
+//!   by a dedicated reader thread, events go on a separate channel
 //!   (`tokio::sync::broadcast`).
-//! - Timeout per comando; una risposta tardiva viene scartata.
-//! - Un solo handle del socket condiviso tra lettura, scrittura e chiusura,
-//!   letture bloccanti senza `SO_RCVTIMEO` dopo l'handshake (F0-04, punto 8:
-//!   dopo un timeout di ricezione il flusso Winsock può restare in uno stato
-//!   indeterminato).
-//! - Nessuna API pubblica esegue un comando QMP arbitrario: esistono soltanto
-//!   metodi tipizzati con argomenti costruiti dal backend.
+//! - Per-command timeout; a late response is discarded.
+//! - A single socket handle shared between reading, writing and closing,
+//!   blocking reads without `SO_RCVTIMEO` after the handshake (F0-04, point 8:
+//!   after a receive timeout the Winsock stream may remain in an
+//!   undefined state).
+//! - No public API runs an arbitrary QMP command: there are only
+//!   typed methods with arguments built by the backend.
 
 mod types;
 
@@ -36,16 +36,16 @@ pub use types::{
     QmpVersion, RunState, StatusInfo, VersionInfo,
 };
 
-/// Configurazione del client.
+/// Client configuration.
 #[derive(Clone, Debug)]
 pub struct QmpConfig {
-    /// Timeout predefinito per comando.
+    /// Default per-command timeout.
     pub command_timeout: Duration,
-    /// Timeout per greeting e negoziazione.
+    /// Timeout for greeting and negotiation.
     pub handshake_timeout: Duration,
-    /// Lunghezza massima di una riga QMP.
+    /// Maximum length of a QMP line.
     pub max_line_bytes: usize,
-    /// Capacità del canale degli eventi (gli abbonati lenti perdono eventi).
+    /// Capacity of the event channel (slow subscribers lose events).
     pub event_capacity: usize,
 }
 
@@ -60,14 +60,14 @@ impl Default for QmpConfig {
     }
 }
 
-/// Stato della connessione.
+/// Connection state.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConnectionState {
-    /// Negoziazione completata, comandi accettati.
+    /// Negotiation completed, commands accepted.
     Ready,
-    /// Connessione chiusa (da QEMU, per errore o localmente).
+    /// Connection closed (by QEMU, by error or locally).
     Closed {
-        /// Motivo.
+        /// Reason.
         reason: String,
     },
 }
@@ -83,7 +83,7 @@ struct Shared {
     events_tx: broadcast::Sender<QmpEvent>,
 }
 
-/// Identificativo riservato alla richiesta che sblocca il lettore in chiusura.
+/// Identifier reserved for the request that unblocks the reader on close.
 const CLOSE_NUDGE_ID: u64 = u64::MAX;
 
 struct SockReader(Arc<Shared>);
@@ -94,7 +94,7 @@ impl Read for SockReader {
     }
 }
 
-/// Client QMP. Unico proprietario della connessione con un processo QEMU.
+/// QMP client. Sole owner of the connection with a QEMU process.
 #[derive(Debug)]
 pub struct QmpClient {
     shared: Arc<Shared>,
@@ -106,8 +106,8 @@ pub struct QmpClient {
     cfg: QmpConfig,
 }
 
-/// Comandi QMP usati dal backend. Il tipo è privato: nessun chiamante esterno
-/// può comporre un comando.
+/// QMP commands used by the backend. The type is private: no external caller
+/// can compose a command.
 enum Cmd {
     QueryStatus,
     QueryAccelerators,
@@ -170,7 +170,7 @@ fn read_json_line<R: BufRead>(r: &mut R, max: usize) -> Result<Option<Value>, Qm
         }
         if buf.last() != Some(&b'\n') {
             if buf.len() > max {
-                return Err(QmpError::Protocol(format!("riga QMP oltre {max} byte")));
+                return Err(QmpError::Protocol(format!("QMP line over {max} bytes")));
             }
             return Ok(None);
         }
@@ -179,24 +179,24 @@ fn read_json_line<R: BufRead>(r: &mut R, max: usize) -> Result<Option<Value>, Qm
         }
         return serde_json::from_slice(&buf)
             .map(Some)
-            .map_err(|e| QmpError::Protocol(format!("JSON non valido: {e}")));
+            .map_err(|e| QmpError::Protocol(format!("invalid JSON: {e}")));
     }
 }
 
 impl QmpClient {
-    /// Si collega al socket QMP, legge il greeting e negozia le capacità.
+    /// Connects to the QMP socket, reads the greeting and negotiates the capabilities.
     pub async fn connect(socket: &ManagedPath, cfg: QmpConfig) -> Result<Self, QmpError> {
         let path = socket.as_path().to_owned();
         tokio::task::spawn_blocking(move || Self::connect_blocking(&path, cfg))
             .await
-            .map_err(|e| QmpError::Protocol(format!("task di connessione: {e}")))?
+            .map_err(|e| QmpError::Protocol(format!("connection task: {e}")))?
     }
 
     fn connect_blocking(path: &Path, cfg: QmpConfig) -> Result<Self, QmpError> {
         let sock = Socket::new(Domain::UNIX, Type::STREAM, None)?;
         sock.connect(&SockAddr::unix(path)?)?;
-        // Timeout di ricezione solo durante l'handshake; se scatta, la
-        // connessione viene abbandonata (F0-04, punto 8).
+        // Receive timeout only during the handshake; if it fires, the
+        // connection is abandoned (F0-04, point 8).
         sock.set_read_timeout(Some(cfg.handshake_timeout))?;
         sock.set_write_timeout(Some(cfg.handshake_timeout))?;
         let (state_tx, _) = watch::channel(ConnectionState::Ready);
@@ -238,7 +238,7 @@ impl QmpClient {
                 }
                 types::Incoming::Return { .. } => {
                     return Err(QmpError::Protocol(
-                        "risposta inattesa durante la negoziazione".into(),
+                        "unexpected response during negotiation".into(),
                     ));
                 }
             }
@@ -279,27 +279,27 @@ impl QmpClient {
         })
     }
 
-    /// Greeting ricevuto.
+    /// Received greeting.
     pub fn greeting(&self) -> &Greeting {
         &self.greeting
     }
 
-    /// `true` se la capacità `oob` è stata abilitata.
+    /// `true` if the `oob` capability was enabled.
     pub fn oob_enabled(&self) -> bool {
         self.oob
     }
 
-    /// Stato corrente della connessione.
+    /// Current connection state.
     pub fn state(&self) -> ConnectionState {
         self.shared.state_tx.borrow().clone()
     }
 
-    /// Osservatore dello stato della connessione.
+    /// Observer of the connection state.
     pub fn subscribe_state(&self) -> watch::Receiver<ConnectionState> {
         self.shared.state_tx.subscribe()
     }
 
-    /// Nuovo abbonamento agli eventi asincroni (riceve gli eventi successivi).
+    /// New subscription to asynchronous events (receives subsequent events).
     pub fn subscribe_events(&self) -> broadcast::Receiver<QmpEvent> {
         self.shared.events_tx.subscribe()
     }
@@ -346,12 +346,12 @@ impl QmpClient {
         types::parse_status(self.execute(Cmd::QueryStatus, None).await?)
     }
 
-    /// `query-status` con timeout esplicito (riconciliazione dello stato).
+    /// `query-status` with an explicit timeout (state reconciliation).
     pub async fn query_status_within(&self, timeout: Duration) -> Result<StatusInfo, QmpError> {
         types::parse_status(self.execute(Cmd::QueryStatus, Some(timeout)).await?)
     }
 
-    /// `query-accelerators` (verifica dell'acceleratore attivo, ADR-0007).
+    /// `query-accelerators` (verification of the active accelerator, ADR-0007).
     pub async fn query_accelerators(&self) -> Result<AcceleratorsInfo, QmpError> {
         types::parse_accelerators(self.execute(Cmd::QueryAccelerators, None).await?)
     }
@@ -361,9 +361,9 @@ impl QmpClient {
         types::parse_version(self.execute(Cmd::QueryVersion, None).await?)
     }
 
-    /// Macchina corrente. `query-current-machine` di QEMU 11.1 non riporta il
-    /// nome (F0-02 4.1): il nome si legge con `qom-get /machine type` e si
-    /// restituisce soltanto la voce corrispondente di `query-machines`.
+    /// Current machine. `query-current-machine` of QEMU 11.1 does not report the
+    /// name (F0-02 4.1): the name is read with `qom-get /machine type` and only
+    /// the matching entry of `query-machines` is returned.
     pub async fn query_current_machine(&self) -> Result<CurrentMachine, QmpError> {
         let ty = self.execute(Cmd::QomGetMachineType, None).await?;
         let name = types::machine_name_from_qom_type(&ty)?;
@@ -376,23 +376,23 @@ impl QmpClient {
         types::parse_name(self.execute(Cmd::QueryName, None).await?)
     }
 
-    /// Diagnostica: testo di `info network` tramite `human-monitor-command`.
-    /// Uso riservato alla diagnostica e alla verifica di assenza di NIC; il
-    /// comando HMP è fisso.
+    /// Diagnostics: text of `info network` via `human-monitor-command`.
+    /// Reserved for diagnostics and for verifying the absence of NICs; the
+    /// HMP command is fixed.
     pub async fn network_diagnostics(&self) -> Result<String, QmpError> {
         let v = self.execute(Cmd::HmpInfoNetwork, None).await?;
         v.as_str()
             .map(str::to_owned)
-            .ok_or_else(|| QmpError::Protocol("info network: risposta non testuale".into()))
+            .ok_or_else(|| QmpError::Protocol("info network: non-text response".into()))
     }
 
-    /// Dispositivi PCI di classe rete (`query-pci`).
+    /// PCI devices of the network class (`query-pci`).
     pub async fn pci_network_devices(&self) -> Result<Vec<PciNetworkDevice>, QmpError> {
         let v = self.execute(Cmd::QueryPci, None).await?;
         types::pci_network_devices(&v)
     }
 
-    /// `system_powerdown` (richiesta ACPI; il guest può ignorarla).
+    /// `system_powerdown` (ACPI request; the guest may ignore it).
     pub async fn system_powerdown(&self) -> Result<(), QmpError> {
         self.execute(Cmd::SystemPowerdown, None).await.map(drop)
     }
@@ -402,7 +402,7 @@ impl QmpClient {
         self.execute(Cmd::SystemReset, None).await.map(drop)
     }
 
-    /// `quit`. La chiusura del canale subito dopo il comando è un successo.
+    /// `quit`. The channel closing right after the command is a success.
     pub async fn quit(&self) -> Result<(), QmpError> {
         match self.execute(Cmd::Quit, None).await {
             Ok(_) | Err(QmpError::Disconnected) => Ok(()),
@@ -410,14 +410,14 @@ impl QmpClient {
         }
     }
 
-    /// `system_powerdown` con timeout esplicito (scalata dell'arresto).
+    /// `system_powerdown` with an explicit timeout (shutdown escalation).
     pub async fn system_powerdown_within(&self, timeout: Duration) -> Result<(), QmpError> {
         self.execute(Cmd::SystemPowerdown, Some(timeout))
             .await
             .map(drop)
     }
 
-    /// `quit` con timeout esplicito (scalata dell'arresto).
+    /// `quit` with an explicit timeout (shutdown escalation).
     pub async fn quit_within(&self, timeout: Duration) -> Result<(), QmpError> {
         match self.execute(Cmd::Quit, Some(timeout)).await {
             Ok(_) | Err(QmpError::Disconnected) => Ok(()),
@@ -425,13 +425,13 @@ impl QmpClient {
         }
     }
 
-    /// `cont`: avvia le vCPU dopo `-S` (usato dal backend dopo le verifiche).
+    /// `cont`: starts the vCPUs after `-S` (used by the backend after the checks).
     pub(crate) async fn cont(&self) -> Result<(), QmpError> {
         self.execute(Cmd::Cont, None).await.map(drop)
     }
 
-    /// `screendump` in PPM verso un file scelto dal backend nella directory
-    /// privata (mai un percorso del client).
+    /// `screendump` as PPM to a file chosen by the backend in the private
+    /// directory (never a client path).
     pub(crate) async fn screendump_ppm(
         &self,
         file: &ManagedPath,
@@ -447,9 +447,9 @@ impl QmpClient {
         .map(drop)
     }
 
-    /// `input-send-event` con eventi tipizzati già validati da
-    /// [`crate::input::validate_events`] (coordinate assolute 0..=32767).
-    /// Nessuna ripetizione automatica dopo un timeout (ROADMAP 6.3).
+    /// `input-send-event` with typed events already validated by
+    /// [`crate::input::validate_events`] (absolute coordinates 0..=32767).
+    /// No automatic retry after a timeout (ROADMAP 6.3).
     pub(crate) async fn input_send_event(&self, events: &[InputEvent]) -> Result<(), QmpError> {
         if events.is_empty() {
             return Ok(());
@@ -460,9 +460,9 @@ impl QmpClient {
             .map(drop)
     }
 
-    /// Chiusura pulita senza arrestare QEMU: blocca nuovi comandi, provoca una
-    /// risposta per sbloccare il lettore, chiude il lato di scrittura e attende
-    /// al massimo `wait` la fine del thread lettore.
+    /// Clean close without stopping QEMU: blocks new commands, triggers a
+    /// response to unblock the reader, closes the write side and waits
+    /// at most `wait` for the reader thread to end.
     pub async fn close(&self, wait: Duration) {
         self.begin_close();
         let done = lock(&self.reader_done).take();
@@ -479,8 +479,8 @@ impl QmpClient {
         if let Some(w) = lock(&self.writer_tx).take() {
             let _ = w.send(nudge.into_bytes());
         }
-        // Il thread di scrittura termina dopo aver svuotato la coda; lo
-        // shutdown del lato di scrittura fa chiudere la connessione a QEMU.
+        // The writer thread ends after draining the queue; the
+        // shutdown of the write side makes QEMU close the connection.
         let shared = self.shared.clone();
         let _ = std::thread::Builder::new()
             .name("qmp-close".into())
@@ -505,7 +505,7 @@ fn reader_loop<R: BufRead>(shared: &Shared, reader: &mut R, max: usize) -> Strin
     loop {
         let v = match read_json_line(reader, max) {
             Ok(Some(v)) => v,
-            Ok(None) => return "connessione chiusa da QEMU".into(),
+            Ok(None) => return "connection closed by QEMU".into(),
             Err(e) => return e.to_string(),
         };
         match types::classify(v) {
@@ -533,7 +533,7 @@ fn reader_loop<R: BufRead>(shared: &Shared, reader: &mut R, max: usize) -> Strin
                     }));
                 }
             }
-            // Risposte senza `id` non sono correlabili: scartate.
+            // Responses without `id` cannot be correlated: discarded.
             Ok(_) => {}
             Err(e) => return e.to_string(),
         }
@@ -560,7 +560,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn righe_json() {
+    fn json_lines() {
         let mut r = BufReader::new(&b"\r\n{\"a\": 1}\r\n{\"b\": 2}\n"[..]);
         assert_eq!(read_json_line(&mut r, 1024).unwrap().unwrap()["a"], 1);
         assert_eq!(read_json_line(&mut r, 1024).unwrap().unwrap()["b"], 2);

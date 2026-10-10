@@ -1,36 +1,36 @@
-//! Validazione della grammatica delle opzioni QEMU (ROADMAP 6.3).
+//! Validation of the QEMU option grammar (ROADMAP 6.3).
 //!
-//! Lo spawn senza shell non basta: QEMU interpreta a sua volta i valori delle
-//! opzioni `chiave=valore,chiave=valore` (QemuOpts/keyval) e i prefissi come
-//! `unix:`. Regole applicate:
+//! Spawning without a shell is not enough: QEMU itself interprets the values of
+//! `key=value,key=value` options (QemuOpts/keyval) and prefixes such as
+//! `unix:`. Rules applied:
 //!
-//! - i valori testuali che entrano in un'opzione (nome macchina, modello CPU,
-//!   identificativi) sono **token** di un alfabeto chiuso `[A-Za-z0-9._-]`, non
-//!   vuoti, lunghi al massimo [`TOKEN_MAX_LEN`] e mai inizianti con `-`;
-//! - qualunque valore che entra in un'opzione separata da virgole o `=` viene
-//!   rifiutato se contiene `,`, `=`, `:` o caratteri di controllo
+//! - text values that go into an option (machine name, CPU model,
+//!   identifiers) are **tokens** of a closed alphabet `[A-Za-z0-9._-]`, non
+//!   empty, at most [`TOKEN_MAX_LEN`] long and never starting with `-`;
+//! - any value that goes into an option separated by commas or `=` is
+//!   rejected if it contains `,`, `=`, `:` or control characters
 //!   ([`check_option_value`]);
-//! - i percorsi seguono [`qemu_path_value`]: assoluti, separatori `/`, l'unico
-//!   `:` ammesso è quello della lettera di unità su Windows.
+//! - paths follow [`qemu_path_value`]: absolute, `/` separators, the only
+//!   `:` allowed is the drive letter one on Windows.
 
 use crate::error::{BackendError, Result};
 
-/// Lunghezza massima di un token.
+/// Maximum length of a token.
 pub const TOKEN_MAX_LEN: usize = 64;
 
-/// Verifica che `s` sia un token: `[A-Za-z0-9._-]{1,64}`, primo carattere non `-`.
+/// Verifies that `s` is a token: `[A-Za-z0-9._-]{1,64}`, first character not `-`.
 pub fn check_token(field: &'static str, s: &str) -> Result<()> {
     if s.is_empty() {
-        return Err(BackendError::invalid(field, "valore vuoto"));
+        return Err(BackendError::invalid(field, "empty value"));
     }
     if s.len() > TOKEN_MAX_LEN {
         return Err(BackendError::invalid(
             field,
-            format!("più di {TOKEN_MAX_LEN} caratteri"),
+            format!("more than {TOKEN_MAX_LEN} characters"),
         ));
     }
     if s.starts_with('-') {
-        return Err(BackendError::invalid(field, "inizia con `-`"));
+        return Err(BackendError::invalid(field, "starts with `-`"));
     }
     if let Some(c) = s
         .chars()
@@ -38,17 +38,17 @@ pub fn check_token(field: &'static str, s: &str) -> Result<()> {
     {
         return Err(BackendError::invalid(
             field,
-            format!("carattere {c:?} non ammesso (alfabeto [A-Za-z0-9._-])"),
+            format!("character {c:?} not allowed (alphabet [A-Za-z0-9._-])"),
         ));
     }
     Ok(())
 }
 
-/// Rifiuta un valore destinato a un'opzione separata da virgole o `=` se
-/// contiene `,`, `=`, `:` o caratteri di controllo.
+/// Rejects a value meant for an option separated by commas or `=` if it
+/// contains `,`, `=`, `:` or control characters.
 pub fn check_option_value(field: &'static str, s: &str) -> Result<()> {
     if s.is_empty() {
-        return Err(BackendError::invalid(field, "valore vuoto"));
+        return Err(BackendError::invalid(field, "empty value"));
     }
     if let Some(c) = s
         .chars()
@@ -56,22 +56,22 @@ pub fn check_option_value(field: &'static str, s: &str) -> Result<()> {
     {
         return Err(BackendError::invalid(
             field,
-            format!("carattere {c:?} non ammesso nelle opzioni QEMU"),
+            format!("character {c:?} not allowed in QEMU options"),
         ));
     }
     Ok(())
 }
 
-/// Protocolli di blocco ammessi nel comando QEMU (ADR-0004, ADR-0010): solo
-/// file locali.
+/// Block protocols allowed in the QEMU command (ADR-0004, ADR-0010): local
+/// files only.
 pub const ALLOWED_BLOCK_PROTOCOLS: &[&str] = &["file"];
 
-/// Driver di blocco remoti presenti nella build QEMU 11.1.0 per Windows
-/// (F0-02 §3) e sempre rifiutati.
+/// Remote block drivers present in the QEMU 11.1.0 build for Windows
+/// (F0-02 §3) and always rejected.
 pub const REMOTE_BLOCK_PROTOCOLS: &[&str] = &["http", "https", "ftp", "ftps", "nfs", "ssh", "nbd"];
 
-/// Verifica che `name` sia un protocollo di blocco ammesso e restituisce il
-/// nome canonico. I driver remoti hanno un messaggio dedicato.
+/// Verifies that `name` is an allowed block protocol and returns the
+/// canonical name. Remote drivers get a dedicated message.
 pub fn check_block_protocol(name: &str) -> Result<&'static str> {
     if let Some(p) = ALLOWED_BLOCK_PROTOCOLS.iter().find(|p| **p == name) {
         return Ok(p);
@@ -79,52 +79,52 @@ pub fn check_block_protocol(name: &str) -> Result<&'static str> {
     if REMOTE_BLOCK_PROTOCOLS.contains(&name) {
         return Err(BackendError::invalid(
             "block_protocol",
-            format!("protocollo remoto `{name}` escluso dal profilo offline"),
+            format!("remote protocol `{name}` excluded by the offline profile"),
         ));
     }
     Err(BackendError::invalid(
         "block_protocol",
-        "protocollo di blocco non in allowlist (ammesso solo `file`)",
+        "block protocol not in the allowlist (only `file` is allowed)",
     ))
 }
 
-/// Lunghezza massima del percorso di un socket Unix (`sun_path`, 108 byte con
-/// il terminatore su Windows e Linux).
+/// Maximum length of a Unix socket path (`sun_path`, 108 bytes including
+/// the terminator on Windows and Linux).
 pub const UNIX_SOCKET_PATH_MAX: usize = 107;
 
-/// Caratteri vietati in un percorso passato a QEMU, oltre ai caratteri di
-/// controllo: separatori di opzione, prefissi di protocollo, metacaratteri e
-/// caratteri non validi nei nomi di file Windows.
+/// Characters forbidden in a path passed to QEMU, besides control
+/// characters: option separators, protocol prefixes, metacharacters and
+/// characters not valid in Windows file names.
 const PATH_FORBIDDEN: &[char] = &[',', '=', ':', '"', '\'', '?', '*', '<', '>', '|', '\\'];
 
-/// Converte un percorso assoluto nella forma usata nelle opzioni QEMU e la
-/// valida. Su Windows: `X:/a/b` (lettera di unità, separatori `/`); altrove
-/// `/a/b`. Rifiuta componenti vuoti, `.` e `..`, prefissi UNC o di dispositivo
-/// e ogni carattere di [`PATH_FORBIDDEN`] fuori dalla lettera di unità.
+/// Converts an absolute path to the form used in the QEMU options and
+/// validates it. On Windows: `X:/a/b` (drive letter, `/` separators); elsewhere
+/// `/a/b`. Rejects empty components, `.` and `..`, UNC or device prefixes
+/// and every character of [`PATH_FORBIDDEN`] outside the drive letter.
 pub fn qemu_path_value(field: &'static str, raw: &str) -> Result<String> {
     if raw.chars().any(char::is_control) {
         return Err(BackendError::invalid(
             field,
-            "carattere di controllo nel percorso",
+            "control character in the path",
         ));
     }
     let unified = raw.replace('\\', "/");
     let (prefix, rest) = split_root(field, &unified)?;
     if rest.is_empty() {
-        return Err(BackendError::invalid(field, "il percorso è una radice"));
+        return Err(BackendError::invalid(field, "the path is a root"));
     }
     for comp in rest.split('/') {
         match comp {
             "" => {
                 return Err(BackendError::invalid(
                     field,
-                    "componente vuoto (separatori doppi o finali)",
+                    "empty component (double or trailing separators)",
                 ));
             }
             "." | ".." => {
                 return Err(BackendError::invalid(
                     field,
-                    "componenti `.` o `..` non ammessi",
+                    "`.` or `..` components not allowed",
                 ));
             }
             _ => {}
@@ -132,13 +132,13 @@ pub fn qemu_path_value(field: &'static str, raw: &str) -> Result<String> {
         if let Some(c) = comp.chars().find(|c| PATH_FORBIDDEN.contains(c)) {
             return Err(BackendError::invalid(
                 field,
-                format!("carattere {c:?} non ammesso nel percorso"),
+                format!("character {c:?} not allowed in the path"),
             ));
         }
         if comp.ends_with(' ') || comp.ends_with('.') {
             return Err(BackendError::invalid(
                 field,
-                "componente che termina con spazio o punto",
+                "component ending with a space or a dot",
             ));
         }
     }
@@ -151,7 +151,7 @@ fn split_root<'a>(field: &'static str, p: &'a str) -> Result<(String, &'a str)> 
     if p.starts_with("//") {
         return Err(BackendError::invalid(
             field,
-            "percorsi UNC o di dispositivo non ammessi",
+            "UNC or device paths not allowed",
         ));
     }
     if b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'/' {
@@ -160,18 +160,18 @@ fn split_root<'a>(field: &'static str, p: &'a str) -> Result<(String, &'a str)> 
     }
     Err(BackendError::invalid(
         field,
-        "atteso un percorso assoluto con lettera di unità (X:\\...)",
+        "expected an absolute path with a drive letter (X:\\...)",
     ))
 }
 
 #[cfg(not(windows))]
 fn split_root<'a>(field: &'static str, p: &'a str) -> Result<(String, &'a str)> {
     if p.starts_with("//") {
-        return Err(BackendError::invalid(field, "doppio separatore iniziale"));
+        return Err(BackendError::invalid(field, "double leading separator"));
     }
     match p.strip_prefix('/') {
         Some(rest) => Ok(("/".to_owned(), rest)),
-        None => Err(BackendError::invalid(field, "atteso un percorso assoluto")),
+        None => Err(BackendError::invalid(field, "expected an absolute path")),
     }
 }
 
@@ -200,11 +200,11 @@ mod tests {
     }
 
     #[test]
-    fn protocolli_di_blocco() {
+    fn block_protocols() {
         assert_eq!(check_block_protocol("file").unwrap(), "file");
         for p in REMOTE_BLOCK_PROTOCOLS {
             let e = check_block_protocol(p).unwrap_err().to_string();
-            assert!(e.contains("remoto"), "{p}: {e}");
+            assert!(e.contains("remote"), "{p}: {e}");
         }
         for p in ["vvfat", "host_device", "FILE", "file,x", "", "iscsi"] {
             assert!(check_block_protocol(p).is_err(), "{p:?}");
@@ -212,7 +212,7 @@ mod tests {
     }
 
     #[test]
-    fn valore_opzione() {
+    fn option_value() {
         assert!(check_option_value("v", "abc").is_ok());
         for bad in ["a,b", "a=b", "a:b", "a\u{0}b", "a\tb", ""] {
             assert!(check_option_value("v", bad).is_err(), "{bad:?}");
@@ -221,7 +221,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn percorsi_windows() {
+    fn windows_paths() {
         assert_eq!(
             qemu_path_value("p", r"e:\OpenVM\lab\vms\a b\x.qcow2").unwrap(),
             "E:/OpenVM/lab/vms/a b/x.qcow2"
@@ -251,7 +251,7 @@ mod tests {
 
     #[cfg(not(windows))]
     #[test]
-    fn percorsi_unix() {
+    fn unix_paths() {
         assert_eq!(qemu_path_value("p", "/srv/a b/x").unwrap(), "/srv/a b/x");
         for bad in ["rel/x", "//x", "/a/../b", "/a,b", "/a:b", "/"] {
             assert!(qemu_path_value("p", bad).is_err(), "{bad:?}");

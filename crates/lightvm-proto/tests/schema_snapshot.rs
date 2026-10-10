@@ -1,5 +1,5 @@
-//! Snapshot degli schemi: i file in `schema/` devono coincidere con quelli
-//! generati. Per rigenerarli: `LIGHTVM_UPDATE_SCHEMAS=1 cargo test -p lightvm-proto --test schema_snapshot`.
+//! Schema snapshot: the files in `schema/` must match the generated
+//! ones. To regenerate them: `LIGHTVM_UPDATE_SCHEMAS=1 cargo test -p lightvm-proto --test schema_snapshot`.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -22,15 +22,15 @@ fn committed_schemas_match_generated() {
         let generated = render(&schema);
         expected_files.insert(file.clone());
         if update {
-            std::fs::create_dir_all(&dir).expect("creazione directory schema");
-            std::fs::write(&path, &generated).expect("scrittura schema");
+            std::fs::create_dir_all(&dir).expect("creating schema directory");
+            std::fs::write(&path, &generated).expect("writing schema");
             continue;
         }
         match std::fs::read_to_string(&path) {
-            // Normalizza CRLF eventualmente introdotti dal checkout su Windows.
+            // Normalize CRLF possibly introduced by the checkout on Windows.
             Ok(committed) if committed.replace("\r\n", "\n") == generated => {}
-            Ok(_) => mismatches.push(format!("{file}: diverso dal generato")),
-            Err(_) => mismatches.push(format!("{file}: mancante")),
+            Ok(_) => mismatches.push(format!("{file}: differs from the generated one")),
+            Err(_) => mismatches.push(format!("{file}: missing")),
         }
     }
     let on_disk: BTreeSet<String> = std::fs::read_dir(&dir)
@@ -42,11 +42,11 @@ fn committed_schemas_match_generated() {
         })
         .unwrap_or_default();
     for extra in on_disk.difference(&expected_files) {
-        mismatches.push(format!("{extra}: file non più generato"));
+        mismatches.push(format!("{extra}: file no longer generated"));
     }
     assert!(
         mismatches.is_empty(),
-        "schemi non allineati (rigenerare con LIGHTVM_UPDATE_SCHEMAS=1):\n{}",
+        "schemas out of sync (regenerate with LIGHTVM_UPDATE_SCHEMAS=1):\n{}",
         mismatches.join("\n")
     );
 }
@@ -70,14 +70,17 @@ fn schema_names_are_unique_and_generation_is_deterministic() {
 fn internal_types_have_no_public_schema() {
     for (name, schema) in public_schemas() {
         let text = render(&schema);
-        assert!(!text.contains("managed_path"), "{name} espone managed_path");
+        assert!(
+            !text.contains("managed_path"),
+            "{name} exposes managed_path"
+        );
         assert!(
             !text.contains("ManagedRelPath"),
-            "{name} espone ManagedRelPath"
+            "{name} exposes ManagedRelPath"
         );
         assert!(
             !text.contains("file_identity"),
-            "{name} espone file_identity"
+            "{name} exposes file_identity"
         );
     }
 }

@@ -1,17 +1,17 @@
-//! Registro delle sessioni agente (ROADMAP 7.3, 9).
+//! Registry of agent sessions (ROADMAP 7.3, 9).
 //!
-//! Il grant e il lease sono verificati dal core (cioè dal supervisor), mai dal
-//! client. Una sessione terminata non torna attiva: la ripresa dell'agente
-//! richiede una nuova autorizzazione.
+//! The grant and the lease are checked by the core (i.e. by the supervisor), never by
+//! the client. A terminated session does not become active again: resuming the agent
+//! requires a new authorization.
 //!
-//! Codici dei dinieghi (semantica in `lightvm_proto::ErrorCode`):
-//! - `unauthenticated`: token assente, sessione sconosciuta, token errato,
-//!   sessione terminata per revoca, Emergency Stop, perdita del client, chiusura
-//!   UI, ripresa dell'host, ripristino o qualunque causa diversa dalla scadenza;
-//!   token riusato dopo un riavvio del supervisor (nessuna sessione sopravvive);
-//! - `session_expired`: grant o lease scaduti (anche dopo la terminazione per scadenza);
-//! - `permission_denied`: sessione valida ma VM fuori allowlist, capability non
-//!   concessa o mutazione durante la pausa.
+//! Denial codes (semantics in `lightvm_proto::ErrorCode`):
+//! - `unauthenticated`: missing token, unknown session, wrong token,
+//!   session terminated by revocation, Emergency Stop, client loss, UI
+//!   close, host resume, restore or any cause other than expiry;
+//!   token reused after a supervisor restart (no session survives);
+//! - `session_expired`: grant or lease expired (also after termination by expiry);
+//! - `permission_denied`: valid session but VM outside the allowlist, capability not
+//!   granted or mutation while paused.
 
 use std::collections::BTreeMap;
 
@@ -20,11 +20,11 @@ use lightvm_proto::{
     SessionToken, TerminationCause, UtcTimestamp, VmId,
 };
 
-/// Messaggio unico per ogni diniego `unauthenticated` di una sessione agente.
-pub const UNAUTHENTICATED_MESSAGE: &str = "credenziale di sessione non valida";
+/// Single message for every `unauthenticated` denial of an agent session.
+pub const UNAUTHENTICATED_MESSAGE: &str = "invalid session credential";
 
-/// Codice con cui si scartano le operazioni non inoltrate di una sessione
-/// terminata con la causa data: lo stesso che darebbe la seconda verifica.
+/// Code with which the non-forwarded operations of a session terminated with
+/// the given cause are discarded: the same the second check would give.
 #[must_use]
 pub fn discard_code_for(cause: TerminationCause) -> lightvm_proto::ErrorCode {
     match cause {
@@ -35,45 +35,45 @@ pub fn discard_code_for(cause: TerminationCause) -> lightvm_proto::ErrorCode {
     }
 }
 
-/// Contatori di consumo delle quote.
+/// Quota consumption counters.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SessionUsage {
-    /// Operazioni accettate.
+    /// Accepted operations.
     pub operations: u32,
-    /// Eventi di input accettati.
+    /// Accepted input events.
     pub input_events: u32,
-    /// Screenshot accettati.
+    /// Accepted screenshots.
     pub screenshots: u32,
 }
 
-/// Sessione agente in memoria del supervisor.
+/// Agent session in the supervisor's memory.
 #[derive(Clone, Debug)]
 pub struct Session {
-    /// Identificativo.
+    /// Identifier.
     pub id: SessionId,
     token: SessionToken,
-    /// Grant emesso.
+    /// Issued grant.
     pub grant: Grant,
-    /// Lease corrente.
+    /// Current lease.
     pub lease: Lease,
-    /// Stato.
+    /// State.
     pub state: SessionState,
-    /// Causa di terminazione, se terminata.
+    /// Termination cause, if terminated.
     pub termination: Option<TerminationCause>,
-    /// Istante di creazione.
+    /// Creation instant.
     pub created_at: UtcTimestamp,
-    /// Consumo delle quote.
+    /// Quota consumption.
     pub usage: SessionUsage,
 }
 
 impl Session {
-    /// `true` se il token presentato corrisponde (confronto a tempo costante).
+    /// `true` if the presented token matches (constant-time comparison).
     #[must_use]
     pub fn token_matches(&self, presented: &SessionToken) -> bool {
         self.token.ct_eq(presented)
     }
 
-    /// Motivo di scadenza all'istante `now`, se scaduta.
+    /// Expiry reason at instant `now`, if expired.
     #[must_use]
     pub fn expiry_at(&self, now: UtcTimestamp) -> Option<TerminationCause> {
         if now >= self.grant.expires_at {
@@ -86,29 +86,29 @@ impl Session {
     }
 }
 
-/// Richiesta di creazione di una sessione, approvata dall'utente nell'app.
+/// Session creation request, approved by the user in the app.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionSpec {
-    /// VM ammesse.
+    /// Allowed VMs.
     pub vm_allowlist: std::collections::BTreeSet<VmId>,
-    /// Capability concesse.
+    /// Granted capabilities.
     pub capabilities: lightvm_proto::CapabilitySet,
-    /// Quote concesse.
+    /// Granted quotas.
     pub quotas: Quotas,
-    /// Scadenza assoluta del grant.
+    /// Absolute expiry of the grant.
     pub expires_at: UtcTimestamp,
-    /// Durata del lease in ms (1..=10000).
+    /// Lease duration in ms (1..=10000).
     pub lease_millis: i64,
 }
 
-/// Registro delle sessioni.
+/// Session registry.
 #[derive(Clone, Debug, Default)]
 pub struct SessionRegistry {
     sessions: BTreeMap<SessionId, Session>,
 }
 
 impl SessionRegistry {
-    /// Sessione per id.
+    /// Session by id.
     #[must_use]
     pub fn get(&self, id: SessionId) -> Option<&Session> {
         self.sessions.get(&id)
@@ -118,14 +118,14 @@ impl SessionRegistry {
         self.sessions.get_mut(&id)
     }
 
-    /// Sessioni non terminate.
+    /// Non-terminated sessions.
     pub fn live(&self) -> impl Iterator<Item = &Session> {
         self.sessions
             .values()
             .filter(|s| s.state != SessionState::Terminated)
     }
 
-    /// Tutte le sessioni registrate (incluse le terminate, per i report).
+    /// All registered sessions (including terminated ones, for reports).
     pub fn all(&self) -> impl Iterator<Item = &Session> {
         self.sessions.values()
     }
@@ -153,8 +153,8 @@ impl SessionRegistry {
         );
     }
 
-    /// Verifica pura di una chiamata: token, stato, scadenze, allowlist, pausa.
-    /// La capability rispetto alla policy effettiva è verificata dal chiamante.
+    /// Pure check of a call: token, state, expiries, allowlist, pause.
+    /// The capability against the effective policy is checked by the caller.
     pub(crate) fn check(
         &self,
         id: SessionId,
@@ -163,9 +163,9 @@ impl SessionRegistry {
         capability: Capability,
         now: UtcTimestamp,
     ) -> Result<(), PublicError> {
-        // Token assente, sessione inesistente, token errato e sessione terminata
-        // (non per scadenza) danno lo stesso codice e lo stesso messaggio: il
-        // client non distingue quali sessioni esistono.
+        // Missing token, nonexistent session, wrong token and terminated session
+        // (not by expiry) give the same code and the same message: the
+        // client cannot tell which sessions exist.
         let unauthenticated = || PublicError::unauthenticated(UNAUTHENTICATED_MESSAGE);
         let Some(token) = token else {
             return Err(unauthenticated());
@@ -178,29 +178,29 @@ impl SessionRegistry {
         if session.state == SessionState::Terminated {
             return Err(match session.termination {
                 Some(TerminationCause::GrantExpired | TerminationCause::LeaseExpired) => {
-                    PublicError::session_expired("sessione scaduta")
+                    PublicError::session_expired("session expired")
                 }
                 _ => unauthenticated(),
             });
         }
-        // La scadenza prevale sulla pausa: una credenziale scaduta non è più valida.
+        // Expiry takes precedence over pause: an expired credential is no longer valid.
         if session.expiry_at(now).is_some() {
-            return Err(PublicError::session_expired("grant o lease scaduto"));
+            return Err(PublicError::session_expired("grant or lease expired"));
         }
         if session.state == SessionState::Paused && capability.is_mutation() {
-            return Err(PublicError::permission_denied("sessione in pausa"));
+            return Err(PublicError::permission_denied("session paused"));
         }
         if let Some(vm) = vm_id
             && !session.grant.vm_allowlist.contains(&vm)
         {
             return Err(PublicError::permission_denied(
-                "VM non autorizzata dal grant",
+                "VM not authorized by the grant",
             ));
         }
         Ok(())
     }
 
-    /// Rinnova il lease. Un lease già scaduto non si rinnova.
+    /// Renews the lease. An already expired lease is not renewed.
     pub(crate) fn renew(
         &mut self,
         id: SessionId,
@@ -216,7 +216,7 @@ impl SessionRegistry {
         Ok(lease)
     }
 
-    /// Sessioni vive scadute all'istante `now`, con la causa.
+    /// Live sessions expired at instant `now`, with the cause.
     #[must_use]
     pub fn due_expirations(&self, now: UtcTimestamp) -> Vec<(SessionId, TerminationCause)> {
         self.live()
@@ -224,7 +224,7 @@ impl SessionRegistry {
             .collect()
     }
 
-    /// Marca la sessione come terminata. `false` se già terminata o inesistente.
+    /// Marks the session as terminated. `false` if already terminated or nonexistent.
     pub(crate) fn terminate(&mut self, id: SessionId, cause: TerminationCause) -> bool {
         match self.sessions.get_mut(&id) {
             Some(s) if s.state != SessionState::Terminated => {
@@ -236,7 +236,7 @@ impl SessionRegistry {
         }
     }
 
-    /// Sessioni vive che includono la VM nell'allowlist.
+    /// Live sessions that include the VM in the allowlist.
     #[must_use]
     pub fn live_for_vm(&self, vm_id: VmId) -> Vec<SessionId> {
         self.live()

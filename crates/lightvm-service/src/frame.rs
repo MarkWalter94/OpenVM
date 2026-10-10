@@ -1,44 +1,44 @@
-//! Framing a lunghezza prefissata: 4 byte big-endian di lunghezza, poi il
-//! payload JSON. Lunghezza zero o superiore al limite → errore, senza leggere
-//! il payload (nessuna allocazione guidata dal peer oltre il limite).
+//! Length-prefixed framing: 4 big-endian length bytes, then the JSON payload.
+//! Zero length or a length above the limit → error, without reading the
+//! payload (no peer-driven allocation beyond the limit).
 
 use std::io;
 
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-/// Limite predefinito di byte per frame (payload).
+/// Default byte limit per frame (payload).
 pub const DEFAULT_MAX_FRAME: u32 = 64 * 1024;
 
-/// Errore di lettura di un frame.
+/// Error reading a frame.
 #[derive(Debug)]
 pub enum FrameError {
-    /// Il peer ha chiuso la connessione in modo pulito tra due frame.
+    /// The peer closed the connection cleanly between two frames.
     Closed,
-    /// Lunghezza dichiarata oltre il limite.
+    /// Declared length above the limit.
     TooLarge {
-        /// Lunghezza dichiarata.
+        /// Declared length.
         declared: u32,
-        /// Limite.
+        /// Limit.
         max: u32,
     },
-    /// Lunghezza zero.
+    /// Zero length.
     Empty,
-    /// Payload non decodificabile.
+    /// Payload that cannot be decoded.
     Malformed(serde_json::Error),
-    /// Errore di I/O.
+    /// I/O error.
     Io(io::Error),
 }
 
 impl std::fmt::Display for FrameError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Closed => write!(f, "connessione chiusa"),
+            Self::Closed => write!(f, "connection closed"),
             Self::TooLarge { declared, max } => {
-                write!(f, "frame di {declared} byte oltre il limite di {max}")
+                write!(f, "frame of {declared} bytes over the limit of {max}")
             }
-            Self::Empty => write!(f, "frame vuoto"),
-            Self::Malformed(e) => write!(f, "messaggio non valido: {e}"),
+            Self::Empty => write!(f, "empty frame"),
+            Self::Malformed(e) => write!(f, "invalid message: {e}"),
             Self::Io(e) => write!(f, "I/O: {e}"),
         }
     }
@@ -46,7 +46,7 @@ impl std::fmt::Display for FrameError {
 
 impl std::error::Error for FrameError {}
 
-/// Legge il payload grezzo di un frame.
+/// Reads the raw payload of a frame.
 pub async fn read_frame_bytes<R: AsyncRead + Unpin>(
     r: &mut R,
     max: u32,
@@ -70,7 +70,7 @@ pub async fn read_frame_bytes<R: AsyncRead + Unpin>(
     Ok(buf)
 }
 
-/// Legge e decodifica un frame JSON.
+/// Reads and decodes a JSON frame.
 pub async fn read_frame<R: AsyncRead + Unpin, T: DeserializeOwned>(
     r: &mut R,
     max: u32,
@@ -79,7 +79,7 @@ pub async fn read_frame<R: AsyncRead + Unpin, T: DeserializeOwned>(
     serde_json::from_slice(&buf).map_err(FrameError::Malformed)
 }
 
-/// Codifica e scrive un frame JSON. Rifiuta payload oltre `max`.
+/// Encodes and writes a JSON frame. Rejects payloads above `max`.
 pub async fn write_frame<W: AsyncWrite + Unpin, T: Serialize>(
     w: &mut W,
     msg: &T,
@@ -89,7 +89,7 @@ pub async fn write_frame<W: AsyncWrite + Unpin, T: Serialize>(
     write_frame_bytes(w, &payload, max).await
 }
 
-/// Scrive un payload grezzo come frame.
+/// Writes a raw payload as a frame.
 pub async fn write_frame_bytes<W: AsyncWrite + Unpin>(
     w: &mut W,
     payload: &[u8],
@@ -98,7 +98,7 @@ pub async fn write_frame_bytes<W: AsyncWrite + Unpin>(
     let len = u32::try_from(payload.len())
         .ok()
         .filter(|l| *l <= max && *l > 0)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "frame fuori limite"))?;
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "frame out of bounds"))?;
     let mut out = Vec::with_capacity(payload.len() + 4);
     out.extend_from_slice(&len.to_be_bytes());
     out.extend_from_slice(payload);
@@ -106,7 +106,7 @@ pub async fn write_frame_bytes<W: AsyncWrite + Unpin>(
     w.flush().await
 }
 
-/// Errori che equivalgono a una chiusura del peer (pipe rotta, reset).
+/// Errors equivalent to the peer closing (broken pipe, reset).
 pub(crate) fn is_disconnect(e: &io::Error) -> bool {
     matches!(
         e.kind(),
@@ -140,7 +140,7 @@ mod tests {
                 assert_eq!(declared, u32::MAX);
                 assert_eq!(max, 1024);
             }
-            other => panic!("atteso TooLarge, ottenuto {other:?}"),
+            other => panic!("expected TooLarge, got {other:?}"),
         }
     }
 

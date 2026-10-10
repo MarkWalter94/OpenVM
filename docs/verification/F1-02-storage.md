@@ -1,160 +1,167 @@
-# F1-02 — `vm-storage`: catalogo, migrazioni, journal, registro media, budget e protezione dei dischi
+# F1-02 — `vm-storage`: catalog, migrations, journal, media registry, budget and disk protection
 
-- Data di esecuzione (UTC): 2026-10-09
-- Esecutore: agente di sviluppo (sessione Claude Code), su richiesta del responsabile del progetto
-- Passo della roadmap: sezione 10, F1 ("migrazioni SQLite e tipi condivisi", "registro dei media approvati", "rifiuto di percorsi e risorse non validi"); sezioni 6.3 (registro media, SQLite + journal), 7.4 (righe "Host", "Storage", "Crash", "File"), 8 (baseline a VM spenta, budget storage); backlog `docs/RELEASE_PLAN.md` F1-01 (migrazioni), F1-04 (registro media), F1-09 (share mode sui dischi, parte storage)
-- ADR collegati: ADR-0005, ADR-0008, ADR-0011, ADR-0017, ADR-0025 (non modificati)
-- Esito complessivo: **parziale** — tutte le voci elencate sono **verificate con test sintetici** (file finti al posto di QCOW2, OVMF e ISO; nessun QEMU, nessun `qemu-img`) su Windows 11; la protezione con QEMU reale, Linux e la scelta sulla protezione dell'overlay in uso sono **non eseguite** o aperte (vedi Limiti e Punti aperti).
+- Execution date (UTC): 2026-10-09
+- Executed by: development agent (Claude Code session), at the request of the project owner
+- Roadmap step: section 10, F1 ("SQLite migrations and shared types", "registry of approved media", "rejection of invalid paths and resources"); sections 6.3 (media registry, SQLite + journal), 7.4 (rows "Host", "Storage", "Crash", "File"), 8 (baseline with the VM off, storage budget); backlog `docs/RELEASE_PLAN.md` F1-01 (migrations), F1-04 (media registry), F1-09 (share mode on disks, storage part)
+- Related ADRs: ADR-0005, ADR-0008, ADR-0011, ADR-0017, ADR-0025 (not modified)
+- Overall outcome: **partial** — all the items listed are **verified with synthetic tests** (fake files instead of QCOW2, OVMF and ISO; no QEMU, no `qemu-img`) on Windows 11; protection with real QEMU, Linux and the choice on protecting the overlay in use are **not executed** or open (see Limits and Open points).
 
-Esiti ammessi: **verificato**, **fallito**, **non eseguito** (sezione 17). In questo file "verificato" significa sempre "verificato con test sintetico automatico" (sezione 16 punto 5): nessuna voce sostituisce la prova con QEMU reale richiesta dal criterio di uscita di F1.
+Allowed outcomes: **verified**, **failed**, **not executed** (section 17). In this file "verified" always means "verified with an automated synthetic test" (section 16 point 5): no item replaces the test with real QEMU required by the F1 exit criterion.
 
-## Scopo
+## Purpose
 
-Portare `crates/vm-storage` allo stato richiesto da F1 per la parte storage:
+Bring `crates/vm-storage` to the state required by F1 for the storage part:
 
-1. identificativi di `lightvm-proto` al posto di quelli provvisori (rimozione del modulo `compat`);
-2. migrazioni SQLite versionate con prova di aggiornamento da **ogni** versione precedente;
-3. journal di intenti con riconciliazione all'avvio, compreso l'esito "da verificare" quando la riconciliazione non riesce;
-4. lock di istanza singola sotto concorrenza;
-5. percorsi gestiti con rifiuto di reparse point, junction e percorsi fuori dalla radice;
-6. registro dei media approvati con copia gestita in sola lettura, SHA-256, `CREATE_NEW` e nessuna sovrascrittura;
-7. manifest di budget (occupazione per catalogo, VM, baseline, esecuzione e limiti dichiarati);
-8. protezione dei dischi (F1-09, parte storage): baseline e suo vars aperti con il solo `FILE_SHARE_READ` per la durata dell'esecuzione, verifica dell'hash della baseline prima di ogni avvio, rilevatore di scrittori inattesi, handle dell'overlay senza `FILE_SHARE_DELETE`.
+1. identifiers from `lightvm-proto` instead of the provisional ones (removal of the `compat` module);
+2. versioned SQLite migrations with an upgrade test from **every** previous version;
+3. intent journal with reconciliation at startup, including the outcome "to be checked" when reconciliation does not succeed;
+4. single-instance lock under concurrency;
+5. managed paths with rejection of reparse points, junctions and paths outside the root;
+6. registry of approved media with a managed read-only copy, SHA-256, `CREATE_NEW` and no overwriting;
+7. budget manifest (usage per catalog, VM, baseline, run and declared limits);
+8. disk protection (F1-09, storage part): baseline and its vars opened with `FILE_SHARE_READ` only for the duration of the run, verification of the baseline hash before every start, detector of unexpected writers, overlay handle without `FILE_SHARE_DELETE`.
 
-Non dimostra: comportamento con QEMU 11.1.0 reale (le share mode con QEMU sono provate in `F0-05` §7, non qui); `qemu-img check`/`compare` sui file `.partial` (ADR-0025 punto 6, compito di `qemu-backend`); comportamento su Linux; consistenza di un filesystem guest; resistenza a un amministratore o a un processo malevolo dello stesso utente (sezione 7.1); integrazione con `lightvm-service` (altro flusso).
+It does not demonstrate: behaviour with real QEMU 11.1.0 (share modes with QEMU are tested in `F0-05` §7, not here); `qemu-img check`/`compare` on `.partial` files (ADR-0025 point 6, a task of `qemu-backend`); behaviour on Linux; consistency of a guest filesystem; resistance to an administrator or to a malicious process of the same user (section 7.1); integration with `lightvm-service` (another stream).
 
-## Ambiente
+## Environment
 
-| Voce | Valore |
+| Item | Value |
 | --- | --- |
-| Host (modello, CPU, RAM, storage) | HP ZBook Fury 16 G9, Intel Core i7-12800HX, 32 GiB RAM; directory temporanee dei test su `C:` (NTFS), sorgenti su `E:` (NTFS) |
-| OS e build | Windows 11 Pro 10.0.26200; utente non amministratore; modalità sviluppatore attiva (`AllowDevelopmentWithoutDevLicense = 1`: i collegamenti simbolici si creano senza privilegi, quindi i test sui symlink sono stati eseguiti e non saltati) |
-| Acceleratore e stato | non usato |
-| Toolchain / versioni rilevanti | `rustc 1.99.0 (b940084d7 2026-09-28)`, `cargo 1.99.0 (5f94df478 2026-08-27)`, target `x86_64-pc-windows-msvc` con ambiente Build Tools 2022 caricato da un wrapper (`vcvars64.bat`, come `F0-01` §4.1); `rusqlite =0.40.2` con `bundled`, `sha2 =0.10.9`, `uuid =1.27.0`, `tempfile =3.27.0` (dipendenze già presenti, nessuna aggiunta) |
-| Binario QEMU | non applicabile |
-| Firmware | non applicabile (vars finti di pochi byte) |
-| Guest / media | non applicabile (ISO finte generate dai test) |
-| Sessione grafica | non applicabile |
-| Altre condizioni | antivirus e criteri di gruppo non modificati; nessuna elevazione |
+| Host (model, CPU, RAM, storage) | HP ZBook Fury 16 G9, Intel Core i7-12800HX, 32 GiB RAM; test temporary directories on `C:` (NTFS), sources on `E:` (NTFS) |
+| OS and build | Windows 11 Pro 10.0.26200; non-administrator user; developer mode active (`AllowDevelopmentWithoutDevLicense = 1`: symbolic links can be created without privileges, so the symlink tests were run and not skipped) |
+| Accelerator and state | not used |
+| Toolchain / relevant versions | `rustc 1.99.0 (b940084d7 2026-09-28)`, `cargo 1.99.0 (5f94df478 2026-08-27)`, target `x86_64-pc-windows-msvc` with the Build Tools 2022 environment loaded by a wrapper (`vcvars64.bat`, as in `F0-01` §4.1); `rusqlite =0.40.2` with `bundled`, `sha2 =0.10.9`, `uuid =1.27.0`, `tempfile =3.27.0` (dependencies already present, none added) |
+| QEMU binary | not applicable |
+| Firmware | not applicable (fake vars of a few bytes) |
+| Guest / media | not applicable (fake ISOs generated by the tests) |
+| Graphics session | not applicable |
+| Other conditions | antivirus and group policies not modified; no elevation |
 
-## Procedura
+## Procedure
 
-Tutti i comandi sono eseguiti dalla radice `E:\OpenVM` attraverso il wrapper che carica l'ambiente MSVC.
+All commands are run from the root `E:\OpenVM` through the wrapper that loads the MSVC environment.
 
 ```text
 cargo fmt -p vm-storage -- --check
 cargo clippy -p vm-storage --all-targets -- -D warnings
 cargo test -p vm-storage
-cargo test -p vm-storage -- --nocapture      # per controllare che nessun test sia stato saltato
+cargo test -p vm-storage -- --nocapture      # to check that no test was skipped
 cargo check --workspace --all-targets
 ```
 
-Metodo dei test (sintetici, dichiarati):
+Test method (synthetic, declared):
 
-- **Crash**: il `Catalog` viene rilasciato senza completare l'operazione e riaperto (la riapertura esegue `recover`). Per le API di alto livello il produttore dei file (in prodotto `qemu-img`) è una closure che scrive un file parziale e poi restituisce errore, oppure va in panico per saltare l'annullamento come farebbe un processo ucciso.
-- **Altro processo**: simulato con un handle aperto nello stesso processo con share mode esplicita (`OpenOptionsExt::share_mode`). Per Windows la condivisione è una proprietà dell'apertura, quindi l'effetto sull'handle di guardia è lo stesso; la prova con processi distinti e QEMU reale è in `F0-05` §7.
-- **Junction**: `cmd /C mklink /J` (nessun privilegio richiesto). **Symlink**: `std::os::windows::fs::symlink_file`.
+- **Crash**: the `Catalog` is dropped without completing the operation and reopened (reopening runs `recover`). For the high-level APIs the file producer (in the product `qemu-img`) is a closure that writes a partial file and then returns an error, or panics to skip the rollback as a killed process would.
+- **Other process**: simulated with a handle opened in the same process with an explicit share mode (`OpenOptionsExt::share_mode`). On Windows sharing is a property of the open, so the effect on the guard handle is the same; the test with distinct processes and real QEMU is in `F0-05` §7.
+- **Junction**: `cmd /C mklink /J` (no privilege required). **Symlink**: `std::os::windows::fs::symlink_file`.
 
-## Risultati
+## Results
 
-Conteggio dei test di `vm-storage`: **50 prima** del lavoro, **77 dopo** (tutti superati, nessuno ignorato, nessuno saltato: l'output con `--nocapture` non contiene messaggi "prova saltata"). `cargo fmt --check`, `cargo clippy -D warnings` e `cargo check --workspace --all-targets` senza errori né avvisi. Il crate non contiene codice `unsafe` (`unsafe_code = deny` del workspace).
+Test count of `vm-storage`: **50 before** the work, **77 after** (all passed, none ignored, none skipped: the output with `--nocapture` contains no "prova saltata" messages). `cargo fmt --check`, `cargo clippy -D warnings` and `cargo check --workspace --all-targets` without errors or warnings. The crate contains no `unsafe` code (`unsafe_code = deny` of the workspace).
 
-| File di test | Prima | Dopo |
+| Test file | Before | After |
 | --- | --- | --- |
-| unità (`src/`) | 5 | 5 |
+| unit (`src/`) | 5 | 5 |
 | `budget_manifest.rs` | 4 | 6 |
-| `concurrency.rs` (nuovo) | — | 3 |
+| `concurrency.rs` (new) | — | 3 |
 | `constraints.rs` | 9 | 9 |
-| `interruption.rs` (nuovo) | — | 6 |
+| `interruption.rs` (new) | — | 6 |
 | `journal.rs` | 20 | 20 |
-| `media_registry.rs` (nuovo) | — | 5 |
+| `media_registry.rs` (new) | — | 5 |
 | `migrations.rs` | 4 | 6 |
 | `paths_lock.rs` | 8 | 9 |
-| `protection.rs` (nuovo) | — | 8 |
+| `protection.rs` (new) | — | 8 |
 
-| Voce | Esito | Evidenza |
+| Item | Outcome | Evidence |
 | --- | --- | --- |
-| Identificativi di `lightvm-proto` (`VmId`, `RunId`, `OperationId`, `BaselineId`, `MediaId`, `SessionId`, `GrantId`); modulo `compat` e `TODO(F1)` rimossi | verificato (compilazione e test) | `src/ids.rs`; riesportati dalla radice del crate; nessun `TODO(F1)` nel crate |
-| Migrazione 0003 (`needs_review` nel journal, tabella ricostruita) | verificato (sintetico) | `migrations.rs::needs_review_state_requires_the_latest_schema`: lo stato è rifiutato dal CHECK in v2 e accettato dopo la migrazione |
-| Aggiornamento da **ogni** versione precedente (v1, v2 → v3) con backup datato, dati e journal conservati, sequenza `AUTOINCREMENT` proseguita, intento aperto riconciliato, schema finale identico a un catalogo nuovo | verificato (sintetico) | `migrations.rs::upgrade_from_every_previous_version_matches_a_fresh_schema` (confronto di `sqlite_master` normalizzato) |
-| Rifiuto del downgrade e di una migrazione alterata | verificato (sintetico, test preesistenti) | `newer_schema_is_refused_without_changes`, `tampered_migration_is_detected` |
-| Riconciliazione: intento irrisolvibile → `needs_review` ("da verificare"), VM `recovering` e occupata, apertura del catalogo non bloccata; nuovo tentativo riuscito dopo la rimozione della causa | verificato (sintetico, Windows) | `interruption.rs::unresolvable_intent_is_marked_needs_review_and_retried`: temporaneo tenuto aperto con share mode 0 → apertura riuscita, esito `NeedsReview`; rilasciato l'handle, `recover()` → `RolledBack` |
-| Interruzione della promozione di una baseline durante la scrittura del disco | verificato (sintetico) | `promotion_interrupted_while_writing_the_disk_leaves_nothing`: nessun file, nessuna directory, nessuna riga, VM libera |
-| Interruzione della promozione durante la scrittura del vars (disco già pubblicato) | verificato (sintetico) | `promotion_interrupted_while_writing_vars_removes_the_published_disk`: disco e directory rimossi, baseline precedente integra (hash e manifest) |
-| Interruzione della preparazione di un'esecuzione (errore e crash con panico) | verificato (sintetico) | `preparation_interrupted_while_writing_the_overlay_leaves_nothing`, `interrupted_preparation_then_crash_is_reconciled_at_open` |
-| Crash tra collegamento fisico e rimozione del temporaneo: completamento in avanti con base di nuovo in sola lettura | verificato (sintetico) | `crash_between_link_and_temp_removal_keeps_the_base_readonly` |
-| Lock a istanza singola: 8 thread aprono lo stesso catalogo insieme → una sola istanza; grafie diverse (`.`, `sub\..`, maiuscole) rifiutate; cataloghi distinti coesistono | verificato (sintetico) | `concurrency.rs` (3 test) |
-| Percorsi assoluti accettati solo sotto la radice; `..`, nomi riservati, radice vuota, junction verso l'esterno rifiutati | verificato (sintetico) | `paths_lock.rs::absolute_paths_are_accepted_only_inside_the_root` (`CatalogLayout::managed_from_absolute`) |
-| Registro media: copia gestita in sola lettura, SHA-256 dei byte copiati, nessun temporaneo residuo; ISO sostituita dopo l'approvazione non cambia la copia | verificato (sintetico) | `media_registry.rs::approved_media_is_a_readonly_managed_copy_with_hash` |
-| Registro media: copia alterata rilevata (`IntegrityMismatch`), copia rimossa → `missing` | verificato (sintetico) | `altered_managed_copy_is_detected` |
-| Registro media: sorgente directory, collegamento simbolico o con scrittore attivo rifiutata; origine con caratteri di controllo rifiutata | verificato (sintetico; scrittore solo Windows) | `source_that_is_a_directory_or_link_is_refused`, `source_open_by_a_writer_is_refused` |
-| Nessuna sovrascrittura: destinazione comparsa prima della pubblicazione mai sostituita né rimossa dall'annullamento | verificato (sintetico) | `destination_appearing_before_publication_is_never_overwritten` |
-| Manifest di budget per catalogo, VM, baseline ed esecuzione con limiti e flag di superamento; scritto in modo atomico con hash registrato | verificato (sintetico) | `budget_manifest.rs::budget_manifest_reports_usage_per_vm_baseline_and_run` |
-| Budget superato: esecuzione rifiutata (`resource_limit`) prima di qualunque intento o file; entro il budget preparata | verificato (sintetico) | `run_over_budget_is_refused_before_any_file_or_intent` |
-| Guardia di esecuzione: hash di disco base e vars ricalcolato attraverso l'handle di guardia e uguale al catalogo | verificato (sintetico) | `protection.rs::guard_verifies_baseline_hash_through_the_handle` |
-| Baseline o vars alterati fuori dal catalogo: avvio rifiutato (`IntegrityMismatch` → `state_conflict`) | verificato (sintetico) | `altered_baseline_is_refused_before_start` |
-| Attributo di sola lettura tolto: ripristinato e riportato | verificato (sintetico) | `missing_readonly_attribute_is_restored_and_reported` |
-| Baseline con guardia attiva: apertura in scrittura, rinomina e cancellazione rifiutate (errore 32), lettura condivisa possibile | verificato (sintetico, Windows) | `guarded_baseline_rejects_writers_rename_and_delete` |
-| Rilevatore di scrittori: base aperta in scrittura da altri → `WriterProbe::Busy`, avvio e preparazione rifiutati (`vm_busy`), nessun intento lasciato | verificato (sintetico, Windows) | `writer_detector_refuses_start_and_preparation` |
-| Overlay in uso: rinomina e cancellazione rifiutate (errore 32) | verificato (sintetico, Windows) | `overlay_in_use_cannot_be_renamed_or_deleted_but_remains_writable` |
-| Overlay in uso **scrivibile** da un altro handle dello stesso utente | verificato come **limite** (sintetico, Windows) | stesso test: la scrittura di terzi riesce, coerente con `F0-05` §7.3 e ADR-0025 punto 4 |
-| Cancellazione della baseline tramite journal con guardia attiva: rinomina fallita, file intatto | verificato (sintetico, Windows) | `guarded_baseline_cannot_be_deleted_through_the_journal` |
-| Esecuzione già conclusa: guardia rifiutata | verificato (sintetico) | `ended_run_cannot_be_guarded` |
-| Prova con QEMU reale e processi distinti | non eseguito | fuori perimetro di questo flusso; base sperimentale in `F0-05` §7 |
-| Linux | non eseguito | share mode non disponibili; rinvio a R2a (ADR-0016, ADR-0025) |
+| Identifiers from `lightvm-proto` (`VmId`, `RunId`, `OperationId`, `BaselineId`, `MediaId`, `SessionId`, `GrantId`); `compat` module and `TODO(F1)` removed | verified (compilation and tests) | `src/ids.rs`; re-exported from the crate root; no `TODO(F1)` in the crate |
+| Migration 0003 (`needs_review` in the journal, table rebuilt) | verified (synthetic) | `migrations.rs::needs_review_state_requires_the_latest_schema`: the state is rejected by the CHECK in v2 and accepted after the migration |
+| Upgrade from **every** previous version (v1, v2 → v3) with dated backup, data and journal preserved, `AUTOINCREMENT` sequence continued, open intent reconciled, final schema identical to a new catalog | verified (synthetic) | `migrations.rs::upgrade_from_every_previous_version_matches_a_fresh_schema` (comparison of normalized `sqlite_master`) |
+| Rejection of downgrade and of an altered migration | verified (synthetic, pre-existing tests) | `newer_schema_is_refused_without_changes`, `tampered_migration_is_detected` |
+| Reconciliation: unresolvable intent → `needs_review` ("to be checked"), VM `recovering` and busy, catalog opening not blocked; new attempt succeeds after removing the cause | verified (synthetic, Windows) | `interruption.rs::unresolvable_intent_is_marked_needs_review_and_retried`: temporary file kept open with share mode 0 → open succeeded, outcome `NeedsReview`; handle released, `recover()` → `RolledBack` |
+| Interruption of a baseline promotion while writing the disk | verified (synthetic) | `promotion_interrupted_while_writing_the_disk_leaves_nothing`: no file, no directory, no row, VM free |
+| Interruption of the promotion while writing the vars (disk already published) | verified (synthetic) | `promotion_interrupted_while_writing_vars_removes_the_published_disk`: disk and directory removed, previous baseline intact (hash and manifest) |
+| Interruption of the preparation of a run (error and crash with panic) | verified (synthetic) | `preparation_interrupted_while_writing_the_overlay_leaves_nothing`, `interrupted_preparation_then_crash_is_reconciled_at_open` |
+| Crash between hard link and removal of the temporary file: roll-forward completion with the base read-only again | verified (synthetic) | `crash_between_link_and_temp_removal_keeps_the_base_readonly` |
+| Single-instance lock: 8 threads open the same catalog together → a single instance; different spellings (`.`, `sub\..`, uppercase) rejected; distinct catalogs coexist | verified (synthetic) | `concurrency.rs` (3 tests) |
+| Absolute paths accepted only under the root; `..`, reserved names, empty root, junctions pointing outside rejected | verified (synthetic) | `paths_lock.rs::absolute_paths_are_accepted_only_inside_the_root` (`CatalogLayout::managed_from_absolute`) |
+| Media registry: managed read-only copy, SHA-256 of the copied bytes, no leftover temporary file; ISO replaced after approval does not change the copy | verified (synthetic) | `media_registry.rs::approved_media_is_a_readonly_managed_copy_with_hash` |
+| Media registry: altered copy detected (`IntegrityMismatch`), copy removed → `missing` | verified (synthetic) | `altered_managed_copy_is_detected` |
+| Media registry: source that is a directory, a symbolic link or has an active writer rejected; origin with control characters rejected | verified (synthetic; writer only on Windows) | `source_that_is_a_directory_or_link_is_refused`, `source_open_by_a_writer_is_refused` |
+| No overwriting: destination appearing before publication never replaced nor removed by the rollback | verified (synthetic) | `destination_appearing_before_publication_is_never_overwritten` |
+| Budget manifest per catalog, VM, baseline and run with limits and overshoot flags; written atomically with recorded hash | verified (synthetic) | `budget_manifest.rs::budget_manifest_reports_usage_per_vm_baseline_and_run` |
+| Budget exceeded: run rejected (`resource_limit`) before any intent or file; within budget prepared | verified (synthetic) | `run_over_budget_is_refused_before_any_file_or_intent` |
+| Run guard: hash of base disk and vars recomputed through the guard handle and equal to the catalog | verified (synthetic) | `protection.rs::guard_verifies_baseline_hash_through_the_handle` |
+| Baseline or vars altered outside the catalog: start rejected (`IntegrityMismatch` → `state_conflict`) | verified (synthetic) | `altered_baseline_is_refused_before_start` |
+| Read-only attribute removed: restored and reported | verified (synthetic) | `missing_readonly_attribute_is_restored_and_reported` |
+| Baseline with active guard: write open, rename and delete rejected (error 32), shared read possible | verified (synthetic, Windows) | `guarded_baseline_rejects_writers_rename_and_delete` |
+| Writer detector: base opened for writing by others → `WriterProbe::Busy`, start and preparation rejected (`vm_busy`), no intent left behind | verified (synthetic, Windows) | `writer_detector_refuses_start_and_preparation` |
+| Overlay in use: rename and delete rejected (error 32) | verified (synthetic, Windows) | `overlay_in_use_cannot_be_renamed_or_deleted_but_remains_writable` |
+| Overlay in use **writable** from another handle of the same user | verified as a **limit** (synthetic, Windows) | same test: the third-party write succeeds, consistent with `F0-05` §7.3 and ADR-0025 point 4 |
+| Deletion of the baseline through the journal with an active guard: rename failed, file intact | verified (synthetic, Windows) | `guarded_baseline_cannot_be_deleted_through_the_journal` |
+| Run already ended: guard refused | verified (synthetic) | `ended_run_cannot_be_guarded` |
+| Test with real QEMU and distinct processes | not executed | outside the scope of this stream; experimental basis in `F0-05` §7 |
+| Linux | not executed | share modes not available; deferred to R2a (ADR-0016, ADR-0025) |
 
-Misure di prestazione: nessuna in questo file. La verifica dell'hash della baseline legge l'intero disco base a ogni avvio; il costo con dischi reali non è stato misurato.
+Performance measurements: none in this file. Verifying the baseline hash reads the whole base disk at every start; the cost with real disks was not measured.
 
-### Cambiamenti di comportamento rilevanti
+### Relevant behaviour changes
 
-- I file nuovi sono pubblicati con un collegamento fisico (`std::fs::hard_link`, che fallisce se la destinazione esiste) seguito dalla rimozione del nome temporaneo, invece di `std::fs::rename`, che su Windows sostituisce una destinazione esistente. Su volumi senza collegamenti fisici (FAT, exFAT; errore `Unsupported`) il codice ripiega su controllo di esistenza + `rename`, con finestra tra controllo e uso.
-- Una destinazione trovata occupata alla pubblicazione è registrata nel journal (`destination_conflict`): annullamento e riconciliazione non la rimuovono più (prima veniva trattata come file orfano dell'intento e cancellata).
-- La preparazione di un'esecuzione tiene aperta la guardia della baseline (rilevatore di scrittori, senza ricalcolo dell'hash); la verifica completa dell'hash avviene in `Catalog::guard_run`, da chiamare prima di avviare QEMU.
-- Un errore durante la riconciliazione di un intento non impedisce più l'apertura del catalogo: l'intento passa a `needs_review`; una presenza di file non verificabile è riportata come `IntegrityIssue::Unverifiable`.
+- New files are published with a hard link (`std::fs::hard_link`, which fails if the destination exists) followed by removal of the temporary name, instead of `std::fs::rename`, which on Windows replaces an existing destination. On volumes without hard links (FAT, exFAT; error `Unsupported`) the code falls back to an existence check + `rename`, with a window between check and use.
+- A destination found occupied at publication is recorded in the journal (`destination_conflict`): rollback and reconciliation no longer remove it (previously it was treated as an orphan file of the intent and deleted).
+- Preparing a run keeps the baseline guard open (writer detector, without hash recomputation); the full hash verification happens in `Catalog::guard_run`, to be called before starting QEMU.
+- An error during the reconciliation of an intent no longer prevents the catalog from opening: the intent moves to `needs_review`; a file presence that cannot be verified is reported as `IntegrityIssue::Unverifiable`.
 
-## Limiti
+## Limits
 
-- Test sintetici: file di pochi byte al posto di immagini QCOW2, vars OVMF e ISO; nessun QEMU né `qemu-img`. "Altro processo" simulato con handle nello stesso processo.
-- Un solo host, un solo utente non amministratore, volumi NTFS. Nessuna prova su FAT/exFAT (ripiego di `publish_no_replace` non provato), su Linux o con un secondo account.
-- La protezione degli handle vale finché il supervisor è vivo; non protegge da un amministratore, da accessi a livello di volume o da mappature in memoria (non provati); lo stesso utente può togliere l'attributo di sola lettura (viene ripristinato e riportato all'uso successivo, non impedito).
-- L'overlay in uso resta scrivibile da un altro processo dello stesso utente (limite dichiarato, decisione aperta).
-- L'identità OS dei file (`FileIdentity` di `lightvm-proto`: numero di serie del volume e indice del file) non è registrata: su Windows non è leggibile con le API stabili di `std` senza codice `unsafe`.
-- Il controllo di collegamenti sui componenti intermedi dei percorsi gestiti avviene prima dell'uso (finestra tra controllo e uso dichiarata in `paths.rs`); solo l'ultimo componente delle aperture protette è verificato sull'handle.
-- Il budget è applicativo (ADR-0017): calcolato dai byte registrati e aggiornato da `refresh_disk_sizes`; tra due controlli il consumo può superarlo.
-- La verifica dell'hash a ogni avvio ha un costo proporzionale alla dimensione del disco base, non misurato.
+- Synthetic tests: files of a few bytes instead of QCOW2 images, OVMF vars and ISOs; no QEMU nor `qemu-img`. "Other process" simulated with a handle in the same process.
+- A single host, a single non-administrator user, NTFS volumes. No tests on FAT/exFAT (fallback of `publish_no_replace` not tested), on Linux or with a second account.
+- Handle protection holds as long as the supervisor is alive; it does not protect against an administrator, volume-level access or memory mappings (not tested); the same user can remove the read-only attribute (it is restored and reported at the next use, not prevented).
+- The overlay in use remains writable by another process of the same user (declared limit, open decision).
+- The OS identity of files (`FileIdentity` of `lightvm-proto`: volume serial number and file index) is not recorded: on Windows it cannot be read with the stable `std` APIs without `unsafe` code.
+- The check for links on intermediate components of managed paths happens before use (window between check and use declared in `paths.rs`); only the last component of protected opens is verified on the handle.
+- The budget is application-level (ADR-0017): computed from the recorded bytes and updated by `refresh_disk_sizes`; between two checks consumption can exceed it.
+- Verifying the hash at every start has a cost proportional to the size of the base disk, not measured.
 
-## Punti aperti
+## Open points
 
-1. **Protezione dell'overlay in uso (decisione dell'utente, ADR-0025 punto 4, backlog F1-09).** Opzioni: directory per esecuzione con ACL esplicita concessa solo all'identità di QEMU; identità di processo distinta per QEMU (token ristretto o AppContainer); limite dichiarato in via definitiva. Il codice implementa soltanto l'handle senza `FILE_SHARE_DELETE` e non sceglie.
-2. **Chi tiene gli handle di guardia.** `qemu-backend` ha già `StorageGuards` (stesse share mode); `vm-storage` ora offre `guard_run`/`guard_baseline` con verifica dell'hash attraverso l'handle. Va deciso nel supervisor quale dei due usare (o la composizione), per non aprire due volte gli stessi file con regole diverse.
-3. **Lifecycle dopo `needs_review`.** Risolto l'intento, la VM resta `recovering`: il ritorno a `stopped` è lasciato al supervisor dopo l'osservazione del processo. Da confermare.
-4. **Costo della verifica completa dell'hash a ogni avvio** con dischi base reali (misura da registrare; eventuale alternativa da decidere con ADR).
-5. **Identità OS dei media** (`FileIdentity`): richiede API di sistema (`GetFileInformationByHandleEx`) e quindi codice `unsafe` confinato in un altro crate, oppure la stabilizzazione delle API `std` corrispondenti.
+1. **Protection of the overlay in use (user decision, ADR-0025 point 4, backlog F1-09).** Options: per-run directory with an explicit ACL granted only to QEMU's identity; distinct process identity for QEMU (restricted token or AppContainer); limit declared permanently. The code implements only the handle without `FILE_SHARE_DELETE` and does not choose.
+2. **Who holds the guard handles.** `qemu-backend` already has `StorageGuards` (same share modes); `vm-storage` now offers `guard_run`/`guard_baseline` with hash verification through the handle. It must be decided in the supervisor which of the two to use (or the composition), so as not to open the same files twice with different rules.
+3. **Lifecycle after `needs_review`.** Once the intent is resolved, the VM stays `recovering`: the return to `stopped` is left to the supervisor after observing the process. To be confirmed.
+4. **Cost of the full hash verification at every start** with real base disks (measurement to be recorded; possible alternative to be decided with an ADR).
+5. **OS identity of media** (`FileIdentity`): requires system APIs (`GetFileInformationByHandleEx`) and therefore `unsafe` code confined in another crate, or the stabilization of the corresponding `std` APIs.
 
-## Azioni richieste
+## Required actions
 
-1. Integrazione in `lightvm-service`: chiamare `Catalog::guard_run` prima di avviare QEMU e tenere la guardia viva fino alla fine del processo; usare `prepare_run_within_budget` (o `check_new_run`) prima di ogni nuova esecuzione; trattare `RecoveryOutcome::NeedsReview` e `IntegrityIssue::Unverifiable` all'avvio come stato "da verificare" visibile all'utente.
-2. Prova con QEMU reale delle guardie di `vm-storage` (baseline e overlay) sul runner fisico, nell'ambito di F1-09/F1-12.
-3. Prova su FAT/exFAT del ripiego di pubblicazione o decisione di rifiutare cataloghi su volumi senza collegamenti fisici.
-4. Aggiornare l'indice di `docs/verification/README.md`, `docs/STATUS.md` e `docs/RELEASE_PLAN.md` (fuori dal perimetro di questo flusso).
+1. Integration in `lightvm-service`: call `Catalog::guard_run` before starting QEMU and keep the guard alive until the end of the process; use `prepare_run_within_budget` (or `check_new_run`) before every new run; treat `RecoveryOutcome::NeedsReview` and `IntegrityIssue::Unverifiable` at startup as a "to be checked" state visible to the user.
+2. Test of the `vm-storage` guards (baseline and overlay) with real QEMU on the physical runner, as part of F1-09/F1-12.
+3. Test of the publication fallback on FAT/exFAT or decision to reject catalogs on volumes without hard links.
+4. Update the index of `docs/verification/README.md`, `docs/STATUS.md` and `docs/RELEASE_PLAN.md` (outside the scope of this stream).
 
-## Decisioni proposte
+## Proposed decisions
 
-- Per **ADR-0025**: pubblicazione dei file gestiti con collegamento fisico + rimozione del temporaneo (nessuna sovrascrittura anche con destinazioni comparse dopo il controllo) e verifica dell'hash della baseline attraverso lo stesso handle di guardia, così che tra verifica e avvio il contenuto non possa cambiare. Da registrare nell'ADR se accettata.
-- Per **ADR-0005**: stato `needs_review` del journal come esito esplicito di una riconciliazione non riuscita, con VM bloccata fino alla risoluzione.
-- Nessuna proposta sulla protezione dell'overlay in uso: la scelta spetta all'utente (Punti aperti, punto 1).
+- For **ADR-0025**: publication of managed files with a hard link + removal of the temporary file (no overwriting even with destinations that appear after the check) and verification of the baseline hash through the same guard handle, so that the content cannot change between verification and start. To be recorded in the ADR if accepted.
+- For **ADR-0005**: journal state `needs_review` as the explicit outcome of an unsuccessful reconciliation, with the VM blocked until resolution.
+- No proposal on protecting the overlay in use: the choice is up to the user (Open points, point 1).
 
 
-## Aggiornamento del 2026-10-10: sessione dell'operazione (migrazione v4)
+## Update of 2026-10-10: operation session (migration v4)
 
-Sezione aggiunta in coda (regola 8 di `docs/verification/README.md`). Eseguito sull'host di `F1-03-qemu-backend-reale.md` (Windows 11, Rust 1.99.0 MSVC).
+Section appended at the end (rule 8 of `docs/verification/README.md`). Run on the host of `F1-03-real-qemu-backend.md` (Windows 11, Rust 1.99.0 MSVC).
 
-- Migrazione `0004_operation_session.sql`: `ALTER TABLE operations ADD COLUMN session_id TEXT` (nullable, senza vincolo verso `sessions`: le sessioni agente vivono nel core, F4). `OperationRecord` di `vm-storage` ha il campo `session_id`; l'adattatore del servizio lo scrive e lo rilegge (chiuso il `TODO(F1)` in `lightvm-service/src/adapters/catalog.rs`).
+- Migration `0004_operation_session.sql`: `ALTER TABLE operations ADD COLUMN session_id TEXT` (nullable, without a constraint towards `sessions`: agent sessions live in the core, F4). The `OperationRecord` of `vm-storage` has the field `session_id`; the service adapter writes and reads it back (closed the `TODO(F1)` in `lightvm-service/src/adapters/catalog.rs`).
 
-| Voce | Esito | Evidenza |
+| Item | Outcome | Evidence |
 | --- | --- | --- |
-| Aggiornamento da v1, v2 e v3 a v4 con schema identico a un catalogo nuovo e dati conservati | verificato (sintetico) | `migrations.rs::upgrade_from_every_previous_version_matches_a_fresh_schema` e gli altri test di `migrations.rs`, verdi con `LATEST_VERSION = 4` |
-| Sessione salvata e riletta; operazioni dell'utente senza sessione | verificato (sintetico) | `constraints.rs::operation_session_is_persisted` |
-| Test di `vm-storage` e `lightvm-service` | verificato | `cargo test -p vm-storage -p lightvm-service`: tutti verdi |
+| Upgrade from v1, v2 and v3 to v4 with a schema identical to a new catalog and data preserved | verified (synthetic) | `migrations.rs::upgrade_from_every_previous_version_matches_a_fresh_schema` and the other tests of `migrations.rs`, green with `LATEST_VERSION = 4` |
+| Session saved and read back; user operations without a session | verified (synthetic) | `constraints.rs::operation_session_is_persisted` |
+| Tests of `vm-storage` and `lightvm-service` | verified | `cargo test -p vm-storage -p lightvm-service`: all green |
 
-Resta aperto: identità OS del file e apertura protetta contro reparse point nell'ispezione dei media (`ManagedMediaInspector`, `TODO(F1-04)`): `vm-storage` non espone l'identità del file con API stabili (vedi `src/media.rs`).
+Still open: OS file identity and protected opening against reparse points in media inspection (`ManagedMediaInspector`, `TODO(F1-04)`): `vm-storage` does not expose the file identity with stable APIs (see `src/media.rs`).
+
+
+## Update 2026-10-10 (night): migration hash independent of line endings
+
+Section appended (rule 8). Defect found while testing the desktop app: `lightvm-service` exited with code 4 (`migration v4 applied with content different from the embedded one`) on a catalog created a few minutes earlier. Cause: `schema_version.sql_sha256` hashed the migration text exactly as embedded at build time, and the embedded file's line endings depend on the checkout (`core.autocrlf=true` on Windows writes CRLF, the repository stores LF), so a rebuild after a checkout could change the hash. Evidence: the user's catalog had migrations 1–3 hashed in CRLF form and migration 4 in LF form.
+
+Fix (`crates/vm-storage/src/migrate.rs`): the hash is computed on the text normalized to LF; when verifying an existing catalog, the stored hash is accepted if it matches either the LF or the CRLF form, so catalogs created before the fix keep opening. `.gitattributes` pins `*.sql` to LF. Test: `migrate::tests::migration_hash_ignores_line_endings`. The previously rejected catalog was not re-tested here (the app was still holding it open).

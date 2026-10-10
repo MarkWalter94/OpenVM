@@ -1,33 +1,33 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Screenshot",
-  "description": "Metadati di uno screenshot prodotto dal backend (ROADMAP 6.4, 9). I byte\ndell'immagine viaggiano separatamente (contenuto immagine MCP o blocco IPC),\nmai come percorso host.",
+  "description": "Metadata of a screenshot produced by the backend (ROADMAP 6.4, 9). The image\nbytes travel separately (MCP image content or IPC block),\nnever as a host path.",
   "type": "object",
   "properties": {
     "byte_len": {
-      "description": "Dimensione in byte dell'immagine.",
+      "description": "Size in bytes of the image.",
       "type": "integer",
       "format": "uint64",
       "minimum": 0
     },
     "captured_at": {
-      "description": "Istante della cattura.",
+      "description": "Capture instant.",
       "$ref": "#/$defs/UtcTimestamp"
     },
     "format": {
-      "description": "Formato.",
+      "description": "Format.",
       "$ref": "#/$defs/ImageFormat"
     },
     "geometry": {
-      "description": "Geometria del display al momento della cattura.",
+      "description": "Display geometry at capture time.",
       "$ref": "#/$defs/DisplayGeometry"
     },
     "run_id": {
-      "description": "Esecuzione in cui è stato catturato.",
+      "description": "Run in which it was captured.",
       "$ref": "#/$defs/RunId"
     },
     "sha256": {
-      "description": "SHA-256 dei byte dell'immagine.",
+      "description": "SHA-256 of the image bytes.",
       "$ref": "#/$defs/Sha256Digest"
     },
     "vm_id": {
@@ -46,18 +46,18 @@
   ],
   "$defs": {
     "DisplayGeometry": {
-      "description": "Geometria del display guest in pixel.",
+      "description": "Guest display geometry in pixels.",
       "type": "object",
       "properties": {
         "height": {
-          "description": "Altezza (1..=8192).",
+          "description": "Height (1..=8192).",
           "type": "integer",
           "format": "uint32",
           "maximum": 8192,
           "minimum": 1
         },
         "width": {
-          "description": "Larghezza (1..=8192).",
+          "description": "Width (1..=8192).",
           "type": "integer",
           "format": "uint32",
           "maximum": 8192,
@@ -70,7 +70,7 @@
       ]
     },
     "ImageFormat": {
-      "description": "Formato dell'immagine di uno screenshot.",
+      "description": "Image format of a screenshot.",
       "oneOf": [
         {
           "description": "PNG.",
@@ -80,23 +80,23 @@
       ]
     },
     "RunId": {
-      "description": "RunId: UUID versione 7 in minuscolo con trattini.",
+      "description": "RunId: version 7 UUID, lowercase with hyphens.",
       "type": "string",
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     },
     "Sha256Digest": {
-      "description": "SHA-256 in esadecimale minuscolo.",
+      "description": "SHA-256 in lowercase hexadecimal.",
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
     },
     "UtcTimestamp": {
-      "description": "Istante UTC RFC 3339 con suffisso Z, precisione al millisecondo.",
+      "description": "RFC 3339 UTC instant with Z suffix, millisecond precision.",
       "type": "string",
       "format": "date-time"
     },
     "VmId": {
-      "description": "VmId: UUID versione 7 in minuscolo con trattini.",
+      "description": "VmId: version 7 UUID, lowercase with hyphens.",
       "type": "string",
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"

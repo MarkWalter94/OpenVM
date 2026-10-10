@@ -1,7 +1,7 @@
-# Artefatti di build
+# Build artifacts
 /target/
 **/target/
-# Laboratorio locale: ISO, dischi, firmware scrivibile, log QEMU (mai nel repo)
+# Local lab: ISOs, disks, writable firmware, QEMU logs (never in the repo)
 /lab/
 # Editor/OS
 .vscode/
@@ -9,7 +9,7 @@
 *.swp
 Thumbs.db
 .DS_Store
-# Segreti e credenziali locali
+# Local secrets and credentials
 *.pem
 *.key
 *.p12

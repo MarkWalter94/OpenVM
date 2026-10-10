@@ -1,35 +1,35 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "VmState",
-  "description": "Stato del ciclo di vita di una VM.",
+  "description": "Lifecycle state of a VM.",
   "oneOf": [
     {
-      "description": "Processo assente e file rilasciati. Unico stato per operazioni su dischi, NVRAM e media.",
+      "description": "Process absent and files released. The only state for operations on disks, NVRAM and media.",
       "type": "string",
       "const": "stopped"
     },
     {
-      "description": "Spawn avviato, nuovo `run_id` assegnato, QMP non ancora pronto.",
+      "description": "Spawn started, new `run_id` assigned, QMP not ready yet.",
       "type": "string",
       "const": "starting"
     },
     {
-      "description": "Processo vivo e QMP pronto.",
+      "description": "Process alive and QMP ready.",
       "type": "string",
       "const": "running"
     },
     {
-      "description": "Arresto richiesto; completo solo a fine processo osservata.",
+      "description": "Stop requested; complete only once the process end is observed.",
       "type": "string",
       "const": "stopping"
     },
     {
-      "description": "Errore di avvio o uscita inattesa. Nessuna promozione automatica a baseline.",
+      "description": "Start error or unexpected exit. No automatic promotion to baseline.",
       "type": "string",
       "const": "failed"
     },
     {
-      "description": "Riconciliazione dopo crash (journal, file, processi): nessuna mutazione esterna.",
+      "description": "Reconciliation after a crash (journal, files, processes): no external mutation.",
       "type": "string",
       "const": "recovering"
     }

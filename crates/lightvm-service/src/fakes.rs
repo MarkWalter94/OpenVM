@@ -1,8 +1,8 @@
-//! Implementazioni finte per i test headless: nessun processo QEMU, nessun
-//! file VM. Il core (`vm_core::Core`) è reale; sono finti il backend delle VM,
-//! l'host (Emergency Stop, sessioni agente) e, a scelta, catalogo e audit in
-//! memoria. Non fanno parte del prodotto: il binario usa sempre gli adattatori
-//! reali ([`crate::adapters`]).
+//! Fake implementations for headless tests: no QEMU process, no VM files.
+//! The core (`vm_core::Core`) is real; the VM backend, the host (Emergency
+//! Stop, agent sessions) and, optionally, the catalog and audit in memory are
+//! fake. They are not part of the product: the binary always uses the real
+//! adapters ([`crate::adapters`]).
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -19,7 +19,7 @@ use vm_core::ports::{AuditSink, CatalogStore, MediaInspector, VmBackend};
 use crate::engine::{BackendPort, CoreEngine, VmEngine, core_config};
 use crate::supervisor::{Backend, EmergencyOutcome, EmergencyStop, ParentLossPolicy};
 
-/// Registro delle chiamate ricevute dalle implementazioni finte.
+/// Log of the calls received by the fake implementations.
 pub type Calls = Arc<Mutex<Vec<String>>>;
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -30,7 +30,7 @@ fn push(calls: &Calls, s: impl Into<String>) {
     lock(calls).push(s.into());
 }
 
-/// Cancello che blocca il backend finto finché non viene aperto (test di coda).
+/// Gate that blocks the fake backend until it is opened (queue tests).
 #[derive(Debug, Default)]
 pub struct Gate {
     open: Mutex<bool>,
@@ -38,12 +38,12 @@ pub struct Gate {
 }
 
 impl Gate {
-    /// Cancello chiuso.
+    /// Closed gate.
     pub fn closed() -> Arc<Self> {
         Arc::new(Self::default())
     }
 
-    /// Apre il cancello.
+    /// Opens the gate.
     pub fn open(&self) {
         *lock(&self.open) = true;
         self.cv.notify_all();
@@ -57,7 +57,7 @@ impl Gate {
     }
 }
 
-/// Capacità host finte: acceleratore disponibile, nessuna cattura né input.
+/// Fake host capacity: accelerator available, no capture or input.
 pub fn host_capacity() -> HostCapacity {
     HostCapacity {
         logical_cpus: 8,
@@ -72,10 +72,10 @@ pub fn host_capacity() -> HostCapacity {
     }
 }
 
-/// Configurazione di prova valida per i limiti del MVP.
+/// Test configuration valid for the MVP limits.
 pub fn sample_config(name: &str) -> VmConfig {
     VmConfig {
-        name: VmName::parse(name).expect("nome di prova valido"),
+        name: VmName::parse(name).expect("valid test name"),
         guest_os: GuestOs::UbuntuLtsX86_64,
         vcpus: 2,
         memory_mib: 2048,
@@ -96,7 +96,7 @@ struct MemoryInner {
     runs: BTreeMap<RunId, RunRecord>,
 }
 
-/// Catalogo in memoria.
+/// In-memory catalog.
 #[derive(Debug, Default)]
 pub struct MemoryStore(MemoryInner);
 
@@ -114,8 +114,8 @@ impl CatalogStore for MemoryStore {
                 *v = vm.clone();
                 Ok(())
             }
-            Some(_) => Err(PublicError::state_conflict("revisione diversa")),
-            None => Err(PublicError::not_found("VM inesistente")),
+            Some(_) => Err(PublicError::state_conflict("different revision")),
+            None => Err(PublicError::not_found("VM not found")),
         }
     }
     fn list_vms(&self) -> Result<Vec<VmRecord>, PublicError> {
@@ -159,12 +159,12 @@ impl CatalogStore for MemoryStore {
     }
 }
 
-/// Audit in memoria, condiviso con il test.
+/// In-memory audit, shared with the test.
 #[derive(Debug, Clone, Default)]
 pub struct MemoryAudit(pub Arc<Mutex<Vec<AuditEvent>>>);
 
 impl MemoryAudit {
-    /// Copia degli eventi registrati.
+    /// Copy of the recorded events.
     pub fn events(&self) -> Vec<AuditEvent> {
         lock(&self.0).clone()
     }
@@ -177,7 +177,7 @@ impl AuditSink for MemoryAudit {
     }
 }
 
-/// Ispettore dei media finto: riporta i fatti registrati (nessun file).
+/// Fake media inspector: reports the registered facts (no file).
 #[derive(Debug, Default)]
 pub struct FakeInspector;
 
@@ -192,16 +192,16 @@ impl MediaInspector for FakeInspector {
     }
 }
 
-/// Backend delle VM finto: registra le chiamate e simula processi sempre
-/// pronti. Un cancello opzionale blocca la lettura delle osservazioni (usata a
-/// ogni richiesta che tocca il motore) per i test di coda.
+/// Fake VM backend: logs the calls and simulates processes that are always
+/// ready. An optional gate blocks reading the observations (done on every
+/// request that touches the engine) for queue tests.
 #[derive(Debug, Default)]
 pub struct FakeVmBackend {
-    /// Chiamate ricevute (condivise con [`FakeHost`]).
+    /// Received calls (shared with [`FakeHost`]).
     pub calls: Calls,
-    /// Cancello opzionale.
+    /// Optional gate.
     pub gate: Option<Arc<Gate>>,
-    /// Osservazioni da consegnare al core (uscite simulate).
+    /// Observations to deliver to the core (simulated exits).
     pub observations: Arc<Mutex<Vec<(VmId, BackendObservation)>>>,
 }
 
@@ -237,7 +237,7 @@ impl VmBackend for FakeVmBackend {
         _max_bytes: u64,
     ) -> Result<Screenshot, PublicError> {
         Err(PublicError::unsupported(
-            "screenshot non disponibile nel backend finto",
+            "screenshot not available in the fake backend",
         ))
     }
     fn send_input(
@@ -248,7 +248,7 @@ impl VmBackend for FakeVmBackend {
         _events: &[InputEvent],
     ) -> Result<(), PublicError> {
         Err(PublicError::unsupported(
-            "input non disponibile nel backend finto",
+            "input not available in the fake backend",
         ))
     }
 }
@@ -262,10 +262,10 @@ impl BackendPort for FakeVmBackend {
     }
 }
 
-/// Host finto (servizio): registra le chiamate.
+/// Fake host (service): logs the calls.
 #[derive(Debug, Default)]
 pub struct FakeHost {
-    /// Chiamate ricevute.
+    /// Received calls.
     pub calls: Calls,
 }
 
@@ -307,10 +307,10 @@ impl Backend for FakeHost {
     }
 }
 
-/// Motore con core reale, catalogo e audit in memoria, backend finto.
+/// Engine with a real core, in-memory catalog and audit, fake backend.
 pub type MemoryEngine = CoreEngine<MemoryStore, MemoryAudit, FakeVmBackend, FakeInspector>;
 
-/// Motore in memoria con una VM di esempio spenta (`esempio`).
+/// In-memory engine with a powered-off sample VM (`sample`).
 pub fn sample_engine(backend: FakeVmBackend, audit: MemoryAudit) -> MemoryEngine {
     let mut e = CoreEngine::new(
         MemoryStore::default(),
@@ -319,9 +319,9 @@ pub fn sample_engine(backend: FakeVmBackend, audit: MemoryAudit) -> MemoryEngine
         FakeInspector,
         core_config(host_capacity()),
     )
-    .expect("core in memoria");
-    e.create_vm(&Caller::User, sample_config("esempio"))
-        .expect("VM di esempio");
+    .expect("in-memory core");
+    e.create_vm(&Caller::User, sample_config("sample"))
+        .expect("sample VM");
     let _ = e.state_changes();
     e
 }

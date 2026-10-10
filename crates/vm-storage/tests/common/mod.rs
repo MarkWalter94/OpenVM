@@ -1,4 +1,4 @@
-//! Supporto comune ai test di integrazione (directory temporanee, dati finti).
+//! Shared support for integration tests (temporary directories, fake data).
 #![allow(dead_code, unreachable_pub)]
 
 use std::path::Path;
@@ -10,7 +10,7 @@ pub fn tempdir() -> tempfile::TempDir {
     tempfile::Builder::new()
         .prefix("lightvm-storage-test-")
         .tempdir()
-        .expect("directory temporanea")
+        .expect("temporary directory")
 }
 
 pub fn new_vm(cat: &mut Catalog, name: &str) -> VmId {
@@ -22,7 +22,7 @@ pub fn new_vm(cat: &mut Catalog, name: &str) -> VmId {
             config: serde_json::json!({"cpus": 2, "memory_mib": 2048, "network": "offline"}),
         })
     })
-    .expect("creazione VM")
+    .expect("VM creation")
 }
 
 pub fn write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -32,28 +32,28 @@ pub fn write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     })
 }
 
-/// Baseline con disco base e vars finti.
+/// Baseline with a fake base disk and vars.
 pub fn baseline(cat: &mut Catalog, vm: &VmId, protected: bool) -> BaselineId {
     cat.promote_baseline(
         &PromoteBaseline {
             vm_id: *vm,
-            label: "installazione pulita".into(),
+            label: "clean install".into(),
             clean_shutdown: true,
             protected,
             virtual_size_bytes: 20 * 1024 * 1024 * 1024,
         },
-        |p| write_bytes(p, b"QFI\xfb base finta immutabile"),
-        Some(Box::new(|p: &Path| write_bytes(p, b"OVMF_VARS finto"))),
+        |p| write_bytes(p, b"QFI\xfb fake immutable base"),
+        Some(Box::new(|p: &Path| write_bytes(p, b"fake OVMF_VARS"))),
     )
-    .expect("promozione baseline")
+    .expect("baseline promotion")
 }
 
 pub fn run_from(cat: &mut Catalog, vm: &VmId, b: &BaselineId) -> RunRecord {
     cat.prepare_run_from_baseline(vm, b, |tmp, base| {
-        assert!(base.is_file(), "la base deve esistere");
-        write_bytes(tmp, b"QFI\xfb overlay finto")
+        assert!(base.is_file(), "the base must exist");
+        write_bytes(tmp, b"QFI\xfb fake overlay")
     })
-    .expect("preparazione esecuzione")
+    .expect("run preparation")
 }
 
 pub fn base_hash(cat: &mut Catalog, b: &BaselineId) -> String {
@@ -63,8 +63,8 @@ pub fn base_hash(cat: &mut Catalog, b: &BaselineId) -> String {
     vm_storage::sha256_file(&cat.layout().resolve(&rel).unwrap()).unwrap()
 }
 
-/// Crea una junction NTFS (`mklink /J`, nessun privilegio richiesto).
-/// Restituisce `false` se l'ambiente non lo consente.
+/// Creates an NTFS junction (`mklink /J`, no privileges required).
+/// Returns `false` if the environment does not allow it.
 pub fn make_junction(link: &Path, target: &Path) -> bool {
     if !cfg!(windows) {
         return false;

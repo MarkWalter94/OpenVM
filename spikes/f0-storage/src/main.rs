@@ -1,15 +1,15 @@
-//! Spike F0-05: ciclo baseline/overlay/firmware a VM spenta, esclusione dei
-//! dischi e prove di crash sullo storage. Log in `lab/logs/f0-05-*`.
+//! Spike F0-05: baseline/overlay/firmware cycle with the VM off, disk
+//! exclusion and storage crash tests. Logs in `lab/logs/f0-05-*`.
 
 #[cfg(not(windows))]
 fn main() {
-    eprintln!("f0-storage: spike solo Windows");
+    eprintln!("f0-storage: Windows-only spike");
 }
 
 #[cfg(windows)]
 fn main() {
     if let Err(e) = imp::run() {
-        eprintln!("errore: {e}");
+        eprintln!("error: {e}");
         std::process::exit(2);
     }
 }
@@ -54,7 +54,7 @@ mod imp {
             }
             Some("convert-crash") => convert_crash(),
             _ => {
-                eprintln!("uso: f0-storage <baseline-cycles|guest-write-crash|convert-crash>");
+                eprintln!("usage: f0-storage <baseline-cycles|guest-write-crash|convert-crash>");
                 Ok(())
             }
         }
@@ -91,7 +91,7 @@ mod imp {
                 .trim()
                 .to_string(),
             ),
-            Err(e) => (None, format!("spawn fallito: {e}")),
+            Err(e) => (None, format!("spawn failed: {e}")),
         }
     }
 
@@ -135,20 +135,20 @@ mod imp {
         r.map(|(w, h, p)| (w, h, p, size))
     }
 
-    /// Arresto ordinato per questa prova: `quit` (nessun guest da salvare)
-    /// con ripiego su Emergency Stop.
+    /// Orderly stop for this test: `quit` (no guest to save)
+    /// with a fallback to Emergency Stop.
     fn stop_vm(vm: &Vm, q: &mut Qmp, log: &mut Log) -> io::Result<()> {
         let t = Instant::now();
         let r = q.execute("quit", None);
         let code = vm.wait(Duration::from_secs(10))?;
         log.line(&format!(
-            "  quit: risposta={:?} uscita={code:?} in {:.0} ms",
+            "  quit: response={:?} exit={code:?} in {:.0} ms",
             r.is_ok(),
             t.elapsed().as_secs_f64() * 1000.0
         ));
         if code.is_none() {
             let (p, _) = vm.emergency_stop(Duration::from_secs(10))?;
-            log.line(&format!("  quit senza uscita: Emergency Stop in {p:.0} ms"));
+            log.line(&format!("  quit without exit: Emergency Stop in {p:.0} ms"));
         }
         Ok(())
     }
@@ -185,7 +185,7 @@ mod imp {
     }
 
     // -----------------------------------------------------------------------
-    // Ciclo baseline/overlay/firmware.
+    // Baseline/overlay/firmware cycle.
     // -----------------------------------------------------------------------
     fn baseline_cycles(cycles: u64, boot_s: u64) -> io::Result<()> {
         let mut log = Log::create(&Path::new(LOGS).join("f0-05-baseline-cycles.log"))?;
@@ -215,13 +215,13 @@ mod imp {
             serde_json::to_string_pretty(&manifest)?,
         )?;
         log.line(&format!("baseline: sha256 base={hb} vars={hv}"));
-        // Il supervisor tiene aperti i file della baseline con FILE_SHARE_READ
-        // per tutta la serie: nessuno può scriverli, rinominarli o cancellarli.
+        // The supervisor keeps the baseline files open with FILE_SHARE_READ
+        // for the whole series: nobody can write, rename or delete them.
         let gb = guard(&base)?;
         let gv = guard(&bvars)?;
         let mut stop_ms = Vec::new();
         for i in 1..=cycles {
-            log.line(&format!("== ciclo {i}"));
+            log.line(&format!("== cycle {i}"));
             let rdir = root.join(format!("run-{i}"));
             let (ovl, vars) = new_run(&rdir, r"..\baseline\base.qcow2", &bvars, &mut log)?;
             let (_, chain) = tool(
@@ -230,7 +230,7 @@ mod imp {
                 &["info", "--backing-chain", "overlay.qcow2"],
             );
             log.line(&format!(
-                "  catena: {}",
+                "  chain: {}",
                 chain
                     .split_whitespace()
                     .filter(|w| w.contains(".qcow2"))
@@ -240,7 +240,7 @@ mod imp {
             let ho0 = sha256(&ovl)?;
             let hr0 = sha256(&vars)?;
             log.line(&format!(
-                "  pre-boot: overlay={} vars_esecuzione={} (uguale alla baseline: {})",
+                "  pre-boot: overlay={} run_vars={} (same as baseline: {})",
                 short(&ho0),
                 short(&hr0),
                 hr0 == hv
@@ -260,9 +260,7 @@ mod imp {
                         d["inserted"]["ro"], d["inserted"]["image"]["backing-filename"]
                     )
                 });
-            log.line(&format!(
-                "  dopo {boot_s}s: schermo={shot:?} disco={disk:?}"
-            ));
+            log.line(&format!("  after {boot_s}s: screen={shot:?} disk={disk:?}"));
             let t = Instant::now();
             stop_vm(&vm, &mut q, &mut log)?;
             stop_ms.push(t.elapsed().as_secs_f64() * 1000.0);
@@ -274,7 +272,7 @@ mod imp {
             let ho1 = sha256(&ovl)?;
             let hr1 = sha256(&vars)?;
             log.line(&format!(
-                "  post-stop: base invariata={} vars_baseline invariato={} overlay cambiato={} ({}) vars_esecuzione cambiato={} ({}) overlay_byte={}",
+                "  post-stop: base unchanged={} baseline_vars unchanged={} overlay changed={} ({}) run_vars changed={} ({}) overlay_bytes={}",
                 hb1 == hb,
                 hv1 == hv,
                 ho1 != ho0,
@@ -287,17 +285,19 @@ mod imp {
                 let a = std::fs::read(&bvars)?;
                 let b = std::fs::read(&vars)?;
                 let diff = a.iter().zip(&b).filter(|(x, y)| x != y).count();
-                log.line(&format!("  vars: {diff} byte diversi su {}", a.len()));
+                log.line(&format!("  vars: {diff} bytes differ out of {}", a.len()));
             }
             let r = tool(&rdir, &qemu_img(), &["check", "overlay.qcow2"]);
             log.line(&format!("  qemu-img check overlay: {r:?}"));
-            // Scrittura dimostrativa a VM spenta (il guest live non scrive sul disco).
+            // Demonstration write with the VM off (the live guest does not write to the disk).
             let r = tool(
                 &rdir,
                 &qemu_io(),
                 &["-f", "qcow2", "-c", "write -P 0x5a 0 1M", "overlay.qcow2"],
             );
-            log.line(&format!("  qemu-io write 1 MiB 0x5a nell'overlay: {r:?}"));
+            log.line(&format!(
+                "  qemu-io write 1 MiB 0x5a into the overlay: {r:?}"
+            ));
             let r = tool(
                 &rdir,
                 &qemu_io(),
@@ -312,10 +312,10 @@ mod imp {
             );
             log.line(&format!("  qemu-io -r read -P 0x5a: {r:?}"));
             log.line(&format!(
-                "  base invariata dopo la scrittura nell'overlay={}",
+                "  base unchanged after the write into the overlay={}",
                 sha256(&base)? == hb
             ));
-            // Ripristino: scarta overlay e vars dell'esecuzione, ricrea dalla baseline.
+            // Restore: discard the run's overlay and vars, recreate from the baseline.
             std::fs::remove_file(&ovl)?;
             std::fs::remove_file(&vars)?;
             let (ovl2, vars2) = new_run(&rdir, r"..\baseline\base.qcow2", &bvars, &mut log)?;
@@ -325,29 +325,29 @@ mod imp {
                 &["-r", "-f", "qcow2", "-c", "read -P 0 0 1M", "overlay.qcow2"],
             );
             log.line(&format!(
-                "  ripristino: overlay nuovo legge zeri come la base: {r:?}; vars nuovo = baseline: {}",
+                "  restore: new overlay reads zeroes like the base: {r:?}; new vars = baseline: {}",
                 sha256(&vars2)? == hv
             ));
             log.line(&format!(
-                "  ripristino: overlay nuovo identico all'overlay pre-boot: {}",
+                "  restore: new overlay identical to the pre-boot overlay: {}",
                 sha256(&ovl2)? == ho0
             ));
         }
         drop(gb);
         drop(gv);
         log.line(&format!(
-            "RIEPILOGO: base finale invariata={} vars baseline invariato={} stop (ms): {}",
+            "SUMMARY: final base unchanged={} baseline vars unchanged={} stop (ms): {}",
             sha256(&base)? == hb,
             sha256(&bvars)? == hv,
             stats(&stop_ms).map(|s| s.to_string()).unwrap_or_default()
         ));
         let (t, m) = qemu_residuals("lightvm-f0-05");
-        log.line(&format!("residui_spike={m:?} qemu_totali_host={t}"));
+        log.line(&format!("spike_residuals={m:?} host_qemu_total={t}"));
         Ok(())
     }
 
     // -----------------------------------------------------------------------
-    // Kill di QEMU mentre il guest scrive nell'overlay.
+    // Kill QEMU while the guest writes into the overlay.
     // -----------------------------------------------------------------------
     fn guest_write_crash(boot_s: u64, grow_mib: u64) -> io::Result<()> {
         let mut log = Log::create(&Path::new(LOGS).join("f0-05-guest-write-crash.log"))?;
@@ -362,7 +362,7 @@ mod imp {
             &qemu_img(),
             &["create", "-q", "-f", "qcow2", "base.qcow2", "20G"],
         );
-        // Contenuto riconoscibile nella base per verificare che resti intatta.
+        // Recognisable content in the base to verify that it stays intact.
         tool(
             &bdir,
             &qemu_io(),
@@ -370,7 +370,7 @@ mod imp {
         );
         std::fs::copy(f0_supervisor::fw_vars_template(), &bvars)?;
         let hb = sha256(&base)?;
-        log.line(&format!("base 20G con 64 MiB 0x11: sha256={hb}"));
+        log.line(&format!("base 20G with 64 MiB 0x11: sha256={hb}"));
         let gb = guard(&base)?;
         let rdir = root.join("run");
         let (ovl, vars) = new_run(&rdir, r"..\baseline\base.qcow2", &bvars, &mut log)?;
@@ -378,21 +378,21 @@ mod imp {
         let (vm, mut q, sock) = start_vm(tag, &ovl, &vars)?;
         std::thread::sleep(Duration::from_secs(boot_s));
         log.line(&format!(
-            "desktop? schermo={:?}",
+            "desktop? screen={:?}",
             screendump(&mut q, &format!("{tag}-1"), true)
         ));
-        // Apre un terminale nel live (Ctrl+Alt+T) e lancia dd sul disco di prova.
+        // Opens a terminal in the live session (Ctrl+Alt+T) and runs dd on the test disk.
         q.send_keys(&["ctrl", "alt", "t"])?;
         std::thread::sleep(Duration::from_secs(8));
         log.line(&format!(
-            "dopo Ctrl+Alt+T schermo={:?}",
+            "after Ctrl+Alt+T screen={:?}",
             screendump(&mut q, &format!("{tag}-2"), true)
         ));
-        // /dev/vda è il disco virtio-blk di prova collegato all'overlay (nessun disco reale).
+        // /dev/vda is the test virtio-blk disk attached to the overlay (no real disk).
         let cmd =
             "sudo dd if=/dev/urandom of=/dev/vda bs=1M count=8000 oflag=direct status=progress\n";
         q.type_text(cmd)?;
-        log.line(&format!("digitato: {}", cmd.trim()));
+        log.line(&format!("typed: {}", cmd.trim()));
         let size0 = std::fs::metadata(&ovl)?.len();
         let t0 = Instant::now();
         let mut killed = false;
@@ -401,13 +401,13 @@ mod imp {
             let s = std::fs::metadata(&ovl)?.len();
             if s > size0 + (grow_mib << 20) {
                 log.line(&format!(
-                    "overlay cresciuto da {size0} a {s} byte in {:.1}s: Emergency Stop durante la scrittura",
+                    "overlay grew from {size0} to {s} bytes in {:.1}s: Emergency Stop during the write",
                     t0.elapsed().as_secs_f64()
                 ));
                 let _ = screendump(&mut q, &format!("{tag}-3"), true);
                 let (p, j) = vm.emergency_stop(Duration::from_secs(10))?;
                 log.line(&format!(
-                    "Emergency Stop: ms_uscita_qemu={p:.1} ms_job_vuoto={j:.1}"
+                    "Emergency Stop: qemu_exit_ms={p:.1} job_empty_ms={j:.1}"
                 ));
                 killed = true;
                 break;
@@ -415,7 +415,7 @@ mod imp {
         }
         if !killed {
             log.line(&format!(
-                "overlay non cresciuto oltre {grow_mib} MiB entro 90 s (dimensione {} byte): schermo={:?}",
+                "overlay did not grow beyond {grow_mib} MiB within 90 s (size {} bytes): screen={:?}",
                 std::fs::metadata(&ovl)?.len(),
                 screendump(&mut q, &format!("{tag}-3"), true)
             ));
@@ -426,10 +426,10 @@ mod imp {
         drop(gb);
         let _ = std::fs::remove_file(&sock);
         let r = tool(&rdir, &qemu_img(), &["check", "overlay.qcow2"]);
-        log.line(&format!("qemu-img check overlay dopo il kill: {r:?}"));
+        log.line(&format!("qemu-img check overlay after the kill: {r:?}"));
         let r = tool(&rdir, &qemu_img(), &["info", "overlay.qcow2"]);
         log.line(&format!("qemu-img info overlay: {r:?}"));
-        log.line(&format!("base invariata={}", sha256(&base)? == hb));
+        log.line(&format!("base unchanged={}", sha256(&base)? == hb));
         let r = tool(
             &bdir,
             &qemu_io(),
@@ -442,14 +442,14 @@ mod imp {
                 "base.qcow2",
             ],
         );
-        log.line(&format!("contenuto base 0x11 verificato: {r:?}"));
+        log.line(&format!("base content 0x11 verified: {r:?}"));
         let (t, m) = qemu_residuals("lightvm-f0-05");
-        log.line(&format!("residui_spike={m:?} qemu_totali_host={t}"));
+        log.line(&format!("spike_residuals={m:?} host_qemu_total={t}"));
         Ok(())
     }
 
     // -----------------------------------------------------------------------
-    // Kill di qemu-img durante convert.
+    // Kill qemu-img during convert.
     // -----------------------------------------------------------------------
     fn convert_crash() -> io::Result<()> {
         let mut log = Log::create(&Path::new(LOGS).join("f0-05-convert-crash.log"))?;
@@ -469,10 +469,10 @@ mod imp {
         let src = dir.join("src.qcow2");
         let hs = sha256(&src)?;
         log.line(&format!(
-            "src: 8G virtuali, 2 GiB scritti, {} byte su disco, sha256={hs}",
+            "src: 8G virtual, 2 GiB written, {} bytes on disk, sha256={hs}",
             std::fs::metadata(&src)?.len()
         ));
-        // Riferimento: convert completo.
+        // Reference: full convert.
         let t = Instant::now();
         let r = tool(
             &dir,
@@ -480,7 +480,7 @@ mod imp {
             &["convert", "-O", "qcow2", "src.qcow2", "full.qcow2"],
         );
         let full_ms = t.elapsed().as_secs_f64() * 1000.0;
-        log.line(&format!("convert completo: {r:?} in {full_ms:.0} ms"));
+        log.line(&format!("full convert: {r:?} in {full_ms:.0} ms"));
         let r = tool(&dir, &qemu_img(), &["compare", "src.qcow2", "full.qcow2"]);
         log.line(&format!("compare src/full: {r:?}"));
         let _ = std::fs::remove_file(dir.join("full.qcow2"));
@@ -500,7 +500,7 @@ mod imp {
             let dst = dir.join(&name);
             let size = std::fs::metadata(&dst).map(|m| m.len()).ok();
             log.line(&format!(
-                "[{}] kill dopo {delay} ms (vivo al kill={still}) uscita={:?} file={name} byte={size:?}",
+                "[{}] kill after {delay} ms (alive at kill={still}) exit={:?} file={name} bytes={size:?}",
                 i + 1,
                 st.code()
             ));
@@ -516,8 +516,8 @@ mod imp {
                 &qemu_img(),
                 &["compare", "-f", "qcow2", "-F", "qcow2", "src.qcow2", &name],
             );
-            log.line(&format!("  compare con src: {r:?}"));
-            log.line(&format!("  src invariata={}", sha256(&src)? == hs));
+            log.line(&format!("  compare with src: {r:?}"));
+            log.line(&format!("  src unchanged={}", sha256(&src)? == hs));
         }
         Ok(())
     }

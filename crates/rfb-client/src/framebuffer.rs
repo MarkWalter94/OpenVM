@@ -1,30 +1,30 @@
 use crate::Error;
 
-/// Rettangolo in coordinate del framebuffer (pixel).
+/// Rectangle in framebuffer coordinates (pixels).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub struct Rect {
-    /// Ascissa del vertice in alto a sinistra.
+    /// X coordinate of the top-left corner.
     pub x: u16,
-    /// Ordinata del vertice in alto a sinistra.
+    /// Y coordinate of the top-left corner.
     pub y: u16,
-    /// Larghezza.
+    /// Width.
     pub w: u16,
-    /// Altezza.
+    /// Height.
     pub h: u16,
 }
 
 impl Rect {
-    /// Costruisce un rettangolo.
+    /// Builds a rectangle.
     pub const fn new(x: u16, y: u16, w: u16, h: u16) -> Self {
         Self { x, y, w, h }
     }
 
-    /// Area in pixel.
+    /// Area in pixels.
     pub fn area(&self) -> u64 {
         u64::from(self.w) * u64::from(self.h)
     }
 
-    /// Rettangolo minimo che contiene `self` e `other`.
+    /// Smallest rectangle containing `self` and `other`.
     pub fn union(&self, other: &Self) -> Self {
         let x0 = self.x.min(other.x);
         let y0 = self.y.min(other.y);
@@ -41,8 +41,8 @@ impl Rect {
     }
 }
 
-/// Framebuffer locale in formato BGRX 32 bpp (byte in memoria: B, G, R, X),
-/// righe contigue senza padding (`stride = width * 4`).
+/// Local framebuffer in 32 bpp BGRX format (bytes in memory: B, G, R, X),
+/// contiguous rows without padding (`stride = width * 4`).
 #[derive(Clone, PartialEq, Eq)]
 pub struct Framebuffer {
     width: u16,
@@ -60,7 +60,7 @@ impl std::fmt::Debug for Framebuffer {
 }
 
 impl Framebuffer {
-    /// Framebuffer nero delle dimensioni indicate.
+    /// Black framebuffer of the given size.
     pub fn new(width: u16, height: u16) -> Self {
         Self {
             width,
@@ -69,27 +69,27 @@ impl Framebuffer {
         }
     }
 
-    /// Larghezza in pixel.
+    /// Width in pixels.
     pub fn width(&self) -> u16 {
         self.width
     }
 
-    /// Altezza in pixel.
+    /// Height in pixels.
     pub fn height(&self) -> u16 {
         self.height
     }
 
-    /// Byte BGRX dell'intero framebuffer.
+    /// BGRX bytes of the whole framebuffer.
     pub fn data(&self) -> &[u8] {
         &self.data
     }
 
-    /// Rettangolo che copre l'intero framebuffer.
+    /// Rectangle covering the whole framebuffer.
     pub fn full_rect(&self) -> Rect {
         Rect::new(0, 0, self.width, self.height)
     }
 
-    /// Ridimensiona e azzera (nero), come dopo un DesktopSize.
+    /// Resizes and clears (black), as after a DesktopSize.
     pub fn resize(&mut self, width: u16, height: u16) {
         self.width = width;
         self.height = height;
@@ -98,13 +98,13 @@ impl Framebuffer {
             .resize(usize::from(width) * usize::from(height) * 4, 0);
     }
 
-    /// Verifica che il rettangolo sia interamente contenuto nel framebuffer.
+    /// Checks that the rectangle is entirely contained in the framebuffer.
     pub(crate) fn check(&self, r: Rect) -> Result<(), Error> {
         if u32::from(r.x) + u32::from(r.w) > u32::from(self.width)
             || u32::from(r.y) + u32::from(r.h) > u32::from(self.height)
         {
             return Err(Error::Protocol(format!(
-                "rettangolo {r:?} fuori dal framebuffer {}x{}",
+                "rectangle {r:?} outside the {}x{} framebuffer",
                 self.width, self.height
             )));
         }
@@ -115,12 +115,12 @@ impl Framebuffer {
         (usize::from(y) * usize::from(self.width) + usize::from(x)) * 4
     }
 
-    /// Copia pixel BGRX contigui (`r.w * r.h * 4` byte) nel rettangolo.
+    /// Copies contiguous BGRX pixels (`r.w * r.h * 4` bytes) into the rectangle.
     pub(crate) fn put(&mut self, r: Rect, src: &[u8]) -> Result<(), Error> {
         self.check(r)?;
         let row = usize::from(r.w) * 4;
         if src.len() != row * usize::from(r.h) {
-            return Err(Error::Protocol("dimensione dei pixel non coerente".into()));
+            return Err(Error::Protocol("inconsistent pixel data size".into()));
         }
         for (i, chunk) in src
             .chunks_exact(row.max(1))
@@ -133,7 +133,7 @@ impl Framebuffer {
         Ok(())
     }
 
-    /// Riempie il rettangolo con un pixel BGRX.
+    /// Fills the rectangle with a BGRX pixel.
     pub(crate) fn fill(&mut self, r: Rect, px: [u8; 4]) -> Result<(), Error> {
         self.check(r)?;
         for y in r.y..r.y + r.h {
@@ -148,8 +148,8 @@ impl Framebuffer {
         Ok(())
     }
 
-    /// CopyRect: copia l'area di origine (sx, sy) nel rettangolo di destinazione.
-    /// Gestisce la sovrapposizione passando per un buffer temporaneo.
+    /// CopyRect: copies the source area (sx, sy) into the destination rectangle.
+    /// Handles overlap by going through a temporary buffer.
     pub(crate) fn copy_within(&mut self, dst: Rect, sx: u16, sy: u16) -> Result<(), Error> {
         self.check(dst)?;
         self.check(Rect::new(sx, sy, dst.w, dst.h))?;
@@ -157,8 +157,8 @@ impl Framebuffer {
         self.put(dst, &tmp)
     }
 
-    /// Copia i byte BGRX di un rettangolo (contigui, `r.w * 4` per riga).
-    /// Il rettangolo viene ritagliato ai bordi del framebuffer.
+    /// Copies the BGRX bytes of a rectangle (contiguous, `r.w * 4` per row).
+    /// The rectangle is clipped to the framebuffer edges.
     pub fn region(&self, r: Rect) -> Vec<u8> {
         let r = self.clip(r);
         let row = usize::from(r.w) * 4;
@@ -170,7 +170,7 @@ impl Framebuffer {
         out
     }
 
-    /// Copia un rettangolo da un altro framebuffer delle stesse dimensioni.
+    /// Copies a rectangle from another framebuffer of the same size.
     pub fn copy_from(&mut self, other: &Self, r: Rect) {
         if self.width != other.width || self.height != other.height {
             *self = other.clone();
@@ -184,7 +184,7 @@ impl Framebuffer {
         }
     }
 
-    /// Ritaglia un rettangolo ai bordi del framebuffer.
+    /// Clips a rectangle to the framebuffer edges.
     pub fn clip(&self, r: Rect) -> Rect {
         let x = r.x.min(self.width);
         let y = r.y.min(self.height);
@@ -193,7 +193,7 @@ impl Framebuffer {
         Rect::new(x, y, w, h)
     }
 
-    /// Converte un rettangolo in RGBA (alpha 255), utile per una texture.
+    /// Converts a rectangle to RGBA (alpha 255), useful for a texture.
     pub fn region_rgba(&self, r: Rect) -> Vec<u8> {
         let mut v = self.region(r);
         for p in v.as_chunks_mut::<4>().0 {
@@ -203,7 +203,7 @@ impl Framebuffer {
         v
     }
 
-    /// Converte l'intero framebuffer in RGB (3 byte per pixel), per PNG/PPM.
+    /// Converts the whole framebuffer to RGB (3 bytes per pixel), for PNG/PPM.
     pub fn to_rgb(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.data.len() / 4 * 3);
         for p in self.data.as_chunks::<4>().0 {

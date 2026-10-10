@@ -1,32 +1,32 @@
-//! Registro media approvato come modello (ROADMAP 6.3; ADR-0008).
+//! Approved media registry as a model (ROADMAP 6.3; ADR-0008).
 //!
-//! Un percorso selezionato non autorizza qualunque file lo sostituisca: prima
-//! di ogni uso il core confronta hash, dimensione e identità OS osservati sul
-//! file aperto con quelli registrati all'approvazione. Il backend accetta solo
-//! [`VerifiedMedia`], costruibile esclusivamente da [`verify_media`].
+//! A selected path does not authorize whatever file replaces it: before
+//! each use the core compares the hash, size and OS identity observed on the
+//! open file with those recorded at approval time. The backend accepts only
+//! [`VerifiedMedia`], which can be built exclusively by [`verify_media`].
 //!
-//! Limite: la verifica vale per il file ispezionato. Perché copra anche l'uso,
-//! l'ispezione deve avvenire sullo stesso handle consegnato a QEMU (o su un file
-//! in directory controllata e in sola lettura): responsabilità di storage e backend.
+//! Limitation: the check holds for the inspected file. For it to cover use too,
+//! the inspection must happen on the same handle handed to QEMU (or on a file
+//! in a controlled, read-only directory): a responsibility of storage and backend.
 
 use lightvm_proto::{
     FileIdentity, MediaEntry, MediaKind, MediaRecord, PublicError, Sha256Digest, UtcTimestamp,
 };
 
-/// Fatti osservati sulla copia gestita, calcolati sul file aperto.
+/// Facts observed on the managed copy, computed on the open file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ObservedMediaFacts {
-    /// SHA-256 del contenuto.
+    /// SHA-256 of the content.
     pub sha256: Sha256Digest,
-    /// Dimensione in byte.
+    /// Size in bytes.
     pub size_bytes: u64,
-    /// Identità OS del file aperto, se disponibile.
+    /// OS identity of the open file, if available.
     pub file_identity: Option<FileIdentity>,
-    /// `true` se il file è aperto/marcato in sola lettura.
+    /// `true` if the file is open/marked read-only.
     pub read_only: bool,
 }
 
-/// Prova di verifica di un supporto: campi privati, costruibile solo da [`verify_media`].
+/// Proof that a medium was verified: private fields, built only by [`verify_media`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifiedMedia {
     entry: MediaEntry,
@@ -34,17 +34,17 @@ pub struct VerifiedMedia {
 }
 
 impl VerifiedMedia {
-    /// Voce verificata.
+    /// Verified entry.
     #[must_use]
     pub fn entry(&self) -> &MediaEntry {
         &self.entry
     }
-    /// Dati pubblici.
+    /// Public data.
     #[must_use]
     pub fn record(&self) -> &MediaRecord {
         &self.entry.record
     }
-    /// Istante della verifica.
+    /// Instant of the verification.
     #[must_use]
     pub fn verified_at(&self) -> UtcTimestamp {
         self.verified_at
@@ -52,13 +52,13 @@ impl VerifiedMedia {
 }
 
 fn mismatch(what: &'static str) -> PublicError {
-    PublicError::permission_denied("supporto diverso da quello approvato")
+    PublicError::permission_denied("medium differs from the approved one")
         .with_detail("reason", "media_identity_mismatch")
         .with_detail("field", what)
 }
 
-/// Confronta i fatti osservati con il registro. Qualunque differenza (hash,
-/// dimensione, identità OS registrata, scrivibilità) nega l'uso.
+/// Compares the observed facts with the registry. Any difference (hash,
+/// size, recorded OS identity, writability) denies use.
 pub fn verify_media(
     entry: &MediaEntry,
     observed: &ObservedMediaFacts,
@@ -84,13 +84,13 @@ pub fn verify_media(
     })
 }
 
-/// Verifica che un supporto sia del tipo richiesto dal ruolo nella configurazione.
+/// Checks that a medium is of the kind required by its role in the configuration.
 pub fn check_media_kind(entry: &MediaEntry, expected: MediaKind) -> Result<(), PublicError> {
     if entry.record.kind == expected {
         Ok(())
     } else {
         Err(
-            PublicError::invalid_argument("tipo di supporto non adatto al ruolo richiesto")
+            PublicError::invalid_argument("media kind not suitable for the requested role")
                 .with_detail("media_id", entry.record.id.to_string()),
         )
     }

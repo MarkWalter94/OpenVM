@@ -1,13 +1,13 @@
-//! Destinazione dell'audit su file (F1-10): una riga JSON per evento
-//! ([`lightvm_proto::AuditEvent`]), in sola aggiunta, nel profilo utente.
+//! File audit sink (F1-10): one JSON line per event
+//! ([`lightvm_proto::AuditEvent`]), append-only, in the user profile.
 //!
-//! Gli eventi arrivano dal core già privi di payload sensibili (nessun testo
-//! digitato, token, percorso host o contenuto guest). Ogni riga viene scritta e
-//! sincronizzata prima di restituire: se la scrittura fallisce il core conta
-//! l'errore e, per gli eventi che precedono un effetto, rifiuta l'operazione.
+//! Events arrive from the core already stripped of sensitive payloads (no
+//! typed text, tokens, host paths or guest content). Each line is written and
+//! synced before returning: if the write fails the core counts the error and,
+//! for events that precede an effect, rejects the operation.
 //!
-//! Il numero `seq` riparte da 1 a ogni avvio del supervisor: le righe di avvii
-//! diversi si distinguono per `at` (ogni riga è un `AuditEvent` completo).
+//! The `seq` number restarts from 1 at every supervisor start: lines from
+//! different starts are told apart by `at` (each line is a full `AuditEvent`).
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
@@ -16,12 +16,12 @@ use std::path::{Path, PathBuf};
 use lightvm_proto::{AuditEvent, PublicError};
 use vm_core::ports::AuditSink;
 
-/// Nome del file di audit nella directory di stato dell'utente.
+/// Name of the audit file in the user's state directory.
 pub const AUDIT_FILE: &str = "audit.jsonl";
 
-/// Directory di stato predefinita nel profilo utente:
-/// `%LOCALAPPDATA%\LightVM` su Windows, `$XDG_STATE_HOME/lightvm` (o
-/// `~/.local/state/lightvm`) su Unix.
+/// Default state directory in the user profile:
+/// `%LOCALAPPDATA%\LightVM` on Windows, `$XDG_STATE_HOME/lightvm` (or
+/// `~/.local/state/lightvm`) on Unix.
 pub fn default_state_dir() -> Option<PathBuf> {
     #[cfg(windows)]
     {
@@ -37,7 +37,7 @@ pub fn default_state_dir() -> Option<PathBuf> {
     }
 }
 
-/// Audit su file JSON Lines in sola aggiunta.
+/// Audit on an append-only JSON Lines file.
 #[derive(Debug)]
 pub struct FileAuditSink {
     file: File,
@@ -45,8 +45,8 @@ pub struct FileAuditSink {
 }
 
 impl FileAuditSink {
-    /// Apre (o crea) il file in sola aggiunta; crea la directory se manca.
-    /// Su Unix il file nuovo nasce con permessi `0600`.
+    /// Opens (or creates) the file append-only; creates the directory if missing.
+    /// On Unix a new file is created with `0600` permissions.
     pub fn open(path: &Path) -> io::Result<Self> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
@@ -65,7 +65,7 @@ impl FileAuditSink {
         })
     }
 
-    /// Percorso del file (diagnostica locale; mai inviato ai client).
+    /// Path of the file (local diagnostics; never sent to clients).
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -74,9 +74,9 @@ impl FileAuditSink {
 impl AuditSink for FileAuditSink {
     fn append(&mut self, event: &AuditEvent) -> Result<(), PublicError> {
         let line = serde_json::to_string(event)
-            .map_err(|_| PublicError::infrastructure("audit: evento non serializzabile"))?;
+            .map_err(|_| PublicError::infrastructure("audit: event not serializable"))?;
         writeln!(self.file, "{line}")
             .and_then(|()| self.file.sync_data())
-            .map_err(|_| PublicError::infrastructure("audit: scrittura non riuscita"))
+            .map_err(|_| PublicError::infrastructure("audit: write failed"))
     }
 }

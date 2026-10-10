@@ -1,193 +1,193 @@
-# Architettura
+# Architecture
 
-Ultimo aggiornamento: 2026-10-10 (riesame di F0, avanzamento F1)
+Last updated: 2026-10-10 (F0 review, F1 progress)
 
-Documento richiesto dalla sezione 10 (F0) di `docs/ROADMAP.md`, derivato dalla sezione 6. Descrive componenti, confini e regole del prodotto; il codice esistente è costituito da spike di fattibilità F0 e da crate in costruzione. I punti marcati **[verificato in F0: …]** rimandano a prove di fattibilità sul primo host (Windows 11, `docs/verification/`); quelli marcati **[pendente]** dipendono da prove non ancora eseguite. Le decisioni sono negli ADR indicati.
+Document required by section 10 (F0) of `docs/ROADMAP.md`, derived from section 6. It describes the product's components, boundaries and rules; the existing code consists of F0 feasibility spikes and crates under construction. Items marked **[verified in F0: …]** refer to feasibility tests on the first host (Windows 11, `docs/verification/`); items marked **[pending]** depend on tests not yet run. Decisions are in the referenced ADRs.
 
-## 1. Componenti e confini
+## 1. Components and boundaries
 
-| Componente | Processo | Responsabilità | Non fa | ADR |
+| Component | Process | Responsibility | Does not | ADR |
 | --- | --- | --- | --- | --- |
-| UI desktop (`apps/desktop`, egui/eframe) | Processo UI | Schermate, wizard, console come texture, lettura input con winit, selettore file nativo | Non lancia QEMU, non apre dischi, non esegue comandi host generici, non è un livello fidato, non conosce l'endpoint QMP | 0001, 0014 |
-| Client RFB (`rfb-client`) | Libreria nel processo UI | Handshake RFB 3.8, VeNCrypt X.509 con rustls, decodifica ZRLE/Hextile/CopyRect/Raw/DesktopSize, framebuffer condiviso | Non invia input, appunti né power control (solo messaggi client 0, 2, 3); non dipende da QMP né da codice di processo | 0003, 0024 |
-| Supervisor (`lightvm-service`) | Processo supervisor, distinto dalla UI | Unica autorità su processi, sessioni, policy e file VM; IPC autenticato; coda per VM; Emergency Stop | Non espone QMP né percorsi host ai client | 0002, 0009 |
-| Adapter MCP (`mcp-server`, binario `lightvm-mcp`, da F5) | Processo avviato dal client MCP via stdio | Traduzione MCP ↔ IPC; pairing | Non apre dischi, non esegue QEMU, non decide la policy | 0006 |
-| Backend QEMU (`qemu-backend`) | Libreria nel supervisor | Probe, costruzione argomenti, spawn nel Job Object, client QMP unico, lato server della console (directory privata, `-vnc unix:`, credenziale del display), screendump, input | Non accetta opzioni QEMU arbitrarie; non contiene il client RFB | 0007, 0010, 0012, 0013, 0024 |
-| Storage (`vm-storage`) | Libreria nel supervisor | SQLite, manifest JSON versionati, registro media, baseline, overlay, journal, esclusione dei dischi tramite share mode | Non modifica immagini in uso; non si affida al lock di QEMU | 0005, 0008, 0025 |
-| Core (`vm-core`) | Libreria | Modelli, stati, casi d'uso, policy, sessioni | Nessuna dipendenza da UI o da I/O di processo | — |
-| Protocollo (`lightvm-proto`) | Libreria | Tipi IPC/MCP e JSON Schema generati da fonte unica; errori pubblici stabili | — | — |
-| QEMU | Processo figlio del supervisor, uno per VM in esecuzione | Esecuzione del guest con acceleratore | — | 0007 |
+| Desktop UI (`apps/desktop`, egui/eframe) | UI process | Screens, wizards, console as a texture, input reading with winit, native file picker | Does not launch QEMU, does not open disks, does not run generic host commands, is not a trusted layer, does not know the QMP endpoint | 0001, 0014 |
+| RFB client (`rfb-client`) | Library in the UI process | RFB 3.8 handshake, VeNCrypt X.509 with rustls, ZRLE/Hextile/CopyRect/Raw/DesktopSize decoding, shared framebuffer | Does not send input, clipboard or power control (client messages 0, 2, 3 only); does not depend on QMP or process code | 0003, 0024 |
+| Supervisor (`lightvm-service`) | Supervisor process, separate from the UI | Sole authority over processes, sessions, policy and VM files; authenticated IPC; per-VM queue; Emergency Stop | Does not expose QMP or host paths to clients | 0002, 0009 |
+| MCP adapter (`mcp-server`, binary `lightvm-mcp`, from F5) | Process launched by the MCP client via stdio | MCP ↔ IPC translation; pairing | Does not open disks, does not run QEMU, does not decide policy | 0006 |
+| QEMU backend (`qemu-backend`) | Library in the supervisor | Probe, argument construction, spawn into the Job Object, single QMP client, server side of the console (private directory, `-vnc unix:`, display credential), screendump, input | Does not accept arbitrary QEMU options; does not contain the RFB client | 0007, 0010, 0012, 0013, 0024 |
+| Storage (`vm-storage`) | Library in the supervisor | SQLite, versioned JSON manifests, media registry, baselines, overlays, journal, disk exclusion through share modes | Does not modify images in use; does not rely on QEMU's lock | 0005, 0008, 0025 |
+| Core (`vm-core`) | Library | Models, states, use cases, policy, sessions | No dependency on UI or process I/O | — |
+| Protocol (`lightvm-proto`) | Library | IPC/MCP types and JSON Schema generated from a single source; stable public errors | — | — |
+| QEMU | Child process of the supervisor, one per running VM | Runs the guest with an accelerator | — | 0007 |
 
-## 2. Diagramma
+## 2. Diagram
 
 ```text
- Processo UI (eframe)                      Processo client MCP (esterno)
+ UI process (eframe)                       External MCP client process
  ┌─────────────────────────┐                ┌──────────────────────────┐
- │ schermate, wizard        │                │ agente                   │
- │ client RFB → texture     │                └────────────┬─────────────┘
- │ input winit (scancode)   │                             │ stdio (MCP 2025-11-25)
+ │ screens, wizards         │                │ agent                    │
+ │ RFB client → texture     │                └────────────┬─────────────┘
+ │ winit input (scancode)   │                             │ stdio (MCP 2025-11-25)
  └──────┬───────────▲───────┘                ┌────────────▼─────────────┐
-        │ IPC       │ framebuffer            │ adapter lightvm-mcp      │
-        │ tipizzato │ (canale display        └────────────┬─────────────┘
-        │ autentic. │  protetto o IPC                     │ IPC autenticato
-        │           │  nel ripiego)                       │
+        │ IPC       │ framebuffer            │ lightvm-mcp adapter      │
+        │ typed     │ (protected             └────────────┬─────────────┘
+        │ authent.  │  display channel                    │ authenticated IPC
+        │           │  or IPC in fallback)                │
  ┌──────▼───────────┴─────────────────────────────────────▼─────────────┐
- │ Processo supervisor                                                   │
- │  autenticazione IPC → policy (intersezione) → sessioni/grant         │
- │  → coda operazioni per VM ─┐      percorso prioritario Emergency Stop │
- │  backend QEMU · storage · audit                                       │
+ │ Supervisor process                                                    │
+ │  IPC authentication → policy (intersection) → sessions/grants        │
+ │  → per-VM operation queue ─┐      Emergency Stop priority path        │
+ │  QEMU backend · storage · audit                                       │
  └────────┬───────────────────┴──────────────────────────────────────────┘
-          │ spawn con argomenti strutturati, Job Object / meccanismo Linux
+          │ spawn with structured arguments, Job Object / Linux mechanism
  ┌────────▼────────────────────┐
- │ processo QEMU (per VM)       │◄── QMP su canale privato (solo supervisor)
- │  display RFB protetto        │──► framebuffer verso la UI
+ │ QEMU process (per VM)        │◄── QMP on private channel (supervisor only)
+ │  protected RFB display       │──► framebuffer to the UI
  └────────┬────────────────────┘
           │
-        guest (offline, nessuna NIC)
+        guest (offline, no NIC)
 ```
 
-## 3. Modello di processo
+## 3. Process model
 
-- La UI avvia e sorveglia il supervisor; il supervisor avvia i processi QEMU (ADR-0002).
-- Istanza singola del supervisor per catalogo; processi identificati con handle, tempo di creazione e `run_id`, mai solo con il PID. **[verificato in F0: `F0-06` §3, PID riassegnato riconosciuto dal tempo di creazione]**
-- Windows: QEMU creato con `CreateProcessW` e argomenti strutturati, nel Job Object del supervisor **dalla creazione** (`PROC_THREAD_ATTRIBUTE_JOB_LIST`), job con `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` senza breakaway, eredità limitata ai tre handle standard (`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`), `DETACHED_PROCESS`, ambiente ridotto a `SystemRoot`. **[verificato in F0: `F0-06` §1]**
-- Crash del supervisor (Windows): il sistema operativo chiude il job e termina QEMU (p50 118,9 / 110,4 ms, max 143,9 ms, 10 cicli, 0 residui). **[verificato in F0: `F0-06` §2a]**
-- Morte esterna di QEMU: rilevata dall'attesa sull'handle e classificata dal codice di uscita e dalle notifiche del job. **[verificato in F0: `F0-06` §2b]**
-- Emergency Stop: `TerminateJobObject` con codice dedicato, completamento dopo l'uscita osservata e `ActiveProcesses = 0` (p95 640,2 ms su 30 campioni a desktop, 273,3 ms su 100 campioni durante il boot). **[verificato in F0: `F0-06` §2c]**
-- Arresto ordinario: `system_powerdown` con timeout configurabile, poi `quit`, poi `TerminateJobObject`. **[verificato in F0 come procedura: `F0-06` §2d]**
-- Limiti: hard cap CPU e limite di memoria del job applicati prima dello spawn, impostabili per VM (ADR-0017, accettata in parte). **[verificato in F0: `F0-08`; per VM in F1: `F1-10`]**
-- Linux: combinazione proposta `PR_SET_PDEATHSIG` + pidfd + cgroup v2 delegato con `cgroup.kill` (ADR-0015, Proposta). **[verificato in F0 solo per il ciclo di vita dei processi in WSL2: `F0-07` §4; QEMU su host fisico in R2a]**
-- Crash della UI: le sessioni agente sono revocate; la sorte delle VM manuali è un'impostazione (predefinito: terminarle subito; ADR-0015 parte B). **[verificato su Windows in F1: `F1-09` (P-2)]**
-- Il recupero di UI o applicazione non riattiva automaticamente sessioni agente.
-- Il supervisor non è un servizio sempre attivo nell'MVP.
+- The UI launches and monitors the supervisor; the supervisor launches the QEMU processes (ADR-0002).
+- Single supervisor instance per catalog; processes identified by handle, creation time and `run_id`, never by PID alone. **[verified in F0: `F0-06` §3, reassigned PID recognized by creation time]**
+- Windows: QEMU created with `CreateProcessW` and structured arguments, inside the supervisor's Job Object **from creation** (`PROC_THREAD_ATTRIBUTE_JOB_LIST`), job with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` without breakaway, inheritance limited to the three standard handles (`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`), `DETACHED_PROCESS`, environment reduced to `SystemRoot`. **[verified in F0: `F0-06` §1]**
+- Supervisor crash (Windows): the operating system closes the job and terminates QEMU (p50 118.9 / 110.4 ms, max 143.9 ms, 10 cycles, 0 leftovers). **[verified in F0: `F0-06` §2a]**
+- External death of QEMU: detected by waiting on the handle and classified by exit code and job notifications. **[verified in F0: `F0-06` §2b]**
+- Emergency Stop: `TerminateJobObject` with a dedicated code, completion after the observed exit and `ActiveProcesses = 0` (p95 640.2 ms over 30 samples at the desktop, 273.3 ms over 100 samples during boot). **[verified in F0: `F0-06` §2c]**
+- Ordinary shutdown: `system_powerdown` with a configurable timeout, then `quit`, then `TerminateJobObject`. **[verified in F0 as a procedure: `F0-06` §2d]**
+- Limits: CPU hard cap and job memory limit applied before spawn, configurable per VM (ADR-0017, partially accepted). **[verified in F0: `F0-08`; per VM in F1: `F1-10`]**
+- Linux: proposed combination `PR_SET_PDEATHSIG` + pidfd + delegated cgroup v2 with `cgroup.kill` (ADR-0015, Proposed). **[verified in F0 only for the process lifecycle in WSL2: `F0-07` §4; QEMU on a physical host in R2a]**
+- UI crash: agent sessions are revoked; the fate of manual VMs is a setting (default: terminate them immediately; ADR-0015 part B). **[verified on Windows in F1: `F1-09` (P-2)]**
+- Recovery of the UI or application does not automatically reactivate agent sessions.
+- The supervisor is not an always-on service in the MVP.
 
-## 4. Macchina a stati della VM
+## 4. VM state machine
 
-Stato osservato derivato da processo e QMP, non dal solo database (sezione 6.3).
+Observed state derived from the process and QMP, not from the database alone (section 6.3).
 
 ```text
-            start                 QMP pronto + processo vivo
+            start                 QMP ready + process alive
  Stopped ─────────► Starting ───────────────────────────► Running
    ▲                   │                                    │
-   │                   │ errore / timeout                   │ shutdown, force-stop, Emergency Stop
+   │                   │ error / timeout                    │ shutdown, force-stop, Emergency Stop
    │                   ▼                                    ▼
-   │                Failed ◄──── uscita inattesa ───── Stopping
+   │                Failed ◄──── unexpected exit ───── Stopping
    │                   │                                    │
-   │                   ▼                                    │ processo terminato e file rilasciati
-   │              Recovering ── riconciliazione ──┐         │
+   │                   ▼                                    │ process terminated and files released
+   │              Recovering ── reconciliation ───┐         │
    └───────────────────────────────────────────────┴────────┘
 ```
 
-| Stato | Ingresso | Operazioni ammesse | Note |
+| State | Entry | Allowed operations | Notes |
 | --- | --- | --- | --- |
-| Stopped | Processo terminato e file rilasciati | start, configurazione, media, baseline, ripristino | Unico stato per operazioni su dischi, NVRAM e media |
-| Starting | Spawn avviato | force-stop | Nuovo `run_id` assegnato |
-| Running | Processo vivo e QMP pronto | shutdown, force-stop, reset, screenshot, input, observe | Richieste con `run_id` precedente rifiutate |
-| Stopping | Arresto richiesto | force-stop | Stop dichiarato completo solo a fine processo osservata |
-| Failed | Errore di avvio o uscita inattesa | recover, diagnostica | Nessuna promozione automatica a baseline |
-| Recovering | Riconciliazione dopo crash | nessuna mutazione esterna | Applica journal, verifica file e processi |
+| Stopped | Process terminated and files released | start, configuration, media, baseline, restore | Only state for operations on disks, NVRAM and media |
+| Starting | Spawn started | force-stop | New `run_id` assigned |
+| Running | Process alive and QMP ready | shutdown, force-stop, reset, screenshot, input, observe | Requests with a previous `run_id` rejected |
+| Stopping | Shutdown requested | force-stop | Stop declared complete only once the process end is observed |
+| Failed | Startup error or unexpected exit | recover, diagnostics | No automatic promotion to baseline |
+| Recovering | Reconciliation after a crash | no external mutation | Applies the journal, checks files and processes |
 
-## 5. Coda operazioni per VM
+## 5. Per-VM operation queue
 
-- Una coda di mutazioni per VM; operazioni incompatibili bloccate (`vm_busy`, `state_conflict`).
-- Ogni operazione ha `operation_id`; ogni esecuzione ha `run_id`; controllo delle revisioni su configurazione e policy.
-- Le richieste riferite a un `run_id` precedente sono invalidate dopo riavvio o ripristino.
-- Retry automatici solo per operazioni idempotenti; input GUI mai ripetuti dopo un timeout.
-- Comandi lunghi restituiscono uno stato tracciabile per `operation_id`.
-- Il percorso di Emergency Stop non passa dalla coda (ADR-0009).
-- Doppio controllo dell'autorizzazione: al ricevimento e immediatamente prima dell'inoltro al backend (sezione 7.3).
+- One mutation queue per VM; incompatible operations blocked (`vm_busy`, `state_conflict`).
+- Each operation has an `operation_id`; each execution has a `run_id`; revision checks on configuration and policy.
+- Requests referring to a previous `run_id` are invalidated after a restart or restore.
+- Automatic retries only for idempotent operations; GUI input never repeated after a timeout.
+- Long-running commands return a state trackable by `operation_id`.
+- The Emergency Stop path does not go through the queue (ADR-0009).
+- Double authorization check: on receipt and immediately before forwarding to the backend (section 7.3).
 
-## 6. Policy come intersezione
+## 6. Policy as intersection
 
 ```text
-policy_effettiva = limiti_globali ∩ policy_VM ∩ grant_sessione ∩ capacità_host_disponibili
+effective_policy = global_limits ∩ vm_policy ∩ session_grant ∩ available_host_capabilities
 ```
 
-- Nessun livello amplia i precedenti; un'assenza di capacità host restringe, non viene ignorata.
-- La stessa policy vale per UI e MCP; la UI non è un livello fidato aggiuntivo.
-- La revisione della policy applicata è registrata in ogni report di sessione (sezione 9).
-- Errori pubblici: `unauthenticated`, `permission_denied`, `session_expired`, `vm_busy`, `unsupported`, `resource_limit`, `state_conflict` (semantica dei codici di autenticazione in ADR-0026).
+- No layer widens the previous ones; a missing host capability narrows, it is not ignored.
+- The same policy applies to the UI and MCP; the UI is not an additional trusted layer.
+- The revision of the applied policy is recorded in every session report (section 9).
+- Public errors: `unauthenticated`, `permission_denied`, `session_expired`, `vm_busy`, `unsupported`, `resource_limit`, `state_conflict` (semantics of the authentication codes in ADR-0026).
 
 ## 7. Console
 
-- Client RFB interno nel processo UI, crate `rfb-client` separato (ADR-0024), sottoinsieme ristretto, sola lettura per costruzione; framebuffer disegnato come texture egui aggiornata per rettangoli (ADR-0003). **[verificato in F0: `F0-04` §1–§3, framebuffer dell'app identico a `screendump`]**
-- Canale display primario: **VNC su socket Unix** nella directory privata per esecuzione creata dal supervisor, ACL solo-utente; alternativa documentata VeNCrypt X.509 con certificato client (rustls), non predefinita perché l'arresto della sessione TLS non interrompe la lettura (ADR-0013). **[verificato in F0: `F0-04` §1, §5, §6; secondo utente pendente]**
-- Credenziale del display emessa dal supervisor per esecuzione e VM, distinta da QMP e IPC, consegnata alla UI e revocata con la sessione. **[pendente: da realizzare e provare entro F2, ADR-0013]**
-- Ripiego: framebuffer da QMP `screendump` a frequenza limitata, file temporaneo in directory privata scelto dal backend, consegna alla UI via IPC; latenza dichiarata in `docs/COMPATIBILITY.md`. **[fattibilità verificata in F0: cattura p95 19,2 ms, `F0-04` §7; non necessario sul primo host]**
-- Input: eventi winit con scancode fisici → qcode QEMU per layout dichiarati (US, IT) → IPC → bridge autorizzato → QMP. Tasti rilasciati su perdita di focus, disconnessione o cambio proprietario. **[verificato in F0 da `egui::Event` in poi: `F0-04` §4; tastiera fisica attraverso winit pendente]**
-- Nessuna lettura degli appunti host: egui-winit è usato in una copia patchata che non li legge (`vendor/egui-winit`, F1-13); il filtro della UI resta come seconda difesa; le etichette non sono selezionabili, quindi nemmeno la copia verso gli appunti.
-- Screenshot prodotti dal backend anche con console chiusa, con `run_id` e geometria del display.
+- Internal RFB client in the UI process, separate `rfb-client` crate (ADR-0024), restricted subset, read-only by construction; framebuffer drawn as an egui texture updated by rectangles (ADR-0003). **[verified in F0: `F0-04` §1–§3, app framebuffer identical to `screendump`]**
+- Primary display channel: **VNC over a Unix socket** in the private per-execution directory created by the supervisor, user-only ACL; documented alternative VeNCrypt X.509 with a client certificate (rustls), not the default because shutting down the TLS session does not stop reading (ADR-0013). **[verified in F0: `F0-04` §1, §5, §6; second user pending]**
+- Display credential issued by the supervisor per execution and VM, distinct from QMP and IPC, delivered to the UI and revoked with the session. **[pending: to be implemented and tested by F2, ADR-0013]**
+- Fallback: framebuffer from QMP `screendump` at a limited rate, temporary file in a private directory chosen by the backend, delivered to the UI via IPC; latency declared in `docs/COMPATIBILITY.md`. **[feasibility verified in F0: capture p95 19.2 ms, `F0-04` §7; not needed on the first host]**
+- Input: winit events with physical scancodes → QEMU qcodes for the declared layouts (US, IT) → IPC → authorized bridge → QMP. Keys released on focus loss, disconnection or owner change. **[verified in F0 from `egui::Event` onwards: `F0-04` §4; physical keyboard through winit pending]**
+- No reading of the host clipboard: egui-winit is used in a patched copy that does not read it (`vendor/egui-winit`, F1-13); the UI filter remains as a second defense; labels are not selectable, so copying to the clipboard is not possible either.
+- Screenshots produced by the backend even with the console closed, with `run_id` and display geometry.
 
-### 7.1 Canali di controllo
+### 7.1 Control channels
 
-| Canale | Trasporto | Proprietario | Stato |
+| Channel | Transport | Owner | Status |
 | --- | --- | --- | --- |
-| QMP | socket Unix `qmp.sock` nella directory privata per esecuzione; un solo client, il supervisor, collegato subito dopo lo spawn (QEMU serve un client alla volta) | supervisor | verificato in F0 (`F0-02` §4.3, `F0-04` §6, `F0-06`); named pipe creata da QEMU scartata (ADR-0012) |
-| Display | socket Unix `vnc.sock` nella directory privata per esecuzione | UI (client RFB), con endpoint ricevuto dal supervisor | verificato in F0 (`F0-04`); credenziale per esecuzione pendente (ADR-0013) |
-| IPC UI/MCP ↔ supervisor | named pipe con ACL (Windows), socket Unix con permessi restrittivi (Linux) | supervisor | da F1 |
+| QMP | Unix socket `qmp.sock` in the private per-execution directory; a single client, the supervisor, connected right after spawn (QEMU serves one client at a time) | supervisor | verified in F0 (`F0-02` §4.3, `F0-04` §6, `F0-06`); named pipe created by QEMU discarded (ADR-0012) |
+| Display | Unix socket `vnc.sock` in the private per-execution directory | UI (RFB client), with the endpoint received from the supervisor | verified in F0 (`F0-04`); per-execution credential pending (ADR-0013) |
+| UI/MCP ↔ supervisor IPC | named pipe with ACL (Windows), Unix socket with restrictive permissions (Linux) | supervisor | from F1 |
 
-## 8. Struttura dei crate (sezione 6.2)
+## 8. Crate structure (section 6.2)
 
 ```text
-apps/desktop/              UI egui/eframe
-crates/vm-core/            modelli, stati, casi d'uso, policy e sessioni
-crates/qemu-backend/       processi, QMP, probe, lato server della console
-crates/rfb-client/         client RFB in sola lettura, usato dalla UI (ADR-0024)
-crates/vm-storage/         SQLite, manifest, baseline, journal
-crates/lightvm-service/    supervisor e IPC locale
-crates/lightvm-proto/      tipi IPC/MCP e JSON Schema generati
-crates/mcp-server/         aggiunto in F5
+apps/desktop/              egui/eframe UI
+crates/vm-core/            models, states, use cases, policy and sessions
+crates/qemu-backend/       processes, QMP, probe, server side of the console
+crates/rfb-client/         read-only RFB client, used by the UI (ADR-0024)
+crates/vm-storage/         SQLite, manifests, baselines, journal
+crates/lightvm-service/    supervisor and local IPC
+crates/lightvm-proto/      IPC/MCP types and generated JSON Schema
+crates/mcp-server/         added in F5
 tests/{integration,security,e2e}/
 docs/{adr,verification}/
 ```
 
-Direzione delle dipendenze (non fissata dalla roadmap; registrata qui e in ADR-0024):
+Dependency direction (not fixed by the roadmap; recorded here and in ADR-0024):
 
 ```text
-apps/desktop ──► lightvm-proto, rfb-client, lightvm-service (solo client IPC, senza `supervisore`),
-                 f0-console (spike, console diretta da sostituire in F2)
-rfb-client ──► (nessuna dipendenza da QMP, processi, storage o supervisor)
+apps/desktop ──► lightvm-proto, rfb-client, lightvm-service (IPC client only, without `supervisor`),
+                 f0-console (spike, direct console to be replaced in F2)
+rfb-client ──► (no dependency on QMP, processes, storage or supervisor)
 lightvm-service ──► vm-core, qemu-backend, vm-storage, lightvm-proto
 qemu-backend ──► vm-core
 vm-storage ──► vm-core
 mcp-server ──► lightvm-proto
-vm-core ──► (nessuna dipendenza da UI, processi o I/O)
+vm-core ──► (no dependency on UI, processes or I/O)
 ```
 
-La UI dipende dal protocollo e dal client RFB, mai dal backend né dallo storage; l'adapter MCP dipende solo dal protocollo. La sezione 6.2 colloca la console in `qemu-backend`, mentre la sezione 6.4 esegue il client RFB nel processo UI: ADR-0024 separa il client in `crates/rfb-client` e lascia in `qemu-backend` il lato server della console. Nuovi crate (`vm-network`, `ai-control-bridge`, `vm-security`, `agent-runtime`, `test-runner`) solo quando hanno responsabilità e dipendenze stabili; nessun framework di plugin o secondo backend nel MVP. Gli spike F0 (`spikes/`) non sono codice di prodotto; l'unica eccezione temporanea è `f0-console`, usata dalla console della UI fino al trasporto del display attraverso il supervisor (F2, ADR-0013).
+The UI depends on the protocol and the RFB client, never on the backend or storage; the MCP adapter depends only on the protocol. Section 6.2 places the console in `qemu-backend`, while section 6.4 runs the RFB client in the UI process: ADR-0024 separates the client into `crates/rfb-client` and leaves the server side of the console in `qemu-backend`. New crates (`vm-network`, `ai-control-bridge`, `vm-security`, `agent-runtime`, `test-runner`) only when they have stable responsibilities and dependencies; no plugin framework or second backend in the MVP. The F0 spikes (`spikes/`) are not product code; the only temporary exception is `f0-console`, used by the UI console until the display is transported through the supervisor (F2, ADR-0013).
 
-## 9. Checklist di review (sezione 6.3)
+## 9. Review checklist (section 6.3)
 
-Da applicare a ogni modifica che tocca processi, QEMU, file, IPC o MCP.
+To be applied to every change that touches processes, QEMU, files, IPC or MCP.
 
-- [ ] Spawn con argomenti strutturati, mai stringhe per una shell; percorso QEMU approvato e verificato.
-- [ ] Nessuna concatenazione di percorsi in opzioni QEMU interpretabili (`-drive` e simili); formato disco esplicito; protocolli in allowlist.
-- [ ] Media solo dal registro approvato, con identità/hash verificati all'uso; apertura protetta contro symlink, junction e sostituzioni tra controllo e uso.
-- [ ] Nessun montaggio di filesystem guest sull'host.
-- [ ] Ambiente, handle e descrittori dei figli ripuliti; nessuna credenziale provider o MCP trasmessa a QEMU.
-- [ ] QMP solo interno, su canale privato; nessun endpoint TCP non autenticato; nessun `qmp.execute`.
-- [ ] Backend con API ridotta (probe, create, start, shutdown, force-stop, status, observe, input, baseline); capacità non disponibili producono errori espliciti.
-- [ ] Stato VM derivato da processo e QMP, non dal solo database.
-- [ ] Mutazioni tramite la coda per VM, con `operation_id`, `run_id` e controllo delle revisioni.
-- [ ] Policy effettiva calcolata come intersezione; nessun livello che amplia.
-- [ ] Retry solo per operazioni idempotenti; nessun input GUI ripetuto dopo timeout.
-- [ ] Operazioni DB + filesystem con journal e riconciliazione.
-- [ ] Tipi e JSON Schema generati dalla fonte unica; errori pubblici stabili.
-- [ ] Dipendenze con versione fissata e lockfile aggiornato; versioni QEMU/firmware testate registrate.
-- [ ] Testo dal guest, log e report resi come testo; nessun link aperto automaticamente.
-- [ ] Nessun segreto in argomenti di processo, log, report o esempi.
+- [ ] Spawn with structured arguments, never strings for a shell; approved and verified QEMU path.
+- [ ] No path concatenation in interpretable QEMU options (`-drive` and similar); explicit disk format; protocols on an allowlist.
+- [ ] Media only from the approved registry, with identity/hash verified at use; opening protected against symlinks, junctions and substitutions between check and use.
+- [ ] No mounting of guest filesystems on the host.
+- [ ] Child environment, handles and descriptors cleaned up; no provider or MCP credentials passed to QEMU.
+- [ ] QMP internal only, on a private channel; no unauthenticated TCP endpoint; no `qmp.execute`.
+- [ ] Backend with a reduced API (probe, create, start, shutdown, force-stop, status, observe, input, baseline); unavailable capabilities produce explicit errors.
+- [ ] VM state derived from the process and QMP, not from the database alone.
+- [ ] Mutations through the per-VM queue, with `operation_id`, `run_id` and revision checks.
+- [ ] Effective policy computed as an intersection; no widening layer.
+- [ ] Retries only for idempotent operations; no GUI input repeated after a timeout.
+- [ ] DB + filesystem operations with journal and reconciliation.
+- [ ] Types and JSON Schema generated from the single source; stable public errors.
+- [ ] Dependencies with pinned versions and updated lockfile; tested QEMU/firmware versions recorded.
+- [ ] Text from the guest, logs and reports rendered as text; no link opened automatically.
+- [ ] No secrets in process arguments, logs, reports or examples.
 
-## 10. Esito dei punti da validare in F0
+## 10. Outcome of the items to validate in F0
 
-Riepilogo del riesame `docs/verification/F0-09-riesame-prove.md`.
+Summary of the review `docs/verification/F0-09-evidence-review.md`.
 
-| Punto | ADR | Esito F0 | Evidenza |
+| Item | ADR | F0 outcome | Evidence |
 | --- | --- | --- | --- |
-| Build eframe Windows/Linux e backend di rendering, anche in RDP | 0014 | verificato con limiti (glow predefinito, wgpu selezionabile, WARP degradato; Linux solo WSL2; RDP non eseguito) | `F0-01`, `F0-04`, `F0-07` |
-| Build QEMU, acceleratore WHPX, QMP privato, stop | 0010, 0012, 0007 | verificato con deviazioni (`-cpu qemu64`, firma scaduta) | `F0-02` |
-| Guest e firmware | 0011 | verificato (boot live in F0; installazione su disco e boot dal disco verificati poi in F1-17, `F1-03`) | `F0-03`, `F0-02` §9 |
-| Console RFB sul canale protetto, input, screenshot | 0003, 0013, 0024 | verificato con pendenti (tastiera fisica, secondo utente, credenziale del display) | `F0-04` |
-| Baseline/overlay/NVRAM ed esclusione dei dischi | 0005, 0025 | verificato (5 cicli; overlay in uso non protetto da terzi dello stesso utente) | `F0-05` |
-| Modello di processo e crash | 0002, 0009, 0015 | verificato con pendente (crash della UI) | `F0-06`, `F0-07` |
-| Linux/KVM | 0016 | non eseguito (laboratorio assente); proposto "verificato solo Windows" | `F0-07` |
-| Limiti risorse e prime misure | 0017, 0018 | identificati (soglie e prove sotto pressione pendenti) | `F0-08` |
+| eframe build on Windows/Linux and rendering backend, including over RDP | 0014 | verified with limits (glow default, wgpu selectable, WARP degraded; Linux WSL2 only; RDP not run) | `F0-01`, `F0-04`, `F0-07` |
+| QEMU build, WHPX accelerator, private QMP, stop | 0010, 0012, 0007 | verified with deviations (`-cpu qemu64`, expired signature) | `F0-02` |
+| Guest and firmware | 0011 | verified (live boot in F0; disk installation and boot from disk later verified in F1-17, `F1-03`) | `F0-03`, `F0-02` §9 |
+| RFB console on the protected channel, input, screenshots | 0003, 0013, 0024 | verified with pending items (physical keyboard, second user, display credential) | `F0-04` |
+| Baseline/overlay/NVRAM and disk exclusion | 0005, 0025 | verified (5 cycles; overlay in use not protected from third parties of the same user) | `F0-05` |
+| Process model and crashes | 0002, 0009, 0015 | verified with a pending item (UI crash) | `F0-06`, `F0-07` |
+| Linux/KVM | 0016 | not run (lab unavailable); "verified on Windows only" proposed | `F0-07` |
+| Resource limits and first measurements | 0017, 0018 | identified (thresholds and under-pressure tests pending) | `F0-08` |

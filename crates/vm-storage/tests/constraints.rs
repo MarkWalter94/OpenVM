@@ -1,4 +1,4 @@
-//! Vincoli del catalogo: riferimenti, unicità, immutabilità, audit append-only.
+//! Catalog constraints: references, uniqueness, immutability, append-only audit.
 
 mod common;
 
@@ -43,7 +43,7 @@ fn referenced_baseline_cannot_be_deleted() {
         matches!(err, StorageError::Referenced("baseline_referenced")),
         "{err:?}"
     );
-    // Controllo applicativo prima di toccare il filesystem.
+    // Application-level check before touching the filesystem.
     let err = cat
         .begin_intent(IntentSpec {
             kind: IntentKind::DeleteFile,
@@ -59,11 +59,11 @@ fn referenced_baseline_cannot_be_deleted() {
         err,
         StorageError::Referenced("baseline_referenced")
     ));
-    // Anche dopo la fine dell'esecuzione l'overlay conservato la referenzia.
+    // Even after the run ends, the retained overlay still references it.
     cat.with_tx(|tx| tx.end_run(&run.run_id, RunState::Stopped, TerminationCause::Shutdown))
         .unwrap();
     assert!(cat.with_tx(|tx| tx.delete_baseline(&b)).is_err());
-    // Il disco base e l'overlay non sono cancellabili come righe isolate.
+    // The base disk and the overlay cannot be deleted as standalone rows.
     let base_disk = cat.read(|tx| Ok(tx.baseline(&b)?.base_disk_id)).unwrap();
     let err = cat.with_tx(|tx| tx.delete_disk(&base_disk)).unwrap_err();
     assert!(matches!(err, StorageError::Referenced("disk_referenced")));
@@ -71,7 +71,7 @@ fn referenced_baseline_cannot_be_deleted() {
     let err = cat.with_tx(|tx| tx.delete_disk(&overlay)).unwrap_err();
     assert!(matches!(err, StorageError::Referenced("disk_referenced")));
 
-    assert_eq!(common::base_hash(&mut cat, &b), before, "base integra");
+    assert_eq!(common::base_hash(&mut cat, &b), before, "base intact");
     assert!(
         dir.path()
             .join(CatalogLayout::baseline_disk(&vm, &b).as_str())
@@ -110,9 +110,9 @@ fn unreferenced_baseline_is_deleted_through_the_journal() {
         })
         .unwrap();
     cat.mark_applied(&i).unwrap();
-    assert!(i.temp_path.is_dir(), "directory spostata in tmp/");
+    assert!(i.temp_path.is_dir(), "directory moved to tmp/");
     cat.commit(&i, |tx| tx.delete_baseline(&b)).unwrap();
-    assert!(!i.temp_path.exists(), "temporaneo rimosso dopo la conferma");
+    assert!(!i.temp_path.exists(), "temporary removed after commit");
     assert!(
         !dir.path()
             .join(CatalogLayout::baseline_dir(&vm, &b).as_str())
@@ -157,7 +157,7 @@ fn referenced_media_cannot_be_deleted() {
             sha256: "a".repeat(64),
             size_bytes: 10,
             kind: MediaKind::Iso,
-            declared_origin: "ubuntu.com, checksum verificato".into(),
+            declared_origin: "ubuntu.com, checksum verified".into(),
             approved_at: now_rfc3339(),
             managed_path: CatalogLayout::media_file(&media, "iso")?,
             status: MediaStatus::Approved,
@@ -218,7 +218,7 @@ fn overlay_backing_must_be_a_base_and_base_is_immutable() {
 
     let b = common::baseline(&mut cat, &vm, false);
     let base = cat.read(|tx| Ok(tx.baseline(&b)?.base_disk_id)).unwrap();
-    // La misura dei byte occupati resta ammessa; percorso e hash no.
+    // Updating the allocated byte count is still allowed; path and hash are not.
     cat.with_tx(|tx| tx.set_disk_allocated(&base, 1)).unwrap();
     let dbp = dir.path().join(vm_storage::DB_FILE);
     drop(cat);
@@ -292,8 +292,8 @@ fn config_revision_is_checked() {
     assert!(matches!(err, StorageError::StateConflict(_)));
 }
 
-/// v4: la sessione agente di un'operazione è conservata e riletta; le
-/// operazioni dell'utente restano senza sessione.
+/// v4: an operation's agent session is persisted and read back; user
+/// operations remain without a session.
 #[test]
 fn operation_session_is_persisted() {
     use vm_storage::{OperationId, OperationRecord, OperationState, SessionId};
@@ -301,10 +301,10 @@ fn operation_session_is_persisted() {
     let mut cat = Catalog::open(dir.path()).unwrap();
     let vm = common::new_vm(&mut cat, "vm");
     let session = SessionId::new_v7();
-    let agente = OperationId::new_v7();
-    let utente = OperationId::new_v7();
+    let agent_op = OperationId::new_v7();
+    let user_op = OperationId::new_v7();
     let now = now_rfc3339();
-    for (id, session_id) in [(agente, Some(session)), (utente, None)] {
+    for (id, session_id) in [(agent_op, Some(session)), (user_op, None)] {
         cat.with_tx(|tx| {
             tx.insert_operation(&OperationRecord {
                 operation_id: id,
@@ -321,8 +321,8 @@ fn operation_session_is_persisted() {
         })
         .unwrap();
     }
-    let a = cat.read(|tx| tx.operation(&agente)).unwrap();
-    let u = cat.read(|tx| tx.operation(&utente)).unwrap();
+    let a = cat.read(|tx| tx.operation(&agent_op)).unwrap();
+    let u = cat.read(|tx| tx.operation(&user_op)).unwrap();
     assert_eq!(a.session_id, Some(session));
     assert_eq!(u.session_id, None);
 }

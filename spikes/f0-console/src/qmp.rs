@@ -1,4 +1,4 @@
-//! Client QMP minimo su socket Unix.
+//! Minimal QMP client over a Unix socket.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -6,17 +6,17 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-/// Valore massimo degli assi assoluti di QEMU (`INPUT_EVENT_ABS_MAX`).
+/// Maximum value of QEMU's absolute axes (`INPUT_EVENT_ABS_MAX`).
 pub const ABS_MAX: u32 = 0x7fff;
 
-/// Errore QMP.
+/// QMP error.
 #[derive(Debug)]
 pub enum QmpError {
     /// I/O.
     Io(std::io::Error),
-    /// JSON non valido o risposta inattesa.
+    /// Invalid JSON or unexpected response.
     Protocol(String),
-    /// Errore restituito da QEMU (`class`, `desc`).
+    /// Error returned by QEMU (`class`, `desc`).
     Command(String),
 }
 
@@ -24,8 +24,8 @@ impl std::fmt::Display for QmpError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Io(e) => write!(f, "I/O QMP: {e}"),
-            Self::Protocol(e) => write!(f, "protocollo QMP: {e}"),
-            Self::Command(e) => write!(f, "errore QEMU: {e}"),
+            Self::Protocol(e) => write!(f, "QMP protocol: {e}"),
+            Self::Command(e) => write!(f, "QEMU error: {e}"),
         }
     }
 }
@@ -38,18 +38,18 @@ impl From<std::io::Error> for QmpError {
     }
 }
 
-/// Pulsanti del puntatore (nomi QAPI `InputButton`).
+/// Pointer buttons (QAPI `InputButton` names).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Button {
-    /// Sinistro.
+    /// Left.
     Left,
-    /// Centrale.
+    /// Middle.
     Middle,
-    /// Destro.
+    /// Right.
     Right,
-    /// Rotella su.
+    /// Wheel up.
     WheelUp,
-    /// Rotella giù.
+    /// Wheel down.
     WheelDown,
 }
 
@@ -65,28 +65,28 @@ impl Button {
     }
 }
 
-/// Evento di input tipizzato per `input-send-event`.
+/// Typed input event for `input-send-event`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InputEvent {
-    /// Posizione assoluta già scalata in 0..=32767.
+    /// Absolute position already scaled to 0..=32767.
     Abs {
-        /// Asse x scalato.
+        /// Scaled x axis.
         x: u32,
-        /// Asse y scalato.
+        /// Scaled y axis.
         y: u32,
     },
-    /// Pulsante premuto o rilasciato.
+    /// Button pressed or released.
     Btn {
-        /// Pulsante.
+        /// Button.
         button: Button,
-        /// Premuto.
+        /// Pressed.
         down: bool,
     },
-    /// Tasto premuto o rilasciato, per qcode QEMU.
+    /// Key pressed or released, by QEMU qcode.
     Key {
-        /// Nome qcode (`QKeyCode`).
+        /// qcode name (`QKeyCode`).
         qcode: &'static str,
-        /// Premuto.
+        /// Pressed.
         down: bool,
     },
 }
@@ -108,8 +108,8 @@ impl InputEvent {
     }
 }
 
-/// Scala una coordinata in pixel (0..size-1) sull'intervallo 0..=32767,
-/// con la stessa formula del server VNC di QEMU (`qemu_input_scale_axis`).
+/// Scales a pixel coordinate (0..size-1) to the range 0..=32767,
+/// with the same formula as QEMU's VNC server (`qemu_input_scale_axis`).
 pub fn scale_abs(px: u32, size: u32) -> u32 {
     if size <= 1 {
         return 0;
@@ -118,13 +118,13 @@ pub fn scale_abs(px: u32, size: u32) -> u32 {
     (u64::from(px) * u64::from(ABS_MAX) / u64::from(size - 1)) as u32
 }
 
-/// Client QMP collegato a un socket Unix.
+/// QMP client connected to a Unix socket.
 pub struct Qmp {
     reader: BufReader<socket2::Socket>,
     writer: socket2::Socket,
-    /// Greeting ricevuto alla connessione.
+    /// Greeting received on connection.
     pub greeting: Value,
-    /// Eventi asincroni ricevuti e non ancora letti.
+    /// Asynchronous events received and not yet read.
     pub events: Vec<Value>,
 }
 
@@ -137,7 +137,7 @@ impl std::fmt::Debug for Qmp {
 }
 
 impl Qmp {
-    /// Si collega, legge il greeting e negozia `qmp_capabilities`.
+    /// Connects, reads the greeting and negotiates `qmp_capabilities`.
     pub fn connect(path: &Path) -> Result<Self, QmpError> {
         let s = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)?;
         s.connect(&socket2::SockAddr::unix(path)?)?;
@@ -152,7 +152,7 @@ impl Qmp {
         q.greeting = q.read_json()?;
         if q.greeting.get("QMP").is_none() {
             return Err(QmpError::Protocol(format!(
-                "greeting inatteso: {}",
+                "unexpected greeting: {}",
                 q.greeting
             )));
         }
@@ -166,10 +166,10 @@ impl Qmp {
             line.clear();
             let n = self.reader.read_line(&mut line)?;
             if n == 0 {
-                return Err(QmpError::Protocol("connessione QMP chiusa".into()));
+                return Err(QmpError::Protocol("QMP connection closed".into()));
             }
             if line.len() > 16 * 1024 * 1024 {
-                return Err(QmpError::Protocol("riga QMP troppo lunga".into()));
+                return Err(QmpError::Protocol("QMP line too long".into()));
             }
             if !line.trim().is_empty() {
                 return serde_json::from_str(&line).map_err(|e| QmpError::Protocol(e.to_string()));
@@ -177,8 +177,8 @@ impl Qmp {
         }
     }
 
-    /// Esegue un comando e restituisce il campo `return`. Privato: la UI usa
-    /// soltanto i metodi tipizzati.
+    /// Executes a command and returns the `return` field. Private: the UI uses
+    /// only the typed methods.
     fn execute_raw(&mut self, cmd: &str, args: Option<Value>) -> Result<Value, QmpError> {
         let mut msg = json!({ "execute": cmd });
         if let Some(a) = args {
@@ -199,11 +199,11 @@ impl Qmp {
             if let Some(e) = v.get("error") {
                 return Err(QmpError::Command(e.to_string()));
             }
-            return Err(QmpError::Protocol(format!("risposta inattesa: {v}")));
+            return Err(QmpError::Protocol(format!("unexpected response: {v}")));
         }
     }
 
-    /// `input-send-event` con una sequenza di eventi in un'unica chiamata.
+    /// `input-send-event` with a sequence of events in a single call.
     pub fn send_input(&mut self, events: &[InputEvent]) -> Result<(), QmpError> {
         if events.is_empty() {
             return Ok(());
@@ -213,12 +213,12 @@ impl Qmp {
         Ok(())
     }
 
-    /// `screendump` in formato PPM verso un file scelto dal chiamante (nello
-    /// spike: directory fissa passata da riga di comando, mai dalla UI).
+    /// `screendump` in PPM format to a file chosen by the caller (in the
+    /// spike: fixed directory passed on the command line, never from the UI).
     pub fn screendump_ppm(&mut self, path: &Path) -> Result<(), QmpError> {
         let p = path
             .to_str()
-            .ok_or_else(|| QmpError::Protocol("percorso non UTF-8".into()))?
+            .ok_or_else(|| QmpError::Protocol("non-UTF-8 path".into()))?
             .replace('\\', "/");
         self.execute_raw(
             "screendump",
@@ -227,7 +227,7 @@ impl Qmp {
         Ok(())
     }
 
-    /// `query-status`: restituisce lo stato (`running`, `paused`, ...).
+    /// `query-status`: returns the status (`running`, `paused`, ...).
     pub fn query_status(&mut self) -> Result<String, QmpError> {
         let r = self.execute_raw("query-status", None)?;
         Ok(r.get("status")
@@ -236,17 +236,17 @@ impl Qmp {
             .to_owned())
     }
 
-    /// `query-mice`: dispositivi di puntamento e quello corrente.
+    /// `query-mice`: pointing devices and the current one.
     pub fn query_mice(&mut self) -> Result<Value, QmpError> {
         self.execute_raw("query-mice", None)
     }
 
-    /// `query-accelerators` (verifica WHPX senza TCG).
+    /// `query-accelerators` (checks WHPX without TCG).
     pub fn query_accelerators(&mut self) -> Result<Value, QmpError> {
         self.execute_raw("query-accelerators", None)
     }
 
-    /// `quit`: chiude QEMU.
+    /// `quit`: shuts QEMU down.
     pub fn quit(&mut self) -> Result<(), QmpError> {
         self.execute_raw("quit", None).map(|_| ())
     }
@@ -257,7 +257,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn scala_assi_come_qemu() {
+    fn scales_axes_like_qemu() {
         assert_eq!(scale_abs(0, 1280), 0);
         assert_eq!(scale_abs(1279, 1280), 32767);
         assert_eq!(scale_abs(5000, 1280), 32767);
@@ -266,7 +266,7 @@ mod tests {
     }
 
     #[test]
-    fn json_degli_eventi() {
+    fn event_json() {
         let e = InputEvent::Key {
             qcode: "a",
             down: true,

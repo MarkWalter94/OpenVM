@@ -1,4 +1,4 @@
-//! Named pipe Windows con ACL limitata all'utente corrente.
+//! Windows named pipe with an ACL restricted to the current user.
 
 use std::io;
 
@@ -27,7 +27,7 @@ impl std::fmt::Debug for Listener {
     }
 }
 
-/// SID dell'utente proprietario di un processo, in forma testuale `S-1-...`.
+/// SID of the user owning a process, in textual `S-1-...` form.
 pub(crate) fn process_user_sid(pid: u32) -> io::Result<String> {
     let mut sys = System::new();
     let p = Pid::from_u32(pid);
@@ -43,15 +43,15 @@ pub(crate) fn process_user_sid(pid: u32) -> io::Result<String> {
         .ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                format!("SID del processo {pid} non disponibile"),
+                format!("SID of process {pid} not available"),
             )
         })?;
     validate_sid(&sid)?;
     Ok(sid)
 }
 
-/// Il SID entra in una stringa SDDL: si accetta solo la forma `S-1-` con cifre
-/// e trattini, per escludere ogni iniezione nel descrittore.
+/// The SID goes into an SDDL string: only the `S-1-` form with digits and
+/// dashes is accepted, to rule out any injection into the descriptor.
 fn validate_sid(sid: &str) -> io::Result<()> {
     let ok = sid.starts_with("S-1-")
         && sid.len() <= 184
@@ -62,19 +62,19 @@ fn validate_sid(sid: &str) -> io::Result<()> {
     } else {
         Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "SID in formato inatteso",
+            "SID in unexpected format",
         ))
     }
 }
 
-/// Descrittore SDDL della pipe:
-/// - `O:<sid>`: proprietario l'utente corrente;
-/// - `D:P(A;;GA;;;<sid>)`: DACL protetta (nessuna ereditarietà) con un solo
-///   ACE che concede l'accesso al SID dell'utente corrente; nessun altro
-///   principal, nemmeno SYSTEM o Administrators;
-/// - `S:(ML;;NWNRNX;;;ME)`: etichetta obbligatoria di integrità media con
-///   no-write-up, no-read-up, no-execute-up: un processo a integrità bassa (o
-///   AppContainer) non può aprire la pipe.
+/// SDDL descriptor of the pipe:
+/// - `O:<sid>`: owner is the current user;
+/// - `D:P(A;;GA;;;<sid>)`: protected DACL (no inheritance) with a single ACE
+///   granting access to the current user's SID; no other principal, not even
+///   SYSTEM or Administrators;
+/// - `S:(ML;;NWNRNX;;;ME)`: mandatory medium integrity label with
+///   no-write-up, no-read-up, no-execute-up: a low-integrity (or
+///   AppContainer) process cannot open the pipe.
 pub(crate) fn pipe_sddl(sid: &str) -> String {
     format!("O:{sid}D:P(A;;GA;;;{sid})S:(ML;;NWNRNX;;;ME)")
 }
@@ -84,11 +84,11 @@ impl Listener {
         let own_sid = process_user_sid(std::process::id())?;
         let endpoint = format!(r"\\.\pipe\lightvm-{}", super::random_suffix()?);
         let sddl = U16CString::from_str(pipe_sddl(&own_sid))
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "SDDL non valido"))?;
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid SDDL"))?;
         let sd = SecurityDescriptor::deserialize(&sddl)?;
-        // `accept_remote(false)`: PIPE_REJECT_REMOTE_CLIENTS. La prima istanza è
-        // creata con FILE_FLAG_FIRST_PIPE_INSTANCE da `interprocess`: se il nome
-        // esiste già la creazione fallisce invece di condividere la pipe.
+        // `accept_remote(false)`: PIPE_REJECT_REMOTE_CLIENTS. The first instance
+        // is created with FILE_FLAG_FIRST_PIPE_INSTANCE by `interprocess`: if the
+        // name already exists, creation fails instead of sharing the pipe.
         let inner = PipeListenerOptions::new()
             .path(endpoint.as_str())
             .mode(PipeMode::Bytes)
@@ -110,16 +110,16 @@ impl Listener {
         let stream = self.inner.accept().await?;
         let pid = match stream.client_process_id() {
             Ok(p) => p,
-            Err(e) => return Ok(Accepted::Rejected(format!("PID del client: {e}"))),
+            Err(e) => return Ok(Accepted::Rejected(format!("client PID: {e}"))),
         };
         match (stream.client_session_id(), stream.server_session_id()) {
             (Ok(c), Ok(s)) if c == s => {}
             (Ok(c), Ok(s)) => {
                 return Ok(Accepted::Rejected(format!(
-                    "sessione di logon diversa (client {c}, servizio {s})"
+                    "different logon session (client {c}, service {s})"
                 )));
             }
-            _ => return Ok(Accepted::Rejected("sessione non verificabile".into())),
+            _ => return Ok(Accepted::Rejected("session cannot be verified".into())),
         }
         match process_user_sid(pid) {
             Ok(sid) if sid == self.own_sid => Ok(Accepted::Ok(
@@ -129,8 +129,8 @@ impl Listener {
                     os_identity: sid,
                 },
             )),
-            Ok(_) => Ok(Accepted::Rejected("SID del peer diverso".into())),
-            Err(e) => Ok(Accepted::Rejected(format!("SID del peer: {e}"))),
+            Ok(_) => Ok(Accepted::Rejected("different peer SID".into())),
+            Err(e) => Ok(Accepted::Rejected(format!("peer SID: {e}"))),
         }
     }
 }
@@ -139,7 +139,7 @@ pub(super) async fn connect(endpoint: &str) -> io::Result<BoxedStream> {
     if !endpoint.starts_with(r"\\.\pipe\") {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "endpoint non locale",
+            "non-local endpoint",
         ));
     }
     let s = DuplexPipeStream::<pipe_mode::Bytes>::connect_by_path(endpoint).await?;

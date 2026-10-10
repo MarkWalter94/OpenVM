@@ -1,12 +1,12 @@
-//! Identificativi.
+//! Identifiers.
 //!
-//! `VmId`, `RunId`, `OperationId`, `BaselineId`, `MediaId`, `SessionId` e
-//! `GrantId` sono quelli di `lightvm-proto` (UUID v7), riesportati dalla radice
-//! del crate. Gli identificativi propri dello storage (`DiskId`, `FirmwareId`,
-//! `ArtifactId`) non compaiono nel protocollo e hanno la stessa forma testuale.
-//! Nel DB tutti sono conservati come testo canonico (minuscolo, con trattini)
-//! tramite i tratti interni [`IdSql`] e [`IdCol`]: la regola di orfanità
-//! impedisce di implementare i tratti di `rusqlite` sui tipi di `lightvm-proto`.
+//! `VmId`, `RunId`, `OperationId`, `BaselineId`, `MediaId`, `SessionId` and
+//! `GrantId` are those of `lightvm-proto` (UUID v7), re-exported from the crate
+//! root. The storage-specific identifiers (`DiskId`, `FirmwareId`,
+//! `ArtifactId`) do not appear in the protocol and have the same text form.
+//! In the DB they are all stored as canonical text (lowercase, hyphenated)
+//! through the internal traits [`IdSql`] and [`IdCol`]: the orphan rule
+//! prevents implementing the `rusqlite` traits on `lightvm-proto` types.
 
 use std::fmt;
 use std::str::FromStr;
@@ -20,7 +20,7 @@ macro_rules! local_id {
         pub struct $name(uuid::Uuid);
 
         impl $name {
-            /// Nuovo identificativo UUID v7 dall'orologio di sistema.
+            /// New UUID v7 identifier from the system clock.
             #[must_use]
             pub fn new_v7() -> Self {
                 Self(uuid::Uuid::now_v7())
@@ -56,19 +56,19 @@ macro_rules! local_id {
 }
 
 local_id!(
-    /// Identificativo di un disco gestito (solo storage).
+    /// Identifier of a managed disk (storage only).
     DiskId
 );
 local_id!(
-    /// Identificativo di uno stato firmware gestito (solo storage).
+    /// Identifier of a managed firmware state (storage only).
     FirmwareId
 );
 local_id!(
-    /// Identificativo di un artefatto (screenshot, log, report).
+    /// Identifier of an artifact (screenshot, log, report).
     ArtifactId
 );
 
-/// Identificativo conservato come testo nel DB.
+/// Identifier stored as text in the DB.
 pub(crate) trait StorageId: fmt::Display + FromStr {}
 
 macro_rules! storage_id {
@@ -87,7 +87,7 @@ storage_id!(
     ArtifactId
 );
 
-/// Conversione in parametro SQL (testo o NULL).
+/// Conversion to an SQL parameter (text or NULL).
 pub(crate) trait IdSql {
     fn sql(&self) -> Option<String>;
 }
@@ -104,30 +104,26 @@ impl<T: StorageId> IdSql for Option<T> {
     }
 }
 
-/// Lettura da una colonna di testo (eventualmente NULL).
+/// Reading from a text column (possibly NULL).
 pub(crate) trait IdCol: Sized {
     fn from_text(v: Option<String>) -> Result<Self, String>;
 }
 
 impl<T: StorageId> IdCol for T {
     fn from_text(v: Option<String>) -> Result<Self, String> {
-        let s = v.ok_or_else(|| "identificativo NULL".to_owned())?;
-        s.parse()
-            .map_err(|_| format!("identificativo non valido: {s}"))
+        let s = v.ok_or_else(|| "NULL identifier".to_owned())?;
+        s.parse().map_err(|_| format!("invalid identifier: {s}"))
     }
 }
 
 impl<T: StorageId> IdCol for Option<T> {
     fn from_text(v: Option<String>) -> Result<Self, String> {
-        v.map(|s| {
-            s.parse()
-                .map_err(|_| format!("identificativo non valido: {s}"))
-        })
-        .transpose()
+        v.map(|s| s.parse().map_err(|_| format!("invalid identifier: {s}")))
+            .transpose()
     }
 }
 
-/// Legge un identificativo (o un identificativo opzionale) dalla colonna `i`.
+/// Reads an identifier (or an optional identifier) from column `i`.
 pub(crate) fn idc<T: IdCol>(r: &rusqlite::Row<'_>, i: usize) -> rusqlite::Result<T> {
     let v: Option<String> = r.get(i)?;
     T::from_text(v).map_err(|e| {
@@ -135,8 +131,8 @@ pub(crate) fn idc<T: IdCol>(r: &rusqlite::Row<'_>, i: usize) -> rusqlite::Result
     })
 }
 
-/// Analizza un identificativo letto dal journal.
+/// Parses an identifier read from the journal.
 pub(crate) fn parse_id<T: FromStr>(s: &str) -> crate::Result<T> {
     s.parse()
-        .map_err(|_| crate::StorageError::Constraint(format!("identificativo non valido: {s}")))
+        .map_err(|_| crate::StorageError::Constraint(format!("invalid identifier: {s}")))
 }

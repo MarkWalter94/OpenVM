@@ -1,19 +1,19 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Admission",
-  "description": "Esito dell'accettazione di una richiesta (prima dell'inoltro).",
+  "description": "Outcome of accepting a request (before forwarding).",
   "type": "object",
   "properties": {
     "duplicate": {
-      "description": "`true` se la richiesta ripete un `operation_id` già noto (nessun nuovo effetto).",
+      "description": "`true` if the request repeats an already known `operation_id` (no new effect).",
       "type": "boolean"
     },
     "operation_id": {
-      "description": "Operazione.",
+      "description": "Operation.",
       "$ref": "#/$defs/OperationId"
     },
     "status": {
-      "description": "Stato corrente dell'operazione.",
+      "description": "Current status of the operation.",
       "$ref": "#/$defs/OperationStatus"
     }
   },
@@ -24,36 +24,36 @@
   ],
   "$defs": {
     "OperationId": {
-      "description": "OperationId: UUID versione 7 in minuscolo con trattini.",
+      "description": "OperationId: version 7 UUID, lowercase with hyphens.",
       "type": "string",
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     },
     "OperationStatus": {
-      "description": "Stato di un'operazione.",
+      "description": "Status of an operation.",
       "oneOf": [
         {
-          "description": "Accettata, in coda, non ancora inoltrata al backend.",
+          "description": "Accepted, queued, not yet forwarded to the backend.",
           "type": "string",
           "const": "queued"
         },
         {
-          "description": "Inoltrata al backend: può produrre effetti anche dopo una revoca.",
+          "description": "Forwarded to the backend: it may produce effects even after a revocation.",
           "type": "string",
           "const": "forwarded"
         },
         {
-          "description": "Completata con successo.",
+          "description": "Completed successfully.",
           "type": "string",
           "const": "succeeded"
         },
         {
-          "description": "Inoltrata e fallita.",
+          "description": "Forwarded and failed.",
           "type": "string",
           "const": "failed"
         },
         {
-          "description": "Scartata prima dell'inoltro (revoca, Emergency Stop, `run_id` superato): nessun effetto.",
+          "description": "Discarded before forwarding (revocation, Emergency Stop, superseded `run_id`): no effect.",
           "type": "string",
           "const": "discarded"
         }

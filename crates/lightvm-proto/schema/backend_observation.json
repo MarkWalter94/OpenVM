@@ -1,10 +1,10 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "BackendObservation",
-  "description": "Evento elementare osservato dal backend, usato dal core per derivare lo stato.",
+  "description": "Elementary event observed by the backend, used by the core to derive the state.",
   "oneOf": [
     {
-      "description": "Processo creato e associato all'esecuzione.",
+      "description": "Process created and associated with the run.",
       "type": "object",
       "properties": {
         "kind": {
@@ -12,7 +12,7 @@
           "const": "process_spawned"
         },
         "run_id": {
-          "description": "Esecuzione.",
+          "description": "Run.",
           "$ref": "#/$defs/RunId"
         }
       },
@@ -22,7 +22,7 @@
       ]
     },
     {
-      "description": "QMP pronto (capabilities negoziate) e processo vivo.",
+      "description": "QMP ready (capabilities negotiated) and process alive.",
       "type": "object",
       "properties": {
         "kind": {
@@ -30,7 +30,7 @@
           "const": "qmp_ready"
         },
         "run_id": {
-          "description": "Esecuzione.",
+          "description": "Run.",
           "$ref": "#/$defs/RunId"
         }
       },
@@ -40,11 +40,11 @@
       ]
     },
     {
-      "description": "Fine processo osservata tramite handle (non tramite PID).",
+      "description": "Process end observed through the handle (not through the PID).",
       "type": "object",
       "properties": {
         "expected": {
-          "description": "`true` se l'uscita era stata richiesta (stop ordinario, force-stop, Emergency Stop).",
+          "description": "`true` if the exit had been requested (ordinary stop, force-stop, Emergency Stop).",
           "type": "boolean"
         },
         "kind": {
@@ -52,7 +52,7 @@
           "const": "process_exited"
         },
         "run_id": {
-          "description": "Esecuzione.",
+          "description": "Run.",
           "$ref": "#/$defs/RunId"
         }
       },
@@ -63,7 +63,7 @@
       ]
     },
     {
-      "description": "Avvio fallito prima che il processo fosse pronto.",
+      "description": "Start failed before the process was ready.",
       "type": "object",
       "properties": {
         "kind": {
@@ -71,7 +71,7 @@
           "const": "start_failed"
         },
         "run_id": {
-          "description": "Esecuzione.",
+          "description": "Run.",
           "$ref": "#/$defs/RunId"
         }
       },
@@ -83,7 +83,7 @@
   ],
   "$defs": {
     "RunId": {
-      "description": "RunId: UUID versione 7 in minuscolo con trattini.",
+      "description": "RunId: version 7 UUID, lowercase with hyphens.",
       "type": "string",
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"

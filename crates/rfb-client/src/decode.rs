@@ -1,5 +1,5 @@
-//! Decodifica dei rettangoli: Raw, CopyRect, Hextile, ZRLE.
-//! Tutti i decoder assumono il formato pixel BGRX8888 imposto dal client.
+//! Rectangle decoding: Raw, CopyRect, Hextile, ZRLE.
+//! All decoders assume the BGRX8888 pixel format imposed by the client.
 
 use std::io::Read;
 
@@ -8,7 +8,7 @@ use flate2::{Decompress, FlushDecompress, Status};
 use crate::proto::{read_u8, read_u16, read_u32, read_vec};
 use crate::{Error, Framebuffer, Rect};
 
-/// Limite ai dati compressi di un singolo rettangolo ZRLE.
+/// Limit on the compressed data of a single ZRLE rectangle.
 const MAX_ZRLE_COMPRESSED: u32 = 64 * 1024 * 1024;
 
 pub(crate) fn raw(r: &mut impl Read, fb: &mut Framebuffer, rect: Rect) -> Result<(), Error> {
@@ -63,7 +63,7 @@ pub(crate) fn hextile(r: &mut impl Read, fb: &mut Framebuffer, rect: Rect) -> Re
                         let sw = u16::from(wh >> 4) + 1;
                         let sh = u16::from(wh & 15) + 1;
                         if sx + sw > tw || sy + sh > th {
-                            return Err(Error::Protocol("subrect Hextile fuori dal tile".into()));
+                            return Err(Error::Protocol("Hextile subrect outside the tile".into()));
                         }
                         fb.fill(Rect::new(tile.x + sx, tile.y + sy, sw, sh), color)?;
                     }
@@ -76,7 +76,7 @@ pub(crate) fn hextile(r: &mut impl Read, fb: &mut Framebuffer, rect: Rect) -> Re
     Ok(())
 }
 
-/// Stato ZRLE: un solo flusso zlib per tutta la connessione (RFC 6143, 7.7.6).
+/// ZRLE state: a single zlib stream for the whole connection (RFC 6143, 7.7.6).
 pub(crate) struct ZrleState {
     inflater: Decompress,
     out: Vec<u8>,
@@ -97,7 +97,7 @@ impl ZrleState {
             if self.out.len() == self.out.capacity() {
                 if self.out.len() >= limit {
                     return Err(Error::Protocol(
-                        "dati ZRLE decompressi oltre il limite".into(),
+                        "decompressed ZRLE data over the limit".into(),
                     ));
                 }
                 self.out.reserve(self.out.len().max(64 * 1024));
@@ -112,20 +112,22 @@ impl ZrleState {
             let produced = self.inflater.total_out() - before_out;
             pos += consumed;
             if status == Status::StreamEnd {
-                return Err(Error::Protocol("fine inattesa del flusso zlib ZRLE".into()));
+                return Err(Error::Protocol(
+                    "unexpected end of the ZRLE zlib stream".into(),
+                ));
             }
             let spare = self.out.len() < self.out.capacity();
             if pos >= input.len() && spare {
                 return Ok(());
             }
             if consumed == 0 && produced == 0 && spare {
-                return Err(Error::Protocol("flusso zlib ZRLE bloccato".into()));
+                return Err(Error::Protocol("ZRLE zlib stream stuck".into()));
             }
         }
     }
 }
 
-/// Lettore su slice con errore di protocollo a fine dati.
+/// Slice reader with a protocol error at end of data.
 struct Cursor<'a> {
     buf: &'a [u8],
     pos: usize,
@@ -134,7 +136,7 @@ struct Cursor<'a> {
 impl Cursor<'_> {
     fn take(&mut self, n: usize) -> Result<&[u8], Error> {
         if self.pos + n > self.buf.len() {
-            return Err(Error::Protocol("dati ZRLE troncati".into()));
+            return Err(Error::Protocol("truncated ZRLE data".into()));
         }
         let s = &self.buf[self.pos..self.pos + n];
         self.pos += n;
@@ -145,7 +147,7 @@ impl Cursor<'_> {
         Ok(self.take(1)?[0])
     }
 
-    /// CPIXEL a 3 byte (B, G, R) per BGRX8888 con profondità 24.
+    /// 3-byte CPIXEL (B, G, R) for BGRX8888 with depth 24.
     fn cpixel(&mut self) -> Result<[u8; 4], Error> {
         let s = self.take(3)?;
         Ok([s[0], s[1], s[2], 0])
@@ -173,12 +175,12 @@ pub(crate) fn zrle(
     let len = read_u32(r)?;
     if len > MAX_ZRLE_COMPRESSED {
         return Err(Error::Protocol(format!(
-            "rettangolo ZRLE di {len} byte oltre il limite"
+            "ZRLE rectangle of {len} bytes over the limit"
         )));
     }
     let compressed = read_vec(r, len as usize)?;
     let tiles = rect.w.div_ceil(64) as usize * rect.h.div_ceil(64) as usize;
-    // Caso peggiore ragionevole: ogni tile raw (1 + 64*64*3) più margine per RLE.
+    // Reasonable worst case: every tile raw (1 + 64*64*3) plus margin for RLE.
     let limit = tiles * (1 + 64 * 64 * 4) + 1024 * 1024;
     st.inflate(&compressed, limit)?;
     let mut c = Cursor {
@@ -227,9 +229,7 @@ pub(crate) fn zrle(
                             let shift = 8 - bits - (bit % 8);
                             let idx = usize::from((byte >> shift) & ((1u8 << bits) - 1));
                             if idx >= usize::from(sub) {
-                                return Err(Error::Protocol(
-                                    "indice palette ZRLE non valido".into(),
-                                ));
+                                return Err(Error::Protocol("invalid ZRLE palette index".into()));
                             }
                             tile_px.push(pal[idx]);
                         }
@@ -242,7 +242,7 @@ pub(crate) fn zrle(
                         let p = c.cpixel()?;
                         let run = c.run_length()?;
                         if tile_px.len() + run > n {
-                            return Err(Error::Protocol("run ZRLE oltre il tile".into()));
+                            return Err(Error::Protocol("ZRLE run beyond the tile".into()));
                         }
                         tile_px.extend(std::iter::repeat_n(p, run));
                     }
@@ -258,21 +258,19 @@ pub(crate) fn zrle(
                     while tile_px.len() < n {
                         let b = c.u8()?;
                         let idx = usize::from(b & 127);
-                        let p = *pal.get(idx).ok_or_else(|| {
-                            Error::Protocol("indice palette RLE non valido".into())
-                        })?;
+                        let p = *pal
+                            .get(idx)
+                            .ok_or_else(|| Error::Protocol("invalid RLE palette index".into()))?;
                         let run = if b & 128 != 0 { c.run_length()? } else { 1 };
                         if tile_px.len() + run > n {
-                            return Err(Error::Protocol("run ZRLE oltre il tile".into()));
+                            return Err(Error::Protocol("ZRLE run beyond the tile".into()));
                         }
                         tile_px.extend(std::iter::repeat_n(p, run));
                     }
                     put_tile(fb, tile, &tile_px)?;
                 }
                 other => {
-                    return Err(Error::Protocol(format!(
-                        "subencoding ZRLE {other} non valido"
-                    )));
+                    return Err(Error::Protocol(format!("invalid ZRLE subencoding {other}")));
                 }
             }
             tx += tw;
@@ -281,7 +279,7 @@ pub(crate) fn zrle(
     }
     if c.pos != c.buf.len() {
         return Err(Error::Protocol(format!(
-            "{} byte ZRLE in eccesso dopo i tile",
+            "{} excess ZRLE bytes after the tiles",
             c.buf.len() - c.pos
         )));
     }
@@ -305,16 +303,16 @@ mod tests {
     }
 
     #[test]
-    fn hextile_sfondo_e_subrect() {
+    fn hextile_background_and_subrect() {
         let mut fb = Framebuffer::new(20, 16);
-        // Tile 1 (16x16): sfondo rosso + 1 subrect blu 2x3 in (1,2). Tile 2 (4x16): sfondo ereditato.
+        // Tile 1 (16x16): red background + 1 blue 2x3 subrect at (1,2). Tile 2 (4x16): inherited background.
         let mut s = vec![2 | 8 | 16];
-        s.extend_from_slice(&[0, 0, 255, 0]); // bg BGRX rosso
+        s.extend_from_slice(&[0, 0, 255, 0]); // bg BGRX red
         s.push(1);
-        s.extend_from_slice(&[255, 0, 0, 0]); // blu
+        s.extend_from_slice(&[255, 0, 0, 0]); // blue
         s.push((1 << 4) | 2);
         s.push((1 << 4) | 2);
-        s.push(0); // tile 2: nessun bit, sfondo precedente
+        s.push(0); // tile 2: no bits, previous background
         hextile(&mut s.as_slice(), &mut fb, Rect::new(0, 0, 20, 16)).unwrap();
         let px = |x: usize, y: usize| &fb.data()[(y * 20 + x) * 4..(y * 20 + x) * 4 + 3];
         assert_eq!(px(0, 0), &[0, 0, 255]);
@@ -325,11 +323,11 @@ mod tests {
     }
 
     #[test]
-    fn zrle_solido_palette_e_rle_su_due_rettangoli() {
+    fn zrle_solid_palette_and_rle_on_two_rectangles() {
         let mut c = Compress::new(Compression::default(), true);
         let mut st = ZrleState::new();
         let mut fb = Framebuffer::new(70, 2);
-        // Rettangolo 1: 70x2 -> due tile (64x2 solido verde, 6x2 palette 2 colori).
+        // Rectangle 1: 70x2 -> two tiles (64x2 solid green, 6x2 2-colour palette).
         let mut d = vec![1, 0, 255, 0];
         d.extend_from_slice(&[2, 1, 1, 1, 9, 9, 9]);
         d.extend_from_slice(&[0b1010_1000, 0b0101_0100]);
@@ -351,7 +349,7 @@ mod tests {
         assert_eq!(at(&fb, 65, 0), 1);
         assert_eq!(at(&fb, 64, 1), 1);
         assert_eq!(at(&fb, 65, 1), 9);
-        // Rettangolo 2 sullo stesso flusso zlib: RLE semplice 4x1 (3 + 1 pixel).
+        // Rectangle 2 on the same zlib stream: plain RLE 4x1 (3 + 1 pixels).
         let d2 = vec![128, 7, 7, 7, 2, 8, 8, 8, 0];
         let z2 = compress_sync(&mut c, &d2);
         let mut msg2 = (z2.len() as u32).to_be_bytes().to_vec();
@@ -368,7 +366,7 @@ mod tests {
     }
 
     #[test]
-    fn zrle_rifiuta_run_oltre_il_tile() {
+    fn zrle_rejects_run_beyond_the_tile() {
         let mut c = Compress::new(Compression::default(), true);
         let mut st = ZrleState::new();
         let mut fb = Framebuffer::new(2, 1);
@@ -379,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn rettangolo_fuori_dal_framebuffer_rifiutato() {
+    fn rectangle_outside_the_framebuffer_rejected() {
         let mut fb = Framebuffer::new(4, 4);
         let data = vec![0u8; 4 * 4 * 4];
         assert!(raw(&mut data.as_slice(), &mut fb, Rect::new(2, 2, 4, 4)).is_err());
@@ -388,7 +386,7 @@ mod tests {
     }
 
     #[test]
-    fn copy_rect_con_sovrapposizione() {
+    fn copy_rect_with_overlap() {
         let mut fb = Framebuffer::new(4, 1);
         let data: Vec<u8> = (0..16).collect();
         fb.put(Rect::new(0, 0, 4, 1), &data).unwrap();

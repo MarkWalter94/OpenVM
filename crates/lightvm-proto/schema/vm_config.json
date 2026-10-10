@@ -1,11 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "VmConfig",
-  "description": "Configurazione di una VM richiesta dall'utente. Nessun campo è un percorso o\nun'opzione QEMU: i media sono riferiti per [`MediaId`] del registro approvato.",
+  "description": "VM configuration requested by the user. No field is a path or\na QEMU option: media are referenced by [`MediaId`] of the approved registry.",
   "type": "object",
   "properties": {
     "data_media": {
-      "description": "Supporto dati opzionale in sola lettura (tipo `data_iso`), montato a VM spenta.",
+      "description": "Optional read-only data media (kind `data_iso`), attached with the VM off.",
       "anyOf": [
         {
           "$ref": "#/$defs/MediaId"
@@ -16,22 +16,22 @@
       ]
     },
     "disk_gib": {
-      "description": "Dimensione virtuale del disco principale QCOW2 in GiB.",
+      "description": "Virtual size of the main QCOW2 disk in GiB.",
       "type": "integer",
       "format": "uint64",
       "minimum": 0
     },
     "firmware": {
-      "description": "Firmware; nel MVP solo `uefi`.",
+      "description": "Firmware; in the MVP only `uefi`.",
       "$ref": "#/$defs/Firmware",
       "default": "uefi"
     },
     "guest_os": {
-      "description": "Sistema operativo guest dichiarato.",
+      "description": "Declared guest operating system.",
       "$ref": "#/$defs/GuestOs"
     },
     "install_media": {
-      "description": "Supporto di installazione dal registro media (tipo `install_iso`).",
+      "description": "Installation media from the media registry (kind `install_iso`).",
       "anyOf": [
         {
           "$ref": "#/$defs/MediaId"
@@ -42,7 +42,7 @@
       ]
     },
     "limits": {
-      "description": "Limiti di esecuzione applicati dal supervisor al processo QEMU\n(ADR-0017); assenti nei cataloghi precedenti → valori predefiniti.",
+      "description": "Execution limits applied by the supervisor to the QEMU process\n(ADR-0017); missing in older catalogs → default values.",
       "$ref": "#/$defs/VmLimits",
       "default": {
         "cpu_max_percent": 100,
@@ -50,22 +50,22 @@
       }
     },
     "memory_mib": {
-      "description": "Memoria guest in MiB (non è il limite dell'intero processo QEMU).",
+      "description": "Guest memory in MiB (not the limit of the whole QEMU process).",
       "type": "integer",
       "format": "uint64",
       "minimum": 0
     },
     "name": {
-      "description": "Nome visibile.",
+      "description": "Visible name.",
       "$ref": "#/$defs/VmName"
     },
     "network": {
-      "description": "Profilo di rete; nel MVP solo `offline`.",
+      "description": "Network profile; in the MVP only `offline`.",
       "$ref": "#/$defs/NetworkProfile",
       "default": "offline"
     },
     "vcpus": {
-      "description": "Numero di vCPU (non è un limite percentuale di CPU: ROADMAP 7.2).",
+      "description": "Number of vCPUs (not a CPU percentage limit: ROADMAP 7.2).",
       "type": "integer",
       "format": "uint32",
       "minimum": 0
@@ -81,52 +81,52 @@
   ],
   "$defs": {
     "Firmware": {
-      "description": "Firmware del guest. Nel MVP solo UEFI con stato NVRAM gestito (ROADMAP 8).",
+      "description": "Guest firmware. In the MVP only UEFI with managed NVRAM state (ROADMAP 8).",
       "oneOf": [
         {
-          "description": "UEFI (OVMF) con NVRAM per VM.",
+          "description": "UEFI (OVMF) with per-VM NVRAM.",
           "type": "string",
           "const": "uefi"
         }
       ]
     },
     "GuestOs": {
-      "description": "Sistema operativo guest dichiarato. Nel MVP il riferimento è Ubuntu LTS\nx86_64 con versione e checksum fissati in F0 (ROADMAP 4).",
+      "description": "Declared guest operating system. In the MVP the reference is Ubuntu LTS\nx86_64 with the version and checksum pinned in F0 (ROADMAP 4).",
       "oneOf": [
         {
-          "description": "Ubuntu LTS x86_64 (guest di riferimento del MVP).",
+          "description": "Ubuntu LTS x86_64 (MVP reference guest).",
           "type": "string",
           "const": "ubuntu_lts_x86_64"
         },
         {
-          "description": "Altro Linux x86_64: gestibile manualmente, senza garanzie di compatibilità.",
+          "description": "Other Linux x86_64: manageable manually, without compatibility guarantees.",
           "type": "string",
           "const": "other_linux_x86_64"
         }
       ]
     },
     "MediaId": {
-      "description": "MediaId: UUID versione 7 in minuscolo con trattini.",
+      "description": "MediaId: version 7 UUID, lowercase with hyphens.",
       "type": "string",
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     },
     "NetworkProfile": {
-      "description": "Profilo di rete. Nel MVP l'unico valore ammesso è `offline` (ADR-0004): nessuna\nNIC guest, periferiche di rete predefinite escluse, nessun forwarding.",
+      "description": "Network profile. In the MVP the only allowed value is `offline` (ADR-0004): no\nguest NIC, default network devices excluded, no forwarding.",
       "oneOf": [
         {
-          "description": "Nessuna NIC.",
+          "description": "No NIC.",
           "type": "string",
           "const": "offline"
         }
       ]
     },
     "VmLimits": {
-      "description": "Limiti di esecuzione di una VM (ADR-0017), impostati dall'utente nelle\nimpostazioni della VM e applicati dal supervisor, mai dal client.",
+      "description": "Execution limits of a VM (ADR-0017), set by the user in the\nVM settings and applied by the supervisor, never by the client.",
       "type": "object",
       "properties": {
         "cpu_max_percent": {
-          "description": "Tetto di CPU in percentuale della capacità dei vCPU assegnati\n([`MIN_CPU_MAX_PERCENT`]..=100; 100 = nessun tetto). Applicato dal\nsistema operativo all'intero processo QEMU.",
+          "description": "CPU cap as a percentage of the capacity of the assigned vCPUs\n([`MIN_CPU_MAX_PERCENT`]..=100; 100 = no cap). Applied by the\noperating system to the whole QEMU process.",
           "type": "integer",
           "format": "uint8",
           "default": 100,
@@ -134,14 +134,14 @@
           "minimum": 0
         },
         "memory_margin_mib": {
-          "description": "Memoria concessa al processo QEMU oltre la RAM del guest, in MiB\n([`MIN_MEMORY_MARGIN_MIB`]..=[`MAX_MEMORY_MARGIN_MIB`]). Superato il\nlimite, QEMU è terminato e l'uscita è classificata come limite di risorse.",
+          "description": "Memory granted to the QEMU process beyond the guest RAM, in MiB\n([`MIN_MEMORY_MARGIN_MIB`]..=[`MAX_MEMORY_MARGIN_MIB`]). When the\nlimit is exceeded, QEMU is terminated and the exit is classified as a resource limit.",
           "type": "integer",
           "format": "uint32",
           "default": 1024,
           "minimum": 0
         },
         "storage_budget_gib": {
-          "description": "Spazio massimo in GiB per i file della VM oltre al disco principale\n(overlay, baseline, variabili firmware); `None` = nessun budget dedicato.\nVerificato a ogni avvio.",
+          "description": "Maximum space in GiB for the VM's files beyond the main disk\n(overlays, baselines, firmware variables); `None` = no dedicated budget.\nChecked at every start.",
           "type": [
             "integer",
             "null"
@@ -153,7 +153,7 @@
       "additionalProperties": false
     },
     "VmName": {
-      "description": "Nome VM: etichetta ASCII, non un percorso.",
+      "description": "VM name: ASCII label, not a path.",
       "type": "string",
       "maxLength": 64,
       "minLength": 1,

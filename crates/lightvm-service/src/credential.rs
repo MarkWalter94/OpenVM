@@ -1,8 +1,8 @@
-//! Credenziali di connessione: 32 byte casuali dal generatore del sistema
-//! operativo, confronto a tempo costante, ruoli, scadenza e revoca.
+//! Connection credentials: 32 random bytes from the operating system
+//! generator, constant-time comparison, roles, expiry and revocation.
 //!
-//! Le credenziali vivono solo in memoria: un riavvio del servizio le invalida
-//! tutte (ROADMAP 7.4, riga "Sessioni": token riutilizzato dopo riavvio).
+//! Credentials live only in memory: a service restart invalidates them all
+//! (ROADMAP 7.4, "Sessions" row: token reused after restart).
 
 use std::collections::HashMap;
 use std::fmt;
@@ -10,21 +10,21 @@ use std::time::{Duration, Instant};
 
 use lightvm_proto::ipc::Role;
 
-/// Lunghezza della credenziale in byte.
+/// Credential length in bytes.
 pub const CREDENTIAL_LEN: usize = 32;
 
-/// Segreto di 32 byte. `Debug` non mostra il valore.
+/// 32-byte secret. `Debug` does not show the value.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Credential([u8; CREDENTIAL_LEN]);
 
 impl fmt::Debug for Credential {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("Credential(<redatta>)")
+        f.write_str("Credential(<redacted>)")
     }
 }
 
 impl Drop for Credential {
-    /// Azzeramento in memoria al rilascio (miglior sforzo, senza `unsafe`).
+    /// Zeroes the memory on drop (best effort, without `unsafe`).
     fn drop(&mut self) {
         self.0.fill(0);
         std::hint::black_box(&self.0);
@@ -32,19 +32,19 @@ impl Drop for Credential {
 }
 
 impl Credential {
-    /// Genera una credenziale dal generatore casuale del sistema operativo.
+    /// Generates a credential from the operating system random generator.
     pub fn generate() -> std::io::Result<Self> {
         let mut b = [0u8; CREDENTIAL_LEN];
         getrandom::fill(&mut b).map_err(std::io::Error::other)?;
         Ok(Self(b))
     }
 
-    /// Forma esadecimale minuscola (64 caratteri).
+    /// Lowercase hexadecimal form (64 characters).
     pub fn to_hex(&self) -> String {
         hex_encode(&self.0)
     }
 
-    /// Decodifica dalla forma esadecimale; lunghezza e alfabeto verificati.
+    /// Decodes from the hexadecimal form; length and alphabet are checked.
     pub fn from_hex(s: &str) -> Option<Self> {
         let s = s.as_bytes();
         if s.len() != CREDENTIAL_LEN * 2 {
@@ -57,7 +57,7 @@ impl Credential {
         Some(Self(out))
     }
 
-    /// Confronto a tempo costante rispetto al contenuto.
+    /// Comparison in constant time with respect to the content.
     pub fn ct_eq(&self, other: &Self) -> bool {
         let mut diff = 0u8;
         for (a, b) in self.0.iter().zip(other.0.iter()) {
@@ -86,7 +86,7 @@ fn hex_val(c: u8) -> Option<u8> {
     }
 }
 
-/// Identificativo interno di una credenziale (non segreto).
+/// Internal identifier of a credential (not secret).
 pub type CredentialId = u64;
 
 #[derive(Debug)]
@@ -97,7 +97,7 @@ struct Entry {
     revoked: bool,
 }
 
-/// Archivio in memoria delle credenziali.
+/// In-memory credential store.
 #[derive(Debug, Default)]
 pub struct CredentialStore {
     next_id: CredentialId,
@@ -105,20 +105,20 @@ pub struct CredentialStore {
 }
 
 impl CredentialStore {
-    /// Archivio vuoto.
+    /// Empty store.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Emette una nuova credenziale con ruolo e durata opzionale.
+    /// Issues a new credential with a role and an optional lifetime.
     pub fn issue(
         &mut self,
         role: Role,
         ttl: Option<Duration>,
     ) -> std::io::Result<(CredentialId, Credential)> {
         let secret = Credential::generate()?;
-        // Le voci scadute o revocate non servono più: non si accumulano con
-        // emissioni ripetute (la verifica le scorre tutte).
+        // Expired or revoked entries are no longer needed: they do not pile up
+        // with repeated issuing (verification scans them all).
         let now = Instant::now();
         self.entries
             .retain(|_, e| !e.revoked && e.expires_at.is_none_or(|t| now < t));
@@ -136,9 +136,9 @@ impl CredentialStore {
         Ok((id, secret))
     }
 
-    /// Verifica una credenziale presentata. Confronta con tutte le voci a tempo
-    /// costante per voce; restituisce id e ruolo solo se valida, non scaduta e
-    /// non revocata. Nessuna distinzione verso il client tra i casi di rifiuto.
+    /// Verifies a presented credential. Compares against all entries in
+    /// constant time per entry; returns id and role only if valid, not expired
+    /// and not revoked. No distinction towards the client between rejection cases.
     pub fn verify(&self, presented: &Credential) -> Option<(CredentialId, Role)> {
         let now = Instant::now();
         let mut found = None;
@@ -154,7 +154,7 @@ impl CredentialStore {
         Some((id, e.role))
     }
 
-    /// Revoca una credenziale. Restituisce vero se esisteva.
+    /// Revokes a credential. Returns true if it existed.
     pub fn revoke(&mut self, id: CredentialId) -> bool {
         match self.entries.get_mut(&id) {
             Some(e) => {
@@ -165,7 +165,7 @@ impl CredentialStore {
         }
     }
 
-    /// Revoca tutte le credenziali con un ruolo diverso da `keep`.
+    /// Revokes all credentials with a role other than `keep`.
     pub fn revoke_all_except(&mut self, keep: Role) -> u32 {
         let mut n = 0;
         for e in self.entries.values_mut() {
@@ -213,7 +213,7 @@ mod tests {
         let (ui, ui_c) = s.issue(Role::Ui, None).unwrap();
         let (p, p_c) = s.issue(Role::Pairing, Some(Duration::ZERO)).unwrap();
         assert_eq!(s.verify(&ui_c), Some((ui, Role::Ui)));
-        assert_eq!(s.verify(&p_c), None, "scaduta");
+        assert_eq!(s.verify(&p_c), None, "expired");
         let _ = p;
         let other = Credential::generate().unwrap();
         assert_eq!(s.verify(&other), None);

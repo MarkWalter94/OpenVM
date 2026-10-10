@@ -1,7 +1,7 @@
-//! Richieste tipizzate verso la coda per VM (ROADMAP 6.3, 7.3).
+//! Typed requests towards the per-VM queue (ROADMAP 6.3, 7.3).
 //!
-//! Questi tipi sono il contenuto delle richieste IPC di controllo VM; l'involucro
-//! di trasporto (versione, autenticazione del canale, correlazione) appartiene a
+//! These types are the content of the VM control IPC requests; the transport
+//! envelope (version, channel authentication, correlation) belongs to
 //! `lightvm-service`.
 
 use schemars::JsonSchema;
@@ -12,40 +12,40 @@ use crate::{
     SessionToken, VmId,
 };
 
-/// Chi richiede un'azione.
+/// Who requests an action.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Caller {
-    /// Utente locale tramite la UI (soggetto a limiti globali, policy VM e capacità host).
+    /// Local user through the UI (subject to global limits, VM policy and host capacity).
     User,
-    /// Agente con sessione: soggetto anche al grant. Il token è verificato a ogni
-    /// chiamata e subito prima dell'inoltro.
+    /// Agent with a session: also subject to the grant. The token is checked on every
+    /// call and right before forwarding.
     Agent {
-        /// Sessione dichiarata.
+        /// Declared session.
         session_id: SessionId,
-        /// Segreto di sessione; assente = diniego `unauthenticated`.
+        /// Session secret; missing = `unauthenticated` denial.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         token: Option<SessionToken>,
     },
 }
 
-/// Attore registrato nell'audit (senza segreti).
+/// Actor recorded in the audit (without secrets).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Actor {
-    /// Utente locale.
+    /// Local user.
     User,
-    /// Sessione agente.
+    /// Agent session.
     Agent {
-        /// Sessione.
+        /// Session.
         session_id: SessionId,
     },
-    /// Supervisor (scadenze, riconciliazione, osservazioni).
+    /// Supervisor (expiries, reconciliation, observations).
     System,
 }
 
 impl Caller {
-    /// Attore corrispondente, senza il segreto.
+    /// Corresponding actor, without the secret.
     #[must_use]
     pub fn actor(&self) -> Actor {
         match self {
@@ -57,26 +57,26 @@ impl Caller {
     }
 }
 
-/// Azione richiesta su una VM esistente.
+/// Action requested on an existing VM.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum VmAction {
-    /// Avvio.
+    /// Start.
     Start,
-    /// Arresto ordinario.
+    /// Ordinary stop.
     Stop,
-    /// Arresto forzato con primitive OS.
+    /// Forced stop with OS primitives.
     ForceStop,
-    /// Reset del guest.
+    /// Guest reset.
     Reset,
     /// Screenshot.
     Screenshot,
-    /// Input tipizzato.
+    /// Typed input.
     Input(InputBatch),
 }
 
 impl VmAction {
-    /// Tipo di operazione.
+    /// Operation kind.
     #[must_use]
     pub fn kind(&self) -> OperationKind {
         match self {
@@ -89,7 +89,7 @@ impl VmAction {
         }
     }
 
-    /// Capability richiesta.
+    /// Required capability.
     #[must_use]
     pub fn capability(&self) -> Capability {
         match self {
@@ -102,29 +102,29 @@ impl VmAction {
     }
 }
 
-/// Richiesta di azione su una VM.
+/// Request for an action on a VM.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct VmRequest {
-    /// Chiave di idempotenza scelta dal chiamante: la stessa richiesta ripetuta con
-    /// lo stesso `operation_id` non duplica l'effetto.
+    /// Idempotency key chosen by the caller: the same request repeated with
+    /// the same `operation_id` does not duplicate the effect.
     pub operation_id: OperationId,
     /// VM.
     pub vm_id: VmId,
-    /// Esecuzione attesa: obbligatoria per reset, screenshot e input; se presente
-    /// e diversa dall'esecuzione corrente la richiesta è rifiutata (`state_conflict`).
+    /// Expected run: mandatory for reset, screenshot and input; if present
+    /// and different from the current run the request is rejected (`state_conflict`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_run_id: Option<RunId>,
-    /// Azione (oggetto con discriminante `type`).
+    /// Action (object with a `type` discriminant).
     pub action: VmAction,
 }
 
-/// Esito dell'accettazione di una richiesta (prima dell'inoltro).
+/// Outcome of accepting a request (before forwarding).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Admission {
-    /// Operazione.
+    /// Operation.
     pub operation_id: OperationId,
-    /// Stato corrente dell'operazione.
+    /// Current status of the operation.
     pub status: OperationStatus,
-    /// `true` se la richiesta ripete un `operation_id` già noto (nessun nuovo effetto).
+    /// `true` if the request repeats an already known `operation_id` (no new effect).
     pub duplicate: bool,
 }

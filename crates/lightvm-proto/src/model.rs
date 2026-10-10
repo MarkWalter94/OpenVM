@@ -1,4 +1,4 @@
-//! Modelli del catalogo: VM, media, baseline, esecuzioni, operazioni, limiti
+//! Catalog models: VMs, media, baselines, runs, operations, limits
 //! (ROADMAP 4, 6.3, 7.2, 8).
 
 use schemars::JsonSchema;
@@ -9,21 +9,21 @@ use crate::{
     Sha256Digest, UtcTimestamp, VmId, VmName, VmState,
 };
 
-/// Sistema operativo guest dichiarato. Nel MVP il riferimento è Ubuntu LTS
-/// x86_64 con versione e checksum fissati in F0 (ROADMAP 4).
+/// Declared guest operating system. In the MVP the reference is Ubuntu LTS
+/// x86_64 with the version and checksum pinned in F0 (ROADMAP 4).
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum GuestOs {
-    /// Ubuntu LTS x86_64 (guest di riferimento del MVP).
+    /// Ubuntu LTS x86_64 (MVP reference guest).
     UbuntuLtsX86_64,
-    /// Altro Linux x86_64: gestibile manualmente, senza garanzie di compatibilità.
+    /// Other Linux x86_64: manageable manually, without compatibility guarantees.
     OtherLinuxX86_64,
 }
 
-/// Profilo di rete. Nel MVP l'unico valore ammesso è `offline` (ADR-0004): nessuna
-/// NIC guest, periferiche di rete predefinite escluse, nessun forwarding.
+/// Network profile. In the MVP the only allowed value is `offline` (ADR-0004): no
+/// guest NIC, default network devices excluded, no forwarding.
 #[derive(
     Clone,
     Copy,
@@ -40,12 +40,12 @@ pub enum GuestOs {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum NetworkProfile {
-    /// Nessuna NIC.
+    /// No NIC.
     #[default]
     Offline,
 }
 
-/// Firmware del guest. Nel MVP solo UEFI con stato NVRAM gestito (ROADMAP 8).
+/// Guest firmware. In the MVP only UEFI with managed NVRAM state (ROADMAP 8).
 #[derive(
     Clone,
     Copy,
@@ -62,53 +62,53 @@ pub enum NetworkProfile {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum Firmware {
-    /// UEFI (OVMF) con NVRAM per VM.
+    /// UEFI (OVMF) with per-VM NVRAM.
     #[default]
     Uefi,
 }
 
-/// Configurazione di una VM richiesta dall'utente. Nessun campo è un percorso o
-/// un'opzione QEMU: i media sono riferiti per [`MediaId`] del registro approvato.
+/// VM configuration requested by the user. No field is a path or
+/// a QEMU option: media are referenced by [`MediaId`] of the approved registry.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct VmConfig {
-    /// Nome visibile.
+    /// Visible name.
     pub name: VmName,
-    /// Sistema operativo guest dichiarato.
+    /// Declared guest operating system.
     pub guest_os: GuestOs,
-    /// Numero di vCPU (non è un limite percentuale di CPU: ROADMAP 7.2).
+    /// Number of vCPUs (not a CPU percentage limit: ROADMAP 7.2).
     pub vcpus: u32,
-    /// Memoria guest in MiB (non è il limite dell'intero processo QEMU).
+    /// Guest memory in MiB (not the limit of the whole QEMU process).
     pub memory_mib: u64,
-    /// Dimensione virtuale del disco principale QCOW2 in GiB.
+    /// Virtual size of the main QCOW2 disk in GiB.
     pub disk_gib: u64,
-    /// Profilo di rete; nel MVP solo `offline`.
+    /// Network profile; in the MVP only `offline`.
     #[serde(default)]
     pub network: NetworkProfile,
-    /// Supporto di installazione dal registro media (tipo `install_iso`).
+    /// Installation media from the media registry (kind `install_iso`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub install_media: Option<MediaId>,
-    /// Supporto dati opzionale in sola lettura (tipo `data_iso`), montato a VM spenta.
+    /// Optional read-only data media (kind `data_iso`), attached with the VM off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_media: Option<MediaId>,
-    /// Firmware; nel MVP solo `uefi`.
+    /// Firmware; in the MVP only `uefi`.
     #[serde(default)]
     pub firmware: Firmware,
-    /// Limiti di esecuzione applicati dal supervisor al processo QEMU
-    /// (ADR-0017); assenti nei cataloghi precedenti → valori predefiniti.
+    /// Execution limits applied by the supervisor to the QEMU process
+    /// (ADR-0017); missing in older catalogs → default values.
     #[serde(default)]
     pub limits: VmLimits,
 }
 
-/// Dimensione massima di un'ISO di installazione nel registro media (16 GiB;
+/// Maximum size of an installation ISO in the media registry (16 GiB;
 /// ADR-0008).
 pub const MAX_INSTALL_MEDIA_BYTES: u64 = 16 << 30;
-/// Dimensione massima di un'ISO dati in sola lettura (8 GiB, DVD a doppio
-/// strato; ADR-0008). Conta anche nel budget di storage (ADR-0017).
+/// Maximum size of a read-only data ISO (8 GiB, dual-layer
+/// DVD; ADR-0008). It also counts towards the storage budget (ADR-0017).
 pub const MAX_DATA_MEDIA_BYTES: u64 = 8 << 30;
 
 impl MediaKind {
-    /// Dimensione massima ammessa per questo tipo di supporto.
+    /// Maximum size allowed for this media kind.
     #[must_use]
     pub const fn max_bytes(self) -> u64 {
         match self {
@@ -118,31 +118,31 @@ impl MediaKind {
     }
 }
 
-/// Tetto CPU minimo ammesso, in percentuale della capacità dei vCPU.
+/// Minimum allowed CPU cap, as a percentage of the vCPU capacity.
 pub const MIN_CPU_MAX_PERCENT: u8 = 5;
-/// Margine di memoria minimo oltre la RAM guest, in MiB.
+/// Minimum memory margin beyond the guest RAM, in MiB.
 pub const MIN_MEMORY_MARGIN_MIB: u32 = 256;
-/// Margine di memoria massimo oltre la RAM guest, in MiB.
+/// Maximum memory margin beyond the guest RAM, in MiB.
 pub const MAX_MEMORY_MARGIN_MIB: u32 = 16_384;
-/// Budget di storage massimo per VM, in GiB.
+/// Maximum storage budget per VM, in GiB.
 pub const MAX_STORAGE_BUDGET_GIB: u64 = 16_384;
 
-/// Limiti di esecuzione di una VM (ADR-0017), impostati dall'utente nelle
-/// impostazioni della VM e applicati dal supervisor, mai dal client.
+/// Execution limits of a VM (ADR-0017), set by the user in the
+/// VM settings and applied by the supervisor, never by the client.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct VmLimits {
-    /// Tetto di CPU in percentuale della capacità dei vCPU assegnati
-    /// ([`MIN_CPU_MAX_PERCENT`]..=100; 100 = nessun tetto). Applicato dal
-    /// sistema operativo all'intero processo QEMU.
+    /// CPU cap as a percentage of the capacity of the assigned vCPUs
+    /// ([`MIN_CPU_MAX_PERCENT`]..=100; 100 = no cap). Applied by the
+    /// operating system to the whole QEMU process.
     pub cpu_max_percent: u8,
-    /// Memoria concessa al processo QEMU oltre la RAM del guest, in MiB
-    /// ([`MIN_MEMORY_MARGIN_MIB`]..=[`MAX_MEMORY_MARGIN_MIB`]). Superato il
-    /// limite, QEMU è terminato e l'uscita è classificata come limite di risorse.
+    /// Memory granted to the QEMU process beyond the guest RAM, in MiB
+    /// ([`MIN_MEMORY_MARGIN_MIB`]..=[`MAX_MEMORY_MARGIN_MIB`]). When the
+    /// limit is exceeded, QEMU is terminated and the exit is classified as a resource limit.
     pub memory_margin_mib: u32,
-    /// Spazio massimo in GiB per i file della VM oltre al disco principale
-    /// (overlay, baseline, variabili firmware); `None` = nessun budget dedicato.
-    /// Verificato a ogni avvio.
+    /// Maximum space in GiB for the VM's files beyond the main disk
+    /// (overlays, baselines, firmware variables); `None` = no dedicated budget.
+    /// Checked at every start.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub storage_budget_gib: Option<u64>,
 }
@@ -158,205 +158,205 @@ impl Default for VmLimits {
 }
 
 impl VmLimits {
-    /// Validazione strutturale dei limiti.
+    /// Structural validation of the limits.
     pub fn validate(&self) -> Result<(), crate::PublicError> {
         if !(MIN_CPU_MAX_PERCENT..=100).contains(&self.cpu_max_percent) {
             return Err(crate::PublicError::invalid_argument(format!(
-                "cpu_max_percent fuori dall'intervallo {MIN_CPU_MAX_PERCENT}..=100"
+                "cpu_max_percent outside the range {MIN_CPU_MAX_PERCENT}..=100"
             )));
         }
         if !(MIN_MEMORY_MARGIN_MIB..=MAX_MEMORY_MARGIN_MIB).contains(&self.memory_margin_mib) {
             return Err(crate::PublicError::invalid_argument(format!(
-                "memory_margin_mib fuori dall'intervallo {MIN_MEMORY_MARGIN_MIB}..={MAX_MEMORY_MARGIN_MIB}"
+                "memory_margin_mib outside the range {MIN_MEMORY_MARGIN_MIB}..={MAX_MEMORY_MARGIN_MIB}"
             )));
         }
         if let Some(b) = self.storage_budget_gib
             && !(1..=MAX_STORAGE_BUDGET_GIB).contains(&b)
         {
             return Err(crate::PublicError::invalid_argument(format!(
-                "storage_budget_gib fuori dall'intervallo 1..={MAX_STORAGE_BUDGET_GIB}"
+                "storage_budget_gib outside the range 1..={MAX_STORAGE_BUDGET_GIB}"
             )));
         }
         Ok(())
     }
 }
 
-/// VM del catalogo con revisione della configurazione e ultimo stato persistito.
+/// Catalog VM with configuration revision and last persisted state.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct VmRecord {
-    /// Identificativo.
+    /// Identifier.
     pub id: VmId,
-    /// Configurazione corrente.
+    /// Current configuration.
     pub config: VmConfig,
-    /// Revisione della configurazione, incrementata a ogni modifica (controllo delle revisioni).
+    /// Configuration revision, incremented on every change (revision check).
     pub config_revision: u64,
-    /// Ultimo stato persistito: indicativo, lo stato osservato prevale.
+    /// Last persisted state: a hint, the observed state takes precedence.
     pub persisted_state: VmState,
-    /// Istante di creazione.
+    /// Creation instant.
     pub created_at: UtcTimestamp,
 }
 
-/// Tipo di supporto nel registro media.
+/// Kind of media in the media registry.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum MediaKind {
-    /// ISO di installazione del guest.
+    /// Guest installation ISO.
     InstallIso,
-    /// ISO dati in sola lettura per portare nel guest il software da testare (ADR-0008).
+    /// Read-only data ISO to bring the software under test into the guest (ADR-0008).
     DataIso,
 }
 
-/// Supporto approvato, come visto dai client: nessun percorso host.
+/// Approved media, as seen by clients: no host path.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct MediaRecord {
-    /// Identificativo.
+    /// Identifier.
     pub id: MediaId,
-    /// Tipo di supporto.
+    /// Kind of media.
     pub kind: MediaKind,
-    /// SHA-256 della copia gestita, calcolato all'approvazione.
+    /// SHA-256 of the managed copy, computed at approval.
     pub sha256: Sha256Digest,
-    /// Dimensione in byte della copia gestita.
+    /// Size in bytes of the managed copy.
     pub size_bytes: u64,
-    /// Origine dichiarata dall'utente (testo, mai interpretato).
+    /// Origin declared by the user (text, never interpreted).
     pub declared_origin: Label,
-    /// Istante dell'approvazione.
+    /// Instant of the approval.
     pub approved_at: UtcTimestamp,
 }
 
-/// Identità del file gestito secondo l'OS (per esempio numero di serie del
-/// volume e indice del file su Windows, `st_dev`/`st_ino` su Unix). Rileva la
-/// sostituzione del file anche quando hash e dimensione non sono ancora ricalcolati.
+/// Identity of the managed file according to the OS (for example volume serial
+/// number and file index on Windows, `st_dev`/`st_ino` on Unix). Detects
+/// replacement of the file even when hash and size have not been recomputed yet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct FileIdentity {
-    /// Volume o dispositivo.
+    /// Volume or device.
     pub volume: u64,
-    /// Identificativo del file nel volume (128 bit, come `FILE_ID_INFO` su Windows;
-    /// su Unix l'inode nei primi 8 byte big-endian).
+    /// Identifier of the file in the volume (128 bits, like `FILE_ID_INFO` on Windows;
+    /// on Unix the inode in the first 8 bytes, big-endian).
     pub file_id: [u8; 16],
 }
 
-/// Voce completa del registro media, **solo interna** al supervisor e allo
-/// storage: contiene il percorso gestito opaco. Non ha schema pubblico.
+/// Full media registry entry, **internal only** to the supervisor and
+/// storage: it contains the opaque managed path. It has no public schema.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MediaEntry {
-    /// Dati pubblici.
+    /// Public data.
     pub record: MediaRecord,
-    /// Percorso relativo della copia gestita in sola lettura.
+    /// Relative path of the read-only managed copy.
     pub managed_path: ManagedRelPath,
-    /// Identità OS registrata all'approvazione, se disponibile.
+    /// OS identity recorded at approval, if available.
     pub file_identity: Option<FileIdentity>,
 }
 
-/// Origine di una baseline (ROADMAP 8).
+/// Origin of a baseline (ROADMAP 8).
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum BaselineOrigin {
-    /// Registrata dopo arresto corretto osservato.
+    /// Recorded after an observed clean shutdown.
     CleanShutdown,
-    /// Checkpoint materializzato da un overlay a VM spenta.
+    /// Checkpoint materialized from an overlay with the VM off.
     Checkpoint,
 }
 
-/// Baseline a VM spenta: disco autonomo più stato firmware, immutabile.
+/// Baseline with the VM off: standalone disk plus firmware state, immutable.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct BaselineRecord {
-    /// Identificativo.
+    /// Identifier.
     pub id: BaselineId,
-    /// VM di appartenenza.
+    /// Owning VM.
     pub vm_id: VmId,
-    /// Revisione della configurazione VM registrata con la baseline.
+    /// VM configuration revision recorded with the baseline.
     pub config_revision: u64,
-    /// Origine.
+    /// Origin.
     pub origin: BaselineOrigin,
-    /// SHA-256 dell'immagine disco della baseline.
+    /// SHA-256 of the baseline's disk image.
     pub disk_sha256: Sha256Digest,
-    /// SHA-256 dello stato firmware (NVRAM) della baseline.
+    /// SHA-256 of the baseline's firmware state (NVRAM).
     pub firmware_sha256: Sha256Digest,
-    /// Baseline iniziale protetta: non cancellabile né sostituibile dai tool agente.
+    /// Protected initial baseline: cannot be deleted or replaced by agent tools.
     pub protected: bool,
-    /// Etichetta opzionale.
+    /// Optional label.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<Label>,
-    /// Istante di creazione.
+    /// Creation instant.
     pub created_at: UtcTimestamp,
 }
 
-/// Motivo della fine di un'esecuzione.
+/// Reason a run ended.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum RunEndReason {
-    /// Arresto ordinario completato (fine processo osservata).
+    /// Ordinary stop completed (process end observed).
     Stopped,
-    /// Arresto forzato richiesto (stato non pulito).
+    /// Forced stop requested (unclean state).
     ForceStopped,
     /// Emergency Stop.
     EmergencyStop,
-    /// Avvio fallito.
+    /// Start failed.
     StartFailed,
-    /// Uscita inattesa del processo.
+    /// Unexpected process exit.
     UnexpectedExit,
-    /// Esecuzione chiusa dalla riconciliazione dopo crash del supervisor.
+    /// Run closed by reconciliation after a supervisor crash.
     Reconciled,
 }
 
-/// Esecuzione: un processo QEMU dall'avvio alla fine osservata.
+/// Run: one QEMU process from start to observed end.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RunRecord {
-    /// Identificativo.
+    /// Identifier.
     pub id: RunId,
     /// VM.
     pub vm_id: VmId,
-    /// Revisione della configurazione usata per l'avvio.
+    /// Configuration revision used for the start.
     pub config_revision: u64,
-    /// Baseline di partenza (da F3).
+    /// Starting baseline (from F3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baseline_id: Option<BaselineId>,
-    /// Istante di avvio.
+    /// Start instant.
     pub started_at: UtcTimestamp,
-    /// Istante di fine osservata.
+    /// Instant of the observed end.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended_at: Option<UtcTimestamp>,
-    /// Motivo della fine.
+    /// Reason for the end.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_reason: Option<RunEndReason>,
 }
 
-/// Tipo di operazione della coda per VM.
+/// Kind of operation of the per-VM queue.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum OperationKind {
-    /// Creazione della VM nel catalogo.
+    /// Creation of the VM in the catalog.
     Create,
-    /// Avvio.
+    /// Start.
     Start,
-    /// Arresto ordinario.
+    /// Ordinary stop.
     Stop,
-    /// Arresto forzato.
+    /// Forced stop.
     ForceStop,
-    /// Reset del guest.
+    /// Guest reset.
     Reset,
-    /// Cattura dello schermo.
+    /// Screen capture.
     Screenshot,
-    /// Input tipizzato.
+    /// Typed input.
     Input,
-    /// Checkpoint a VM spenta (da F3).
+    /// Checkpoint with the VM off (from F3).
     Snapshot,
-    /// Ripristino di una baseline a VM spenta (da F3).
+    /// Restore of a baseline with the VM off (from F3).
     Restore,
-    /// Emergency Stop (percorso prioritario, fuori coda).
+    /// Emergency Stop (priority path, outside the queue).
     EmergencyStop,
 }
 
 impl OperationKind {
-    /// `true` per le mutazioni del ciclo di vita: al massimo una in corso o in coda per VM.
+    /// `true` for lifecycle mutations: at most one in progress or queued per VM.
     #[must_use]
     pub const fn is_lifecycle_mutation(self) -> bool {
         matches!(
@@ -372,8 +372,8 @@ impl OperationKind {
         )
     }
 
-    /// `true` se ripetere l'operazione con lo stesso effetto è sicuro (retry ammesso).
-    /// Input e reset non lo sono (ROADMAP 6.3).
+    /// `true` if repeating the operation with the same effect is safe (retry allowed).
+    /// Input and reset are not (ROADMAP 6.3).
     #[must_use]
     pub const fn is_idempotent(self) -> bool {
         matches!(
@@ -387,26 +387,26 @@ impl OperationKind {
     }
 }
 
-/// Stato di un'operazione.
+/// Status of an operation.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum OperationStatus {
-    /// Accettata, in coda, non ancora inoltrata al backend.
+    /// Accepted, queued, not yet forwarded to the backend.
     Queued,
-    /// Inoltrata al backend: può produrre effetti anche dopo una revoca.
+    /// Forwarded to the backend: it may produce effects even after a revocation.
     Forwarded,
-    /// Completata con successo.
+    /// Completed successfully.
     Succeeded,
-    /// Inoltrata e fallita.
+    /// Forwarded and failed.
     Failed,
-    /// Scartata prima dell'inoltro (revoca, Emergency Stop, `run_id` superato): nessun effetto.
+    /// Discarded before forwarding (revocation, Emergency Stop, superseded `run_id`): no effect.
     Discarded,
 }
 
 impl OperationStatus {
-    /// `true` se lo stato è finale.
+    /// `true` if the status is final.
     #[must_use]
     pub const fn is_terminal(self) -> bool {
         matches!(
@@ -416,50 +416,50 @@ impl OperationStatus {
     }
 }
 
-/// Registro di un'operazione (consultabile per `operation_id`).
+/// Record of an operation (queryable by `operation_id`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct OperationRecord {
-    /// Identificativo (chiave di idempotenza).
+    /// Identifier (idempotency key).
     pub id: OperationId,
     /// VM.
     pub vm_id: VmId,
-    /// Esecuzione a cui si riferisce, se pertinente.
+    /// Run it refers to, if relevant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<RunId>,
-    /// Sessione richiedente, se agente.
+    /// Requesting session, if an agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<SessionId>,
-    /// Tipo.
+    /// Kind.
     pub kind: OperationKind,
-    /// Stato.
+    /// Status.
     pub status: OperationStatus,
-    /// Codice d'errore se `failed` o `discarded`.
+    /// Error code if `failed` or `discarded`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<ErrorCode>,
-    /// Istante di accettazione.
+    /// Acceptance instant.
     pub requested_at: UtcTimestamp,
-    /// Istante dell'ultimo cambio di stato.
+    /// Instant of the last status change.
     pub updated_at: UtcTimestamp,
 }
 
-/// Limiti di risorse (globali o per VM). Tutti i campi sono massimi inclusivi.
+/// Resource limits (global or per VM). All fields are inclusive maxima.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct ResourceLimits {
-    /// vCPU massime per VM.
+    /// Maximum vCPUs per VM.
     pub max_vcpus: u32,
-    /// Memoria guest massima per VM in MiB.
+    /// Maximum guest memory per VM in MiB.
     pub max_memory_mib: u64,
-    /// Disco virtuale massimo per VM in GiB.
+    /// Maximum virtual disk per VM in GiB.
     pub max_disk_gib: u64,
-    /// VM in esecuzione contemporanea (MVP: 1).
+    /// Concurrently running VMs (MVP: 1).
     pub max_running_vms: u32,
-    /// Sessioni agente contemporanee (MVP: 1).
+    /// Concurrent agent sessions (MVP: 1).
     pub max_agent_sessions: u32,
 }
 
 impl ResourceLimits {
-    /// Limiti del MVP: una VM in esecuzione e una sessione agente (ROADMAP 4);
-    /// massimi per VM prudenti, da tarare con le misure di F0 (ADR-0017).
+    /// MVP limits: one running VM and one agent session (ROADMAP 4);
+    /// conservative per-VM maxima, to be tuned with the F0 measurements (ADR-0017).
     pub const MVP_DEFAULT: ResourceLimits = ResourceLimits {
         max_vcpus: 8,
         max_memory_mib: 16 * 1024,
@@ -468,7 +468,7 @@ impl ResourceLimits {
         max_agent_sessions: 1,
     };
 
-    /// Intersezione: per ogni campo il minimo. Nessun lato amplia l'altro.
+    /// Intersection: the minimum for each field. Neither side widens the other.
     #[must_use]
     pub fn intersect(&self, other: &ResourceLimits) -> ResourceLimits {
         ResourceLimits {
@@ -480,7 +480,7 @@ impl ResourceLimits {
         }
     }
 
-    /// `true` se ogni campo di `self` è ≤ del corrispondente di `other`.
+    /// `true` if every field of `self` is ≤ the corresponding one of `other`.
     #[must_use]
     pub fn is_within(&self, other: &ResourceLimits) -> bool {
         self.max_vcpus <= other.max_vcpus
@@ -491,32 +491,32 @@ impl ResourceLimits {
     }
 }
 
-/// Capacità dell'host rilevate dal probe (fornite al core, mai inventate).
+/// Host capabilities detected by the probe (supplied to the core, never invented).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct HostCapacity {
-    /// Processori logici.
+    /// Logical processors.
     pub logical_cpus: u32,
-    /// Memoria fisica totale in MiB.
+    /// Total physical memory in MiB.
     pub total_memory_mib: u64,
-    /// Memoria da lasciare all'host in MiB (riserva).
+    /// Memory to leave to the host in MiB (reserve).
     pub reserved_memory_mib: u64,
-    /// Spazio libero sul volume del catalogo in GiB.
+    /// Free space on the catalog volume in GiB.
     pub free_storage_gib: u64,
-    /// Spazio da lasciare libero in GiB (riserva, ADR-0017).
+    /// Space to leave free in GiB (reserve, ADR-0017).
     pub reserved_storage_gib: u64,
-    /// Acceleratore hardware disponibile e approvato (nessun fallback TCG: ADR-0007).
+    /// Hardware accelerator available and approved (no TCG fallback: ADR-0007).
     pub accelerator_available: bool,
-    /// Cattura dello schermo disponibile nel backend.
+    /// Screen capture available in the backend.
     pub screenshot_available: bool,
-    /// Input tipizzato disponibile nel backend.
+    /// Typed input available in the backend.
     pub input_available: bool,
-    /// Baseline e ripristino disponibili (da F3).
+    /// Baseline and restore available (from F3).
     pub baseline_available: bool,
 }
 
 impl HostCapacity {
-    /// Limiti derivati dalla capacità host: vCPU ≤ processori logici, memoria ≤
-    /// totale meno riserva, disco ≤ libero meno riserva.
+    /// Limits derived from the host capacity: vCPUs ≤ logical processors, memory ≤
+    /// total minus reserve, disk ≤ free minus reserve.
     #[must_use]
     pub fn as_limits(&self) -> ResourceLimits {
         ResourceLimits {
@@ -537,42 +537,42 @@ impl HostCapacity {
     }
 }
 
-/// Geometria del display guest in pixel.
+/// Guest display geometry in pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct DisplayGeometry {
-    /// Larghezza (1..=8192).
+    /// Width (1..=8192).
     #[schemars(range(min = 1, max = 8192))]
     pub width: u32,
-    /// Altezza (1..=8192).
+    /// Height (1..=8192).
     #[schemars(range(min = 1, max = 8192))]
     pub height: u32,
 }
 
 impl DisplayGeometry {
-    /// Lato massimo ammesso.
+    /// Maximum allowed side.
     pub const MAX_SIDE: u32 = 8192;
 
-    /// Valida e costruisce.
+    /// Validates and constructs.
     pub fn new(width: u32, height: u32) -> Result<Self, crate::PublicError> {
         let g = Self { width, height };
         g.validate()?;
         Ok(g)
     }
 
-    /// Verifica i limiti (utile dopo la deserializzazione).
+    /// Checks the limits (useful after deserialization).
     pub fn validate(&self) -> Result<(), crate::PublicError> {
         if (1..=Self::MAX_SIDE).contains(&self.width) && (1..=Self::MAX_SIDE).contains(&self.height)
         {
             Ok(())
         } else {
             Err(crate::PublicError::invalid_argument(
-                "geometria del display fuori da 1..=8192",
+                "display geometry outside 1..=8192",
             ))
         }
     }
 }
 
-/// Formato dell'immagine di uno screenshot.
+/// Image format of a screenshot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ImageFormat {
@@ -580,23 +580,23 @@ pub enum ImageFormat {
     Png,
 }
 
-/// Metadati di uno screenshot prodotto dal backend (ROADMAP 6.4, 9). I byte
-/// dell'immagine viaggiano separatamente (contenuto immagine MCP o blocco IPC),
-/// mai come percorso host.
+/// Metadata of a screenshot produced by the backend (ROADMAP 6.4, 9). The image
+/// bytes travel separately (MCP image content or IPC block),
+/// never as a host path.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Screenshot {
     /// VM.
     pub vm_id: VmId,
-    /// Esecuzione in cui è stato catturato.
+    /// Run in which it was captured.
     pub run_id: RunId,
-    /// Geometria del display al momento della cattura.
+    /// Display geometry at capture time.
     pub geometry: DisplayGeometry,
-    /// Formato.
+    /// Format.
     pub format: ImageFormat,
-    /// SHA-256 dei byte dell'immagine.
+    /// SHA-256 of the image bytes.
     pub sha256: Sha256Digest,
-    /// Dimensione in byte dell'immagine.
+    /// Size in bytes of the image.
     pub byte_len: u64,
-    /// Istante della cattura.
+    /// Capture instant.
     pub captured_at: UtcTimestamp,
 }

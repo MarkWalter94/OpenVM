@@ -1,12 +1,12 @@
-//! Screenshot tramite QMP `screendump` (ROADMAP 6.4).
+//! Screenshot via QMP `screendump` (ROADMAP 6.4).
 //!
-//! Il file temporaneo è scelto soltanto dal backend nella directory privata
-//! dell'esecuzione; il PPM viene letto con un limite di dimensione, validato,
-//! convertito in PNG in memoria e cancellato in ogni caso.
+//! The temporary file is chosen only by the backend in the run's private
+//! directory; the PPM is read with a size limit, validated,
+//! converted to PNG in memory and deleted in every case.
 //!
-//! [`CapturedScreenshot`] è locale perché porta i byte dell'immagine;
-//! [`CapturedScreenshot::metadata`] produce i metadati di `lightvm-proto`
-//! ([`lightvm_proto::Screenshot`]) che viaggiano su IPC/MCP.
+//! [`CapturedScreenshot`] is local because it carries the image bytes;
+//! [`CapturedScreenshot::metadata`] produces the `lightvm-proto` metadata
+//! ([`lightvm_proto::Screenshot`]) that travels over IPC/MCP.
 
 use std::io::Read;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,26 +19,26 @@ use crate::error::{BackendError, Result};
 use crate::paths::ManagedPath;
 use crate::qmp::QmpClient;
 
-/// Lato massimo accettato in pixel (uguale a [`DisplayGeometry::MAX_SIDE`]).
+/// Maximum accepted side in pixels (equal to [`DisplayGeometry::MAX_SIDE`]).
 pub const MAX_SIDE: u32 = DisplayGeometry::MAX_SIDE;
 
-/// Screenshot catturato dal backend: PNG in memoria più metadati.
+/// Screenshot captured by the backend: in-memory PNG plus metadata.
 #[derive(Clone, Debug)]
 pub struct CapturedScreenshot {
-    /// Esecuzione a cui appartiene.
+    /// Run it belongs to.
     pub run_id: RunId,
-    /// Geometria del display al momento della cattura.
+    /// Display geometry at capture time.
     pub geometry: DisplayGeometry,
-    /// Immagine PNG RGB a 8 bit.
+    /// 8-bit RGB PNG image.
     pub png: Vec<u8>,
-    /// SHA-256 del PNG.
+    /// SHA-256 of the PNG.
     pub sha256: Sha256Digest,
-    /// Istante della cattura.
+    /// Capture instant.
     pub captured_at: UtcTimestamp,
 }
 
 impl CapturedScreenshot {
-    /// Metadati pubblici (senza byte né percorsi).
+    /// Public metadata (no bytes or paths).
     pub fn metadata(&self, vm_id: VmId) -> lightvm_proto::Screenshot {
         lightvm_proto::Screenshot {
             vm_id,
@@ -52,23 +52,23 @@ impl CapturedScreenshot {
     }
 }
 
-/// Dimensione massima del file PPM accettata (lato massimo al quadrato × 3
-/// più intestazione).
+/// Maximum accepted PPM file size (maximum side squared × 3
+/// plus header).
 pub const MAX_PPM_BYTES: u64 = (MAX_SIDE as u64) * (MAX_SIDE as u64) * 3 + 64;
 
-/// Immagine RGB a 8 bit per canale.
+/// RGB image with 8 bits per channel.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RgbImage {
-    /// Larghezza.
+    /// Width.
     pub width: u32,
-    /// Altezza.
+    /// Height.
     pub height: u32,
-    /// Pixel RGB contigui.
+    /// Contiguous RGB pixels.
     pub data: Vec<u8>,
 }
 
 impl RgbImage {
-    /// Percentuale di pixel non neri (soglia 16 su ogni canale).
+    /// Percentage of non-black pixels (threshold 16 on each channel).
     pub fn non_black_percent(&self) -> f64 {
         let n = self
             .data
@@ -81,7 +81,7 @@ impl RgbImage {
     }
 }
 
-/// Analizza un PPM binario (P6, maxval 255) con lato massimo `max_side`.
+/// Parses a binary PPM (P6, maxval 255) with maximum side `max_side`.
 pub fn parse_ppm(bytes: &[u8], max_side: u32) -> Result<RgbImage> {
     let bad = |m: String| BackendError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, m));
     let mut pos = 0usize;
@@ -101,34 +101,34 @@ pub fn parse_ppm(bytes: &[u8], max_side: u32) -> Result<RgbImage> {
             pos += 1;
         }
         if start == pos {
-            return Err(bad("intestazione PPM troncata".into()));
+            return Err(bad("truncated PPM header".into()));
         }
         fields.push(std::str::from_utf8(&bytes[start..pos]).map_err(|e| bad(format!("PPM: {e}")))?);
     }
     if pos >= bytes.len() || !bytes[pos].is_ascii_whitespace() {
-        return Err(bad("intestazione PPM non terminata".into()));
+        return Err(bad("unterminated PPM header".into()));
     }
     pos += 1;
     if fields[0] != "P6" {
         return Err(bad(format!(
-            "formato {} non supportato (atteso P6)",
+            "format {} not supported (expected P6)",
             fields[0]
         )));
     }
     let num = |s: &str| s.parse::<u32>().map_err(|e| bad(format!("PPM {s}: {e}")));
     let (w, h, max) = (num(fields[1])?, num(fields[2])?, num(fields[3])?);
     if w == 0 || h == 0 || max != 255 {
-        return Err(bad(format!("PPM {w}x{h} maxval {max} non accettato")));
+        return Err(bad(format!("PPM {w}x{h} maxval {max} not accepted")));
     }
     if w > max_side || h > max_side {
         return Err(BackendError::ResourceLimit(format!(
-            "schermata {w}x{h} oltre il lato massimo {max_side}"
+            "screen {w}x{h} exceeds the maximum side {max_side}"
         )));
     }
     let need = w as usize * h as usize * 3;
     if bytes.len() != pos + need {
         return Err(bad(format!(
-            "dati PPM di {} byte, attesi {need}",
+            "PPM data of {} bytes, expected {need}",
             bytes.len().saturating_sub(pos)
         )));
     }
@@ -139,7 +139,7 @@ pub fn parse_ppm(bytes: &[u8], max_side: u32) -> Result<RgbImage> {
     })
 }
 
-/// Codifica PNG RGB in memoria (compressione `Fast`).
+/// Encodes an RGB PNG in memory (`Fast` compression).
 pub fn encode_png(img: &RgbImage) -> Result<Vec<u8>> {
     let err = |e: png::EncodingError| BackendError::Io(std::io::Error::other(e.to_string()));
     let mut out = Vec::new();
@@ -155,7 +155,7 @@ pub fn encode_png(img: &RgbImage) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Rimuove il file temporaneo all'uscita dallo scope, anche in caso di errore.
+/// Removes the temporary file when leaving the scope, even on error.
 struct TempFile<'a>(&'a ManagedPath);
 
 impl Drop for TempFile<'_> {
@@ -166,8 +166,8 @@ impl Drop for TempFile<'_> {
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Esegue `screendump` nella directory privata e restituisce PNG e immagine.
-/// Il PNG oltre `max_png_bytes` è rifiutato con `resource_limit`.
+/// Runs `screendump` in the private directory and returns PNG and image.
+/// A PNG larger than `max_png_bytes` is rejected with `resource_limit`.
 pub(crate) async fn capture(
     qmp: &QmpClient,
     private_dir: &ManagedPath,
@@ -186,7 +186,7 @@ pub(crate) async fn capture(
         let len = f.metadata()?.len();
         if len > MAX_PPM_BYTES {
             return Err(BackendError::ResourceLimit(format!(
-                "file screendump di {len} byte"
+                "screendump file of {len} bytes"
             )));
         }
         let mut buf = Vec::with_capacity(len as usize);
@@ -203,7 +203,7 @@ pub(crate) async fn capture(
     let png = encode_png(&img)?;
     if png.len() as u64 > max_png_bytes {
         return Err(BackendError::ResourceLimit(format!(
-            "screenshot PNG di {} byte (massimo {max_png_bytes})",
+            "PNG screenshot of {} bytes (maximum {max_png_bytes})",
             png.len()
         )));
     }
@@ -225,8 +225,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ppm_valido_e_png() {
-        let mut ppm = b"P6\n# commento\n2 1\n255\n".to_vec();
+    fn valid_ppm_and_png() {
+        let mut ppm = b"P6\n# comment\n2 1\n255\n".to_vec();
         ppm.extend_from_slice(&[255, 0, 0, 0, 0, 0]);
         let img = parse_ppm(&ppm, MAX_SIDE).unwrap();
         assert_eq!((img.width, img.height), (2, 1));
@@ -236,7 +236,7 @@ mod tests {
     }
 
     #[test]
-    fn metadati_pubblici() {
+    fn public_metadata() {
         let png = vec![1u8, 2, 3];
         let s = CapturedScreenshot {
             run_id: RunId::from_unix_millis(1_700_000_000_000, [1; 10]),
@@ -255,7 +255,7 @@ mod tests {
     }
 
     #[test]
-    fn ppm_non_valido() {
+    fn invalid_ppm() {
         assert!(parse_ppm(b"P3\n1 1\n255\n000", MAX_SIDE).is_err());
         assert!(matches!(
             parse_ppm(b"P6\n99999 1\n255\n", MAX_SIDE),

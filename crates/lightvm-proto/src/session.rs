@@ -1,4 +1,4 @@
-//! Sessioni agente, grant, lease, capability, esiti dei test (ROADMAP 7.3, 9).
+//! Agent sessions, grants, leases, capabilities, test outcomes (ROADMAP 7.3, 9).
 
 use std::borrow::Cow;
 use std::collections::BTreeSet;
@@ -9,46 +9,46 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::{GrantId, OperationId, PublicError, SessionId, UtcTimestamp, VmId};
 
-/// Azione autorizzabile su una VM. I nomi serializzati seguono il catalogo MCP
-/// (ROADMAP 9); `vm.input` copre mouse e tastiera.
+/// Authorizable action on a VM. Serialized names follow the MCP catalog
+/// (ROADMAP 9); `vm.input` covers mouse and keyboard.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
 )]
 pub enum Capability {
-    /// Elenco filtrato dal grant.
+    /// List filtered by the grant.
     #[serde(rename = "vm.list")]
     VmList,
-    /// Stato.
+    /// Status.
     #[serde(rename = "vm.status")]
     VmStatus,
-    /// Avvio.
+    /// Start.
     #[serde(rename = "vm.start")]
     VmStart,
-    /// Arresto (ordinario o forzato).
+    /// Stop (ordinary or forced).
     #[serde(rename = "vm.stop")]
     VmStop,
-    /// Reset: richiede capability esplicita.
+    /// Reset: requires an explicit capability.
     #[serde(rename = "vm.reset")]
     VmReset,
     /// Screenshot.
     #[serde(rename = "vm.screenshot")]
     VmScreenshot,
-    /// Mouse e tastiera.
+    /// Mouse and keyboard.
     #[serde(rename = "vm.input")]
     VmInput,
-    /// Checkpoint a VM spenta: richiede capability esplicita.
+    /// Checkpoint with the VM off: requires an explicit capability.
     #[serde(rename = "vm.snapshot")]
     VmSnapshot,
-    /// Ripristino a VM spenta.
+    /// Restore with the VM off.
     #[serde(rename = "vm.restore")]
     VmRestore,
-    /// Eventi LightVM e log QEMU autorizzati.
+    /// Authorized LightVM events and QEMU logs.
     #[serde(rename = "vm.logs")]
     VmLogs,
 }
 
 impl Capability {
-    /// Tutte le capability.
+    /// All capabilities.
     pub const ALL: [Capability; 10] = [
         Capability::VmList,
         Capability::VmStatus,
@@ -62,7 +62,7 @@ impl Capability {
         Capability::VmLogs,
     ];
 
-    /// Nome stabile.
+    /// Stable name.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -79,7 +79,7 @@ impl Capability {
         }
     }
 
-    /// `true` se la capability autorizza una mutazione (bloccata dalla pausa agente).
+    /// `true` if the capability authorizes a mutation (blocked by the agent pause).
     #[must_use]
     pub const fn is_mutation(self) -> bool {
         matches!(
@@ -100,27 +100,27 @@ impl fmt::Display for Capability {
     }
 }
 
-/// Insieme ordinato di capability.
+/// Ordered set of capabilities.
 pub type CapabilitySet = BTreeSet<Capability>;
 
-/// Quote di una sessione o di un livello di policy. Ogni campo è un massimo
-/// inclusivo; l'intersezione prende il minimo.
+/// Quotas of a session or of a policy layer. Each field is an inclusive
+/// maximum; the intersection takes the minimum.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct Quotas {
-    /// Operazioni totali ammesse nella sessione.
+    /// Total operations allowed in the session.
     pub max_operations: u32,
-    /// Eventi di input totali ammessi nella sessione.
+    /// Total input events allowed in the session.
     pub max_input_events: u32,
-    /// Screenshot totali ammessi nella sessione.
+    /// Total screenshots allowed in the session.
     pub max_screenshots: u32,
-    /// Dimensione massima di un singolo screenshot in byte.
+    /// Maximum size of a single screenshot in bytes.
     pub max_screenshot_bytes: u64,
-    /// Operazioni in coda per VM non ancora inoltrate.
+    /// Operations queued per VM and not yet forwarded.
     pub max_queued_operations: u32,
 }
 
 impl Quotas {
-    /// Quote senza restrizioni proprie (elemento neutro dell'intersezione).
+    /// Quotas without restrictions of their own (neutral element of the intersection).
     pub const UNBOUNDED: Quotas = Quotas {
         max_operations: u32::MAX,
         max_input_events: u32::MAX,
@@ -129,7 +129,7 @@ impl Quotas {
         max_queued_operations: u32::MAX,
     };
 
-    /// Intersezione campo per campo (minimo).
+    /// Field-by-field intersection (minimum).
     #[must_use]
     pub fn intersect(&self, other: &Quotas) -> Quotas {
         Quotas {
@@ -141,7 +141,7 @@ impl Quotas {
         }
     }
 
-    /// `true` se ogni campo di `self` è ≤ del corrispondente di `other`.
+    /// `true` if every field of `self` is ≤ the corresponding one of `other`.
     #[must_use]
     pub fn is_within(&self, other: &Quotas) -> bool {
         self.max_operations <= other.max_operations
@@ -152,26 +152,26 @@ impl Quotas {
     }
 }
 
-/// Revisione monotona della policy applicata (registrata nei report, ROADMAP 9).
+/// Monotonic revision of the applied policy (recorded in reports, ROADMAP 9).
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
 )]
 #[serde(transparent)]
 pub struct PolicyRevision(pub u64);
 
-/// Un livello di policy: capability ammesse e quote. Usato per limiti globali,
-/// policy VM, grant di sessione e capacità host; la policy effettiva è
-/// l'intersezione dei quattro livelli (ROADMAP 6.3, calcolata in `vm-core`).
+/// A policy layer: allowed capabilities and quotas. Used for global limits,
+/// VM policy, session grant and host capacity; the effective policy is
+/// the intersection of the four layers (ROADMAP 6.3, computed in `vm-core`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PolicyLayer {
-    /// Capability ammesse da questo livello.
+    /// Capabilities allowed by this layer.
     pub capabilities: CapabilitySet,
-    /// Quote di questo livello.
+    /// Quotas of this layer.
     pub quotas: Quotas,
 }
 
 impl PolicyLayer {
-    /// Livello neutro: tutte le capability, quote illimitate.
+    /// Neutral layer: all capabilities, unlimited quotas.
     #[must_use]
     pub fn permissive() -> Self {
         Self {
@@ -180,7 +180,7 @@ impl PolicyLayer {
         }
     }
 
-    /// Livello che non ammette nulla.
+    /// Layer that allows nothing.
     #[must_use]
     pub fn deny_all() -> Self {
         Self {
@@ -196,38 +196,38 @@ impl PolicyLayer {
     }
 }
 
-/// Policy effettiva risultante dall'intersezione, con la revisione applicata.
+/// Effective policy resulting from the intersection, with the applied revision.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct EffectivePolicy {
-    /// Capability effettive.
+    /// Effective capabilities.
     pub capabilities: CapabilitySet,
-    /// Quote effettive.
+    /// Effective quotas.
     pub quotas: Quotas,
-    /// Revisione della policy applicata.
+    /// Revision of the applied policy.
     pub revision: PolicyRevision,
 }
 
-/// Grant emesso dal supervisor dopo l'approvazione dell'utente nell'app (ROADMAP 9).
+/// Grant issued by the supervisor after the user's approval in the app (ROADMAP 9).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Grant {
-    /// Identificativo.
+    /// Identifier.
     pub id: GrantId,
-    /// Sessione a cui è legato.
+    /// Session it is bound to.
     pub session_id: SessionId,
-    /// VM ammesse (allowlist esplicita; vuota = nessuna VM).
+    /// Allowed VMs (explicit allowlist; empty = no VM).
     pub vm_allowlist: BTreeSet<VmId>,
-    /// Capability concesse.
+    /// Granted capabilities.
     pub capabilities: CapabilitySet,
-    /// Scadenza assoluta UTC.
+    /// Absolute UTC expiry.
     pub expires_at: UtcTimestamp,
-    /// Quote concesse.
+    /// Granted quotas.
     pub quotas: Quotas,
-    /// Revisione della policy con cui il grant è stato emesso.
+    /// Revision of the policy the grant was issued with.
     pub policy_revision: PolicyRevision,
 }
 
 impl Grant {
-    /// Livello di policy corrispondente al grant.
+    /// Policy layer corresponding to the grant.
     #[must_use]
     pub fn as_layer(&self) -> PolicyLayer {
         PolicyLayer {
@@ -237,23 +237,23 @@ impl Grant {
     }
 }
 
-/// Durata massima di un lease senza rinnovo valido (ROADMAP 7.3: ≤ 10 s).
+/// Maximum duration of a lease without a valid renewal (ROADMAP 7.3: ≤ 10 s).
 pub const LEASE_MAX_MILLIS: i64 = 10_000;
 
-/// Lease di una sessione: va rinnovato prima della scadenza, altrimenti la
-/// sessione è revocata con il percorso di emergenza (ROADMAP 7.3).
+/// Lease of a session: it must be renewed before it expires, otherwise the
+/// session is revoked through the emergency path (ROADMAP 7.3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Lease {
-    /// Sessione.
+    /// Session.
     pub session_id: SessionId,
-    /// Ultimo rinnovo valido.
+    /// Last valid renewal.
     pub renewed_at: UtcTimestamp,
-    /// Scadenza: `renewed_at + durata`, con durata in `1..=LEASE_MAX_MILLIS`.
+    /// Expiry: `renewed_at + duration`, with duration in `1..=LEASE_MAX_MILLIS`.
     pub expires_at: UtcTimestamp,
 }
 
 impl Lease {
-    /// Nuovo lease; rifiuta durate nulle, negative o oltre [`LEASE_MAX_MILLIS`].
+    /// New lease; rejects zero, negative or over-[`LEASE_MAX_MILLIS`] durations.
     pub fn new(
         session_id: SessionId,
         renewed_at: UtcTimestamp,
@@ -261,12 +261,12 @@ impl Lease {
     ) -> Result<Self, PublicError> {
         if !(1..=LEASE_MAX_MILLIS).contains(&duration_millis) {
             return Err(PublicError::invalid_argument(
-                "durata del lease fuori da 1..=10000 ms",
+                "lease duration outside 1..=10000 ms",
             ));
         }
         let expires_at = renewed_at
             .checked_add_millis(duration_millis)
-            .ok_or_else(|| PublicError::invalid_argument("istante del lease fuori intervallo"))?;
+            .ok_or_else(|| PublicError::invalid_argument("lease instant out of range"))?;
         Ok(Self {
             session_id,
             renewed_at,
@@ -274,103 +274,103 @@ impl Lease {
         })
     }
 
-    /// `true` se il lease è valido all'istante `now` (scadenza esclusa).
+    /// `true` if the lease is valid at instant `now` (expiry excluded).
     #[must_use]
     pub fn is_valid_at(&self, now: UtcTimestamp) -> bool {
         now < self.expires_at && self.expires_at.millis_since(self.renewed_at) <= LEASE_MAX_MILLIS
     }
 }
 
-/// Stato di una sessione agente.
+/// State of an agent session.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum SessionState {
-    /// Attiva.
+    /// Active.
     Active,
-    /// Pausa agente: nessuna nuova mutazione inoltrata; osservazione consentita.
+    /// Agent pause: no new mutation forwarded; observation allowed.
     Paused,
-    /// Terminata (revoca, scadenza, Emergency Stop, perdita del client...). Definitivo.
+    /// Terminated (revocation, expiry, Emergency Stop, client loss...). Final.
     Terminated,
 }
 
-/// Causa di terminazione di una sessione (registrata nel report, ROADMAP 9).
+/// Termination cause of a session (recorded in the report, ROADMAP 9).
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum TerminationCause {
-    /// Chiusura ordinaria dall'app.
+    /// Ordinary close from the app.
     Completed,
-    /// Revoca dell'utente.
+    /// Revoked by the user.
     Revoked,
     /// Emergency Stop.
     EmergencyStop,
-    /// Scadenza del grant.
+    /// Grant expired.
     GrantExpired,
-    /// Lease non rinnovato entro il limite.
+    /// Lease not renewed within the limit.
     LeaseExpired,
-    /// Perdita del client o dell'adapter.
+    /// Loss of the client or of the adapter.
     ClientLost,
-    /// Chiusura o crash della UI.
+    /// UI closed or crashed.
     UiClosed,
-    /// Perdita o riavvio del supervisor.
+    /// Supervisor lost or restarted.
     SupervisorLost,
-    /// Ripresa dell'host da sospensione.
+    /// Host resumed from sleep.
     HostResumed,
-    /// VM fallita o terminata durante la sessione.
+    /// VM failed or terminated during the session.
     VmTerminated,
-    /// Ripristino di baseline: la sessione di controllo si chiude (ROADMAP 8).
+    /// Baseline restore: the control session closes (ROADMAP 8).
     Restored,
 }
 
-/// Esito di un test (ROADMAP 9). Il completamento della conversazione non produce
-/// automaticamente `passed`.
+/// Outcome of a test (ROADMAP 9). Completing the conversation does not
+/// automatically produce `passed`.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum TestOutcome {
-    /// Criteri verificati.
+    /// Criteria verified.
     Passed,
-    /// Criteri non soddisfatti.
+    /// Criteria not met.
     Failed,
-    /// Nessun verificatore affidabile o evidenze insufficienti.
+    /// No reliable verifier or insufficient evidence.
     Inconclusive,
-    /// Annullato dall'utente.
+    /// Cancelled by the user.
     Cancelled,
-    /// Tempo esaurito.
+    /// Time ran out.
     TimedOut,
-    /// Guasto dell'infrastruttura, distinto dal fallimento del modello.
+    /// Infrastructure failure, distinct from a model failure.
     InfrastructureError,
 }
 
-/// Rapporto di una revoca o di un Emergency Stop: distingue la coda scartata
-/// dalle richieste già inoltrate (ROADMAP 7.3). Non promette annullamenti.
+/// Report of a revocation or an Emergency Stop: distinguishes the discarded queue
+/// from requests already forwarded (ROADMAP 7.3). It promises no cancellations.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RevocationReport {
-    /// Operazioni in coda scartate senza inoltro (nessun effetto).
+    /// Queued operations discarded without forwarding (no effect).
     pub discarded: Vec<OperationId>,
-    /// Operazioni già inoltrate al backend: possono aver prodotto effetti.
+    /// Operations already forwarded to the backend: they may have produced effects.
     pub already_forwarded: Vec<OperationId>,
 }
 
-/// Segreto di sessione (32 byte) emesso dal supervisor. Non è un identificativo:
-/// non compare in log, report, argomenti di processo né in `Debug`.
+/// Session secret (32 bytes) issued by the supervisor. It is not an identifier:
+/// it does not appear in logs, reports, process arguments nor in `Debug`.
 ///
-/// In JSON (solo sul canale IPC autenticato) è una stringa di 64 cifre esadecimali.
+/// In JSON (only on the authenticated IPC channel) it is a string of 64 hexadecimal digits.
 #[derive(Clone, PartialEq, Eq)]
 pub struct SessionToken([u8; 32]);
 
 impl SessionToken {
-    /// Token dai 32 byte generati dal supervisor con il generatore dell'OS.
+    /// Token from the 32 bytes generated by the supervisor with the OS generator.
     #[must_use]
     pub const fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
 
-    /// Confronto a tempo costante rispetto al contenuto.
+    /// Comparison in constant time with respect to the content.
     #[must_use]
     pub fn ct_eq(&self, other: &SessionToken) -> bool {
         let mut diff = 0u8;
@@ -380,7 +380,7 @@ impl SessionToken {
         diff == 0
     }
 
-    /// Byte del token (solo per l'archivio credenziali OS e il canale IPC).
+    /// Bytes of the token (only for the OS credential store and the IPC channel).
     #[must_use]
     pub const fn expose_bytes(&self) -> &[u8; 32] {
         &self.0
@@ -389,7 +389,7 @@ impl SessionToken {
 
 impl fmt::Debug for SessionToken {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("SessionToken(<redatto>)")
+        f.write_str("SessionToken(<redacted>)")
     }
 }
 
@@ -404,7 +404,7 @@ impl<'de> Deserialize<'de> for SessionToken {
         let s = Cow::<'de, str>::deserialize(deserializer)?;
         crate::Sha256Digest::parse_hex(&s)
             .map(|d| Self(*d.as_bytes()))
-            .map_err(|_| serde::de::Error::custom("token di sessione non valido"))
+            .map_err(|_| serde::de::Error::custom("invalid session token"))
     }
 }
 
@@ -417,7 +417,7 @@ impl JsonSchema for SessionToken {
             "type": "string",
             "pattern": "^[0-9a-f]{64}$",
             "writeOnly": true,
-            "description": "Segreto di sessione, solo su IPC autenticato; mai in log o report."
+            "description": "Session secret, only on authenticated IPC; never in logs or reports."
         })
     }
 }

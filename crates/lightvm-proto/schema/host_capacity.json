@@ -1,51 +1,51 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "HostCapacity",
-  "description": "Capacità dell'host rilevate dal probe (fornite al core, mai inventate).",
+  "description": "Host capabilities detected by the probe (supplied to the core, never invented).",
   "type": "object",
   "properties": {
     "accelerator_available": {
-      "description": "Acceleratore hardware disponibile e approvato (nessun fallback TCG: ADR-0007).",
+      "description": "Hardware accelerator available and approved (no TCG fallback: ADR-0007).",
       "type": "boolean"
     },
     "baseline_available": {
-      "description": "Baseline e ripristino disponibili (da F3).",
+      "description": "Baseline and restore available (from F3).",
       "type": "boolean"
     },
     "free_storage_gib": {
-      "description": "Spazio libero sul volume del catalogo in GiB.",
+      "description": "Free space on the catalog volume in GiB.",
       "type": "integer",
       "format": "uint64",
       "minimum": 0
     },
     "input_available": {
-      "description": "Input tipizzato disponibile nel backend.",
+      "description": "Typed input available in the backend.",
       "type": "boolean"
     },
     "logical_cpus": {
-      "description": "Processori logici.",
+      "description": "Logical processors.",
       "type": "integer",
       "format": "uint32",
       "minimum": 0
     },
     "reserved_memory_mib": {
-      "description": "Memoria da lasciare all'host in MiB (riserva).",
+      "description": "Memory to leave to the host in MiB (reserve).",
       "type": "integer",
       "format": "uint64",
       "minimum": 0
     },
     "reserved_storage_gib": {
-      "description": "Spazio da lasciare libero in GiB (riserva, ADR-0017).",
+      "description": "Space to leave free in GiB (reserve, ADR-0017).",
       "type": "integer",
       "format": "uint64",
       "minimum": 0
     },
     "screenshot_available": {
-      "description": "Cattura dello schermo disponibile nel backend.",
+      "description": "Screen capture available in the backend.",
       "type": "boolean"
     },
     "total_memory_mib": {
-      "description": "Memoria fisica totale in MiB.",
+      "description": "Total physical memory in MiB.",
       "type": "integer",
       "format": "uint64",
       "minimum": 0

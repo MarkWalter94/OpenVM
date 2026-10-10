@@ -1,7 +1,7 @@
-//! Riconciliazione dello stato dalle osservazioni del backend
-//! (`BackendObservation`): processo e QMP prevalgono sullo stato persistito e
-//! sugli esiti tardivi del backend; le osservazioni di esecuzioni non correnti
-//! sono ignorate. Backend e osservazioni sono simulati (nessun QEMU reale).
+//! State reconciliation from backend observations
+//! (`BackendObservation`): process and QMP take precedence over the persisted state and
+//! over late backend outcomes; observations of runs that are not current
+//! are ignored. Backend and observations are simulated (no real QEMU).
 
 mod common;
 
@@ -18,7 +18,7 @@ fn run_of(h: &Harness, run: RunId) -> RunRecord {
     h.store.0.borrow().runs[&run].clone()
 }
 
-/// Avvio inoltrato ma senza esito del backend: VM in `starting`.
+/// Start forwarded but without a backend outcome: VM in `starting`.
 fn begin_start(h: &mut Harness, vm: VmId) -> (OperationId, RunId) {
     let r = h.req(vm, None, VmAction::Start);
     h.core.submit(&Caller::User, r).unwrap();
@@ -38,21 +38,21 @@ fn qmp_ready_promotes_starting_before_the_backend_result() {
             .observe(vm, BackendObservation::ProcessSpawned { run_id: run })
             .unwrap()
     );
-    assert_eq!(state(&mut h, vm), VmState::Starting, "processo senza QMP");
+    assert_eq!(state(&mut h, vm), VmState::Starting, "process without QMP");
     assert!(
         h.core
             .observe(vm, BackendObservation::QmpReady { run_id: run })
             .unwrap()
     );
     assert_eq!(state(&mut h, vm), VmState::Running);
-    // Esito tardivo del backend: nessun cambiamento.
+    // Late backend outcome: no change.
     let rec = h
         .core
         .finish_dispatch(vm, op, Ok(DispatchOutcome::Done))
         .unwrap();
     assert_eq!(rec.status, OperationStatus::Succeeded);
     assert_eq!(state(&mut h, vm), VmState::Running);
-    // QMP pronto ripetuto: nessun effetto.
+    // Repeated QMP ready: no effect.
     assert!(
         h.core
             .observe(vm, BackendObservation::QmpReady { run_id: run })
@@ -73,12 +73,12 @@ fn start_failed_observation_wins_over_a_late_success() {
     assert_eq!(st.state, VmState::Failed);
     assert_eq!(st.run_id, None);
     assert_eq!(run_of(&h, run).end_reason, Some(RunEndReason::StartFailed));
-    // Il backend riporta "avviato" dopo: l'esecuzione non è più corrente.
+    // The backend reports "started" afterwards: the run is no longer current.
     h.core
         .finish_dispatch(vm, op, Ok(DispatchOutcome::Done))
         .unwrap();
     assert_eq!(state(&mut h, vm), VmState::Failed);
-    // Ulteriori osservazioni della stessa esecuzione sono ignorate.
+    // Further observations of the same run are ignored.
     assert!(
         !h.core
             .observe(vm, BackendObservation::QmpReady { run_id: run })
@@ -118,7 +118,7 @@ fn unexpected_exit_while_running_fails_and_discards_the_queue() {
         (OperationStatus::Discarded, Some(ErrorCode::StateConflict))
     );
     assert_eq!(h.backend.count(|c| matches!(c, Call::Screenshot(..))), 0);
-    // La sessione resta valida: l'agente vede lo stato `failed` ma non può riavviare.
+    // The session stays valid: the agent sees the `failed` state but cannot restart.
     assert_eq!(h.core.vm_status(&agent, vm).unwrap().state, VmState::Failed);
     let r = h.req(vm, None, VmAction::Start);
     let e = h.core.submit(&agent, r).unwrap_err();
@@ -138,9 +138,9 @@ fn exit_during_stop_is_a_clean_stop_even_if_backend_reports_late_or_fails() {
         h.core.submit(&Caller::User, r).unwrap();
         let d = h.core.begin_dispatch(vm).unwrap().unwrap();
         assert_eq!(state(&mut h, vm), VmState::Stopping);
-        // Arresto non dichiarato completo senza la fine del processo.
+        // Stop not declared complete without the end of the process.
         assert_eq!(run_of(&h, run).ended_at, None);
-        // Il guest si spegne: l'uscita arriva prima dell'esito della richiesta.
+        // The guest shuts down: the exit arrives before the outcome of the request.
         h.core
             .observe(
                 vm,
@@ -166,7 +166,7 @@ fn force_stop_failure_requires_explicit_reconciliation() {
     let run = h.start(vm);
     let r = h.req(vm, None, VmAction::ForceStop);
     h.core.submit(&Caller::User, r).unwrap();
-    h.backend.fail_next = Some(PublicError::infrastructure("terminazione non confermata"));
+    h.backend.fail_next = Some(PublicError::infrastructure("termination not confirmed"));
     let rec = h.run_next(vm).unwrap();
     assert_eq!(rec.status, OperationStatus::Failed);
     let st = h.core.vm_status(&Caller::User, vm).unwrap();
@@ -174,11 +174,11 @@ fn force_stop_failure_requires_explicit_reconciliation() {
     assert_eq!(
         st.run_id,
         Some(run),
-        "esecuzione non chiusa senza fine osservata"
+        "run not closed without an observed end"
     );
     assert_eq!(run_of(&h, run).ended_at, None);
-    // La fine del processo osservata chiude l'esecuzione, ma `failed` non
-    // diventa `stopped` da solo: serve la riconciliazione.
+    // The observed end of the process closes the run, but `failed` does not
+    // become `stopped` by itself: reconciliation is required.
     assert!(
         h.core
             .observe(
@@ -209,7 +209,7 @@ fn stale_and_unknown_observations_are_ignored() {
     let mut h = Harness::new();
     let vm = h.create_vm("a");
     let stale = RunId::from_unix_millis(1, [0x33; 10]);
-    // VM ferma: nessuna esecuzione corrente.
+    // Stopped VM: no current run.
     for obs in [
         BackendObservation::ProcessSpawned { run_id: stale },
         BackendObservation::QmpReady { run_id: stale },
@@ -233,14 +233,14 @@ fn stale_and_unknown_observations_are_ignored() {
         assert!(!h.core.observe(vm, obs).unwrap());
         assert_eq!(state(&mut h, vm), VmState::Running);
     }
-    // VM sconosciuta.
+    // Unknown VM.
     let ghost = VmId::from_unix_millis(1, [0x44; 10]);
     let e = h
         .core
         .observe(ghost, BackendObservation::QmpReady { run_id: run })
         .unwrap_err();
     assert_eq!(e.code, ErrorCode::NotFound);
-    // Geometria: esecuzione non corrente ignorata, valori non validi rifiutati.
+    // Geometry: non-current run ignored, invalid values rejected.
     let g = DisplayGeometry {
         width: 1024,
         height: 768,
@@ -294,7 +294,7 @@ fn load_catalog_never_trusts_a_persisted_process_state() {
         assert_eq!(st.state, expected, "{persisted}");
         assert_eq!(st.run_id, None);
         assert_eq!(h.store.0.borrow().vms[&id].persisted_state, expected);
-        // Nessuna osservazione è accettata senza un'esecuzione corrente.
+        // No observation is accepted without a current run.
         let any_run = RunId::from_unix_millis(10, [0x55; 10]);
         assert!(
             !h.core
@@ -305,7 +305,7 @@ fn load_catalog_never_trusts_a_persisted_process_state() {
     assert!(h.backend.calls.is_empty());
 }
 
-// ----- proprietà: transizioni sempre ammesse dalla tabella --------------------
+// ----- property: transitions always allowed by the table ---------------------
 
 #[derive(Clone, Debug)]
 enum Step {
@@ -364,7 +364,7 @@ fn apply(h: &mut Harness, vm: VmId, pending: &mut Vec<OperationId>, s: &Step) {
         }
         Step::Execute { fail } => {
             if *fail {
-                h.backend.fail_next = Some(PublicError::infrastructure("guasto simulato"));
+                h.backend.fail_next = Some(PublicError::infrastructure("simulated fault"));
             }
             let _ = h
                 .core
@@ -381,7 +381,7 @@ fn apply(h: &mut Harness, vm: VmId, pending: &mut Vec<OperationId>, s: &Step) {
             if !pending.is_empty() {
                 let op = pending.remove(0);
                 let result = if *fail {
-                    Err(PublicError::infrastructure("guasto simulato"))
+                    Err(PublicError::infrastructure("simulated fault"))
                 } else if h
                     .core
                     .operation(&Caller::User, op)
@@ -428,7 +428,7 @@ fn apply(h: &mut Harness, vm: VmId, pending: &mut Vec<OperationId>, s: &Step) {
             let applied = h.core.observe(vm, obs).unwrap();
             assert!(
                 !applied || st.run_id == Some(run_id),
-                "osservazione non corrente applicata"
+                "non-current observation applied"
             );
         }
         Step::Emergency => {
@@ -446,10 +446,10 @@ fn apply(h: &mut Harness, vm: VmId, pending: &mut Vec<OperationId>, s: &Step) {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
-    /// Qualunque sequenza di richieste, esiti (anche tardivi o falliti) e
-    /// osservazioni (anche di esecuzioni non correnti) produce solo transizioni
-    /// ammesse dalla tabella di `VmState`; un processo implica un'esecuzione
-    /// corrente; `stopped` non ha esecuzione; al più un'esecuzione aperta.
+    /// Any sequence of requests, outcomes (even late or failed) and
+    /// observations (even of non-current runs) produces only transitions
+    /// allowed by the `VmState` table; a process implies a current
+    /// run; `stopped` has no run; at most one open run.
     #[test]
     fn prop_any_sequence_respects_the_transition_table(steps in prop::collection::vec(step(), 1..60)) {
         let mut h = Harness::new();
@@ -459,14 +459,14 @@ proptest! {
             apply(&mut h, vm, &mut pending, s);
             let st = h.core.vm_status(&Caller::User, vm).unwrap();
             if st.state.has_process() {
-                prop_assert!(st.run_id.is_some(), "{:?} senza run_id dopo {:?}", st.state, s);
+                prop_assert!(st.run_id.is_some(), "{:?} without run_id after {:?}", st.state, s);
             }
             if st.state == VmState::Stopped {
                 prop_assert_eq!(st.run_id, None);
             }
             let store = h.store.0.borrow();
             let open = store.runs.values().filter(|r| r.ended_at.is_none()).count();
-            prop_assert!(open <= 1, "{} esecuzioni aperte", open);
+            prop_assert!(open <= 1, "{} open runs", open);
             if let Some(run) = st.run_id {
                 prop_assert!(store.runs.contains_key(&run));
             }
@@ -475,10 +475,10 @@ proptest! {
         let mut prev = VmState::Stopped;
         for (id, s) in &store.state_log {
             prop_assert_eq!(*id, vm);
-            prop_assert!(prev.can_transition_to(*s), "transizione {} → {} non ammessa", prev, s);
+            prop_assert!(prev.can_transition_to(*s), "transition {} → {} not allowed", prev, s);
             prev = *s;
         }
-        // Ogni avvio del backend corrisponde a un'esecuzione registrata.
+        // Every backend start corresponds to a recorded run.
         for c in &h.backend.calls {
             if let Call::Start(_, run, _) = c {
                 prop_assert!(store.runs.contains_key(run));
@@ -489,8 +489,8 @@ proptest! {
     }
 }
 
-/// Riavvio del supervisor senza processi superstiti: le VM in `recovering`
-/// tornano `stopped` (persistito); quelle ferme o fallite non cambiano.
+/// Supervisor restart with no surviving processes: VMs in `recovering`
+/// go back to `stopped` (persisted); stopped or failed ones do not change.
 #[test]
 fn reconcile_after_restart_returns_recovering_vms_to_stopped() {
     let store = MemStore::default();

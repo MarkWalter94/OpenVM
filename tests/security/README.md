@@ -1,1 +1,1 @@
-Test negativi di sicurezza della sezione 7.4 della roadmap: segnaposto, nessun test ancora presente.
+Negative security tests from section 7.4 of the roadmap: placeholder, no tests yet.

@@ -1,19 +1,19 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Lease",
-  "description": "Lease di una sessione: va rinnovato prima della scadenza, altrimenti la\nsessione è revocata con il percorso di emergenza (ROADMAP 7.3).",
+  "description": "Lease of a session: it must be renewed before it expires, otherwise the\nsession is revoked through the emergency path (ROADMAP 7.3).",
   "type": "object",
   "properties": {
     "expires_at": {
-      "description": "Scadenza: `renewed_at + durata`, con durata in `1..=LEASE_MAX_MILLIS`.",
+      "description": "Expiry: `renewed_at + duration`, with duration in `1..=LEASE_MAX_MILLIS`.",
       "$ref": "#/$defs/UtcTimestamp"
     },
     "renewed_at": {
-      "description": "Ultimo rinnovo valido.",
+      "description": "Last valid renewal.",
       "$ref": "#/$defs/UtcTimestamp"
     },
     "session_id": {
-      "description": "Sessione.",
+      "description": "Session.",
       "$ref": "#/$defs/SessionId"
     }
   },
@@ -24,13 +24,13 @@
   ],
   "$defs": {
     "SessionId": {
-      "description": "SessionId: UUID versione 7 in minuscolo con trattini.",
+      "description": "SessionId: version 7 UUID, lowercase with hyphens.",
       "type": "string",
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     },
     "UtcTimestamp": {
-      "description": "Istante UTC RFC 3339 con suffisso Z, precisione al millisecondo.",
+      "description": "RFC 3339 UTC instant with Z suffix, millisecond precision.",
       "type": "string",
       "format": "date-time"
     }

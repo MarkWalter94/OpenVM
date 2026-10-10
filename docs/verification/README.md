@@ -1,110 +1,110 @@
-# Verifiche registrate
+# Recorded verifications
 
-Questa directory contiene le prove eseguite su LightVM: procedure, risultati, benchmark e manifest degli artefatti. È l'unico luogo in cui uno stato "verificato" può essere dimostrato. Riferimenti: `docs/ROADMAP.md`, sezioni 13 e 17.
+This directory contains the tests run on LightVM: procedures, results, benchmarks and artifact manifests. It is the only place where a "verified" state can be demonstrated. References: `docs/ROADMAP.md`, sections 13 and 17.
 
-## Regole
+## Rules
 
-1. **Ogni verifica registra** comando o procedura, ambiente, risultato e limiti (sezione 13). Una prova non riproducibile dal testo del file non vale come verifica.
-2. **Tre esiti distinti, mai fusi** (sezione 17): `verificato`, `fallito`, `non eseguito`. Una voce non eseguita non diventa verificata per analogia, per deduzione o perché "compila".
-3. **Ambito esplicito.** Il file dichiara host, build, versioni e configurazione su cui vale l'esito. Un risultato su un host non si estende ad altri host, acceleratori, macchine o guest (sezione 5).
-4. **Mock e boot reale separati.** Un test con supervisor o QEMU simulato è registrato come tale e non sostituisce la prova su hardware (sezioni 10 F1, 13, 16 punto 5).
-5. **Fallimenti inclusi.** Campioni di misura, tentativi con client LLM e prove ripetute riportano anche errori, timeout e tentativi falliti (sezioni 10 F5 e 13).
-6. **Niente segreti.** Nessuna credenziale, token, chiave privata o percorso personale sensibile nei log riportati; i log grezzi restano in `lab/`, che è fuori dal repository.
-7. **Artefatti identificati.** ISO, binari QEMU, firmware e build citati sono identificati con nome, versione, provenienza e hash (SHA-256).
-8. **Un file non si riscrive per cambiare esito.** Una nuova prova produce un nuovo file oppure una sezione datata aggiunta in coda; l'esito precedente rimane leggibile.
-9. **Le decisioni restano negli ADR.** Il file di verifica può proporre una decisione; la decisione si registra in `docs/adr/`, lo stato in `docs/STATUS.md`, la matrice in `docs/COMPATIBILITY.md`.
+1. **Every verification records** the command or procedure, environment, result and limits (section 13). A test that cannot be reproduced from the text of the file does not count as a verification.
+2. **Three distinct outcomes, never merged** (section 17): `verified`, `failed`, `not executed`. An item not executed does not become verified by analogy, by deduction or because "it compiles".
+3. **Explicit scope.** The file declares the host, build, versions and configuration for which the outcome holds. A result on one host does not extend to other hosts, accelerators, machines or guests (section 5).
+4. **Mock and real boot kept separate.** A test with a simulated supervisor or QEMU is recorded as such and does not replace the test on hardware (sections 10 F1, 13, 16 point 5).
+5. **Failures included.** Measurement samples, attempts with LLM clients and repeated tests also report errors, timeouts and failed attempts (sections 10 F5 and 13).
+6. **No secrets.** No credentials, tokens, private keys or sensitive personal paths in the reported logs; raw logs stay in `lab/`, which is outside the repository.
+7. **Identified artifacts.** ISOs, QEMU binaries, firmware and builds cited are identified by name, version, origin and hash (SHA-256).
+8. **A file is not rewritten to change its outcome.** A new test produces a new file or a dated section appended at the end; the previous outcome remains readable.
+9. **Decisions stay in the ADRs.** The verification file may propose a decision; the decision is recorded in `docs/adr/`, the status in `docs/STATUS.md`, the matrix in `docs/COMPATIBILITY.md`.
 
-## Convenzione dei nomi
+## Naming convention
 
 ```text
-F<fase>-<nn>-<argomento>.md
+F<phase>-<nn>-<topic>.md
 ```
 
-- `<fase>`: numero della fase della sezione 10 (`0`–`6`); per i traguardi successivi `R1`, `R2a`, ecc.
-- `<nn>`: progressivo a due cifre all'interno della fase.
-- `<argomento>`: parole minuscole separate da trattino, senza spazi né accenti.
+- `<phase>`: number of the phase in section 10 (`0`–`6`); for later milestones `R1`, `R2a`, etc.
+- `<nn>`: two-digit sequence number within the phase.
+- `<topic>`: lowercase words separated by hyphens, without spaces or accents.
 
-Esempi: `F0-01-toolchain-eframe.md`, `F0-02-qemu-whpx-qmp.md`, `F1-04-cicli-start-stop.md`.
+Examples: `F0-01-toolchain-eframe.md`, `F0-02-qemu-whpx-qmp.md`, `F1-04-start-stop-cycles.md`.
 
-## Indice delle verifiche
+## Verification index
 
-| File | Passo / fase | Esito dichiarato | Stato del file |
+| File | Step / phase | Declared outcome | File status |
 | --- | --- | --- | --- |
-| `F0-01-toolchain-eframe.md` | F0, passo 1 (sezione 15) | per voce: build Windows verificata con ambiente MSVC esplicito; glow senza accelerazione fallito; RDP e Linux non eseguiti in questo file | completo |
-| `F0-02-qemu-whpx-qmp.md` | F0, passo 2 (e base/overlay del passo 4) | per voce: WHPX, QMP su socket Unix, NIC, arresto forzato verificati; lock immagini e `-cpu host` falliti | completo |
-| `F0-03-guest-media.md` | F0, passi 1–2 (release guest, checksum) | verificato | completo |
-| `F0-04-console-rfb-input.md` | F0, passo 3 | parziale | completo |
-| `F0-05-baseline-overlay-firmware.md` | F0, passo 4 (baseline, overlay, firmware, esclusione dischi) | parziale | completo |
-| `F0-06-supervisore-processi.md` | F0, passo 4 (supervisione processi) | parziale (crash della UI non eseguito) | completo |
-| `F0-07-linux-kvm.md` | F0, passo 5 (Linux/KVM) | parziale; smoke su host fisico non eseguito | completo |
-| `F0-08-limiti-risorse-misure.md` | F0, passo 5 (limiti risorse e consumi) | parziale | completo |
-| `F0-09-riesame-prove.md` | F0, passo 6 (riesame, decisione di prosecuzione) | parziale; F0 non ancora chiusa | completo |
-| `F1-01-proto-core.md` | F1 (backlog F1-01, F1-04 come modello, F1-10) | parziale: tutte le voci verificate solo con test sintetici | completo |
-| `F1-02-storage.md` | F1 (backlog F1-01 migrazioni, F1-04 registro media, F1-09 parte storage) | parziale: verificato con test sintetici su Windows; QEMU reale e Linux non eseguiti | completo |
-| `F1-04-service-ipc-ci.md` | F1 (backlog F1-10, F1-11; integrazione del composition root) | parziale: IPC, istanza singola, revoca, morte del genitore verificati (Windows, WSL2); end-to-end con QEMU reale, 2 esecuzioni; secondo utente, perdita del genitore con QEMU reale e CI su GitHub non eseguiti | completo (sezione datata in coda) |
-| `F1-06-mcp-sdk.md` | F1 (backlog F1-19, SDK MCP) | parziale: SDK `rmcp` provato su stdio; nessun client MCP reale | completo |
-| `F1-07-licenze-packaging.md` | F1 (backlog F1-19 licenze, F1-14 packaging) | verificato per inventario e `cargo deny`; SBOM e librerie Linux a runtime non eseguiti | completo |
-| `F1-08-ci.md` | F1 (backlog F1-02, F1-15) | parziale: workflow validato in locale, non eseguito su GitHub; delega cgroup provata in WSL2 | completo |
-| `F1-03-qemu-backend-reale.md` | F1 (backlog F1-03, F1-05…F1-08, F1-12) | parziale: probe, rifiuti, NIC, 20 cicli start/stop senza orfani e disco del servizio verificati su hardware (Windows, WHPX); VM nel firmware; non vale come criterio di uscita finché F0 è aperta | completo |
-| `F1-09-ui-supervisore-crash-ui.md` | F1 (backlog F1-11); pendente F0 P-2 | parziale: UI → supervisor figlio → IPC verificato; crash della UI senza orfani verificato, arresto ordinato della VM fallito (timeout del supervisor); Linux non eseguito | completo |
-| `F1-10-limiti-vm-impostazioni.md` | F1 (ADR-0017; backlog F1-04, F1-05) | parziale: limiti CPU e memoria applicati a QEMU e verificati; modifica delle VM via IPC, UI e riga di comando; budget storage solo all'avvio; correzioni della chiusura normale e della riconciliazione al riavvio | completo |
-| `F1-11-secondo-utente-e-supporto-dati.md` | F0 P-5 (parte Linux), P-7 | parziale: secondo utente respinto (permessi e UID) in VM Ubuntu [processi]; scrittura del CD dati dal guest impossibile; parte Windows non eseguita | completo |
-| `F1-05-desktop-egui.md` | F1 (backlog F1-13, F1-16, F1-18, F1-19) | parziale: appunti senza testo nella UI (headless) ma lettura in egui-winit non bloccata; ripiego di rendering verificato; misure UI + supervisor (wgpu oltre l'obiettivo di memoria); RDP, avvio a freddo e prova manuale non eseguiti | completo |
+| `F0-01-toolchain-eframe.md` | F0, step 1 (section 15) | per item: Windows build verified with explicit MSVC environment; glow without acceleration failed; RDP and Linux not executed in this file | complete |
+| `F0-02-qemu-whpx-qmp.md` | F0, step 2 (and base/overlay of step 4) | per item: WHPX, QMP over Unix socket, NIC, forced stop verified; image locking and `-cpu host` failed | complete |
+| `F0-03-guest-media.md` | F0, steps 1–2 (guest release, checksum) | verified | complete |
+| `F0-04-console-rfb-input.md` | F0, step 3 | partial | complete |
+| `F0-05-baseline-overlay-firmware.md` | F0, step 4 (baseline, overlay, firmware, disk exclusion) | partial | complete |
+| `F0-06-process-supervisor.md` | F0, step 4 (process supervision) | partial (UI crash not executed) | complete |
+| `F0-07-linux-kvm.md` | F0, step 5 (Linux/KVM) | partial; smoke test on physical host not executed | complete |
+| `F0-08-resource-limits-measurements.md` | F0, step 5 (resource limits and consumption) | partial | complete |
+| `F0-09-evidence-review.md` | F0, step 6 (review, go/no-go decision) | partial; F0 not yet closed | complete |
+| `F1-01-proto-core.md` | F1 (backlog F1-01, F1-04 as model, F1-10) | partial: all items verified only with synthetic tests | complete |
+| `F1-02-storage.md` | F1 (backlog F1-01 migrations, F1-04 media registry, F1-09 storage part) | partial: verified with synthetic tests on Windows; real QEMU and Linux not executed | complete |
+| `F1-04-service-ipc-ci.md` | F1 (backlog F1-10, F1-11; composition root integration) | partial: IPC, single instance, revocation, parent death verified (Windows, WSL2); end-to-end with real QEMU, 2 runs; second user, parent loss with real QEMU and CI on GitHub not executed | complete (dated section at the end) |
+| `F1-06-mcp-sdk.md` | F1 (backlog F1-19, MCP SDK) | partial: `rmcp` SDK tested over stdio; no real MCP client | complete |
+| `F1-07-licences-packaging.md` | F1 (backlog F1-19 licences, F1-14 packaging) | verified for inventory and `cargo deny`; SBOM and Linux runtime libraries not executed | complete |
+| `F1-08-ci.md` | F1 (backlog F1-02, F1-15) | partial: workflow validated locally, not run on GitHub; cgroup delegation tested in WSL2 | complete |
+| `F1-03-real-qemu-backend.md` | F1 (backlog F1-03, F1-05…F1-08, F1-12) | partial: probe, rejections, NIC, 20 start/stop cycles without orphans and service disk verified on hardware (Windows, WHPX); VM in the firmware; does not count as exit criterion while F0 is open | complete |
+| `F1-09-ui-supervisor-ui-crash.md` | F1 (backlog F1-11); F0 P-2 pending | partial: UI → child supervisor → IPC verified; UI crash without orphans verified, orderly VM shutdown failed (supervisor timeout); Linux not executed | complete |
+| `F1-10-vm-limits-settings.md` | F1 (ADR-0017; backlog F1-04, F1-05) | partial: CPU and memory limits applied to QEMU and verified; VM editing via IPC, UI and command line; storage budget only at startup; fixes to normal shutdown and to reconciliation on restart | complete |
+| `F1-11-second-user-and-data-disc.md` | F0 P-5 (Linux part), P-7 | partial: second user rejected (permissions and UID) in Ubuntu VM [processes]; writing the data CD from the guest impossible; Windows part not executed | complete |
+| `F1-05-desktop-egui.md` | F1 (backlog F1-13, F1-16, F1-18, F1-19) | partial: clipboard without text in the UI (headless) but read in egui-winit not blocking; rendering fallback verified; UI + supervisor measurements (wgpu above the memory target); RDP, cold start and manual test not executed | complete |
 
 ## Template
 
-Copiare il blocco seguente in un nuovo file e compilarlo. Le sezioni sono obbligatorie; se una sezione non si applica, scriverlo esplicitamente.
+Copy the following block into a new file and fill it in. The sections are mandatory; if a section does not apply, state so explicitly.
 
 ```markdown
-# F<fase>-<nn> — <titolo>
+# F<phase>-<nn> — <title>
 
-- Data di esecuzione (UTC): AAAA-MM-GG
-- Esecutore: <nome o ruolo>
-- Passo della roadmap: sezione <n>, <fase/passo>
-- ADR collegati: ADR-NNNN, ...
-- Esito complessivo: verificato | fallito | parziale | non eseguito
+- Execution date (UTC): YYYY-MM-DD
+- Executed by: <name or role>
+- Roadmap step: section <n>, <phase/step>
+- Related ADRs: ADR-NNNN, ...
+- Overall outcome: verified | failed | partial | not executed
 
-## Scopo
+## Purpose
 
-Che cosa si vuole dimostrare e quale criterio della roadmap (sezione e voce) la prova alimenta.
-Che cosa questa prova NON dimostra.
+What the test intends to demonstrate and which roadmap criterion (section and item) it feeds.
+What this test does NOT demonstrate.
 
-## Ambiente
+## Environment
 
-| Voce | Valore |
+| Item | Value |
 | --- | --- |
-| Host (modello, CPU, RAM, storage) | |
-| OS e build | |
-| Acceleratore e stato | |
-| Toolchain / versioni rilevanti | |
-| Binario QEMU (versione, provenienza, SHA-256) | |
-| Firmware (file, versione, SHA-256) | |
-| Guest / media (nome, versione, SHA-256) | |
-| Sessione grafica (locale, RDP, headless) | |
-| Altre condizioni (antivirus, criteri di gruppo, ecc.) | |
+| Host (model, CPU, RAM, storage) | |
+| OS and build | |
+| Accelerator and state | |
+| Toolchain / relevant versions | |
+| QEMU binary (version, origin, SHA-256) | |
+| Firmware (file, version, SHA-256) | |
+| Guest / media (name, version, SHA-256) | |
+| Graphics session (local, RDP, headless) | |
+| Other conditions (antivirus, group policies, etc.) | |
 
-## Procedura
+## Procedure
 
-Passi numerati, con i comandi esatti (blocchi di codice) e i file di configurazione usati.
-Nessun segreto nei comandi riportati.
+Numbered steps, with the exact commands (code blocks) and the configuration files used.
+No secrets in the reported commands.
 
-## Risultati
+## Results
 
-| Voce | Esito | Evidenza |
+| Item | Outcome | Evidence |
 | --- | --- | --- |
-| <controllo 1> | verificato / fallito / non eseguito | estratto di log, hash, screenshot, misura |
+| <check 1> | verified / failed / not executed | log excerpt, hash, screenshot, measurement |
 
-Per le misure: numero di campioni, p50, p95, massimo, timeout ed errori (sezione 13).
+For measurements: number of samples, p50, p95, maximum, timeouts and errors (section 13).
 
-## Limiti
+## Limits
 
-Condizioni non coperte, differenze dall'ambiente di riferimento, anomalie osservate non spiegate.
+Conditions not covered, differences from the reference environment, observed anomalies not explained.
 
-## Azioni richieste
+## Required actions
 
-Attività che la prova rende necessarie, con rimando al backlog in `docs/RELEASE_PLAN.md`.
+Activities the test makes necessary, with a reference to the backlog in `docs/RELEASE_PLAN.md`.
 
-## Decisioni proposte
+## Proposed decisions
 
-Proposte per gli ADR collegati (non sono decisioni finché l'ADR non è aggiornato).
+Proposals for the related ADRs (they are not decisions until the ADR is updated).
 ```

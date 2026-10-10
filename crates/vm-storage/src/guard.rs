@@ -1,34 +1,33 @@
-//! Protezione dei dischi durante un'esecuzione (ADR-0025, backlog F1-09).
+//! Disk protection during a run (ADR-0025, backlog F1-09).
 //!
-//! Il lock delle immagini di QEMU non protegge su Windows (`F0-02` §8.3,
-//! `F0-05` §7.1). Il catalogo tiene quindi aperti, per tutta la durata
-//! dell'esecuzione, handle di guardia indipendenti da QEMU:
+//! QEMU's image locking does not protect on Windows (`F0-02` §8.3,
+//! `F0-05` §7.1). The catalog therefore keeps guard handles, independent of
+//! QEMU, open for the whole duration of the run:
 //!
-//! - **baseline** (disco base e vars della baseline): lettura con il solo
-//!   `FILE_SHARE_READ`. Finché l'handle è aperto nessun altro processo può
-//!   scriverli, rinominarli o cancellarli; QEMU li legge. Se l'apertura fallisce
-//!   per violazione di condivisione, qualcuno li tiene già aperti in scrittura
-//!   (**rilevatore di scrittori**): errore [`StorageError::VmBusy`], l'avvio va
-//!   rifiutato. Dopo l'apertura lo SHA-256 è ricalcolato **leggendo attraverso
-//!   lo stesso handle** e confrontato con il catalogo: tra verifica e avvio di
-//!   QEMU il contenuto non può cambiare. L'attributo di sola lettura mancante
-//!   viene ripristinato e riportato.
-//! - **overlay e vars dell'esecuzione**: lettura con
-//!   `FILE_SHARE_READ | FILE_SHARE_WRITE`, senza `FILE_SHARE_DELETE`: impedisce
-//!   rinomina e cancellazione durante l'uso, lascia scrivere QEMU.
+//! - **baseline** (base disk and baseline vars): read with `FILE_SHARE_READ`
+//!   only. While the handle is open no other process can write, rename or
+//!   delete them; QEMU reads them. If opening fails with a sharing violation,
+//!   someone already holds them open for writing (**writer detector**): error
+//!   [`StorageError::VmBusy`], the start must be refused. After opening, the
+//!   SHA-256 is recomputed **by reading through the same handle** and compared
+//!   with the catalog: the content cannot change between verification and
+//!   QEMU start. A missing read-only attribute is restored and reported.
+//! - **run overlay and vars**: read with
+//!   `FILE_SHARE_READ | FILE_SHARE_WRITE`, without `FILE_SHARE_DELETE`: prevents
+//!   rename and deletion while in use, lets QEMU write.
 //!
-//! **Limite dichiarato (decisione aperta, ADR-0025 punto 4):** la share mode è
-//! una proprietà dell'apertura, non del processo; QEMU apre l'overlay con
-//! `FILE_SHARE_WRITE`, quindi un altro processo dello stesso utente può
-//! scrivere l'overlay in uso. La protezione aggiuntiva (directory per
-//! esecuzione con ACL esplicita, identità di processo distinta per QEMU, oppure
-//! limite dichiarato in via definitiva) è una scelta dell'utente non ancora
-//! presa; questo modulo non la implementa.
+//! **Declared limit (open decision, ADR-0025 item 4):** the share mode is a
+//! property of the open, not of the process; QEMU opens the overlay with
+//! `FILE_SHARE_WRITE`, so another process of the same user can write the
+//! overlay in use. The additional protection (per-run directory with an
+//! explicit ACL, a distinct process identity for QEMU, or a permanently
+//! declared limit) is a user decision not yet taken; this module does not
+//! implement it.
 //!
-//! Altri limiti: la protezione cessa alla chiusura degli handle (fine
-//! esecuzione o morte del supervisor); non protegge da un amministratore, da
-//! accessi a livello di volume o da mappature in memoria; su sistemi non
-//! Windows i file sono aperti senza esclusione.
+//! Other limits: protection ends when the handles are closed (end of the run
+//! or death of the supervisor); it does not protect against an administrator,
+//! volume-level access or memory mappings; on non-Windows systems the files
+//! are opened without exclusion.
 
 use std::fs::File;
 
@@ -38,27 +37,27 @@ use crate::fsx::{self, Share};
 use crate::ids::{BaselineId, RunId};
 use crate::paths::ManagedPath;
 
-/// File tenuto aperto da un handle di guardia.
+/// File held open by a guard handle.
 #[derive(Debug)]
 struct GuardedFile {
     path: ManagedPath,
     _file: File,
 }
 
-/// Esito delle verifiche eseguite all'acquisizione di una guardia.
+/// Result of the checks performed when a guard is acquired.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GuardReport {
-    /// File il cui SHA-256 è stato ricalcolato attraverso l'handle di guardia
-    /// e trovato uguale al catalogo.
+    /// Files whose SHA-256 was recomputed through the guard handle and found
+    /// equal to the catalog.
     pub hash_verified: Vec<ManagedPath>,
-    /// File della baseline senza hash registrato (verifica non possibile).
+    /// Baseline files without a recorded hash (verification not possible).
     pub hash_not_recorded: Vec<ManagedPath>,
-    /// File della baseline trovati senza attributo di sola lettura e corretti.
+    /// Baseline files found without the read-only attribute and fixed.
     pub readonly_restored: Vec<ManagedPath>,
 }
 
-/// Guardia sulla baseline: disco base e vars aperti con il solo
-/// `FILE_SHARE_READ`. La protezione dura finché il valore è vivo.
+/// Guard on the baseline: base disk and vars opened with `FILE_SHARE_READ`
+/// only. The protection lasts as long as the value is alive.
 #[derive(Debug)]
 pub struct BaselineGuard {
     baseline_id: BaselineId,
@@ -67,24 +66,24 @@ pub struct BaselineGuard {
 }
 
 impl BaselineGuard {
-    /// Baseline protetta.
+    /// Protected baseline.
     pub fn baseline_id(&self) -> BaselineId {
         self.baseline_id
     }
 
-    /// File protetti in sola lettura.
+    /// Files protected as read-only.
     pub fn paths(&self) -> impl Iterator<Item = &ManagedPath> {
         self.files.iter().map(|f| &f.path)
     }
 
-    /// Verifiche eseguite all'acquisizione.
+    /// Checks performed at acquisition.
     pub fn report(&self) -> &GuardReport {
         &self.report
     }
 }
 
-/// Guardia di un'esecuzione: baseline in sola lettura più overlay e vars
-/// dell'esecuzione protetti da rinomina e cancellazione.
+/// Guard of a run: read-only baseline plus the run's overlay and vars
+/// protected against rename and deletion.
 #[derive(Debug)]
 pub struct RunGuard {
     run_id: RunId,
@@ -93,50 +92,49 @@ pub struct RunGuard {
 }
 
 impl RunGuard {
-    /// Esecuzione protetta.
+    /// Protected run.
     pub fn run_id(&self) -> RunId {
         self.run_id
     }
 
-    /// Guardia della baseline di partenza, se l'esecuzione ne ha una.
+    /// Guard of the starting baseline, if the run has one.
     pub fn baseline(&self) -> Option<&BaselineGuard> {
         self.baseline.as_ref()
     }
 
-    /// File protetti soltanto da rinomina e cancellazione (overlay, vars
-    /// dell'esecuzione). Restano scrivibili da altri processi dello stesso
-    /// utente (limite dichiarato).
+    /// Files protected only against rename and deletion (run overlay and
+    /// vars). They remain writable by other processes of the same user
+    /// (declared limit).
     pub fn no_delete_paths(&self) -> impl Iterator<Item = &ManagedPath> {
         self.no_delete.iter().map(|f| &f.path)
     }
 }
 
-/// Esito del rilevatore di scrittori su una baseline.
+/// Result of the writer detector on a baseline.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriterProbe {
-    /// Nessun handle incompatibile: l'apertura esclusiva è riuscita.
+    /// No incompatible handle: the exclusive open succeeded.
     Clear,
-    /// Almeno un file della baseline è aperto da un altro processo in modo
-    /// incompatibile con la sola lettura condivisa (tipicamente in scrittura).
+    /// At least one baseline file is open by another process in a mode
+    /// incompatible with shared read-only access (typically for writing).
     Busy(Vec<ManagedPath>),
 }
 
 impl Catalog {
-    /// Apre disco base e vars della baseline con il solo `FILE_SHARE_READ`,
-    /// ricalcola lo SHA-256 attraverso gli handle e lo confronta con il
-    /// catalogo, ripristina l'attributo di sola lettura se manca.
+    /// Opens the baseline's base disk and vars with `FILE_SHARE_READ` only,
+    /// recomputes the SHA-256 through the handles and compares it with the
+    /// catalog, restores the read-only attribute if missing.
     ///
-    /// Errori: [`StorageError::VmBusy`] se un altro processo tiene un file
-    /// aperto in modo incompatibile (rilevatore di scrittori);
-    /// [`StorageError::IntegrityMismatch`] se il contenuto non corrisponde;
-    /// [`StorageError::InvalidPath`] se un file è stato sostituito da un
-    /// collegamento.
+    /// Errors: [`StorageError::VmBusy`] if another process holds a file open
+    /// in an incompatible mode (writer detector);
+    /// [`StorageError::IntegrityMismatch`] if the content does not match;
+    /// [`StorageError::InvalidPath`] if a file has been replaced by a link.
     pub fn guard_baseline(&mut self, id: &BaselineId) -> Result<BaselineGuard> {
         self.baseline_guard(id, true)
     }
 
-    /// Rilevatore di scrittori: prova l'apertura esclusiva della baseline e la
-    /// rilascia subito. Non verifica gli hash.
+    /// Writer detector: attempts the exclusive open of the baseline and
+    /// releases it immediately. Does not verify hashes.
     pub fn probe_baseline_writers(&mut self, id: &BaselineId) -> Result<WriterProbe> {
         let files = self.baseline_files(id)?;
         let mut busy = Vec::new();
@@ -155,10 +153,10 @@ impl Catalog {
         })
     }
 
-    /// Guardia per l'avvio di un'esecuzione già preparata: da chiamare prima di
-    /// avviare QEMU e da tenere viva fino alla fine del processo. Verifica
-    /// l'hash della baseline attraverso gli handle (ogni avvio) e apre overlay
-    /// e vars dell'esecuzione senza `FILE_SHARE_DELETE`.
+    /// Guard for starting an already prepared run: call it before starting
+    /// QEMU and keep it alive until the process ends. Verifies the baseline
+    /// hash through the handles (on every start) and opens the run's overlay
+    /// and vars without `FILE_SHARE_DELETE`.
     pub fn guard_run(&mut self, run_id: &RunId) -> Result<RunGuard> {
         let (run, overlay, vars) = self.read(|tx| {
             let run = tx.run(run_id)?;
@@ -176,7 +174,7 @@ impl Catalog {
         })?;
         if run.ended_at.is_some() {
             return Err(StorageError::StateConflict(format!(
-                "esecuzione {run_id} già conclusa"
+                "run {run_id} already ended"
             )));
         }
         let baseline = match &run.baseline_id {
@@ -203,9 +201,9 @@ impl Catalog {
         })
     }
 
-    /// Guardia della baseline con verifica facoltativa degli hash (la
-    /// preparazione di un'esecuzione usa solo il rilevatore di scrittori; la
-    /// verifica completa avviene in [`Self::guard_run`], prima dell'avvio).
+    /// Baseline guard with optional hash verification (preparing a run uses
+    /// only the writer detector; full verification happens in
+    /// [`Self::guard_run`], before start).
     pub(crate) fn baseline_guard(
         &mut self,
         id: &BaselineId,
@@ -227,7 +225,7 @@ impl Catalog {
                         if actual != expected {
                             return Err(StorageError::IntegrityMismatch {
                                 path: rel.to_string(),
-                                detail: format!("SHA-256 atteso {expected}, trovato {actual}"),
+                                detail: format!("expected SHA-256 {expected}, found {actual}"),
                             });
                         }
                         guard.report.hash_verified.push(rel.clone());
@@ -246,7 +244,7 @@ impl Catalog {
         Ok(guard)
     }
 
-    /// Disco base e vars di una baseline con l'hash registrato.
+    /// Base disk and vars of a baseline with the recorded hash.
     fn baseline_files(&mut self, id: &BaselineId) -> Result<Vec<(ManagedPath, Option<String>)>> {
         self.read(|tx| {
             let b = tx.baseline(id)?;

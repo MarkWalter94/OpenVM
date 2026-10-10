@@ -1,12 +1,12 @@
-//! Budget storage applicativo (ROADMAP 7.2 punto 8, sezione 8, ADR-0017).
+//! Application-level storage budget (ROADMAP 7.2 item 8, section 8, ADR-0017).
 //!
-//! Natura del controllo: **budget applicativo** calcolato dai byte registrati
-//! nel catalogo (dischi misurati, firmware, artefatti, log, media) più i file
-//! di metadati, verificato prima di accettare una nuova esecuzione. Non è una
-//! quota rigida del sistema operativo: tra un controllo e il successivo il
-//! consumo può superare il budget, e nulla protegge dal riempimento del volume
-//! causato da altri processi. Una policy che richiede quota rigida OS viene
-//! rifiutata con [`StorageError::Unsupported`].
+//! Nature of the check: an **application budget** computed from the bytes
+//! recorded in the catalog (measured disks, firmware, artifacts, logs, media)
+//! plus the metadata files, checked before a new run is accepted. It is not a
+//! hard operating-system quota: between one check and the next, usage may
+//! exceed the budget, and nothing protects against the volume being filled by
+//! other processes. A policy that requires a hard OS quota is rejected with
+//! [`StorageError::Unsupported`].
 
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -16,38 +16,38 @@ use crate::error::{Result, SqlResultExt, StorageError};
 use crate::ids::{BaselineId, IdSql, RunId, VmId, idc};
 use crate::time::now_rfc3339;
 
-/// Natura del controllo richiesta dalla policy.
+/// Nature of the check required by the policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Enforcement {
-    /// Budget applicativo con controllo prima dell'avvio e monitoraggio.
+    /// Application budget, checked before start and monitored.
     ApplicationBudget,
-    /// Quota rigida del sistema operativo: non implementata.
+    /// Hard operating-system quota: not implemented.
     OsHardQuota,
 }
 
-/// Consumo per categoria, in byte.
+/// Usage per category, in bytes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageUsage {
-    /// Overlay delle esecuzioni (byte misurati).
+    /// Run overlays (measured bytes).
     pub overlays: u64,
-    /// Dischi base delle baseline e relative vars.
+    /// Baseline base disks and their vars.
     pub baselines: u64,
-    /// Dischi di lavoro e vars della VM.
+    /// VM working disks and vars.
     pub primary: u64,
-    /// Vars delle esecuzioni.
+    /// Run vars.
     pub run_firmware: u64,
-    /// Screenshot e report.
+    /// Screenshots and reports.
     pub artifacts: u64,
-    /// Log.
+    /// Logs.
     pub logs: u64,
-    /// Registro media (solo nel totale del catalogo).
+    /// Media registry (catalog total only).
     pub media: u64,
-    /// Database e file accessori (solo nel totale del catalogo).
+    /// Database and auxiliary files (catalog total only).
     pub metadata: u64,
 }
 
 impl StorageUsage {
-    /// Somma di tutte le categorie.
+    /// Sum of all categories.
     pub fn total(&self) -> u64 {
         [
             self.overlays,
@@ -64,27 +64,27 @@ impl StorageUsage {
     }
 }
 
-/// Budget configurati.
+/// Configured budgets.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BudgetConfig {
-    /// Budget del catalogo (`None` = non dichiarato).
+    /// Catalog budget (`None` = not declared).
     pub global_bytes: Option<u64>,
-    /// Riserva da lasciare libera sul volume host.
+    /// Reserve to leave free on the host volume.
     pub host_reserve_bytes: u64,
-    /// Budget della VM (`None` = non dichiarato).
+    /// VM budget (`None` = not declared).
     pub vm_bytes: Option<u64>,
 }
 
-/// Esito positivo del controllo, con i valori usati.
+/// Successful check result, with the values used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BudgetCheck {
-    /// Consumo della VM.
+    /// VM usage.
     pub vm_usage: StorageUsage,
-    /// Consumo del catalogo.
+    /// Catalog usage.
     pub catalog_usage: StorageUsage,
-    /// Budget applicati.
+    /// Budgets applied.
     pub config: BudgetConfig,
-    /// Stima richiesta per la nuova esecuzione.
+    /// Estimate requested for the new run.
     pub requested_bytes: u64,
 }
 
@@ -93,11 +93,11 @@ fn u(v: i64) -> u64 {
 }
 
 fn i(v: u64) -> Result<i64> {
-    i64::try_from(v).map_err(|_| StorageError::Constraint("valore fuori intervallo".into()))
+    i64::try_from(v).map_err(|_| StorageError::Constraint("value out of range".into()))
 }
 
 impl Catalog {
-    /// Imposta budget del catalogo e riserva host.
+    /// Sets the catalog budget and the host reserve.
     pub fn set_global_budget(&mut self, budget_bytes: u64, host_reserve_bytes: u64) -> Result<()> {
         let (b, r) = (i(budget_bytes)?, i(host_reserve_bytes)?);
         self.with_tx(|tx| {
@@ -114,7 +114,7 @@ impl Catalog {
         })
     }
 
-    /// Imposta il budget di una VM.
+    /// Sets the budget of a VM.
     pub fn set_vm_budget(&mut self, vm: &VmId, budget_bytes: u64) -> Result<()> {
         let b = i(budget_bytes)?;
         let key = format!("vm:{vm}");
@@ -132,7 +132,7 @@ impl Catalog {
         })
     }
 
-    /// Budget applicabili a una VM.
+    /// Budgets applicable to a VM.
     pub fn budget_config(&self, vm: &VmId) -> Result<BudgetConfig> {
         let global: Option<(i64, i64)> = self
             .conn
@@ -159,8 +159,8 @@ impl Catalog {
         })
     }
 
-    /// Consumo di una VM (`Some`) o dell'intero catalogo (`None`, include media
-    /// e metadati).
+    /// Usage of a VM (`Some`) or of the whole catalog (`None`, includes media
+    /// and metadata).
     pub fn storage_usage(&self, vm: Option<&VmId>) -> Result<StorageUsage> {
         let vm_s = vm.map(VmId::to_string);
         let sum = |sql: &str| -> Result<u64> {
@@ -221,8 +221,8 @@ impl Catalog {
         Ok(usage)
     }
 
-    /// Aggiorna `allocated_bytes` dei dischi misurando i file (dimensione del
-    /// file; per file sparsi è la dimensione apparente, quindi una stima per eccesso).
+    /// Updates the disks' `allocated_bytes` by measuring the files (file size;
+    /// for sparse files this is the apparent size, hence an overestimate).
     pub fn refresh_disk_sizes(&mut self) -> Result<()> {
         let layout = self.layout.clone();
         self.with_tx(|tx| {
@@ -238,9 +238,9 @@ impl Catalog {
         })
     }
 
-    /// Controlla se una nuova esecuzione con crescita stimata `requested_bytes`
-    /// rientra nei budget dichiarati e lascia libera la riserva host.
-    /// `host_free_bytes` è lo spazio libero del volume misurato dal chiamante.
+    /// Checks whether a new run with estimated growth `requested_bytes` fits
+    /// within the declared budgets and leaves the host reserve free.
+    /// `host_free_bytes` is the volume's free space as measured by the caller.
     pub fn check_new_run(
         &self,
         vm: &VmId,
@@ -250,7 +250,7 @@ impl Catalog {
     ) -> Result<BudgetCheck> {
         if enforcement == Enforcement::OsHardQuota {
             return Err(StorageError::Unsupported(
-                "quota rigida del sistema operativo non implementata",
+                "hard operating-system quota not implemented",
             ));
         }
         let config = self.budget_config(vm)?;
@@ -260,7 +260,7 @@ impl Catalog {
             let need = vm_usage.total().saturating_add(requested_bytes);
             if need > limit {
                 return Err(StorageError::ResourceLimit(format!(
-                    "budget della VM superato: {need} > {limit} byte"
+                    "VM budget exceeded: {need} > {limit} bytes"
                 )));
             }
         }
@@ -268,14 +268,14 @@ impl Catalog {
             let need = catalog_usage.total().saturating_add(requested_bytes);
             if need > limit {
                 return Err(StorageError::ResourceLimit(format!(
-                    "budget del catalogo superato: {need} > {limit} byte"
+                    "catalog budget exceeded: {need} > {limit} bytes"
                 )));
             }
         }
         let need_free = requested_bytes.saturating_add(config.host_reserve_bytes);
         if host_free_bytes < need_free {
             return Err(StorageError::ResourceLimit(format!(
-                "riserva host non rispettata: liberi {host_free_bytes}, richiesti {need_free} byte"
+                "host reserve not met: {host_free_bytes} free, {need_free} bytes required"
             )));
         }
         Ok(BudgetCheck {
@@ -287,100 +287,100 @@ impl Catalog {
     }
 }
 
-/// Nome del manifest di budget nella radice del catalogo.
+/// Name of the budget manifest in the catalog root.
 pub const BUDGET_MANIFEST_FILE: &str = "budget.json";
 
-/// Occupazione di una baseline (disco base e vars).
+/// Space used by a baseline (base disk and vars).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BaselineUsage {
     /// Baseline.
     pub baseline_id: BaselineId,
-    /// Byte del disco base.
+    /// Bytes of the base disk.
     pub disk_bytes: u64,
-    /// Byte del vars della baseline.
+    /// Bytes of the baseline's vars.
     pub vars_bytes: u64,
-    /// Totale.
+    /// Total.
     pub total_bytes: u64,
 }
 
-/// Occupazione di un'esecuzione.
+/// Space used by a run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunUsage {
-    /// Esecuzione.
+    /// Run.
     pub run_id: RunId,
-    /// Esecuzione conclusa (overlay conservato o in attesa di eliminazione).
+    /// Run ended (overlay retained or pending deletion).
     pub ended: bool,
-    /// Byte dell'overlay.
+    /// Bytes of the overlay.
     pub overlay_bytes: u64,
-    /// Byte del vars dell'esecuzione.
+    /// Bytes of the run's vars.
     pub firmware_bytes: u64,
-    /// Screenshot e report.
+    /// Screenshots and reports.
     pub artifact_bytes: u64,
-    /// Log.
+    /// Logs.
     pub log_bytes: u64,
-    /// Totale.
+    /// Total.
     pub total_bytes: u64,
 }
 
-/// Occupazione e limite di una VM.
+/// Space used and limit of a VM.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VmBudget {
     /// VM.
     pub vm_id: VmId,
-    /// Budget dichiarato (`None` = non dichiarato).
+    /// Declared budget (`None` = not declared).
     pub budget_bytes: Option<u64>,
-    /// Consumo per categoria.
+    /// Usage per category.
     pub usage: StorageUsage,
-    /// Totale.
+    /// Total.
     pub total_bytes: u64,
-    /// Budget dichiarato e superato.
+    /// Budget declared and exceeded.
     pub exceeded: bool,
-    /// Baseline della VM.
+    /// Baselines of the VM.
     pub baselines: Vec<BaselineUsage>,
-    /// Esecuzioni della VM.
+    /// Runs of the VM.
     pub runs: Vec<RunUsage>,
 }
 
-/// Manifest di budget: occupazione per catalogo, VM, baseline ed esecuzione,
-/// con i limiti dichiarati. Fotografia dei byte registrati nel catalogo (vedi
-/// [`Catalog::refresh_disk_sizes`]); non è una quota rigida del sistema.
+/// Budget manifest: space used per catalog, VM, baseline and run, with the
+/// declared limits. A snapshot of the bytes recorded in the catalog (see
+/// [`Catalog::refresh_disk_sizes`]); it is not a hard system quota.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BudgetManifest {
-    /// Versione del formato.
+    /// Format version.
     pub format_version: u32,
-    /// Sempre `"budget"`.
+    /// Always `"budget"`.
     pub kind: String,
-    /// Istante di produzione (UTC).
+    /// Generation time (UTC).
     pub generated_at: String,
-    /// Natura del controllo: sempre `"application_budget"`.
+    /// Nature of the check: always `"application_budget"`.
     pub enforcement: String,
-    /// Budget del catalogo.
+    /// Catalog budget.
     pub global_bytes: Option<u64>,
-    /// Riserva da lasciare libera sul volume host.
+    /// Reserve to leave free on the host volume.
     pub host_reserve_bytes: u64,
-    /// Consumo del catalogo (media e metadati inclusi).
+    /// Catalog usage (media and metadata included).
     pub catalog_usage: StorageUsage,
-    /// Totale del catalogo.
+    /// Catalog total.
     pub catalog_total_bytes: u64,
-    /// Budget del catalogo dichiarato e superato.
+    /// Catalog budget declared and exceeded.
     pub catalog_exceeded: bool,
-    /// VM, ordinate per identificativo.
+    /// VMs, sorted by identifier.
     pub vms: Vec<VmBudget>,
 }
 
-/// Richiesta di controllo del budget per una nuova esecuzione.
+/// Budget check request for a new run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RunBudgetRequest {
-    /// Crescita stimata dell'esecuzione (overlay, vars, artefatti, log).
+    /// Estimated growth of the run (overlay, vars, artifacts, logs).
     pub requested_bytes: u64,
-    /// Spazio libero del volume misurato dal chiamante.
+    /// Volume free space as measured by the caller.
     pub host_free_bytes: u64,
-    /// Natura del controllo richiesta dalla policy.
+    /// Nature of the check required by the policy.
     pub enforcement: Enforcement,
 }
 
 impl Catalog {
-    /// Costruisce il manifest di budget dai byte registrati.
+    /// Builds the budget manifest from the recorded bytes.
     pub fn budget_manifest(&mut self) -> Result<BudgetManifest> {
         let vm_ids = self.read(|tx| tx.vm_ids())?;
         let catalog_usage = self.storage_usage(None)?;
@@ -416,8 +416,8 @@ impl Catalog {
         })
     }
 
-    /// Scrive il manifest di budget in `budget.json` (scrittura atomica) e ne
-    /// registra lo SHA-256 in `catalog_meta`. Restituisce il manifest scritto.
+    /// Writes the budget manifest to `budget.json` (atomic write) and records
+    /// its SHA-256 in `catalog_meta`. Returns the manifest written.
     pub fn write_budget_manifest(&mut self) -> Result<BudgetManifest> {
         let m = self.budget_manifest()?;
         let rel = crate::paths::ManagedPath::parse(BUDGET_MANIFEST_FILE)?;

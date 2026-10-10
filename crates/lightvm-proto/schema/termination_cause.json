@@ -1,15 +1,15 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "TerminationCause",
-  "description": "Causa di terminazione di una sessione (registrata nel report, ROADMAP 9).",
+  "description": "Termination cause of a session (recorded in the report, ROADMAP 9).",
   "oneOf": [
     {
-      "description": "Chiusura ordinaria dall'app.",
+      "description": "Ordinary close from the app.",
       "type": "string",
       "const": "completed"
     },
     {
-      "description": "Revoca dell'utente.",
+      "description": "Revoked by the user.",
       "type": "string",
       "const": "revoked"
     },
@@ -19,42 +19,42 @@
       "const": "emergency_stop"
     },
     {
-      "description": "Scadenza del grant.",
+      "description": "Grant expired.",
       "type": "string",
       "const": "grant_expired"
     },
     {
-      "description": "Lease non rinnovato entro il limite.",
+      "description": "Lease not renewed within the limit.",
       "type": "string",
       "const": "lease_expired"
     },
     {
-      "description": "Perdita del client o dell'adapter.",
+      "description": "Loss of the client or of the adapter.",
       "type": "string",
       "const": "client_lost"
     },
     {
-      "description": "Chiusura o crash della UI.",
+      "description": "UI closed or crashed.",
       "type": "string",
       "const": "ui_closed"
     },
     {
-      "description": "Perdita o riavvio del supervisor.",
+      "description": "Supervisor lost or restarted.",
       "type": "string",
       "const": "supervisor_lost"
     },
     {
-      "description": "Ripresa dell'host da sospensione.",
+      "description": "Host resumed from sleep.",
       "type": "string",
       "const": "host_resumed"
     },
     {
-      "description": "VM fallita o terminata durante la sessione.",
+      "description": "VM failed or terminated during the session.",
       "type": "string",
       "const": "vm_terminated"
     },
     {
-      "description": "Ripristino di baseline: la sessione di controllo si chiude (ROADMAP 8).",
+      "description": "Baseline restore: the control session closes (ROADMAP 8).",
       "type": "string",
       "const": "restored"
     }

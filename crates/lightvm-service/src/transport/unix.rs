@@ -1,4 +1,4 @@
-//! Socket Unix in directory privata con verifica dell'UID del peer.
+//! Unix socket in a private directory with peer UID check.
 
 use std::fs::{self, DirBuilder};
 use std::io;
@@ -9,7 +9,7 @@ use tokio::net::{UnixListener, UnixStream};
 
 use super::{Accepted, BoxedStream, EndpointOptions, PeerInfo};
 
-/// Limite pratico di `sun_path` (108 byte su Linux, 104 su macOS).
+/// Practical limit of `sun_path` (108 bytes on Linux, 104 on macOS).
 const MAX_SOCKET_PATH: usize = 100;
 
 #[derive(Debug)]
@@ -30,8 +30,8 @@ fn own_uid() -> u32 {
     rustix::process::geteuid().as_raw()
 }
 
-/// Crea (o verifica) una directory privata: non un collegamento simbolico,
-/// proprietario l'utente effettivo, nessun permesso per gruppo e altri.
+/// Creates (or checks) a private directory: not a symbolic link, owned by the
+/// effective user, no permissions for group and others.
 pub(crate) fn ensure_private_dir(dir: &Path) -> io::Result<()> {
     match DirBuilder::new().mode(0o700).create(dir) {
         Ok(()) => {}
@@ -42,19 +42,19 @@ pub(crate) fn ensure_private_dir(dir: &Path) -> io::Result<()> {
     if !meta.file_type().is_dir() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "la directory privata non è una directory (collegamento simbolico?)",
+            "the private directory is not a directory (symbolic link?)",
         ));
     }
     if meta.uid() != own_uid() {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "la directory privata appartiene a un altro utente",
+            "the private directory belongs to another user",
         ));
     }
     if meta.mode() & 0o077 != 0 {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "la directory privata ha permessi per gruppo o altri (attesi 0700)",
+            "the private directory has group or other permissions (expected 0700)",
         ));
     }
     Ok(())
@@ -77,19 +77,19 @@ impl Listener {
         let path = base.join(format!("svc-{}.sock", &super::random_suffix()?[..16]));
         let endpoint = path
             .to_str()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "percorso non UTF-8"))?
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "non-UTF-8 path"))?
             .to_owned();
         if endpoint.len() > MAX_SOCKET_PATH {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
-                    "percorso del socket troppo lungo ({} byte, massimo {MAX_SOCKET_PATH}): usare --runtime-dir",
+                    "socket path too long ({} bytes, maximum {MAX_SOCKET_PATH}): use --runtime-dir",
                     endpoint.len()
                 ),
             ));
         }
         let inner = UnixListener::bind(&path)?;
-        // La directory 0700 protegge già la finestra tra bind e chmod.
+        // The 0700 directory already protects the window between bind and chmod.
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
         Ok(Self {
             inner,
@@ -107,11 +107,11 @@ impl Listener {
         let (stream, _) = self.inner.accept().await?;
         let cred = match stream.peer_cred() {
             Ok(c) => c,
-            Err(e) => return Ok(Accepted::Rejected(format!("credenziali del peer: {e}"))),
+            Err(e) => return Ok(Accepted::Rejected(format!("peer credentials: {e}"))),
         };
         if cred.uid() != self.own_uid {
             return Ok(Accepted::Rejected(format!(
-                "UID del peer {} diverso da {}",
+                "peer UID {} differs from {}",
                 cred.uid(),
                 self.own_uid
             )));

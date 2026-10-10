@@ -1,11 +1,11 @@
-//! Apertura del database e migrazioni versionate incorporate nel binario.
+//! Database opening and versioned migrations embedded in the binary.
 //!
 //! - `PRAGMA journal_mode=WAL`, `foreign_keys=ON`, `busy_timeout`.
-//! - Tabella `schema_version` con versione, descrizione, SHA-256 del testo SQL
-//!   e data di applicazione.
-//! - Rifiuto di un database con versione più recente (downgrade, sezione 10 F6).
-//! - Backup prima di migrare un database non vuoto: `VACUUM INTO` in un file
-//!   con nome datato UTC nella stessa directory (sezione 10 F6).
+//! - `schema_version` table with version, description, SHA-256 of the SQL text
+//!   and application date.
+//! - A database with a newer version is rejected (downgrade, section 10 F6).
+//! - Backup before migrating a non-empty database: `VACUUM INTO` a file with
+//!   a UTC-dated name in the same directory (section 10 F6).
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -16,18 +16,18 @@ use sha2::{Digest, Sha256};
 use crate::error::{Result, SqlResultExt, StorageError};
 use crate::time::{UtcMillis, now_rfc3339};
 
-/// Migrazione incorporata.
+/// Embedded migration.
 #[derive(Debug, Clone, Copy)]
 pub struct Migration {
-    /// Versione (1, 2, ...), contigua.
+    /// Version (1, 2, ...), contiguous.
     pub version: u32,
-    /// Nome del file sorgente.
+    /// Source file name.
     pub name: &'static str,
-    /// Testo SQL.
+    /// SQL text.
     pub sql: &'static str,
 }
 
-/// Migrazioni in ordine di versione.
+/// Migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
@@ -51,24 +51,24 @@ pub const MIGRATIONS: &[Migration] = &[
     },
 ];
 
-/// Versione di schema più recente nota a questo binario.
+/// Latest schema version known to this binary.
 pub const LATEST_VERSION: u32 = MIGRATIONS[MIGRATIONS.len() - 1].version;
 
-/// Timeout di attesa sui lock SQLite.
+/// Wait timeout on SQLite locks.
 pub const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Esito dell'apertura con migrazione.
+/// Outcome of opening with migration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MigrationReport {
-    /// Versione trovata all'apertura (0 = database nuovo).
+    /// Version found when opening (0 = new database).
     pub from_version: u32,
-    /// Versione dopo la migrazione.
+    /// Version after the migration.
     pub to_version: u32,
-    /// Copia di sicurezza creata prima della migrazione, se il database non era vuoto.
+    /// Backup copy created before the migration, if the database was not empty.
     pub backup: Option<PathBuf>,
 }
 
-/// Apre la connessione e imposta i pragma richiesti.
+/// Opens the connection and sets the required pragmas.
 pub fn open_connection(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path).db()?;
     conn.busy_timeout(BUSY_TIMEOUT).db()?;
@@ -77,7 +77,7 @@ pub fn open_connection(path: &Path) -> Result<Connection> {
         .db()?;
     if !mode.eq_ignore_ascii_case("wal") {
         return Err(StorageError::Constraint(format!(
-            "journal_mode WAL non attivato (ottenuto {mode})"
+            "journal_mode WAL not enabled (got {mode})"
         )));
     }
     conn.execute_batch("PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL;")
@@ -86,13 +86,28 @@ pub fn open_connection(path: &Path) -> Result<Connection> {
         .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
         .db()?;
     if fk != 1 {
-        return Err(StorageError::Constraint("foreign_keys non attivo".into()));
+        return Err(StorageError::Constraint("foreign_keys not enabled".into()));
     }
     Ok(conn)
 }
 
+/// SHA-256 of a migration's SQL text with line endings normalized to LF:
+/// the text is embedded at build time from a file whose line endings depend
+/// on the checkout (`core.autocrlf` on Windows writes CRLF), and the hash
+/// must not.
 fn sql_sha256(sql: &str) -> String {
-    crate::hex(&Sha256::digest(sql.as_bytes()))
+    crate::hex(&Sha256::digest(sql.replace("\r\n", "\n").as_bytes()))
+}
+
+/// Whether a stored hash matches the migration. Besides the normalized form,
+/// catalogs created before normalization stored the hash of the text exactly
+/// as embedded, with either line ending: both are accepted.
+fn sql_sha256_matches(sql: &str, stored: &str) -> bool {
+    let lf = sql.replace("\r\n", "\n");
+    let crlf = lf.replace('\n', "\r\n");
+    [lf, crlf]
+        .iter()
+        .any(|t| crate::hex(&Sha256::digest(t.as_bytes())) == stored)
 }
 
 fn ensure_version_table(conn: &Connection) -> Result<()> {
@@ -107,7 +122,7 @@ fn ensure_version_table(conn: &Connection) -> Result<()> {
     .db()
 }
 
-/// Versione di schema corrente (0 se il database è nuovo).
+/// Current schema version (0 if the database is new).
 pub fn current_version(conn: &Connection) -> Result<u32> {
     let exists: Option<i64> = conn
         .query_row(
@@ -126,15 +141,15 @@ pub fn current_version(conn: &Connection) -> Result<u32> {
     Ok(u32::try_from(v.unwrap_or(0)).unwrap_or(u32::MAX))
 }
 
-/// Porta il database all'ultima versione. Rifiuta versioni più recenti e
-/// migrazioni applicate con testo diverso. Crea un backup se il database
-/// contiene già uno schema e serve almeno una migrazione.
+/// Brings the database to the latest version. Rejects newer versions and
+/// migrations applied with different text. Creates a backup if the database
+/// already contains a schema and at least one migration is needed.
 pub fn migrate(conn: &mut Connection, db_path: &Path) -> Result<MigrationReport> {
     migrate_to(conn, db_path, LATEST_VERSION)
 }
 
-/// Come [`migrate`], fermandosi a `target` (usato dai test per simulare un
-/// catalogo creato da una versione precedente).
+/// Like [`migrate`], stopping at `target` (used by tests to simulate a
+/// catalog created by an earlier version).
 #[doc(hidden)]
 pub fn migrate_to(conn: &mut Connection, db_path: &Path, target: u32) -> Result<MigrationReport> {
     let from = current_version(conn)?;
@@ -179,7 +194,7 @@ pub fn migrate_to(conn: &mut Connection, db_path: &Path, target: u32) -> Result<
         .db()?;
     if fk_violations != 0 {
         return Err(StorageError::Constraint(format!(
-            "{fk_violations} violazioni di chiave esterna dopo la migrazione"
+            "{fk_violations} foreign key violations after the migration"
         )));
     }
     Ok(MigrationReport {
@@ -203,15 +218,15 @@ fn verify_applied(conn: &Connection, from: u32) -> Result<()> {
         let (v, sha) = row.db()?;
         let v = u32::try_from(v).unwrap_or(u32::MAX);
         match MIGRATIONS.iter().find(|m| m.version == v) {
-            Some(m) if sql_sha256(m.sql) == sha => {}
+            Some(m) if sql_sha256_matches(m.sql, &sha) => {}
             _ => return Err(StorageError::MigrationMismatch { version: v }),
         }
     }
     Ok(())
 }
 
-/// Copia coerente del database (`VACUUM INTO`) accanto all'originale, con nome
-/// `catalog.sqlite3.backup-v<versione>-<UTC compatto>[-n]`. Non sovrascrive.
+/// Consistent copy of the database (`VACUUM INTO`) next to the original, named
+/// `catalog.sqlite3.backup-v<version>-<compact UTC>[-n]`. Does not overwrite.
 pub fn backup_database(conn: &Connection, db_path: &Path, version: u32) -> Result<PathBuf> {
     let dir = db_path.parent().unwrap_or_else(|| Path::new("."));
     let base = db_path
@@ -228,4 +243,22 @@ pub fn backup_database(conn: &Connection, db_path: &Path, version: u32) -> Resul
     let target = candidate.to_string_lossy().into_owned();
     conn.execute("VACUUM INTO ?1", params![target]).db()?;
     Ok(candidate)
+}
+
+#[cfg(test)]
+mod tests {
+    use sha2::Digest as _;
+
+    #[test]
+    fn migration_hash_ignores_line_endings() {
+        let lf = "CREATE TABLE t (a);\nCREATE TABLE u (b);\n";
+        let crlf = lf.replace('\n', "\r\n");
+        assert_eq!(super::sql_sha256(lf), super::sql_sha256(&crlf));
+        // Catalogs written before the normalization stored the raw hash of
+        // either form: both still open.
+        let raw = |t: &str| crate::hex(&sha2::Sha256::digest(t.as_bytes()));
+        assert!(super::sql_sha256_matches(lf, &raw(&crlf)));
+        assert!(super::sql_sha256_matches(&crlf, &raw(lf)));
+        assert!(!super::sql_sha256_matches(lf, &raw("other")));
+    }
 }

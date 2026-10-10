@@ -1,16 +1,16 @@
 [package]
 name = "qemu-backend"
-description = "LightVM: probe delle capacità, comando QEMU controllato, client QMP e gestione dei processi QEMU"
+description = "LightVM: capability probe, controlled QEMU command, QMP client and QEMU process management"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
-# Versioni esatte, nessuna sorgente git (ADR-0023). Le versioni coincidono con
-# quelle già presenti nel lockfile del workspace (spike F0-04/F0-06).
+# Exact versions, no git sources (ADR-0023). The versions match
+# those already present in the workspace lockfile (spikes F0-04/F0-06).
 [dependencies]
-# Tipi condivisi (identificativi, input tipizzato, errori pubblici, osservazioni).
+# Shared types (identifiers, typed input, public errors, observations).
 lightvm-proto = { path = "../lightvm-proto" }
 png = "=0.18.1"
 serde = { version = "=1.0.229", features = ["derive"] }
@@ -19,9 +19,9 @@ sha2 = "=0.11.0"
 socket2 = { version = "=0.6.5", features = ["all"] }
 tokio = { version = "=1.53.2", default-features = false, features = ["sync", "time", "rt"] }
 
-# Le API Win32 per Job Object, `CreateProcessW` con lista di handle/job e
-# identità del processo non hanno involucri sicuri equivalenti nella libreria
-# standard: il codice `unsafe` è confinato in `src/sys/windows.rs` (vedi lib.rs).
+# The Win32 APIs for Job Objects, `CreateProcessW` with handle/job lists and
+# process identity have no equivalent safe wrappers in the standard
+# library: the `unsafe` code is confined to `src/sys/windows.rs` (see lib.rs).
 [target.'cfg(windows)'.dependencies.windows-sys]
 version = "=0.61.2"
 features = [

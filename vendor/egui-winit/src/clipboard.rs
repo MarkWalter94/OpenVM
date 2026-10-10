@@ -53,8 +53,8 @@ impl Clipboard {
         }
     }
 
-    /// LightVM (F1-13, ROADMAP 6.4 e 7.2): gli appunti dell'host non vengono
-    /// mai letti. La funzione originale è sostituita; scrittura invariata.
+    /// LightVM (F1-13, ROADMAP 6.4 and 7.2): the host clipboard is never
+    /// read. The original function is replaced; writing is unchanged.
     #[allow(clippy::unused_self)]
     pub fn get(&mut self) -> Option<String> {
         None

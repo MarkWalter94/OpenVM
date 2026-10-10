@@ -1,17 +1,17 @@
-//! `f0-console`: binario di prova per F0-04 (non è codice di prodotto).
+//! `f0-console`: test binary for F0-04 (not product code).
 //!
-//! Sottocomandi:
-//! - `probe-unix <socket> [socket2|uds]`: collegamento AF_UNIX e lettura del banner;
-//! - `rfb-snapshot <trasporto> --out <png>`: handshake RFB, primo aggiornamento completo, PNG;
-//! - `rfb-fps <trasporto> --secs N [--rate R]`: frequenza degli aggiornamenti;
-//! - `qmp --qmp-socket <s> [--geom WxH] <azione> ...`: status, mice, accel, move X Y,
-//!   click X Y [left|right|middle], key COMBO, type TESTO, wheel up|down N,
+//! Subcommands:
+//! - `probe-unix <socket> [socket2|uds]`: AF_UNIX connection and banner read;
+//! - `rfb-snapshot <transport> --out <png>`: RFB handshake, first full update, PNG;
+//! - `rfb-fps <transport> --secs N [--rate R]`: update frequency;
+//! - `qmp --qmp-socket <s> [--geom WxH] <action> ...`: status, mice, accel, move X Y,
+//!   click X Y [left|right|middle], key COMBO, type TEXT, wheel up|down N,
 //!   screendump <png> --tmp <dir>;
 //! - `bench-screendump --qmp-socket <s> --tmp <dir> --n N [--save-last <png>]`;
 //! - `wait-desktop --qmp-socket <s> --tmp <dir> --timeout S`.
 //!
-//! Trasporto RFB: `--vnc-socket <s> [--impl socket2|uds]` oppure
-//! `--vnc-tls 127.0.0.1:PORTA --tls-dir <dir>` (ca-cert.pem, client-cert.pem, client-key.pem).
+//! RFB transport: `--vnc-socket <s> [--impl socket2|uds]` or
+//! `--vnc-tls 127.0.0.1:PORT --tls-dir <dir>` (ca-cert.pem, client-cert.pem, client-key.pem).
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -37,12 +37,12 @@ fn main() -> std::process::ExitCode {
         Some("diff") => diff_cmd(&args[1..]),
         Some("session-stop") => session_stop(&args[1..]),
         Some("rfb-idle") => rfb_idle(&args[1..]),
-        _ => Err("uso: vedere la documentazione del modulo (sottocomando mancante)".into()),
+        _ => Err("usage: see the module documentation (missing subcommand)".into()),
     };
     match res {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
-            println!("ERRORE {e}");
+            println!("ERROR {e}");
             std::process::ExitCode::FAILURE
         }
     }
@@ -60,7 +60,7 @@ fn transport(args: &[String]) -> R<Transport> {
         let imp = match opt(args, "--impl").unwrap_or("socket2") {
             "socket2" => UnixImpl::Socket2,
             "uds" => UnixImpl::UdsWindows,
-            o => return Err(format!("implementazione sconosciuta: {o}").into()),
+            o => return Err(format!("unknown implementation: {o}").into()),
         };
         return Ok(Transport::Unix {
             path: PathBuf::from(p),
@@ -68,7 +68,7 @@ fn transport(args: &[String]) -> R<Transport> {
         });
     }
     if let Some(a) = opt(args, "--vnc-tls") {
-        let dir = PathBuf::from(opt(args, "--tls-dir").ok_or("--tls-dir mancante")?);
+        let dir = PathBuf::from(opt(args, "--tls-dir").ok_or("--tls-dir missing")?);
         return Ok(Transport::VencryptTls {
             addr: a.parse()?,
             tls: TlsConfig {
@@ -79,11 +79,11 @@ fn transport(args: &[String]) -> R<Transport> {
             },
         });
     }
-    Err("specificare --vnc-socket oppure --vnc-tls".into())
+    Err("specify --vnc-socket or --vnc-tls".into())
 }
 
 fn probe_unix(args: &[String]) -> R<()> {
-    let path = Path::new(args.first().ok_or("percorso mancante")?);
+    let path = Path::new(args.first().ok_or("path missing")?);
     let imp = args.get(1).map_or("socket2", String::as_str);
     let t0 = Instant::now();
     let mut buf = vec![0u8; 512];
@@ -93,21 +93,21 @@ fn probe_unix(args: &[String]) -> R<()> {
             s.connect(&socket2::SockAddr::unix(path)?)?;
             s.set_read_timeout(Some(Duration::from_secs(3)))?;
             let n = (&s).read(&mut buf)?;
-            second_read(|b| (&s).read(b), "originale");
+            second_read(|b| (&s).read(b), "original");
             let c = s.try_clone()?;
             c.set_read_timeout(Some(Duration::from_millis(500)))?;
             s.set_read_timeout(None)?;
             println!(
-                "PROBE timeout impostato solo sul duplicato (500 ms), lettura sull'originale in un thread:"
+                "PROBE timeout set only on the duplicate (500 ms), read on the original in a thread:"
             );
             let (tx, rx) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
-                second_read(|b| (&s).read(b), "originale-dopo-timeout-sul-duplicato")
+                second_read(|b| (&s).read(b), "original-after-timeout-on-duplicate")
                     == tx.send(()).is_ok()
             });
             if rx.recv_timeout(Duration::from_secs(3)).is_err() {
                 println!(
-                    "PROBE lettura ancora bloccata dopo 3 s: il timeout del duplicato non vale per l'originale"
+                    "PROBE read still blocked after 3 s: the duplicate's timeout does not apply to the original"
                 );
             }
             n
@@ -118,12 +118,12 @@ fn probe_unix(args: &[String]) -> R<()> {
             s.set_read_timeout(Some(Duration::from_secs(3)))?;
             s.read(&mut buf)?
         }
-        o => return Err(format!("implementazione sconosciuta: {o}").into()),
+        o => return Err(format!("unknown implementation: {o}").into()),
     };
     let text = String::from_utf8_lossy(&buf[..n]);
     let first = text.lines().next().unwrap_or("");
     println!(
-        "PROBE impl={imp} connesso=si byte={n} ms={} prima_riga={first:?}",
+        "PROBE impl={imp} connected=yes bytes={n} ms={} first_line={first:?}",
         t0.elapsed().as_millis()
     );
     Ok(())
@@ -141,13 +141,13 @@ fn save_fb_png(fb: &rfb_client::Framebuffer, out: &Path) -> R<RgbImage> {
 
 fn rfb_snapshot(args: &[String]) -> R<()> {
     let t = transport(args)?;
-    let out = PathBuf::from(opt(args, "--out").ok_or("--out mancante")?);
+    let out = PathBuf::from(opt(args, "--out").ok_or("--out missing")?);
     let t0 = Instant::now();
     let mut c = Connection::connect(&t)?;
     let hs = t0.elapsed();
     let init = c.server_init().clone();
     println!(
-        "RFB connesso canale={:?} sicurezza=\"{}\" handshake_ms={} server_init={}x{} bpp={} depth={} nome={:?}",
+        "RFB connected channel={:?} security=\"{}\" handshake_ms={} server_init={}x{} bpp={} depth={} name={:?}",
         c.channel(),
         c.security(),
         hs.as_millis(),
@@ -162,7 +162,7 @@ fn rfb_snapshot(args: &[String]) -> R<()> {
     let first = t0.elapsed();
     let img = save_fb_png(c.framebuffer(), &out)?;
     println!(
-        "RFB primo_aggiornamento_ms={} rettangoli={} geometria={}x{} non_neri={:.2}% stats={:?}",
+        "RFB first_update_ms={} rects={} geometry={}x{} non_black={:.2}% stats={:?}",
         first.as_millis(),
         u.rects.len(),
         u.width,
@@ -180,7 +180,7 @@ fn rfb_fps(args: &[String]) -> R<()> {
     let rate: u32 = opt(args, "--rate").unwrap_or("60").parse()?;
     let mut c = Connection::connect(&t)?;
     c.request_update()?;
-    c.read_update()?; // aggiornamento completo iniziale, escluso dalla misura
+    c.read_update()?; // initial full update, excluded from the measurement
     let min_interval = Duration::from_secs(1) / rate.max(1);
     let start = Instant::now();
     let mut per_sec: Vec<(u64, u64)> = vec![(0, 0); secs.ceil() as usize + 1];
@@ -208,7 +208,7 @@ fn rfb_fps(args: &[String]) -> R<()> {
     let total = start.elapsed().as_secs_f64();
     let n = c.stats().updates - stats0.updates;
     println!(
-        "FPS durata_s={total:.1} aggiornamenti={n} media_al_s={:.2} limite_richieste_al_s={rate}",
+        "FPS duration_s={total:.1} updates={n} mean_per_s={:.2} request_limit_per_s={rate}",
         n as f64 / total
     );
     let full: Vec<String> = per_sec
@@ -216,17 +216,17 @@ fn rfb_fps(args: &[String]) -> R<()> {
         .take(secs as usize)
         .map(|(u, px)| format!("{u}/{}k", px / 1000))
         .collect();
-    println!("FPS per_secondo(aggiornamenti/kpixel)={}", full.join(" "));
+    println!("FPS per_second(updates/kpixel)={}", full.join(" "));
     if !intervals.is_empty() {
         let s = summarize(&intervals);
         println!(
-            "FPS intervallo_ms n={} p50={:.1} p95={:.1} max={:.1}",
+            "FPS interval_ms n={} p50={:.1} p95={:.1} max={:.1}",
             s.n, s.p50, s.p95, s.max
         );
     }
     let st = c.stats();
     println!(
-        "FPS rettangoli raw={} copyrect={} hextile={} zrle={} desktopsize={} pixel={} resize={}",
+        "FPS rects raw={} copyrect={} hextile={} zrle={} desktopsize={} pixels={} resize={}",
         st.rects_by_encoding[0] - stats0.rects_by_encoding[0],
         st.rects_by_encoding[1] - stats0.rects_by_encoding[1],
         st.rects_by_encoding[2] - stats0.rects_by_encoding[2],
@@ -254,9 +254,9 @@ fn screendump_png(q: &mut Qmp, tmp: &Path, out: &Path) -> R<RgbImage> {
 }
 
 fn qmp_cmd(args: &[String]) -> R<()> {
-    let sock = PathBuf::from(opt(args, "--qmp-socket").ok_or("--qmp-socket mancante")?);
+    let sock = PathBuf::from(opt(args, "--qmp-socket").ok_or("--qmp-socket missing")?);
     let (gw, gh) = geom(args)?;
-    // azione = primo argomento posizionale dopo le opzioni con valore
+    // action = first positional argument after the options with a value
     let mut pos = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -280,7 +280,7 @@ fn qmp_cmd(args: &[String]) -> R<()> {
                 y: scale_abs(y, gh),
             }])?;
             println!(
-                "QMP move {x},{y} su {gw}x{gh} -> abs {},{}",
+                "QMP move {x},{y} on {gw}x{gh} -> abs {},{}",
                 scale_abs(x, gw),
                 scale_abs(y, gh)
             );
@@ -291,7 +291,7 @@ fn qmp_cmd(args: &[String]) -> R<()> {
                 "left" => Button::Left,
                 "right" => Button::Right,
                 "middle" => Button::Middle,
-                o => return Err(format!("pulsante {o}").into()),
+                o => return Err(format!("button {o}").into()),
             };
             let abs = InputEvent::Abs {
                 x: scale_abs(x, gw),
@@ -303,12 +303,12 @@ fn qmp_cmd(args: &[String]) -> R<()> {
                 button,
                 down: false,
             }])?;
-            println!("QMP click {button:?} {x},{y} su {gw}x{gh}");
+            println!("QMP click {button:?} {x},{y} on {gw}x{gh}");
         }
         ["key", combo] => {
             let keys: Vec<&'static str> = combo
                 .split('-')
-                .map(|k| combo_key(k).ok_or(format!("tasto {k} sconosciuto")))
+                .map(|k| combo_key(k).ok_or(format!("unknown key {k}")))
                 .collect::<Result<_, _>>()?;
             let mut ev: Vec<InputEvent> = keys
                 .iter()
@@ -333,7 +333,7 @@ fn qmp_cmd(args: &[String]) -> R<()> {
         ["type", text] => {
             let mut sent = 0;
             for ch in text.chars() {
-                let (k, shift) = us_char(ch).ok_or(format!("carattere {ch:?} non coperto (US)"))?;
+                let (k, shift) = us_char(ch).ok_or(format!("character {ch:?} not covered (US)"))?;
                 let mut down = Vec::new();
                 if shift {
                     down.push(InputEvent::Key {
@@ -361,18 +361,18 @@ fn qmp_cmd(args: &[String]) -> R<()> {
                 std::thread::sleep(Duration::from_millis(15));
                 sent += 1;
             }
-            println!("QMP type caratteri={sent} testo={text:?}");
+            println!("QMP type characters={sent} text={text:?}");
         }
         ["taps", list] => {
             let mut n = 0;
             for k in list.split(',') {
                 let code = combo_key(k)
                     .or_else(|| EXTRA_QCODES.iter().find(|e| **e == k).copied())
-                    .ok_or(format!("qcode {k} non ammesso"))?;
+                    .ok_or(format!("qcode {k} not allowed"))?;
                 q_tap(&mut q, code)?;
                 n += 1;
             }
-            println!("QMP taps n={n} sequenza={list}");
+            println!("QMP taps n={n} sequence={list}");
         }
         ["wheel", dir, n] => {
             let button = if *dir == "up" {
@@ -390,10 +390,10 @@ fn qmp_cmd(args: &[String]) -> R<()> {
             println!("QMP wheel {dir} {n}");
         }
         ["screendump", out] => {
-            let tmp = PathBuf::from(opt(args, "--tmp").ok_or("--tmp mancante")?);
+            let tmp = PathBuf::from(opt(args, "--tmp").ok_or("--tmp missing")?);
             let img = screendump_png(&mut q, &tmp, Path::new(out))?;
             println!(
-                "QMP screendump {}x{} non_neri={:.2}% png={out}",
+                "QMP screendump {}x{} non_black={:.2}% png={out}",
                 img.width,
                 img.height,
                 img.non_black_percent()
@@ -403,18 +403,18 @@ fn qmp_cmd(args: &[String]) -> R<()> {
             q.quit()?;
             println!("QMP quit");
         }
-        other => return Err(format!("azione QMP non valida: {other:?}").into()),
+        other => return Err(format!("invalid QMP action: {other:?}").into()),
     }
-    println!("QMP durata_ms={}", t0.elapsed().as_millis());
+    println!("QMP duration_ms={}", t0.elapsed().as_millis());
     for e in &q.events {
-        println!("QMP evento {e}");
+        println!("QMP event {e}");
     }
     Ok(())
 }
 
 fn bench_screendump(args: &[String]) -> R<()> {
-    let sock = PathBuf::from(opt(args, "--qmp-socket").ok_or("--qmp-socket mancante")?);
-    let tmp = PathBuf::from(opt(args, "--tmp").ok_or("--tmp mancante")?);
+    let sock = PathBuf::from(opt(args, "--qmp-socket").ok_or("--qmp-socket missing")?);
+    let tmp = PathBuf::from(opt(args, "--tmp").ok_or("--tmp missing")?);
     let n: usize = opt(args, "--n").unwrap_or("100").parse()?;
     let mut q = Qmp::connect(&sock)?;
     let ppm = tmp.join("f0-04-bench.ppm");
@@ -449,29 +449,29 @@ fn bench_screendump(args: &[String]) -> R<()> {
                 t_png.push(ph[2]);
                 last = Some((img, png));
             }
-            Err(e) => errors.push(format!("campione {i}: {e}")),
+            Err(e) => errors.push(format!("sample {i}: {e}")),
         }
     }
     let _ = std::fs::remove_file(&ppm);
     for (name, v) in [
-        ("totale", &tot),
+        ("total", &tot),
         ("qmp_screendump", &t_qmp),
-        ("lettura_parse_ppm", &t_parse),
-        ("png_in_memoria", &t_png),
+        ("read_parse_ppm", &t_parse),
+        ("png_in_memory", &t_png),
     ] {
         let s = summarize(v);
         println!(
-            "BENCH {name} n={} min={:.1} p50={:.1} p95={:.1} max={:.1} media={:.1} ms",
+            "BENCH {name} n={} min={:.1} p50={:.1} p95={:.1} max={:.1} mean={:.1} ms",
             s.n, s.min, s.p50, s.p95, s.max, s.mean
         );
     }
-    println!("BENCH errori={} timeout=0", errors.len());
+    println!("BENCH errors={} timeouts=0", errors.len());
     for e in &errors {
-        println!("BENCH errore {e}");
+        println!("BENCH error {e}");
     }
     if let Some((img, png)) = last {
         println!(
-            "BENCH ultima_immagine={}x{} png_byte={} non_neri={:.2}%",
+            "BENCH last_image={}x{} png_bytes={} non_black={:.2}%",
             img.width,
             img.height,
             png.len(),
@@ -485,8 +485,8 @@ fn bench_screendump(args: &[String]) -> R<()> {
 }
 
 fn wait_desktop(args: &[String]) -> R<()> {
-    let sock = PathBuf::from(opt(args, "--qmp-socket").ok_or("--qmp-socket mancante")?);
-    let tmp = PathBuf::from(opt(args, "--tmp").ok_or("--tmp mancante")?);
+    let sock = PathBuf::from(opt(args, "--qmp-socket").ok_or("--qmp-socket missing")?);
+    let tmp = PathBuf::from(opt(args, "--tmp").ok_or("--tmp missing")?);
     let timeout: u64 = opt(args, "--timeout").unwrap_or("240").parse()?;
     let mut q = Qmp::connect(&sock)?;
     let ppm = tmp.join("f0-04-wait.ppm");
@@ -496,24 +496,24 @@ fn wait_desktop(args: &[String]) -> R<()> {
         let img = parse_ppm(&std::fs::read(&ppm)?)?;
         let nb = img.non_black_percent();
         println!(
-            "WAIT t={}s {}x{} non_neri={nb:.2}%",
+            "WAIT t={}s {}x{} non_black={nb:.2}%",
             start.elapsed().as_secs(),
             img.width,
             img.height
         );
         if nb > 50.0 {
             let _ = std::fs::remove_file(&ppm);
-            println!("WAIT desktop_probabile t={}s", start.elapsed().as_secs());
+            println!("WAIT desktop_likely t={}s", start.elapsed().as_secs());
             return Ok(());
         }
         if start.elapsed().as_secs() > timeout {
-            return Err("timeout in attesa del desktop".into());
+            return Err("timeout waiting for the desktop".into());
         }
         std::thread::sleep(Duration::from_secs(5));
     }
 }
 
-/// Qcode aggiuntivi ammessi da `taps` per le prove del layout IT.
+/// Extra qcodes allowed by `taps` for the IT layout tests.
 const EXTRA_QCODES: [&str; 12] = [
     "minus",
     "equal",
@@ -546,11 +546,11 @@ fn q_tap(q: &mut Qmp, k: &'static str) -> R<()> {
 fn load_png(path: &str) -> R<RgbImage> {
     let dec = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(path)?));
     let mut reader = dec.read_info()?;
-    let mut buf = vec![0; reader.output_buffer_size().ok_or("PNG troppo grande")?];
+    let mut buf = vec![0; reader.output_buffer_size().ok_or("PNG too large")?];
     let info = reader.next_frame(&mut buf)?;
     if info.color_type != png::ColorType::Rgb || info.bit_depth != png::BitDepth::Eight {
         return Err(format!(
-            "PNG {:?} {:?} non supportato",
+            "PNG {:?} {:?} not supported",
             info.color_type, info.bit_depth
         )
         .into());
@@ -563,17 +563,17 @@ fn load_png(path: &str) -> R<RgbImage> {
     })
 }
 
-/// `diff a.png b.png`: pixel diversi e rettangolo che li contiene.
+/// `diff a.png b.png`: differing pixels and the rectangle containing them.
 fn diff_cmd(args: &[String]) -> R<()> {
-    let a = load_png(args.first().ok_or("primo PNG mancante")?)?;
-    let b = load_png(args.get(1).ok_or("secondo PNG mancante")?)?;
+    let a = load_png(args.first().ok_or("first PNG missing")?)?;
+    let b = load_png(args.get(1).ok_or("second PNG missing")?)?;
     match a.diff_pixels(&b) {
         None => println!(
-            "DIFF dimensioni diverse {}x{} / {}x{}",
+            "DIFF different sizes {}x{} / {}x{}",
             a.width, a.height, b.width, b.height
         ),
         Some(n) => println!(
-            "DIFF {}x{} pixel_diversi={n} ({:.3}%) bbox={:?}",
+            "DIFF {}x{} differing_pixels={n} ({:.3}%) bbox={:?}",
             a.width,
             a.height,
             n as f64 * 100.0 / f64::from(a.width * a.height),
@@ -583,8 +583,8 @@ fn diff_cmd(args: &[String]) -> R<()> {
     Ok(())
 }
 
-/// `session-stop <trasporto>`: avvia una `Session`, attende il primo
-/// aggiornamento e misura quanto impiega `stop()` a chiudere il thread.
+/// `session-stop <transport>`: starts a `Session`, waits for the first
+/// update and measures how long `stop()` takes to close the thread.
 fn session_stop(args: &[String]) -> R<()> {
     use std::sync::mpsc::channel;
     let t = transport(args)?;
@@ -599,7 +599,7 @@ fn session_stop(args: &[String]) -> R<()> {
         },
     );
     let first = rx.recv_timeout(Duration::from_secs(10))?;
-    println!("SESSION primo_evento={first}");
+    println!("SESSION first_event={first}");
     let _ = rx.recv_timeout(Duration::from_secs(10))?;
     std::thread::sleep(Duration::from_secs(1));
     let t0 = Instant::now();
@@ -610,47 +610,47 @@ fn session_stop(args: &[String]) -> R<()> {
     });
     match drx.recv_timeout(Duration::from_secs(5)) {
         Ok(()) => println!("SESSION stop_ms={}", t0.elapsed().as_millis()),
-        Err(_) => println!("SESSION stop BLOCCATO oltre 5 s"),
+        Err(_) => println!("SESSION stop BLOCKED beyond 5 s"),
     }
     if let Ok(e) = rx.recv_timeout(Duration::from_secs(15)) {
         println!(
-            "SESSION evento_tardivo dopo {} ms: {e}",
+            "SESSION late_event after {} ms: {e}",
             t0.elapsed().as_millis()
         );
     } else {
-        println!("SESSION nessun evento entro 15 s dallo stop");
+        println!("SESSION no event within 15 s of the stop");
     }
     while let Ok(e) = rx.try_recv() {
-        println!("SESSION evento={e}");
+        println!("SESSION event={e}");
     }
     Ok(())
 }
 
-/// Seconda lettura su un socket senza dati in arrivo: deve scadere per timeout.
+/// Second read on a socket with no incoming data: it must time out.
 fn second_read(mut f: impl FnMut(&mut [u8]) -> std::io::Result<usize>, label: &str) -> bool {
     let mut b = [0u8; 16];
     let t0 = Instant::now();
     let r = f(&mut b);
     println!(
-        "PROBE seconda_lettura[{label}] esito={:?} ms={}",
+        "PROBE second_read[{label}] outcome={:?} ms={}",
         r.map_err(|e| e.kind()),
         t0.elapsed().as_millis()
     );
     true
 }
 
-/// `rfb-idle <trasporto> --qmp-socket S --idle N`: connessione interrompibile
-/// (timeout di lettura brevi), attesa di N secondi senza aggiornamenti, poi un
-/// tasto via QMP (`x` + backspace) per cambiare lo schermo: verifica che
-/// l'aggiornamento arrivi dopo che i timeout di `recv` sono scattati.
+/// `rfb-idle <transport> --qmp-socket S --idle N`: interruptible connection
+/// (short read timeouts), wait of N seconds without updates, then a
+/// key via QMP (`x` + backspace) to change the screen: checks that the
+/// update arrives after the `recv` timeouts have fired.
 fn rfb_idle(args: &[String]) -> R<()> {
     let t = transport(args)?;
-    let sock = PathBuf::from(opt(args, "--qmp-socket").ok_or("--qmp-socket mancante")?);
+    let sock = PathBuf::from(opt(args, "--qmp-socket").ok_or("--qmp-socket missing")?);
     let idle: u64 = opt(args, "--idle").unwrap_or("10").parse()?;
     let keys: Vec<&'static str> = opt(args, "--keys")
         .unwrap_or("x,backspace")
         .split(',')
-        .map(|k| combo_key(k).ok_or(format!("tasto {k}")))
+        .map(|k| combo_key(k).ok_or(format!("key {k}")))
         .collect::<Result<_, _>>()?;
     let mut c = Connection::connect(&t)?;
     c.request_update()?;
@@ -686,7 +686,7 @@ fn rfb_idle(args: &[String]) -> R<()> {
             }
         }
     });
-    let mode = "bloccante";
+    let mode = "blocking";
     let key_ms = u128::from(idle) * 1000;
     let mut before = Vec::new();
     let mut after = Vec::new();
@@ -701,7 +701,7 @@ fn rfb_idle(args: &[String]) -> R<()> {
                 }
             }
             Ok(Err(e)) => {
-                println!("IDLE errore {e}");
+                println!("IDLE error {e}");
                 break;
             }
             Err(_) => {}
@@ -714,7 +714,7 @@ fn rfb_idle(args: &[String]) -> R<()> {
         .max()
         .unwrap_or(key_ms);
     println!(
-        "IDLE modo={mode} tasto_a_ms={key_ms} aggiornamenti_prima={} pausa_max_senza_aggiornamenti_prima_ms={longest_gap} aggiornamenti_dopo={} primo_dopo_ms={:?}",
+        "IDLE mode={mode} key_at_ms={key_ms} updates_before={} max_gap_without_updates_before_ms={longest_gap} updates_after={} first_after_ms={:?}",
         before.len(),
         after.len(),
         after.first()

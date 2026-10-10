@@ -1,64 +1,64 @@
-//! Input tipizzato verso il guest (ROADMAP 6.4; F0-04: QMP `input-send-event`
-//! con eventi `key` qcode, `abs` 0–32767 e `btn`; tablet virtio assoluto).
+//! Typed input towards the guest (ROADMAP 6.4; F0-04: QMP `input-send-event`
+//! with `key` qcode, `abs` 0–32767 and `btn` events; absolute virtio tablet).
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{DisplayGeometry, PublicError, QCode, RunId, VmId};
 
-/// Massimo valore di un asse assoluto (come `INPUT_EVENT_ABS_MAX` di QEMU).
+/// Maximum value of an absolute axis (like QEMU's `INPUT_EVENT_ABS_MAX`).
 pub const ABS_AXIS_MAX: u16 = 32767;
 
-/// Numero massimo di eventi in una singola richiesta di input.
+/// Maximum number of events in a single input request.
 pub const MAX_INPUT_EVENTS_PER_REQUEST: usize = 256;
 
-/// Pressione o rilascio di un tasto.
+/// Press or release of a key.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct KeyAction {
-    /// Tasto QEMU.
+    /// QEMU key.
     pub qcode: QCode,
-    /// `true` = premuto, `false` = rilasciato.
+    /// `true` = pressed, `false` = released.
     pub down: bool,
 }
 
-/// Movimento assoluto del puntatore in coordinate QEMU 0..=32767 su ciascun asse.
+/// Absolute pointer movement in QEMU coordinates 0..=32767 on each axis.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct PointerMove {
-    /// Asse X (0..=32767).
+    /// X axis (0..=32767).
     #[schemars(range(max = 32767))]
     pub x: u16,
-    /// Asse Y (0..=32767).
+    /// Y axis (0..=32767).
     #[schemars(range(max = 32767))]
     pub y: u16,
 }
 
 impl PointerMove {
-    /// Costruzione validata.
+    /// Validated construction.
     pub fn new(x: u16, y: u16) -> Result<Self, PublicError> {
         let p = Self { x, y };
         p.validate()?;
         Ok(p)
     }
 
-    /// Verifica l'intervallo (utile dopo la deserializzazione).
+    /// Checks the range (useful after deserialization).
     pub fn validate(&self) -> Result<(), PublicError> {
         if self.x <= ABS_AXIS_MAX && self.y <= ABS_AXIS_MAX {
             Ok(())
         } else {
             Err(PublicError::invalid_argument(
-                "coordinate assolute fuori da 0..=32767",
+                "absolute coordinates outside 0..=32767",
             ))
         }
     }
 
-    /// Converte pixel del display in coordinate assolute con la formula di QEMU
-    /// (`qemu_input_scale_axis`): `px * 32767 / (size - 1)`. Rifiuta pixel fuori
-    /// dalla geometria dichiarata.
+    /// Converts display pixels to absolute coordinates with QEMU's formula
+    /// (`qemu_input_scale_axis`): `px * 32767 / (size - 1)`. Rejects pixels
+    /// outside the declared geometry.
     pub fn from_pixels(px: u32, py: u32, geometry: DisplayGeometry) -> Result<Self, PublicError> {
         geometry.validate()?;
         if px >= geometry.width || py >= geometry.height {
             return Err(PublicError::invalid_argument(
-                "pixel fuori dalla geometria del display",
+                "pixel outside the display geometry",
             ));
         }
         let scale = |p: u32, size: u32| -> u16 {
@@ -75,68 +75,68 @@ impl PointerMove {
     }
 }
 
-/// Pulsante del puntatore (nomi QMP `InputButton` ammessi).
+/// Pointer button (allowed QMP `InputButton` names).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MouseButton {
-    /// Sinistro.
+    /// Left.
     Left,
-    /// Centrale.
+    /// Middle.
     Middle,
-    /// Destro.
+    /// Right.
     Right,
-    /// Rotella su.
+    /// Wheel up.
     WheelUp,
-    /// Rotella giù.
+    /// Wheel down.
     WheelDown,
 }
 
-/// Pressione o rilascio di un pulsante del puntatore.
+/// Press or release of a pointer button.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct PointerButton {
-    /// Pulsante.
+    /// Button.
     pub button: MouseButton,
-    /// `true` = premuto, `false` = rilasciato.
+    /// `true` = pressed, `false` = released.
     pub down: bool,
 }
 
-/// Evento di input elementare.
+/// Elementary input event.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InputEvent {
-    /// Tasto.
+    /// Key.
     Key(KeyAction),
-    /// Movimento assoluto.
+    /// Absolute movement.
     PointerMove(PointerMove),
-    /// Pulsante.
+    /// Button.
     PointerButton(PointerButton),
 }
 
-/// Lotto di eventi di input riferito a un'esecuzione e a una geometria: il core
-/// rifiuta lotti riferiti a un `run_id` superato o a una geometria non corrente
-/// (ROADMAP 6.4). Gli input non vengono mai ripetuti automaticamente.
+/// Batch of input events tied to a run and a geometry: the core
+/// rejects batches tied to a superseded `run_id` or a non-current geometry
+/// (ROADMAP 6.4). Inputs are never repeated automatically.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct InputBatch {
-    /// VM destinataria.
+    /// Target VM.
     pub vm_id: VmId,
-    /// Esecuzione attesa.
+    /// Expected run.
     pub run_id: RunId,
-    /// Geometria su cui il chiamante ha calcolato le coordinate.
+    /// Geometry on which the caller computed the coordinates.
     pub geometry: DisplayGeometry,
-    /// Eventi, al massimo [`MAX_INPUT_EVENTS_PER_REQUEST`].
+    /// Events, at most [`MAX_INPUT_EVENTS_PER_REQUEST`].
     pub events: Vec<InputEvent>,
 }
 
 impl InputBatch {
-    /// Validazione strutturale (numero di eventi, intervalli, geometria).
+    /// Structural validation (number of events, ranges, geometry).
     pub fn validate(&self) -> Result<(), PublicError> {
         self.geometry.validate()?;
         if self.events.is_empty() {
-            return Err(PublicError::invalid_argument("lotto di input vuoto"));
+            return Err(PublicError::invalid_argument("empty input batch"));
         }
         if self.events.len() > MAX_INPUT_EVENTS_PER_REQUEST {
             return Err(PublicError::resource_limit(
-                "troppi eventi di input in una richiesta",
+                "too many input events in one request",
             ));
         }
         for e in &self.events {

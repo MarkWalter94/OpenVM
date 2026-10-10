@@ -1,15 +1,15 @@
-//! Spike F0-06 / F0-08: supervisione di QEMU su Windows.
+//! Spike F0-06 / F0-08: QEMU supervision on Windows.
 //!
-//! Non è codice di prodotto. Dimostra: spawn senza shell con ambiente ripulito
-//! ed eredità limitata degli handle, appartenenza a un Job Object con
-//! `KILL_ON_JOB_CLOSE`, identità del processo tramite handle e tempo di
-//! creazione, Emergency Stop con `TerminateJobObject`, limiti CPU/memoria.
+//! Not product code. It demonstrates: spawn without a shell with a cleaned
+//! environment and limited handle inheritance, membership in a Job Object with
+//! `KILL_ON_JOB_CLOSE`, process identity through handle and creation
+//! time, Emergency Stop with `TerminateJobObject`, CPU/memory limits.
 //!
-//! `unsafe_code` è negato a livello di workspace. Qui è consentito perché le
-//! API Job Object usate (CPU rate control, `PROC_THREAD_ATTRIBUTE_JOB_LIST`,
-//! `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`, porta di completamento del job) non
-//! sono esposte da `std` né dal crate `win32job`. Tutto il codice `unsafe` è
-//! confinato nel modulo `win`, con un commento `SAFETY:` per ogni blocco.
+//! `unsafe_code` is denied at workspace level. Here it is allowed because the
+//! Job Object APIs used (CPU rate control, `PROC_THREAD_ATTRIBUTE_JOB_LIST`,
+//! `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`, job completion port) are not
+//! exposed by `std` nor by the `win32job` crate. All `unsafe` code is
+//! confined to the `win` module, with a `SAFETY:` comment for every block.
 #![cfg(windows)]
 #![allow(unsafe_code)]
 #![allow(unreachable_pub)]
@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 
 pub use win::{ConsoleMode, Job, JobLimits, Spawned};
 
-/// Radice del laboratorio.
+/// Lab root.
 pub const LAB: &str = r"E:\OpenVM\lab";
 pub const QEMU_DIR: &str = r"E:\OpenVM\lab\qemu\qemu-11.1.0";
 pub const ISO: &str = r"E:\OpenVM\lab\media\ubuntu-26.04.1-desktop-amd64.iso";
@@ -45,12 +45,12 @@ pub fn fw_vars_template() -> PathBuf {
     Path::new(QEMU_DIR).join(r"share\edk2-i386-vars.fd")
 }
 
-/// Ambiente minimo passato a QEMU.
+/// Minimal environment passed to QEMU.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnvProfile {
-    /// Nessuna variabile.
+    /// No variables.
     Empty,
-    /// Solo `SystemRoot` (richiesta da Winsock per inizializzarsi).
+    /// Only `SystemRoot` (required by Winsock to initialise).
     SystemRootOnly,
 }
 
@@ -64,21 +64,19 @@ pub fn env_for(profile: EnvProfile) -> Vec<(OsString, OsString)> {
     }
 }
 
-/// Rifiuta percorsi che la grammatica delle opzioni QEMU interpreterebbe
-/// (virgole) o che non sono assoluti/UTF-8.
+/// Rejects paths that the QEMU option grammar would interpret
+/// (commas) or that are not absolute/UTF-8.
 pub fn qemu_path(p: &Path) -> io::Result<String> {
     let s = p
         .to_str()
-        .ok_or_else(|| io::Error::other("percorso non UTF-8"))?;
+        .ok_or_else(|| io::Error::other("non-UTF-8 path"))?;
     if !p.is_absolute() || s.contains(',') || s.contains('\n') {
-        return Err(io::Error::other(format!(
-            "percorso non ammesso per QEMU: {s}"
-        )));
+        return Err(io::Error::other(format!("path not allowed for QEMU: {s}")));
     }
     Ok(s.to_string())
 }
 
-/// Configurazione di una VM di prova.
+/// Configuration of a test VM.
 #[derive(Debug, Clone)]
 pub struct VmConfig {
     pub tag: String,
@@ -86,7 +84,7 @@ pub struct VmConfig {
     pub smp: u32,
     pub iso: bool,
     pub overlay: Option<PathBuf>,
-    /// Copia dei vars OVMF per questa esecuzione (se `None`, niente pflash).
+    /// Copy of the OVMF vars for this run (if `None`, no pflash).
     pub vars: Option<PathBuf>,
     pub qmp_sock: PathBuf,
     pub paused: bool,
@@ -182,7 +180,7 @@ impl VmConfig {
     }
 }
 
-/// VM avviata: job posseduto, handle di processo, identità.
+/// Started VM: owned job, process handle, identity.
 #[derive(Debug)]
 pub struct Vm {
     pub job: Job,
@@ -192,22 +190,22 @@ pub struct Vm {
     pub stderr: PathBuf,
 }
 
-/// Identità di un processo: PID più tempo di creazione (FILETIME).
+/// Identity of a process: PID plus creation time (FILETIME).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Identity {
     pub pid: u32,
     pub creation: u64,
 }
 
-/// Esito del confronto tra un'identità registrata e il PID attuale.
+/// Outcome of comparing a recorded identity with the current PID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdentityCheck {
     Same,
-    /// Il PID esiste ma appartiene a un processo con tempo di creazione diverso.
+    /// The PID exists but belongs to a process with a different creation time.
     Reused {
         creation: u64,
     },
-    /// Nessun processo con quel PID è apribile.
+    /// No process with that PID can be opened.
     Absent,
 }
 
@@ -217,7 +215,7 @@ impl Identity {
         Ok(Identity { pid, creation })
     }
 
-    /// Controlla se il PID registrato indica ancora lo stesso processo.
+    /// Checks whether the recorded PID still refers to the same process.
     pub fn check_pid(&self) -> IdentityCheck {
         match win::open_process(self.pid, false) {
             Ok(h) => match win::process_times(&h) {
@@ -231,7 +229,7 @@ impl Identity {
 }
 
 impl Vm {
-    /// Avvia QEMU nel job indicato (creato dal chiamante con i limiti voluti).
+    /// Starts QEMU in the given job (created by the caller with the desired limits).
     pub fn start(cfg: &VmConfig, job: Job, logs: &Path) -> io::Result<Vm> {
         let _ = std::fs::remove_file(&cfg.qmp_sock);
         let args = cfg.args()?;
@@ -267,29 +265,29 @@ impl Vm {
         )
     }
 
-    /// Emergency Stop: `TerminateJobObject`, poi attesa dell'uscita osservata.
-    /// Restituisce (ms fino all'uscita di QEMU, ms fino a job vuoto).
+    /// Emergency Stop: `TerminateJobObject`, then wait for the observed exit.
+    /// Returns (ms until QEMU exits, ms until the job is empty).
     pub fn emergency_stop(&self, timeout: Duration) -> io::Result<(f64, f64)> {
         let t0 = Instant::now();
         self.job.terminate(0xE5E5)?;
         let code = self.wait(timeout)?;
         let t_proc = t0.elapsed().as_secs_f64() * 1000.0;
         if code.is_none() {
-            return Err(io::Error::other("QEMU non terminato entro il timeout"));
+            return Err(io::Error::other("QEMU not terminated within the timeout"));
         }
         loop {
             if self.job.accounting()?.active_processes == 0 {
                 break;
             }
             if t0.elapsed() > timeout {
-                return Err(io::Error::other("job non vuoto entro il timeout"));
+                return Err(io::Error::other("job not empty within the timeout"));
             }
             std::thread::sleep(Duration::from_millis(1));
         }
         Ok((t_proc, t0.elapsed().as_secs_f64() * 1000.0))
     }
 
-    /// Figli diretti di QEMU (per PID padre) con appartenenza al job.
+    /// Direct children of QEMU (by parent PID) with job membership.
     pub fn children(&self) -> io::Result<Vec<(u32, String, Option<bool>)>> {
         let all = win::list_processes()?;
         Ok(all
@@ -305,10 +303,10 @@ impl Vm {
     }
 }
 
-/// Conteggio dei processi QEMU sull'host: (totale per nome immagine,
-/// di questo spike per riga di comando). Il secondo usa `Get-CimInstance`
-/// perché la riga di comando non è nel Toolhelp; altri agenti possono avere
-/// QEMU attivi in parallelo e sono esclusi dal secondo conteggio.
+/// Count of QEMU processes on the host: (total by image name,
+/// of this spike by command line). The second uses `Get-CimInstance`
+/// because the command line is not in Toolhelp; other agents may have
+/// QEMU instances running in parallel and are excluded from the second count.
 pub fn qemu_residuals(marker: &str) -> (usize, Option<usize>) {
     let total = win::list_processes()
         .map(|v| {
@@ -328,7 +326,7 @@ pub fn qemu_residuals(marker: &str) -> (usize, Option<usize>) {
     (total, mine)
 }
 
-/// Statistiche su campioni (nearest-rank).
+/// Statistics over samples (nearest-rank).
 #[derive(Debug, Clone, Copy)]
 pub struct Stats {
     pub n: usize,
@@ -363,16 +361,16 @@ impl std::fmt::Display for Stats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "n={} min={:.1} p50={:.1} p95={:.1} max={:.1} media={:.1}",
+            "n={} min={:.1} p50={:.1} p95={:.1} max={:.1} mean={:.1}",
             self.n, self.min, self.p50, self.p95, self.max, self.mean
         )
     }
 }
 
-/// Percentuale di pixel non neri e dimensioni di un PPM P6 (screendump).
+/// Percentage of non-black pixels and size of a P6 PPM (screendump).
 pub fn ppm_nonblack(path: &Path) -> io::Result<(u32, u32, f64)> {
     let data = std::fs::read(path)?;
-    // Intestazione: "P6\n<w> <h>\n<max>\n"
+    // Header: "P6\n<w> <h>\n<max>\n"
     let mut fields = Vec::new();
     let mut i = 0;
     while fields.len() < 4 && i < data.len() {
@@ -387,7 +385,7 @@ pub fn ppm_nonblack(path: &Path) -> io::Result<(u32, u32, f64)> {
     }
     i += 1;
     if fields.len() < 4 || fields[0] != "P6" {
-        return Err(io::Error::other("PPM non valido"));
+        return Err(io::Error::other("invalid PPM"));
     }
     let w: u32 = fields[1].parse().map_err(io::Error::other)?;
     let h: u32 = fields[2].parse().map_err(io::Error::other)?;
@@ -403,7 +401,7 @@ pub fn ppm_nonblack(path: &Path) -> io::Result<(u32, u32, f64)> {
     Ok((w, h, 100.0 * nonblack as f64 / total.max(1) as f64))
 }
 
-/// Timestamp UTC leggibile (secondi dall'epoca con millisecondi).
+/// Readable UTC timestamp (seconds since the epoch with milliseconds).
 pub fn now_utc() -> String {
     let d = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -411,7 +409,7 @@ pub fn now_utc() -> String {
     let secs = d.as_secs();
     let (h, m, s) = ((secs / 3600) % 24, (secs / 60) % 60, secs % 60);
     let days = secs / 86400;
-    // Conversione civile da giorni (algoritmo di Howard Hinnant).
+    // Civil conversion from days (Howard Hinnant's algorithm).
     let z = days as i64 + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z - era * 146_097;
@@ -428,7 +426,7 @@ pub fn now_utc() -> String {
     )
 }
 
-/// Logger semplice su file e stdout.
+/// Simple logger to file and stdout.
 #[derive(Debug)]
 pub struct Log {
     file: std::fs::File,

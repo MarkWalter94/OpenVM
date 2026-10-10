@@ -1,6 +1,6 @@
-//! Scenari del core con porte finte (nessun QEMU reale). Coprono i test
-//! negativi della ROADMAP 7.4 realizzabili senza QEMU: Sessioni, VM, Host
-//! (parametri), Risorse, Revoca (coda), Lifecycle (scadenza/perdita client), File.
+//! Core scenarios with fake ports (no real QEMU). They cover the negative
+//! tests of ROADMAP 7.4 that can be done without QEMU: Sessions, VM, Host
+//! (parameters), Resources, Revocation (queue), Lifecycle (expiry/client loss), Files.
 
 mod common;
 
@@ -11,11 +11,11 @@ use vm_core::{DispatchOutcome, action_allowed_in};
 fn denied(code: ErrorCode, r: Result<impl std::fmt::Debug, PublicError>) {
     match r {
         Err(e) => assert_eq!(e.code, code, "{e:?}"),
-        Ok(v) => panic!("atteso {code}, ottenuto {v:?}"),
+        Ok(v) => panic!("expected {code}, got {v:?}"),
     }
 }
 
-// ----- catalogo, risorse, media -------------------------------------------
+// ----- catalog, resources, media ------------------------------------------
 
 #[test]
 fn create_vm_validates_resources_and_media() {
@@ -45,7 +45,7 @@ fn create_vm_validates_resources_and_media() {
         h.core.create_vm(&Caller::User, cfg.clone()),
     );
     cfg.disk_gib = 40;
-    // Media inesistente o di tipo sbagliato.
+    // Nonexistent medium or medium of the wrong kind.
     let mut bad = cfg.clone();
     bad.install_media = Some(MediaId::from_unix_millis(1, [0x42; 10]));
     denied(ErrorCode::NotFound, h.core.create_vm(&Caller::User, bad));
@@ -62,12 +62,12 @@ fn create_vm_validates_resources_and_media() {
         ErrorCode::InvalidArgument,
         h.core.create_vm(&Caller::User, bad),
     );
-    // Configurazione valida con supporto dati.
+    // Valid configuration with a data medium.
     cfg.data_media = Some(data);
     let rec = h.core.create_vm(&Caller::User, cfg).unwrap();
     assert_eq!(rec.persisted_state, VmState::Stopped);
     assert!(h.store.0.borrow().vms.contains_key(&rec.id));
-    // Il disco virtuale è limitato anche dallo spazio host libero meno la riserva.
+    // The virtual disk is also bounded by the free host space minus the reserve.
     let mut cfg2 = h.vm_config("b2", Some(m));
     cfg2.disk_gib = 451;
     let mut small = config();
@@ -109,7 +109,7 @@ fn replaced_media_is_not_used() {
     assert_eq!(
         h.backend.count(|c| matches!(c, Call::Start(..))),
         0,
-        "QEMU non avviato"
+        "QEMU not started"
     );
     assert_eq!(
         h.core.vm_status(&Caller::User, vm).unwrap().state,
@@ -173,16 +173,16 @@ fn verify_media_checks_every_field() {
     }
 }
 
-// ----- ciclo di vita, coda, idempotenza ------------------------------------
+// ----- lifecycle, queue, idempotency ---------------------------------------
 
 #[test]
 fn start_stop_cycles_use_fresh_run_ids_and_audit_in_order() {
     let mut h = Harness::new();
-    let vm = h.create_vm("cicli");
+    let vm = h.create_vm("cycles");
     let mut runs = std::collections::BTreeSet::new();
     for _ in 0..20 {
         let run = h.start(vm);
-        assert!(runs.insert(run), "run_id ripetuto");
+        assert!(runs.insert(run), "repeated run_id");
         h.stop(vm);
         let st = h.core.vm_status(&Caller::User, vm).unwrap();
         assert_eq!(st.state, VmState::Stopped);
@@ -202,7 +202,7 @@ fn start_stop_cycles_use_fresh_run_ids_and_audit_in_order() {
     let ev = h.audit_events();
     assert!(
         ev.windows(2).all(|w| w[1].seq == w[0].seq + 1),
-        "ordine totale"
+        "total order"
     );
     assert_eq!(ev[0].action, AuditAction::VmCreate);
     let starts = ev
@@ -228,12 +228,12 @@ fn incompatible_operations_are_rejected() {
     denied(ErrorCode::VmBusy, h.core.submit(&Caller::User, r));
     let r = h.req(vm, None, VmAction::Start);
     let busy = h.core.submit(&Caller::User, r).unwrap_err();
-    assert!(busy.retryable, "vm_busy è ritentabile");
+    assert!(busy.retryable, "vm_busy is retryable");
     h.drain(vm);
     let r = h.req(vm, None, VmAction::Start);
     denied(ErrorCode::StateConflict, h.core.submit(&Caller::User, r));
-    // Stop in corso: nuovo stop → state_conflict (la tabella di stato ammette
-    // `stop` solo da `running`; il rimedio è il force-stop), force-stop ammesso.
+    // Stop in progress: new stop → state_conflict (the state table allows
+    // `stop` only from `running`; the remedy is force-stop), force-stop allowed.
     let r = h.req(vm, None, VmAction::Stop);
     h.core.submit(&Caller::User, r).unwrap();
     let d = h.core.begin_dispatch(vm).unwrap().unwrap();
@@ -242,7 +242,7 @@ fn incompatible_operations_are_rejected() {
     denied(ErrorCode::StateConflict, h.core.submit(&Caller::User, r));
     let r = h.req(vm, None, VmAction::ForceStop);
     h.core.submit(&Caller::User, r).unwrap();
-    // L'arresto forzato si inoltra anche con lo stop ancora pendente.
+    // The forced stop is forwarded even with the stop still pending.
     let f = h.core.begin_dispatch(vm).unwrap().unwrap();
     assert_eq!(f.action, VmAction::ForceStop);
     let rec = h
@@ -254,7 +254,7 @@ fn incompatible_operations_are_rejected() {
         h.core.vm_status(&Caller::User, vm).unwrap().state,
         VmState::Stopped
     );
-    // Lo stop pendente si chiude senza cambiare stato.
+    // The pending stop closes without changing state.
     h.core
         .finish_dispatch(vm, d.operation_id, Ok(DispatchOutcome::Done))
         .unwrap();
@@ -302,9 +302,9 @@ fn operation_id_is_idempotent() {
     assert_eq!(
         h.backend.count(|c| matches!(c, Call::Start(..))),
         1,
-        "un solo effetto"
+        "a single effect"
     );
-    // Stesso id con azione diversa: rifiutato.
+    // Same id with a different action: rejected.
     let other = VmRequest {
         action: VmAction::Stop,
         ..req
@@ -321,7 +321,7 @@ fn stale_run_id_is_rejected_and_queued_ops_invalidated() {
     let vm = h.create_vm("a");
     let run1 = h.start(vm);
     h.screenshot_geometry(vm, run1);
-    // Input accodato per run1, poi la VM esce in modo inatteso.
+    // Input queued for run1, then the VM exits unexpectedly.
     let a = h.input(vm, run1, 2);
     let r = h.req(vm, Some(run1), a);
     let queued = r.operation_id;
@@ -342,7 +342,7 @@ fn stale_run_id_is_rejected_and_queued_ops_invalidated() {
     let op = h.core.operation(&Caller::User, queued).unwrap();
     assert_eq!(op.status, OperationStatus::Discarded);
     assert_eq!(op.error, Some(ErrorCode::StateConflict));
-    // Riconciliazione e nuovo avvio.
+    // Reconciliation and new start.
     h.core.begin_recovery(vm).unwrap();
     h.core.finish_recovery(vm).unwrap();
     let run2 = h.start(vm);
@@ -354,7 +354,7 @@ fn stale_run_id_is_rejected_and_queued_ops_invalidated() {
         e.details.unwrap().get("reason").map(String::as_str),
         Some("stale_run_id")
     );
-    // Osservazioni della vecchia esecuzione ignorate.
+    // Observations of the old run ignored.
     assert!(
         !h.core
             .observe(
@@ -385,7 +385,7 @@ fn input_requires_current_geometry_and_valid_batch() {
     let a = h.input(vm, run, 1);
     let r = h.req(vm, Some(run), a);
     h.core.submit(&Caller::User, r).unwrap();
-    // Lotto oltre il massimo, vuoto, run mancante, coordinate fuori intervallo.
+    // Batch over the maximum, empty, missing run, coordinates out of range.
     let a = h.input(vm, run, MAX_INPUT_EVENTS_PER_REQUEST + 1);
     let r = h.req(vm, Some(run), a);
     denied(ErrorCode::ResourceLimit, h.core.submit(&Caller::User, r));
@@ -444,7 +444,7 @@ fn restart_reconciles_persisted_running_state() {
         h.store.0.borrow().vms[&vm].persisted_state,
         VmState::Running
     );
-    // Nuovo supervisor sullo stesso catalogo: lo stato persistito non basta.
+    // New supervisor on the same catalog: the persisted state is not enough.
     let mut h2 = Harness::with_store(config(), h.store.clone());
     h2.core.load_catalog().unwrap();
     assert_eq!(
@@ -473,13 +473,13 @@ fn guard_table_matches_architecture() {
                 [Start, Stop, Reset, Screenshot, Input, Snapshot, Restore]
                     .iter()
                     .all(|k| !action_allowed_in(*k, s)),
-                "nessuna mutazione in recovering"
+                "no mutation in recovering"
             );
         }
     }
 }
 
-// ----- sessioni (ROADMAP 7.4 "Sessioni", "VM") -----------------------------
+// ----- sessions (ROADMAP 7.4 "Sessions", "VM") -----------------------------
 
 #[test]
 fn missing_wrong_expired_revoked_or_restarted_token_is_denied_without_effect() {
@@ -489,32 +489,32 @@ fn missing_wrong_expired_revoked_or_restarted_token_is_denied_without_effect() {
     let calls_before = h.backend.calls.len();
     let (sid, agent) = h.session(&[vm], &ALL_CAPS, 1);
 
-    // Token assente.
+    // Missing token.
     let none = Caller::Agent {
         session_id: sid,
         token: None,
     };
     let r = h.req(vm, Some(run), VmAction::Screenshot);
     denied(ErrorCode::Unauthenticated, h.core.submit(&none, r));
-    // Token errato.
+    // Wrong token.
     let wrong = Caller::Agent {
         session_id: sid,
         token: Some(SessionToken::from_bytes([2; 32])),
     };
     let r = h.req(vm, Some(run), VmAction::Screenshot);
     denied(ErrorCode::Unauthenticated, h.core.submit(&wrong, r));
-    // Sessione inesistente.
+    // Nonexistent session.
     let ghost = Caller::Agent {
         session_id: SessionId::from_unix_millis(9, [9; 10]),
         token: Some(SessionToken::from_bytes([1; 32])),
     };
     let r = h.req(vm, Some(run), VmAction::Screenshot);
     denied(ErrorCode::Unauthenticated, h.core.submit(&ghost, r));
-    // Valido.
+    // Valid.
     let r = h.req(vm, Some(run), VmAction::Screenshot);
     h.core.submit(&agent, r).unwrap();
     h.drain(vm);
-    // Revocato.
+    // Revoked.
     h.core
         .revoke_session(sid, TerminationCause::Revoked)
         .unwrap();
@@ -526,20 +526,20 @@ fn missing_wrong_expired_revoked_or_restarted_token_is_denied_without_effect() {
             .renew_lease(sid, &SessionToken::from_bytes([1; 32]), 10_000),
     );
 
-    // Scaduto (grant).
+    // Expired (grant).
     let (sid2, agent2) = h.session(&[vm], &ALL_CAPS, 3);
     h.clock.advance(3_600_001);
     let r = h.req(vm, None, VmAction::Stop);
     denied(ErrorCode::SessionExpired, h.core.submit(&agent2, r));
     let _ = sid2;
 
-    // Token riusato dopo riavvio del supervisor: nessuna sessione sopravvive.
+    // Token reused after supervisor restart: no session survives.
     let mut h2 = Harness::with_store(config(), h.store.clone());
     h2.core.load_catalog().unwrap();
     let r = h2.req(vm, None, VmAction::Stop);
     denied(ErrorCode::Unauthenticated, h2.core.submit(&agent, r));
 
-    // Nessun effetto: solo lo screenshot autorizzato ha raggiunto il backend.
+    // No effect: only the authorized screenshot reached the backend.
     let new_calls = &h.backend.calls[calls_before..];
     assert_eq!(new_calls.len(), 1);
     assert!(matches!(new_calls[0], Call::Screenshot(..)));
@@ -556,17 +556,17 @@ fn session_on_a_cannot_touch_b() {
     let _ = cfg;
     let run_a = h.start(a);
     let (_sid, agent) = h.session(&[a], &ALL_CAPS, 1);
-    // Stato, screenshot e input su B negati; nessun dato di B.
+    // State, screenshot and input on B denied; no data about B.
     denied(ErrorCode::PermissionDenied, h.core.vm_status(&agent, b));
     let r = h.req(b, Some(run_a), VmAction::Screenshot);
     denied(ErrorCode::PermissionDenied, h.core.submit(&agent, r));
     let act = h.input(b, run_a, 1);
     let r = h.req(b, Some(run_a), act);
     denied(ErrorCode::PermissionDenied, h.core.submit(&agent, r));
-    // VM inesistente: stesso errore (non rivela l'esistenza).
+    // Nonexistent VM: same error (does not reveal existence).
     let ghost = VmId::from_unix_millis(1, [0x77; 10]);
     denied(ErrorCode::PermissionDenied, h.core.vm_status(&agent, ghost));
-    // L'elenco contiene solo A.
+    // The list contains only A.
     let list = h.core.list_vms(&agent).unwrap();
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].vm_id, a);
@@ -586,13 +586,13 @@ fn grant_capabilities_are_enforced() {
     denied(ErrorCode::PermissionDenied, h.core.submit(&agent, r));
     let r = h.req(vm, Some(run), VmAction::Screenshot);
     h.core.submit(&agent, r).unwrap();
-    // La policy VM restringe anche ciò che il grant concede.
+    // The VM policy also restricts what the grant allows.
     let mut layer = PolicyLayer::permissive();
     layer.capabilities.remove(&Capability::VmScreenshot);
     h.core.set_vm_policy(vm, layer);
     let r = h.req(vm, Some(run), VmAction::Screenshot);
     denied(ErrorCode::PermissionDenied, h.core.submit(&agent, r));
-    // Anche il già accodato viene scartato alla seconda verifica.
+    // The already queued one is also discarded at the second check.
     let rec = h.run_next(vm);
     assert!(rec.is_none());
     assert_eq!(h.backend.count(|c| matches!(c, Call::Screenshot(..))), 0);
@@ -635,7 +635,7 @@ fn quotas_are_enforced() {
     let a = h.input(vm, run, 2);
     let r = h.req(vm, Some(run), a);
     h.core.submit(&agent, r).unwrap();
-    // Coda piena (2).
+    // Queue full (2).
     let a = h.input(vm, run, 1);
     let r = h.req(vm, Some(run), a);
     denied(ErrorCode::ResourceLimit, h.core.submit(&agent, r));
@@ -643,7 +643,7 @@ fn quotas_are_enforced() {
     let a = h.input(vm, run, 1);
     let r = h.req(vm, Some(run), a);
     h.core.submit(&agent, r).unwrap();
-    // Quota di operazioni (3) esaurita.
+    // Operation quota (3) exhausted.
     let a = h.input(vm, run, 1);
     let r = h.req(vm, Some(run), a);
     denied(ErrorCode::ResourceLimit, h.core.submit(&agent, r));
@@ -661,7 +661,7 @@ fn pause_blocks_mutations_but_not_observation() {
     let queued = r.operation_id;
     h.core.submit(&agent, r).unwrap();
     h.core.pause_session(sid).unwrap();
-    // L'input accodato prima della pausa non viene inoltrato.
+    // The input queued before the pause is not forwarded.
     assert!(h.run_next(vm).is_none());
     let op = h.core.operation(&Caller::User, queued).unwrap();
     assert_eq!(op.status, OperationStatus::Discarded);
@@ -699,7 +699,10 @@ fn revocation_between_receipt_and_forwarding_discards_without_effect() {
         .unwrap();
     assert_eq!(t.report.already_forwarded, vec![forwarded.operation_id]);
     assert_eq!(t.report.discarded, ids[1..].to_vec());
-    assert!(t.emergency_stops.is_empty(), "la revoca non arresta la VM");
+    assert!(
+        t.emergency_stops.is_empty(),
+        "revocation does not stop the VM"
+    );
     assert!(h.core.begin_dispatch(vm).unwrap().is_none());
     let ev = h.audit_events();
     let term = ev
@@ -715,7 +718,7 @@ fn revocation_between_receipt_and_forwarding_discards_without_effect() {
     );
 }
 
-// ----- Emergency Stop e lifecycle (ROADMAP 7.3, 7.4 "Revoca", "Lifecycle") --
+// ----- Emergency Stop and lifecycle (ROADMAP 7.3, 7.4 "Revocation", "Lifecycle")
 
 #[test]
 fn flood_during_emergency_stop_forwards_nothing_after_revocation() {
@@ -729,7 +732,7 @@ fn flood_during_emergency_stop_forwards_nothing_after_revocation() {
         let r = h.req(vm, Some(run), a);
         h.core.submit(&agent, r).unwrap();
     }
-    // Una richiesta inoltrata e bloccata (QMP non risponde).
+    // One request forwarded and blocked (QMP does not respond).
     let in_flight = h.core.begin_dispatch(vm).unwrap().unwrap();
     let inputs_before = h.backend.count(|c| matches!(c, Call::Input(..)));
 
@@ -743,7 +746,7 @@ fn flood_during_emergency_stop_forwards_nothing_after_revocation() {
     assert_eq!(plan.report.already_forwarded, vec![in_flight.operation_id]);
     assert_eq!(plan.report.discarded.len(), 99);
 
-    // Il flood continua dopo la revoca: tutto negato, niente inoltrato.
+    // The flood continues after revocation: everything denied, nothing forwarded.
     for _ in 0..50 {
         let a = h.input(vm, run, 1);
         let r = h.req(vm, Some(run), a);
@@ -753,12 +756,12 @@ fn flood_during_emergency_stop_forwards_nothing_after_revocation() {
     assert_eq!(
         h.backend.count(|c| matches!(c, Call::Input(..))),
         inputs_before,
-        "nessun nuovo inoltro dopo la revoca"
+        "no new forwarding after revocation"
     );
     assert_eq!(h.backend.count(|c| matches!(c, Call::ForceStop(..))), 1);
     let st = h.core.vm_status(&Caller::User, vm).unwrap();
-    assert_eq!(st.state, VmState::Stopped, "fine processo osservata");
-    // La richiesta già inoltrata si chiude senza riattivare nulla.
+    assert_eq!(st.state, VmState::Stopped, "process end observed");
+    // The already forwarded request closes without reactivating anything.
     h.core
         .finish_dispatch(vm, in_flight.operation_id, Ok(DispatchOutcome::Done))
         .unwrap();
@@ -781,7 +784,7 @@ fn emergency_stop_does_not_declare_completion_without_process_exit() {
         h.core.vm_status(&Caller::User, vm).unwrap().state,
         VmState::Stopping
     );
-    // Nessuna nuova operazione ammessa mentre è in stopping, salvo force-stop.
+    // No new operation allowed while stopping, except force-stop.
     let r = h.req(vm, Some(run), VmAction::Screenshot);
     denied(ErrorCode::StateConflict, h.core.submit(&Caller::User, r));
     h.core
@@ -797,12 +800,12 @@ fn emergency_stop_does_not_declare_completion_without_process_exit() {
         h.core.vm_status(&Caller::User, vm).unwrap().state,
         VmState::Stopped
     );
-    // Kill fallito: stato failed, errore restituito.
+    // Kill failed: state failed, error returned.
     let run2 = {
         h.core.begin_recovery(vm).unwrap_err();
         h.start(vm)
     };
-    h.backend.fail_next = Some(PublicError::infrastructure("kill fallito"));
+    h.backend.fail_next = Some(PublicError::infrastructure("kill failed"));
     let (_plan, killed) = h
         .core
         .emergency_stop_with(Actor::User, vm, &mut h.backend)
@@ -820,13 +823,13 @@ fn lease_expiry_revokes_and_requests_emergency_stop() {
     let run = h.start(vm);
     let (sid, agent) = h.session(&[vm], &ALL_CAPS, 1);
     let token = SessionToken::from_bytes([1; 32]);
-    // Rinnovi regolari mantengono viva la sessione.
+    // Regular renewals keep the session alive.
     for _ in 0..5 {
         h.clock.advance(9_000);
         assert!(h.core.tick().unwrap().is_empty());
         h.core.renew_lease(sid, &token, 10_000).unwrap();
     }
-    // Il client smette di rinnovare.
+    // The client stops renewing.
     h.clock.advance(10_000);
     let r = h.req(vm, Some(run), VmAction::Screenshot);
     denied(ErrorCode::SessionExpired, h.core.submit(&agent, r));
@@ -835,16 +838,13 @@ fn lease_expiry_revokes_and_requests_emergency_stop() {
     assert_eq!(terms[0].cause, TerminationCause::LeaseExpired);
     assert_eq!(terms[0].emergency_stops.len(), 1);
     assert_eq!(terms[0].emergency_stops[0].run_id, Some(run));
-    // Rinnovo tardivo rifiutato: serve una nuova autorizzazione.
+    // Late renewal rejected: a new authorization is required.
     denied(
         ErrorCode::SessionExpired,
         h.core.renew_lease(sid, &token, 10_000),
     );
     denied(ErrorCode::StateConflict, h.core.resume_session(sid));
-    assert!(
-        h.core.tick().unwrap().is_empty(),
-        "nessuna doppia terminazione"
-    );
+    assert!(h.core.tick().unwrap().is_empty(), "no double termination");
 }
 
 #[test]
@@ -899,8 +899,8 @@ fn session_creation_limits() {
         h.core
             .create_session(s.clone(), SessionToken::from_bytes([2; 32])),
     );
-    // VmId inesistente: con fake clock e contatore gli id sono deterministici,
-    // quindi `vm` (del primo harness) esisterebbe anche in questo.
+    // Nonexistent VmId: with a fake clock and counter the ids are deterministic,
+    // so `vm` (from the first harness) would exist in this one too.
     let ghost = VmId::from_unix_millis(1, [0x42; 10]);
     s.vm_allowlist = [ghost].into_iter().collect();
     denied(
@@ -937,7 +937,7 @@ fn agent_sees_only_its_own_operations() {
 #[test]
 fn audit_is_ordered_and_contains_no_secrets() {
     let mut h = Harness::new();
-    let vm = h.create_vm("segreti");
+    let vm = h.create_vm("secrets");
     let run = h.start(vm);
     h.screenshot_geometry(vm, run);
     let (sid, agent) = h.session(&[vm], &ALL_CAPS, 0x5a);
@@ -969,7 +969,7 @@ fn audit_is_ordered_and_contains_no_secrets() {
     assert!(ev.iter().any(|e| e.outcome == AuditOutcome::Denied));
     let json = serde_json::to_string(&ev).unwrap();
     for secret in ["5a5a5a5a", "6b6b6b6b", "media/", "qcode", "\"p\""] {
-        assert!(!json.contains(secret), "audit contiene {secret}");
+        assert!(!json.contains(secret), "audit contains {secret}");
     }
     let actions: Vec<_> = ev.iter().map(|e| e.action).collect();
     for needed in [
@@ -979,7 +979,7 @@ fn audit_is_ordered_and_contains_no_secrets() {
         AuditAction::SessionCreate,
         AuditAction::VmInput,
     ] {
-        assert!(actions.contains(&needed), "{needed:?} mancante");
+        assert!(actions.contains(&needed), "{needed:?} missing");
     }
 }
 
@@ -1012,12 +1012,12 @@ fn reported_screenshot_must_match_request() {
     assert_eq!(h.core.vm_status(&Caller::User, vm).unwrap().geometry, None);
 }
 
-// ----- impostazioni della VM: risorse e limiti (ADR-0017) ------------------
+// ----- VM settings: resources and limits (ADR-0017) ------------------------
 
 #[test]
 fn update_vm_config_changes_resources_and_limits_of_a_stopped_vm() {
     let mut h = Harness::new();
-    let vm = h.create_vm("modificabile");
+    let vm = h.create_vm("editable");
     let st = h.core.vm_status(&Caller::User, vm).unwrap();
     assert_eq!(st.config_revision, 1);
     assert_eq!(st.config.limits, VmLimits::default());
@@ -1050,21 +1050,21 @@ fn update_vm_config_changes_resources_and_limits_of_a_stopped_vm() {
 #[test]
 fn update_vm_config_rejections_have_no_effect() {
     let mut h = Harness::new();
-    let vm = h.create_vm("rifiuti");
+    let vm = h.create_vm("rejections");
     let base = h.core.vm_status(&Caller::User, vm).unwrap().config;
-    // Revisione superata.
+    // Outdated revision.
     denied(
         ErrorCode::StateConflict,
         h.core.update_vm_config(&Caller::User, vm, 7, base.clone()),
     );
-    // Disco ridotto.
+    // Reduced disk.
     let mut c = base.clone();
     c.disk_gib -= 1;
     denied(
         ErrorCode::InvalidArgument,
         h.core.update_vm_config(&Caller::User, vm, 1, c),
     );
-    // Limiti fuori intervallo.
+    // Limits out of range.
     for limits in [
         VmLimits {
             cpu_max_percent: 0,
@@ -1090,20 +1090,20 @@ fn update_vm_config_rejections_have_no_effect() {
             h.core.update_vm_config(&Caller::User, vm, 1, c),
         );
     }
-    // Risorse oltre i limiti effettivi.
+    // Resources beyond the effective limits.
     let mut c = base.clone();
     c.vcpus = 64;
     denied(
         ErrorCode::ResourceLimit,
         h.core.update_vm_config(&Caller::User, vm, 1, c),
     );
-    // Sessione agente: nessuna modifica.
+    // Agent session: no modification.
     let (_, agent) = h.session(&[vm], &[Capability::VmStart], 9);
     denied(
         ErrorCode::PermissionDenied,
         h.core.update_vm_config(&agent, vm, 1, base.clone()),
     );
-    // VM accesa.
+    // VM running.
     h.start(vm);
     denied(
         ErrorCode::StateConflict,
@@ -1119,7 +1119,7 @@ fn update_vm_config_rejections_have_no_effect() {
     );
 }
 
-/// ADR-0008: dimensione massima per tipo di supporto.
+/// ADR-0008: maximum size per media kind.
 #[test]
 fn register_media_rejects_oversized_images() {
     let mut h = Harness::new();
@@ -1131,7 +1131,7 @@ fn register_media_rejects_oversized_images() {
             kind,
             sha256: Sha256Digest::from_bytes([3; 32]),
             size_bytes,
-            declared_origin: Label::parse("prova").unwrap(),
+            declared_origin: Label::parse("test").unwrap(),
             managed_path: ManagedRelPath::parse("media/x.iso").unwrap(),
             file_identity: None,
         };
@@ -1143,37 +1143,37 @@ fn register_media_rejects_oversized_images() {
     }
 }
 
-/// Un disco già creato resta avviabile e modificabile anche quando lo spazio
-/// libero dell'host scende sotto la sua dimensione; la crescita oltre lo
-/// spazio disponibile resta rifiutata.
+/// An already created disk stays startable and editable even when the host
+/// free space drops below its size; growth beyond the
+/// available space stays rejected.
 #[test]
 fn existing_disk_survives_less_free_space() {
     let mut h = Harness::new();
-    let mut cfg = h.vm_config("grande", None);
+    let mut cfg = h.vm_config("large", None);
     cfg.disk_gib = 200;
     let vm = h.core.create_vm(&Caller::User, cfg).unwrap().id;
 
-    // Riavvio con meno spazio libero: 120 GiB liberi meno 50 di riserva.
-    let mut poco = config();
-    poco.host.free_storage_gib = 120;
-    let mut h2 = Harness::with_store(poco, h.store.clone());
+    // Restart with less free space: 120 GiB free minus 50 of reserve.
+    let mut little_space = config();
+    little_space.host.free_storage_gib = 120;
+    let mut h2 = Harness::with_store(little_space, h.store.clone());
     h2.core.load_catalog().unwrap();
     h2.start(vm);
     h2.stop(vm);
 
     let rec = h2.core.vm_status(&Caller::User, vm).unwrap();
-    let mut piu_cpu = rec.config.clone();
-    piu_cpu.vcpus = 4;
+    let mut more_cpu = rec.config.clone();
+    more_cpu.vcpus = 4;
     let rev = rec.config_revision;
     let rec = h2
         .core
-        .update_vm_config(&Caller::User, vm, rev, piu_cpu)
+        .update_vm_config(&Caller::User, vm, rev, more_cpu)
         .unwrap();
-    let mut crescita = rec.config.clone();
-    crescita.disk_gib = 230;
+    let mut growth = rec.config.clone();
+    growth.disk_gib = 230;
     denied(
         ErrorCode::ResourceLimit,
         h2.core
-            .update_vm_config(&Caller::User, vm, rec.config_revision, crescita),
+            .update_vm_config(&Caller::User, vm, rec.config_revision, growth),
     );
 }

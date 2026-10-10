@@ -1,35 +1,38 @@
-//! Avvio di `lightvm-desktop`.
+//! Startup of `lightvm-desktop`.
 //!
-//! Opzioni da riga di comando (spike e misure):
-//! - `--smoke SECONDI`: chiude l'app dopo N secondi e stampa su stdout backend,
-//!   versioni, dimensione finestra e numero di frame.
-//! - `--renderer auto|glow|wgpu|warp|ELENCO`: `auto` (predefinito) prova glow,
-//!   poi wgpu su adattatore hardware (DX12 su Windows), poi wgpu su
-//!   rasterizzatore software (WARP). Un nome forza quel backend senza ripiego;
-//!   un elenco separato da virgole (per esempio `glow,warp`) fissa l'ordine.
-//! - `--static`: framebuffer statico, nessun repaint periodico (misura dell'idle).
-//! - `--wgpu-adapter cpu|auto`: con `cpu` usa un adattatore wgpu di tipo CPU
-//!   (WARP su DX12) al posto di quello hardware; da solo equivale a `--renderer warp`.
-//! - `--glow-hw preferred|required|off`: accelerazione hardware richiesta a glutin
-//!   (`off` su Windows fa fallire glow: serve a provare il ripiego).
-//! - `--salta-controllo-librerie` (solo Linux): non esegue il controllo
-//!   preventivo delle librerie caricate con `dlopen` (F1-14).
-//! - `--catalogo DIR` (F1-11): avvia `lightvm-service` come processo figlio sul
-//!   catalogo indicato e mostra nella Dashboard le VM del servizio;
-//!   `--servizio-exe PATH` (predefinito: accanto a questo eseguibile),
-//!   `--qemu-dir DIR`, `--runtime-dir DIR` e `--audit-log FILE` sono passati
-//!   al servizio.
-//! - `--impostazioni FILE`: file delle impostazioni della UI (predefinito nel
-//!   profilo utente, vedi `impostazioni.rs`), scritto dalla pagina Settings.
-//!   Senza `--catalogo` il supervisor parte con le impostazioni della pagina
-//!   Settings, se l'avvio automatico è attivo (predefinito);
-//!   `--senza-supervisor` lo impedisce (smoke e misure).
-//! - `--apri-vm NOME [--crea]` (ADR-0017): all'avvio apre e avvia la VM
-//!   indicata (con `--crea` la crea se non esiste, senza supporto di
-//!   installazione);
-//!   con `--vcpu N`, `--ram MIB`, `--disco GIB`, `--cpu-max PERCENTO`,
-//!   `--memoria-margine MIB`, `--budget-disco GIB|nessuno` ne cambia prima
-//!   risorse e limiti (salvati nelle impostazioni della VM; solo a VM spenta).
+//! Command-line options (spike and measurements):
+//! - `--smoke SECONDS`: closes the app after N seconds and prints backend,
+//!   versions, window size and frame count on stdout. Without a real console
+//!   it implies `--simulated-console`.
+//! - `--simulated-console`: without a real console, the Console page shows a
+//!   framebuffer generated in memory (measurements; never product data).
+//! - `--renderer auto|glow|wgpu|warp|LIST`: `auto` (default) tries glow, then
+//!   wgpu on a hardware adapter (DX12 on Windows), then wgpu on a software
+//!   rasterizer (WARP). A single name forces that backend without fallback; a
+//!   comma-separated list (for example `glow,warp`) sets the order.
+//! - `--static`: static framebuffer, no periodic repaint (idle measurement).
+//! - `--wgpu-adapter cpu|auto`: with `cpu` uses a CPU-type wgpu adapter (WARP
+//!   on DX12) instead of the hardware one; on its own it is equivalent to
+//!   `--renderer warp`.
+//! - `--glow-hw preferred|required|off`: hardware acceleration requested from
+//!   glutin (`off` on Windows makes glow fail: used to test the fallback).
+//! - `--skip-library-check` (Linux only): does not run the preflight check of
+//!   the libraries loaded with `dlopen` (F1-14).
+//! - `--catalog DIR` (F1-11): starts `lightvm-service` as a child process on
+//!   the given catalog and shows the service's VMs in the Dashboard;
+//!   `--service-exe PATH` (default: next to this executable), `--qemu-dir DIR`,
+//!   `--runtime-dir DIR` and `--audit-log FILE` are passed to the service.
+//! - `--settings FILE`: UI settings file (default in the user profile, see
+//!   `settings.rs`), written by the Settings page. Without `--catalog` the
+//!   supervisor starts with the settings of the Settings page, if automatic
+//!   start is on (default); `--no-supervisor` prevents it (smoke and
+//!   measurements).
+//! - `--open-vm NAME [--create]` (ADR-0017): at startup opens and starts the
+//!   given VM (with `--create` it creates it if it does not exist, without
+//!   installation media); with `--vcpu N`, `--ram MIB`, `--disk GIB`,
+//!   `--cpu-max PERCENT`, `--memory-margin MIB`, `--disk-budget GIB|none` it
+//!   first changes its resources and limits (saved in the VM settings; only
+//!   while the VM is stopped).
 
 use std::cell::Cell;
 use std::io::Write as _;
@@ -39,9 +42,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use lightvm_desktop::LightVmApp;
-use lightvm_desktop::impostazioni::Impostazioni;
-use lightvm_desktop::render::{FPS_CONSOLE_DEGRADATA, InfoRendering, Piano, Tentativo};
-use lightvm_desktop::servizio::{ConfigServizio, Servizio};
+use lightvm_desktop::render::{Attempt, DEGRADED_CONSOLE_FPS, Plan, RenderingInfo};
+use lightvm_desktop::service::{Service, ServiceConfig};
+use lightvm_desktop::settings::UiSettings;
 use lightvm_proto::ipc::ParentLossPolicy;
 
 #[derive(Debug)]
@@ -49,40 +52,41 @@ struct Args {
     smoke: Option<Duration>,
     renderer: Option<String>,
     animate: bool,
+    simulated_console: bool,
     wgpu_cpu: bool,
     glow_hw: String,
-    salta_controllo_librerie: bool,
+    skip_library_check: bool,
     console: ConsoleArgs,
-    servizio: ServizioArgs,
+    service: ServiceArgs,
 }
 
-/// Parametri del supervisor avviato dalla UI (F1-11).
+/// Parameters of the supervisor started by the UI (F1-11).
 #[derive(Debug, Default)]
-struct ServizioArgs {
-    catalogo: Option<String>,
-    eseguibile: Option<String>,
+struct ServiceArgs {
+    catalog: Option<String>,
+    executable: Option<String>,
     qemu_dir: Option<String>,
     runtime_dir: Option<String>,
     audit_log: Option<String>,
-    impostazioni: Option<String>,
-    /// `--senza-supervisor`: non avviare il supervisor (smoke e misure).
-    nessuno: bool,
-    /// `--apri-vm`: VM da aprire all'avvio.
-    apri_vm: Option<String>,
-    /// Modifiche a risorse e limiti per `--apri-vm`.
-    modifiche: lightvm_desktop::impostazioni_vm::ModificheVm,
-    /// `--crea`: crea la VM di `--apri-vm` se non esiste.
-    crea: bool,
+    settings: Option<String>,
+    /// `--no-supervisor`: do not start the supervisor (smoke and measurements).
+    no_supervisor: bool,
+    /// `--open-vm`: VM to open at startup.
+    open_vm: Option<String>,
+    /// Changes to resources and limits for `--open-vm`.
+    changes: lightvm_desktop::vm_settings::VmChanges,
+    /// `--create`: create the `--open-vm` VM if it does not exist.
+    create: bool,
 }
 
-fn numero<T: std::str::FromStr>(opzione: &str, v: Option<String>) -> Result<T, String> {
-    let v = v.ok_or_else(|| format!("{opzione} richiede un valore"))?;
+fn parse_number<T: std::str::FromStr>(option: &str, v: Option<String>) -> Result<T, String> {
+    let v = v.ok_or_else(|| format!("{option} requires a value"))?;
     v.parse()
-        .map_err(|_| format!("{opzione}: valore non valido: {v}"))
+        .map_err(|_| format!("{option}: invalid value: {v}"))
 }
 
-/// Parametri della console reale (F0-04). Nessuna configurazione QEMU: solo
-/// i percorsi dei socket già creati da chi ha avviato QEMU.
+/// Parameters of the real console (F0-04). No QEMU configuration: only the
+/// paths of the sockets already created by whoever started QEMU.
 #[derive(Debug, Default)]
 struct ConsoleArgs {
     vnc_socket: Option<String>,
@@ -101,140 +105,137 @@ fn parse_args() -> Result<Args, String> {
     let mut args = Args {
         smoke: None,
         renderer: None,
-        salta_controllo_librerie: false,
+        skip_library_check: false,
         animate: true,
+        simulated_console: false,
         wgpu_cpu: false,
         glow_hw: "preferred".to_owned(),
         console: ConsoleArgs::default(),
-        servizio: ServizioArgs::default(),
+        service: ServiceArgs::default(),
     };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
             "--smoke" => {
-                let v = it.next().ok_or("--smoke richiede un numero di secondi")?;
-                let secs: f64 = v.parse().map_err(|_| format!("secondi non validi: {v}"))?;
+                let v = it.next().ok_or("--smoke requires a number of seconds")?;
+                let secs: f64 = v.parse().map_err(|_| format!("invalid seconds: {v}"))?;
                 if !(secs.is_finite() && secs > 0.0 && secs <= 3600.0) {
-                    return Err(format!("secondi fuori intervallo (0, 3600]: {v}"));
+                    return Err(format!("seconds out of range (0, 3600]: {v}"));
                 }
                 args.smoke = Some(Duration::from_secs_f64(secs));
             }
+            "--simulated-console" => args.simulated_console = true,
             "--renderer" => {
                 args.renderer = Some(
                     it.next()
-                        .ok_or("--renderer richiede auto, glow, wgpu, warp o un elenco")?,
+                        .ok_or("--renderer requires auto, glow, wgpu, warp or a list")?,
                 );
             }
-            "--salta-controllo-librerie" => args.salta_controllo_librerie = true,
+            "--skip-library-check" => args.skip_library_check = true,
             "--static" => args.animate = false,
             "--wgpu-adapter" => {
-                let v = it.next().ok_or("--wgpu-adapter richiede cpu o auto")?;
+                let v = it.next().ok_or("--wgpu-adapter requires cpu or auto")?;
                 args.wgpu_cpu = match v.as_str() {
                     "cpu" => true,
                     "auto" => false,
-                    _ => return Err(format!("adattatore sconosciuto: {v}")),
+                    _ => return Err(format!("unknown adapter: {v}")),
                 };
             }
             "--glow-hw" => {
                 let v = it
                     .next()
-                    .ok_or("--glow-hw richiede preferred, required o off")?;
+                    .ok_or("--glow-hw requires preferred, required or off")?;
                 if !matches!(v.as_str(), "preferred" | "required" | "off") {
-                    return Err(format!("valore --glow-hw sconosciuto: {v}"));
+                    return Err(format!("unknown --glow-hw value: {v}"));
                 }
                 args.glow_hw = v;
             }
             "--vnc-socket" => {
-                args.console.vnc_socket =
-                    Some(it.next().ok_or("--vnc-socket richiede un percorso")?)
+                args.console.vnc_socket = Some(it.next().ok_or("--vnc-socket requires a path")?)
             }
             "--vnc-impl" => {
-                args.console.vnc_impl = Some(it.next().ok_or("--vnc-impl richiede socket2 o uds")?)
+                args.console.vnc_impl = Some(it.next().ok_or("--vnc-impl requires socket2 or uds")?)
             }
             "--vnc-tls" => {
-                args.console.vnc_tls = Some(it.next().ok_or("--vnc-tls richiede 127.0.0.1:PORTA")?)
+                args.console.vnc_tls = Some(it.next().ok_or("--vnc-tls requires 127.0.0.1:PORT")?)
             }
             "--tls-dir" => {
-                args.console.tls_dir = Some(it.next().ok_or("--tls-dir richiede una directory")?)
+                args.console.tls_dir = Some(it.next().ok_or("--tls-dir requires a directory")?)
             }
             "--qmp-socket" => {
-                args.console.qmp_socket =
-                    Some(it.next().ok_or("--qmp-socket richiede un percorso")?)
+                args.console.qmp_socket = Some(it.next().ok_or("--qmp-socket requires a path")?)
             }
             "--capture-dir" => {
                 args.console.capture_dir =
-                    Some(it.next().ok_or("--capture-dir richiede una directory")?)
+                    Some(it.next().ok_or("--capture-dir requires a directory")?)
             }
             "--tmp-dir" => {
-                args.console.tmp_dir = Some(it.next().ok_or("--tmp-dir richiede una directory")?)
+                args.console.tmp_dir = Some(it.next().ok_or("--tmp-dir requires a directory")?)
             }
-            "--layout" => args.console.layout = Some(it.next().ok_or("--layout richiede us o it")?),
+            "--layout" => {
+                args.console.layout = Some(it.next().ok_or("--layout requires us or it")?)
+            }
             "--max-fps" => {
-                let v = it.next().ok_or("--max-fps richiede un numero")?;
-                let n: u32 = v
-                    .parse()
-                    .map_err(|_| format!("--max-fps non valido: {v}"))?;
+                let v = it.next().ok_or("--max-fps requires a number")?;
+                let n: u32 = v.parse().map_err(|_| format!("invalid --max-fps: {v}"))?;
                 if !(1..=120).contains(&n) {
-                    return Err(format!("--max-fps fuori intervallo 1..=120: {v}"));
+                    return Err(format!("--max-fps out of range 1..=120: {v}"));
                 }
                 args.console.max_fps = Some(n);
             }
-            "--catalogo" => {
-                args.servizio.catalogo = Some(it.next().ok_or("--catalogo richiede una directory")?)
+            "--catalog" => {
+                args.service.catalog = Some(it.next().ok_or("--catalog requires a directory")?)
             }
-            "--servizio-exe" => {
-                args.servizio.eseguibile =
-                    Some(it.next().ok_or("--servizio-exe richiede un percorso")?)
+            "--service-exe" => {
+                args.service.executable = Some(it.next().ok_or("--service-exe requires a path")?)
             }
             "--qemu-dir" => {
-                args.servizio.qemu_dir = Some(it.next().ok_or("--qemu-dir richiede una directory")?)
+                args.service.qemu_dir = Some(it.next().ok_or("--qemu-dir requires a directory")?)
             }
             "--runtime-dir" => {
-                args.servizio.runtime_dir =
-                    Some(it.next().ok_or("--runtime-dir richiede una directory")?)
+                args.service.runtime_dir =
+                    Some(it.next().ok_or("--runtime-dir requires a directory")?)
             }
-            "--senza-supervisor" => args.servizio.nessuno = true,
-            "--apri-vm" => {
-                args.servizio.apri_vm =
-                    Some(it.next().ok_or("--apri-vm richiede il nome della VM")?)
+            "--no-supervisor" => args.service.no_supervisor = true,
+            "--open-vm" => {
+                args.service.open_vm = Some(it.next().ok_or("--open-vm requires the VM name")?)
             }
-            "--crea" => args.servizio.crea = true,
-            "--vcpu" => args.servizio.modifiche.vcpus = Some(numero("--vcpu", it.next())?),
-            "--ram" => args.servizio.modifiche.memory_mib = Some(numero("--ram", it.next())?),
-            "--disco" => args.servizio.modifiche.disk_gib = Some(numero("--disco", it.next())?),
+            "--create" => args.service.create = true,
+            "--vcpu" => args.service.changes.vcpus = Some(parse_number("--vcpu", it.next())?),
+            "--ram" => args.service.changes.memory_mib = Some(parse_number("--ram", it.next())?),
+            "--disk" => args.service.changes.disk_gib = Some(parse_number("--disk", it.next())?),
             "--cpu-max" => {
-                args.servizio.modifiche.cpu_max_percent = Some(numero("--cpu-max", it.next())?)
+                args.service.changes.cpu_max_percent = Some(parse_number("--cpu-max", it.next())?)
             }
-            "--memoria-margine" => {
-                args.servizio.modifiche.memory_margin_mib =
-                    Some(numero("--memoria-margine", it.next())?)
+            "--memory-margin" => {
+                args.service.changes.memory_margin_mib =
+                    Some(parse_number("--memory-margin", it.next())?)
             }
-            "--budget-disco" => {
-                let v = it.next().ok_or("--budget-disco richiede GiB o nessuno")?;
-                args.servizio.modifiche.storage_budget_gib = Some(if v == "nessuno" {
+            "--disk-budget" => {
+                let v = it.next().ok_or("--disk-budget requires GiB or none")?;
+                args.service.changes.storage_budget_gib = Some(if v == "none" {
                     None
                 } else {
-                    Some(numero("--budget-disco", Some(v))?)
+                    Some(parse_number("--disk-budget", Some(v))?)
                 });
             }
-            "--impostazioni" => {
-                args.servizio.impostazioni =
-                    Some(it.next().ok_or("--impostazioni richiede un file")?)
+            "--settings" => {
+                args.service.settings = Some(it.next().ok_or("--settings requires a file")?)
             }
             "--audit-log" => {
-                args.servizio.audit_log = Some(it.next().ok_or("--audit-log richiede un file")?)
+                args.service.audit_log = Some(it.next().ok_or("--audit-log requires a file")?)
             }
             "--dump-fb" => {
-                args.console.dump_fb = Some(it.next().ok_or("--dump-fb richiede un percorso PNG")?)
+                args.console.dump_fb = Some(it.next().ok_or("--dump-fb requires a PNG path")?)
             }
             "--help" | "-h" => {
                 println!(
-                    "uso: lightvm-desktop [--smoke SECONDI] [--renderer auto|glow|wgpu|warp|glow,warp...] [--static] \
-                     [--wgpu-adapter cpu|auto] [--glow-hw preferred|required|off] \n                     [--vnc-socket S [--vnc-impl socket2|uds] | --vnc-tls 127.0.0.1:P --tls-dir D] \n                     --qmp-socket S [--capture-dir D] [--tmp-dir D] [--layout us|it] [--max-fps N] [--dump-fb PNG] \n                     [--catalogo DIR [--servizio-exe PATH] [--qemu-dir DIR] [--runtime-dir DIR] [--audit-log FILE]] [--impostazioni FILE] [--senza-supervisor] \n                     [--apri-vm NOME [--crea] [--vcpu N] [--ram MIB] [--disco GIB] [--cpu-max %] [--memoria-margine MIB] [--budget-disco GIB|nessuno]]"
+                    "usage: lightvm-desktop [--smoke SECONDS] [--simulated-console] [--renderer auto|glow|wgpu|warp|glow,warp...] [--static] \
+                     [--wgpu-adapter cpu|auto] [--glow-hw preferred|required|off] [--skip-library-check] \n                     [--vnc-socket S [--vnc-impl socket2|uds] | --vnc-tls 127.0.0.1:P --tls-dir D] \n                     --qmp-socket S [--capture-dir D] [--tmp-dir D] [--layout us|it] [--max-fps N] [--dump-fb PNG] \n                     [--catalog DIR [--service-exe PATH] [--qemu-dir DIR] [--runtime-dir DIR] [--audit-log FILE]] [--settings FILE] [--no-supervisor] \n                     [--open-vm NAME [--create] [--vcpu N] [--ram MIB] [--disk GIB] [--cpu-max %] [--memory-margin MIB] [--disk-budget GIB|none]]"
                 );
                 std::process::exit(0);
             }
-            other => return Err(format!("argomento sconosciuto: {other}")),
+            other => return Err(format!("unknown argument: {other}")),
         }
     }
     Ok(args)
@@ -250,15 +251,15 @@ struct DesktopApp {
     last_frame: Option<Instant>,
     intervals: [u64; 4],
     dump_fb: Option<String>,
-    filtro_appunti: lightvm_desktop::appunti::FiltroAppunti,
+    clipboard_filter: lightvm_desktop::clipboard::ClipboardFilter,
 }
 
 impl eframe::App for DesktopApp {
-    /// F1-13: primo punto dell'app in cui l'input è visibile, prima che il
-    /// contesto egui lo elabori. Nessun `Paste` prosegue oltre questo gancio.
+    /// F1-13: first point of the app where the input is visible, before the
+    /// egui context processes it. No `Paste` goes past this hook.
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
-        let esito = self.filtro_appunti.filtra_raw_input(raw_input);
-        self.ui.conta_appunti_scartati(esito.scartati);
+        let outcome = self.clipboard_filter.filter_raw_input(raw_input);
+        self.ui.count_discarded_pastes(outcome.discarded);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -293,13 +294,13 @@ impl eframe::App for DesktopApp {
             if !self.reported {
                 self.reported = true;
                 self.report(&ctx, elapsed);
-                if let Some((codice, forzato)) = self.ui.arresta_servizio() {
-                    println!("SMOKE servizio_arresto codice={codice:?} forzato={forzato}");
+                if let Some((code, forced)) = self.ui.stop_service() {
+                    println!("SMOKE service_stop code={code:?} forced={forced}");
                 }
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         } else {
-            // Un solo risveglio alla scadenza: anche con `--static` lo smoke termina.
+            // A single wake-up at the deadline: the smoke test ends even with `--static`.
             ctx.request_repaint_after(limit - elapsed);
         }
     }
@@ -312,26 +313,26 @@ impl DesktopApp {
         let inner = ctx.input(|i| i.viewport().inner_rect);
         let r = &self.ui.rendering;
         let mut out = std::io::stdout().lock();
-        let _ = writeln!(out, "SMOKE esito=ok");
-        let _ = writeln!(out, "SMOKE renderer={}", r.dettaglio);
-        let falliti: Vec<String> = r
-            .falliti
+        let _ = writeln!(out, "SMOKE outcome=ok");
+        let _ = writeln!(out, "SMOKE renderer={}", r.detail);
+        let failed: Vec<String> = r
+            .failed
             .iter()
-            .map(|(t, e)| format!("{}:{e}", t.nome()))
+            .map(|(t, e)| format!("{}:{e}", t.name()))
             .collect();
         let _ = writeln!(
             out,
-            "SMOKE backend={} degradato={} forzato={} tentativi_falliti={} indicatore=\"{}\"",
-            r.attivo.map_or("?", Tentativo::nome),
-            r.degradato(),
-            r.forzato,
-            falliti.len(),
-            r.etichetta(),
+            "SMOKE backend={} degraded={} forced={} failed_attempts={} indicator=\"{}\"",
+            r.active.map_or("?", Attempt::name),
+            r.degraded(),
+            r.forced,
+            failed.len(),
+            r.label(),
         );
-        for f in &falliti {
-            let _ = writeln!(out, "SMOKE tentativo_fallito {f}");
+        for f in &failed {
+            let _ = writeln!(out, "SMOKE failed_attempt {f}");
         }
-        #[allow(unused_mut, reason = "i backend presenti dipendono dalle feature")]
+        #[allow(unused_mut, reason = "the backends present depend on the features")]
         let mut backends = String::new();
         #[cfg(feature = "wgpu")]
         backends.push_str(concat!(" wgpu=", env!("LIGHTVM_WGPU_VERSION")));
@@ -339,13 +340,13 @@ impl DesktopApp {
         backends.push_str(concat!(" glow=", env!("LIGHTVM_GLOW_VERSION")));
         let _ = writeln!(
             out,
-            "SMOKE versioni egui={} eframe={}{backends}",
+            "SMOKE versions egui={} eframe={}{backends}",
             env!("LIGHTVM_EGUI_VERSION"),
             env!("LIGHTVM_EFRAME_VERSION"),
         );
         let _ = writeln!(
             out,
-            "SMOKE finestra_punti={:.0}x{:.0} pixels_per_point={ppp:.2} finestra_px={:.0}x{:.0} inner_rect={inner:?}",
+            "SMOKE window_points={:.0}x{:.0} pixels_per_point={ppp:.2} window_px={:.0}x{:.0} inner_rect={inner:?}",
             rect.width(),
             rect.height(),
             rect.width() * ppp,
@@ -353,16 +354,16 @@ impl DesktopApp {
         );
         let _ = writeln!(
             out,
-            "SMOKE frame={} aggiornamenti_fb={} durata_s={:.2} primo_frame_ms={} appunti_scartati={}",
+            "SMOKE frame={} fb_updates={} duration_s={:.2} first_frame_ms={} discarded_pastes={}",
             self.ui.frames(),
             self.ui.fb_updates(),
             elapsed.as_secs_f64(),
             self.first_frame.map_or(-1, |d| d.as_millis() as i64),
-            self.ui.appunti_scartati(),
+            self.ui.discarded_pastes(),
         );
         let _ = writeln!(
             out,
-            "SMOKE intervalli_tra_frame <2ms={} 2-20ms={} 20-90ms={} >=90ms={}",
+            "SMOKE frame_intervals <2ms={} 2-20ms={} 20-90ms={} >=90ms={}",
             self.intervals[0], self.intervals[1], self.intervals[2], self.intervals[3]
         );
         if let Some(live) = self.ui.live_console() {
@@ -370,32 +371,32 @@ impl DesktopApp {
             let (w, h) = live.geometry();
             let _ = writeln!(
                 out,
-                "SMOKE console geometria={w}x{h} aggiornamenti_rfb={} caricamenti_texture={} pixel_caricati={} eventi_input={} ridimensionamenti={}",
+                "SMOKE console geometry={w}x{h} rfb_updates={} texture_uploads={} uploaded_pixels={} input_events={} resizes={}",
                 s.rfb_updates, s.texture_uploads, s.uploaded_pixels, s.input_events, s.resizes
             );
             if let Some(path) = &self.dump_fb {
                 match live.framebuffer_snapshot().map(|fb| save_png(&fb, path)) {
                     Some(Ok(nb)) => {
-                        let _ = writeln!(out, "SMOKE dump_fb={path} non_neri={nb:.2}%");
+                        let _ = writeln!(out, "SMOKE dump_fb={path} non_black={nb:.2}%");
                     }
                     Some(Err(e)) => {
-                        let _ = writeln!(out, "SMOKE dump_fb_errore={e}");
+                        let _ = writeln!(out, "SMOKE dump_fb_error={e}");
                     }
                     None => {
-                        let _ = writeln!(out, "SMOKE dump_fb_errore=nessun framebuffer");
+                        let _ = writeln!(out, "SMOKE dump_fb_error=no framebuffer");
                     }
                 }
             }
         }
-        if let Some(srv) = self.ui.servizio() {
-            let st = srv.stato();
+        if let Some(srv) = self.ui.service() {
+            let st = srv.state();
             let _ = writeln!(
                 out,
-                "SMOKE servizio pid={} connesso={} backend={} acceleratore={} vm={} vm_accese={} stati={} ultimo_esito=\"{}\" connessione=\"{}\"",
+                "SMOKE service pid={} connected={} backend={} accelerator={} vms={} running_vms={} states={} last_outcome=\"{}\" connection=\"{}\"",
                 srv.pid(),
-                st.connesso,
+                st.connected,
                 st.backend.as_deref().unwrap_or("-"),
-                st.acceleratore.as_deref().unwrap_or("-"),
+                st.accelerator.as_deref().unwrap_or("-"),
                 st.vms.len(),
                 st.vms
                     .iter()
@@ -406,33 +407,33 @@ impl DesktopApp {
                     .map(|v| format!("{}:{}", v.name.as_str(), v.state.as_str()))
                     .collect::<Vec<_>>()
                     .join(","),
-                st.ultimo_esito.as_deref().unwrap_or("-").replace('"', "'"),
-                st.connessione.replace('"', "'"),
+                st.last_outcome.as_deref().unwrap_or("-").replace('"', "'"),
+                st.connection.replace('"', "'"),
             );
         }
         for (cause, n) in &self.repaint_causes {
-            let _ = writeln!(out, "SMOKE causa_repaint n={n} {cause}");
+            let _ = writeln!(out, "SMOKE repaint_cause n={n} {cause}");
         }
         let _ = out.flush();
     }
 }
 
-/// Descrizione dell'adattatore wgpu e indicazione "adattatore di tipo CPU".
+/// Description of the wgpu adapter and "CPU-type adapter" indication.
 #[cfg(feature = "wgpu")]
 fn wgpu_info(rs: &eframe::egui_wgpu::RenderState) -> (String, bool) {
     let i = rs.adapter.get_info();
     (
         format!(
-            "wgpu backend={:?} adapter=\"{}\" tipo={:?} driver=\"{}\" driver_info=\"{}\"",
+            "wgpu backend={:?} adapter=\"{}\" type={:?} driver=\"{}\" driver_info=\"{}\"",
             i.backend, i.name, i.device_type, i.driver, i.driver_info
         ),
         i.device_type == eframe::egui_wgpu::wgpu::DeviceType::Cpu,
     )
 }
 
-/// Versione GL dal contesto glow, senza `unsafe` (`HasContext::version`).
-/// Il nome del renderer GL (`glGetString(GL_RENDERER)`) richiederebbe una
-/// chiamata `unsafe` e non è riportato.
+/// GL version from the glow context, without `unsafe` (`HasContext::version`).
+/// The GL renderer name (`glGetString(GL_RENDERER)`) would require an
+/// `unsafe` call and is not reported.
 #[cfg(feature = "glow")]
 fn glow_info(gl: &eframe::glow::Context) -> (String, bool) {
     use eframe::glow::HasContext as _;
@@ -442,7 +443,7 @@ fn glow_info(gl: &eframe::glow::Context) -> (String, bool) {
         .any(|s| v.vendor_info.contains(s));
     (
         format!(
-            "glow versione_gl={}.{}{} driver=\"{}\"",
+            "glow gl_version={}.{}{} driver=\"{}\"",
             v.major,
             v.minor,
             if v.is_embedded { " ES" } else { "" },
@@ -452,22 +453,23 @@ fn glow_info(gl: &eframe::glow::Context) -> (String, bool) {
     )
 }
 
-/// Opzioni eframe per un tentativo.
-fn opzioni(t: Tentativo, args: &Args) -> eframe::NativeOptions {
-    #[allow(unused_mut, reason = "i campi modificati dipendono dalle feature")]
+/// eframe options for an attempt.
+fn options(t: Attempt, args: &Args) -> eframe::NativeOptions {
+    #[allow(unused_mut, reason = "the modified fields depend on the features")]
     let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("LightVM")
             .with_inner_size([1460.0, 860.0])
             .with_min_inner_size([640.0, 400.0]),
-        // Lo stesso event loop serve a più tentativi: senza `run_and_return`
-        // winit non permette di ricrearlo dopo un errore di inizializzazione.
+        // The same event loop serves several attempts: without
+        // `run_and_return` winit does not allow recreating it after an
+        // initialisation error.
         run_and_return: true,
         ..Default::default()
     };
     match t {
         #[cfg(feature = "glow")]
-        Tentativo::Glow => {
+        Attempt::Glow => {
             options.renderer = eframe::Renderer::Glow;
             options.glow_options.hardware_acceleration = match args.glow_hw.as_str() {
                 "required" => eframe::egui_glow::HardwareAcceleration::Required,
@@ -476,18 +478,18 @@ fn opzioni(t: Tentativo, args: &Args) -> eframe::NativeOptions {
             };
         }
         #[cfg(feature = "wgpu")]
-        Tentativo::WgpuHardware | Tentativo::WgpuSoftware => {
+        Attempt::WgpuHardware | Attempt::WgpuSoftware => {
             use eframe::egui_wgpu::{WgpuSetup, wgpu};
             options.renderer = eframe::Renderer::Wgpu;
-            let software = t == Tentativo::WgpuSoftware;
+            let software = t == Attempt::WgpuSoftware;
             if let WgpuSetup::CreateNew(create) = &mut options.wgpu_options.wgpu_setup {
-                // ADR-0014: su Windows wgpu usa DX12 (hardware e WARP).
+                // ADR-0014: on Windows wgpu uses DX12 (hardware and WARP).
                 if cfg!(windows) {
                     create.instance_descriptor.backends = wgpu::Backends::DX12;
                 }
-                // D-12: il suggerimento predefinito (`Performance`) prealloca
-                // blocchi di memoria grandi; per una UI con una sola texture
-                // di console conta l'occupazione (obiettivo 250 MiB, sez. 13).
+                // D-12: the default hint (`Performance`) preallocates large
+                // memory blocks; for a UI with a single console texture the
+                // footprint matters (target 250 MiB, sec. 13).
                 let base = create.device_descriptor.clone();
                 create.device_descriptor = Arc::new(move |adapter| wgpu::DeviceDescriptor {
                     memory_hints: wgpu::MemoryHints::MemoryUsage,
@@ -497,7 +499,7 @@ fn opzioni(t: Tentativo, args: &Args) -> eframe::NativeOptions {
                     for a in adapters {
                         let i = a.get_info();
                         eprintln!(
-                            "wgpu adattatore disponibile: {:?} \"{}\" {:?}",
+                            "wgpu adapter available: {:?} \"{}\" {:?}",
                             i.backend, i.name, i.device_type
                         );
                     }
@@ -507,49 +509,49 @@ fn opzioni(t: Tentativo, args: &Args) -> eframe::NativeOptions {
                         .cloned()
                         .ok_or_else(|| {
                             if software {
-                                "nessun adattatore wgpu di tipo CPU (WARP) disponibile".to_owned()
+                                "no CPU-type (WARP) wgpu adapter available".to_owned()
                             } else {
-                                "nessun adattatore wgpu hardware disponibile".to_owned()
+                                "no hardware wgpu adapter available".to_owned()
                             }
                         })
                 }));
             }
         }
-        #[allow(unreachable_patterns, reason = "dipende dalle feature compilate")]
+        #[allow(unreachable_patterns, reason = "depends on the compiled features")]
         _ => {}
     }
     let _ = &args.glow_hw;
     options
 }
 
-/// Testo di un panico catturato.
-fn testo_panico(p: &(dyn std::any::Any + Send)) -> String {
+/// Text of a caught panic.
+fn panic_text(p: &(dyn std::any::Any + Send)) -> String {
     p.downcast_ref::<&str>()
         .map(|s| (*s).to_owned())
         .or_else(|| p.downcast_ref::<String>().cloned())
-        .unwrap_or_else(|| "panico senza messaggio".to_owned())
+        .unwrap_or_else(|| "panic without message".to_owned())
 }
 
-/// Messaggio per un panico durante l'avvio del rendering o della finestra.
-fn errore_da_panico(msg: &str) -> String {
-    use lightvm_desktop::librerie::{Sessione, mancanti, messaggio, panico_da_libreria};
-    if !(cfg!(target_os = "linux") || panico_da_libreria(msg)) {
-        return format!("LightVM si è interrotto durante l'avvio della finestra: {msg}");
+/// Message for a panic during the start of the rendering or of the window.
+fn error_from_panic(msg: &str) -> String {
+    use lightvm_desktop::libraries::{Session, is_library_panic, message, missing};
+    if !(cfg!(target_os = "linux") || is_library_panic(msg)) {
+        return format!("LightVM stopped while starting the window: {msg}");
     }
-    let sessione = Sessione::rileva(
+    let session = Session::detect(
         std::env::var("WAYLAND_DISPLAY").ok().as_deref(),
         std::env::var("DISPLAY").ok().as_deref(),
     );
     #[cfg(target_os = "linux")]
     let m = {
         let cache = std::fs::read("/etc/ld.so.cache").unwrap_or_default();
-        mancanti(sessione, |f| {
-            lightvm_desktop::librerie::presente_nel_sistema(&cache, f)
+        missing(session, |f| {
+            lightvm_desktop::libraries::present_on_system(&cache, f)
         })
     };
     #[cfg(not(target_os = "linux"))]
-    let m = mancanti(sessione, |_| true);
-    messaggio(sessione, &m, Some(msg))
+    let m = missing(session, |_| true);
+    message(session, &m, Some(msg))
 }
 
 fn main() -> std::process::ExitCode {
@@ -557,66 +559,72 @@ fn main() -> std::process::ExitCode {
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("errore: {e}");
+            eprintln!("error: {e}");
             return std::process::ExitCode::from(2);
         }
     };
-    // Impostazioni prima del piano di rendering: la preferenza salvata vale se
-    // `--renderer` non è indicato.
-    let percorso_impostazioni = args
-        .servizio
-        .impostazioni
+    // Settings before the rendering plan: the saved preference applies if
+    // `--renderer` is not given. Without `--settings`, the file of earlier
+    // versions is read if the new one does not exist yet (saving always
+    // writes the new one).
+    let settings_path = args
+        .service
+        .settings
         .as_ref()
         .map(PathBuf::from)
-        .or_else(lightvm_desktop::impostazioni::percorso_predefinito);
-    let (impostazioni, errore_impostazioni) = match &percorso_impostazioni {
-        Some(p) => Impostazioni::carica(p),
-        None => (Impostazioni::default(), None),
+        .or_else(lightvm_desktop::settings::default_path);
+    let legacy_path = if args.service.settings.is_none() {
+        lightvm_desktop::settings::legacy_default_path()
+    } else {
+        None
     };
-    if let Some(e) = &errore_impostazioni {
-        eprintln!("impostazioni: {e}");
+    let (settings, settings_error) = match (&settings_path, &legacy_path) {
+        (Some(p), Some(l)) => UiSettings::load_or_legacy(p, l),
+        (Some(p), None) => UiSettings::load(p),
+        (None, _) => (UiSettings::default(), None),
+    };
+    if let Some(e) = &settings_error {
+        eprintln!("settings: {e}");
     }
     let renderer = args
         .renderer
         .clone()
-        .or_else(|| Some(impostazioni.rendering.come_argomento().to_owned()));
-    let piano = match Piano::da_argomenti(renderer.as_deref(), args.wgpu_cpu) {
+        .or_else(|| Some(settings.rendering.as_argument().to_owned()));
+    let plan = match Plan::from_args(renderer.as_deref(), args.wgpu_cpu) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("errore: {e}");
+            eprintln!("error: {e}");
             return std::process::ExitCode::from(2);
         }
     };
 
-    // F1-14: su Linux, prima di creare la finestra, controlla le librerie che
-    // winit/glutin/wgpu aprono con `dlopen`.
+    // F1-14: on Linux, before creating the window, check the libraries that
+    // winit/glutin/wgpu open with `dlopen`.
     #[cfg(target_os = "linux")]
-    if !args.salta_controllo_librerie
-        && let Err(msg) = lightvm_desktop::librerie::controllo_preventivo()
+    if !args.skip_library_check
+        && let Err(msg) = lightvm_desktop::libraries::preflight_check()
     {
-        eprintln!("errore: {msg}");
-        println!("SMOKE esito=errore dettaglio=\"librerie di sistema mancanti\"");
+        eprintln!("error: {msg}");
+        println!("SMOKE outcome=error detail=\"missing system libraries\"");
         return std::process::ExitCode::from(3);
     }
     #[cfg(not(target_os = "linux"))]
-    let _ = args.salta_controllo_librerie;
+    let _ = args.skip_library_check;
 
-    if args.servizio.apri_vm.is_none() && (!args.servizio.modifiche.vuote() || args.servizio.crea) {
+    if args.service.open_vm.is_none() && (!args.service.changes.is_empty() || args.service.create) {
         eprintln!(
-            "errore: --crea, --vcpu, --ram, --disco, --cpu-max, --memoria-margine e --budget-disco richiedono --apri-vm"
+            "error: --create, --vcpu, --ram, --disk, --cpu-max, --memory-margin and --disk-budget require --open-vm"
         );
         return std::process::ExitCode::from(2);
     }
-    if args.servizio.apri_vm.is_some() && args.servizio.nessuno {
-        eprintln!(
-            "errore: --apri-vm richiede il supervisor (incompatibile con --senza-supervisor)"
-        );
+    if args.service.open_vm.is_some() && args.service.no_supervisor {
+        eprintln!("error: --open-vm requires the supervisor (incompatible with --no-supervisor)");
         return std::process::ExitCode::from(2);
     }
-    let servizio = match servizio_config(&args.servizio, impostazioni.politica_perdita_ui) {
+    let service = match service_config(&args.service, settings.ui_loss_policy) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("errore: {e}");
+            eprintln!("error: {e}");
             return std::process::ExitCode::from(2);
         }
     };
@@ -624,106 +632,116 @@ fn main() -> std::process::ExitCode {
     let console = match console_config(&args.console) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("errore: {e}");
+            eprintln!("error: {e}");
             return std::process::ExitCode::from(2);
         }
     };
+    // `--smoke` without a real console measures the simulated framebuffer,
+    // as before the flag existed.
+    let simulated_console = console.is_none() && (args.simulated_console || args.smoke.is_some());
 
-    // I panici dovuti a librerie mancanti diventano un messaggio utilizzabile
-    // (sotto): il gancio predefinito resta per tutti gli altri.
-    let gancio_predefinito = std::panic::take_hook();
+    // Panics due to missing libraries become a usable message (below): the
+    // default hook stays for all the others.
+    let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let msg = testo_panico(info.payload());
-        if !lightvm_desktop::librerie::panico_da_libreria(&msg) {
-            gancio_predefinito(info);
+        let msg = panic_text(info.payload());
+        if !lightvm_desktop::libraries::is_library_panic(&msg) {
+            default_hook(info);
         }
     }));
 
-    let mut falliti: Vec<(Tentativo, String)> = Vec::new();
-    let n = piano.tentativi.len();
-    for (indice, &t) in piano.tentativi.iter().enumerate() {
-        let creata = Rc::new(Cell::new(false));
-        let info_base = InfoRendering {
-            attivo: Some(t),
-            dettaglio: String::new(),
-            adattatore_cpu: false,
-            falliti: falliti.clone(),
-            forzato: piano.forzato,
+    let mut failed: Vec<(Attempt, String)> = Vec::new();
+    let n = plan.attempts.len();
+    for (index, &t) in plan.attempts.iter().enumerate() {
+        let created = Rc::new(Cell::new(false));
+        let info_base = RenderingInfo {
+            active: Some(t),
+            detail: String::new(),
+            cpu_adapter: false,
+            failed: failed.clone(),
+            forced: plan.forced,
         };
         let console = console.clone();
-        let servizio = servizio.clone();
-        let percorso_impostazioni = percorso_impostazioni.clone();
-        let errore_impostazioni = errore_impostazioni.clone();
-        let impostazioni = impostazioni.clone();
-        let eseguibile_servizio = args.servizio.eseguibile.as_ref().map(PathBuf::from);
-        let nessun_servizio = args.servizio.nessuno;
-        let apri_vm = args.servizio.apri_vm.clone();
-        let modifiche = args.servizio.modifiche;
-        let crea = args.servizio.crea;
+        let service = service.clone();
+        let settings_path = settings_path.clone();
+        let settings_error = settings_error.clone();
+        let settings = settings.clone();
+        let service_exe = args.service.executable.as_ref().map(PathBuf::from);
+        let no_service = args.service.no_supervisor;
+        let open_vm = args.service.open_vm.clone();
+        let changes = args.service.changes;
+        let create = args.service.create;
         let dump_fb = args.console.dump_fb.clone();
         let animate = args.animate;
         let smoke = args.smoke;
-        let creata_app = creata.clone();
-        let options = opzioni(t, &args);
-        let esito = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let created_app = created.clone();
+        let options = options(t, &args);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             eframe::run_native(
                 "LightVM",
                 options,
                 Box::new(move |cc| {
-                    creata_app.set(true);
+                    created_app.set(true);
                     let mut info = info_base;
                     #[cfg(feature = "wgpu")]
                     if let Some(rs) = &cc.wgpu_render_state {
-                        (info.dettaglio, info.adattatore_cpu) = wgpu_info(rs);
+                        (info.detail, info.cpu_adapter) = wgpu_info(rs);
                     }
                     #[cfg(feature = "glow")]
                     if let Some(gl) = &cc.gl {
-                        (info.dettaglio, info.adattatore_cpu) = glow_info(gl);
+                        (info.detail, info.cpu_adapter) = glow_info(gl);
                     }
                     let mut ui = match console {
                         Some(mut cfg) => {
-                            if info.degradato() {
-                                cfg.max_fps = cfg.max_fps.min(FPS_CONSOLE_DEGRADATA);
+                            if info.degraded() {
+                                cfg.max_fps = cfg.max_fps.min(DEGRADED_CONSOLE_FPS);
                             }
                             LightVmApp::with_console(cfg)
                         }
                         None => LightVmApp::new(animate),
                     };
-                    eprintln!("rendering: {}", info.spiegazione().replace('\n', "; "));
+                    ui.set_simulated_console(simulated_console);
+                    if simulated_console {
+                        // The simulated framebuffer is what is being measured:
+                        // open on the Console page, as before the Dashboard
+                        // became the start page.
+                        ui.set_section(lightvm_desktop::Section::Console);
+                    }
+                    eprintln!("rendering: {}", info.explanation().replace('\n', "; "));
                     ui.rendering = info;
-                    let avvio_da_impostazioni = impostazioni.avvio_supervisor;
-                    ui.set_impostazioni(impostazioni, percorso_impostazioni, errore_impostazioni);
-                    ui.set_eseguibile_servizio(eseguibile_servizio);
-                    ui.set_selettore(lightvm_desktop::selettore_nativo());
-                    // Stile e tema prima del primo frame (niente frame con lo
-                    // stile predefinito di egui).
-                    lightvm_desktop::tema::installa(&cc.egui_ctx);
+                    let start_from_settings = settings.start_supervisor;
+                    ui.set_settings(settings, settings_path, settings_error);
+                    ui.set_service_exe(service_exe);
+                    ui.set_folder_picker(lightvm_desktop::native_folder_picker());
+                    // Style and theme before the first frame (no frame with the
+                    // default egui style).
+                    lightvm_desktop::theme::install(&cc.egui_ctx);
                     cc.egui_ctx.set_theme(egui::Theme::from(ui.theme()));
-                    // Il supervisor parte solo a finestra creata: i tentativi
-                    // di rendering falliti non lasciano servizi avviati. Con
-                    // `--catalogo` vale la riga di comando, altrimenti la
-                    // pagina Settings (avvio automatico predefinito).
-                    if let Some(cfg) = &servizio {
-                        ui.set_config_riga_di_comando(cfg.clone());
+                    // The supervisor starts only once the window exists: failed
+                    // rendering attempts leave no services running. With
+                    // `--catalog` the command line applies, otherwise the
+                    // Settings page (automatic start by default).
+                    if let Some(cfg) = &service {
+                        ui.set_command_line_config(cfg.clone());
                         let ctx = cc.egui_ctx.clone();
-                        match Servizio::avvia(cfg, Arc::new(move || ctx.request_repaint())) {
+                        match Service::start(cfg, Arc::new(move || ctx.request_repaint())) {
                             Ok(s) => {
-                                eprintln!("servizio: lightvm-service avviato (PID {})", s.pid());
-                                ui.set_servizio(s, cfg);
+                                eprintln!("service: lightvm-service started (PID {})", s.pid());
+                                ui.set_service(s, cfg);
                             }
                             Err(e) => {
-                                eprintln!("servizio: {e}");
-                                ui.set_errore_servizio(e.to_string());
+                                eprintln!("service: {e}");
+                                ui.set_service_error(e.to_string());
                             }
                         }
-                    } else if (avvio_da_impostazioni || apri_vm.is_some()) && !nessun_servizio {
-                        ui.avvia_servizio(&cc.egui_ctx);
-                        if let Some(s) = ui.servizio() {
-                            eprintln!("servizio: lightvm-service avviato (PID {})", s.pid());
+                    } else if (start_from_settings || open_vm.is_some()) && !no_service {
+                        ui.start_service(&cc.egui_ctx);
+                        if let Some(s) = ui.service() {
+                            eprintln!("service: lightvm-service started (PID {})", s.pid());
                         }
                     }
-                    if let Some(nome) = apri_vm {
-                        ui.apri_vm(nome, modifiche, crea);
+                    if let Some(name) = open_vm {
+                        ui.open_vm(name, changes, create);
                     }
                     Ok(Box::new(DesktopApp {
                         ui,
@@ -735,43 +753,40 @@ fn main() -> std::process::ExitCode {
                         last_frame: None,
                         intervals: [0; 4],
                         dump_fb,
-                        filtro_appunti: Default::default(),
+                        clipboard_filter: Default::default(),
                     }))
                 }),
             )
         }));
-        match esito {
+        match outcome {
             Ok(Ok(())) => return std::process::ExitCode::SUCCESS,
-            Ok(Err(e)) if !creata.get() && indice + 1 < n => {
+            Ok(Err(e)) if !created.get() && index + 1 < n => {
                 let e = e.to_string();
                 eprintln!(
-                    "rendering: tentativo {} fallito ({e}); ripiego su {}",
-                    t.nome(),
-                    piano.tentativi[indice + 1].nome()
+                    "rendering: attempt {} failed ({e}); falling back to {}",
+                    t.name(),
+                    plan.attempts[index + 1].name()
                 );
-                falliti.push((t, e));
+                failed.push((t, e));
             }
             Ok(Err(e)) => {
-                falliti.push((t, e.to_string()));
-                let elenco: Vec<String> = falliti
+                failed.push((t, e.to_string()));
+                let list: Vec<String> = failed
                     .iter()
-                    .map(|(t, e)| format!("{}: {e}", t.nome()))
+                    .map(|(t, e)| format!("{}: {e}", t.name()))
                     .collect();
                 println!(
-                    "SMOKE esito=errore dettaglio=\"{}\"",
-                    elenco.join(" | ").replace('"', "'")
+                    "SMOKE outcome=error detail=\"{}\"",
+                    list.join(" | ").replace('"', "'")
                 );
-                eprintln!(
-                    "errore: nessun backend di rendering utilizzabile ({})",
-                    elenco.join("; ")
-                );
+                eprintln!("error: no usable rendering backend ({})", list.join("; "));
                 return std::process::ExitCode::FAILURE;
             }
             Err(p) => {
-                let msg = testo_panico(p.as_ref());
-                eprintln!("errore: {}", errore_da_panico(&msg));
+                let msg = panic_text(p.as_ref());
+                eprintln!("error: {}", error_from_panic(&msg));
                 println!(
-                    "SMOKE esito=errore dettaglio=\"panico all'avvio: {}\"",
+                    "SMOKE outcome=error detail=\"panic at startup: {}\"",
                     msg.replace('"', "'")
                 );
                 return std::process::ExitCode::from(3);
@@ -781,36 +796,35 @@ fn main() -> std::process::ExitCode {
     std::process::ExitCode::FAILURE
 }
 
-/// Configurazione del supervisor, se richiesta con `--catalogo`.
-fn servizio_config(
-    a: &ServizioArgs,
-    politica: ParentLossPolicy,
-) -> Result<Option<ConfigServizio>, String> {
-    let Some(catalogo) = &a.catalogo else {
-        if a.eseguibile.is_some()
+/// Supervisor configuration, if requested with `--catalog`.
+fn service_config(
+    a: &ServiceArgs,
+    policy: ParentLossPolicy,
+) -> Result<Option<ServiceConfig>, String> {
+    let Some(catalog) = &a.catalog else {
+        if a.executable.is_some()
             || a.qemu_dir.is_some()
             || a.runtime_dir.is_some()
             || a.audit_log.is_some()
         {
             return Err(
-                "--servizio-exe, --qemu-dir, --runtime-dir e --audit-log richiedono --catalogo"
-                    .into(),
+                "--service-exe, --qemu-dir, --runtime-dir and --audit-log require --catalog".into(),
             );
         }
         return Ok(None);
     };
-    let eseguibile = match &a.eseguibile {
+    let executable = match &a.executable {
         Some(p) => PathBuf::from(p),
-        None => ConfigServizio::eseguibile_accanto()
-            .ok_or("percorso dell'eseguibile della UI non disponibile: usare --servizio-exe")?,
+        None => ServiceConfig::executable_next_to_ui()
+            .ok_or("path of the UI executable not available: use --service-exe")?,
     };
-    Ok(Some(ConfigServizio {
-        eseguibile,
-        catalogo: PathBuf::from(catalogo),
+    Ok(Some(ServiceConfig {
+        executable,
+        catalog: PathBuf::from(catalog),
         qemu_dir: a.qemu_dir.as_ref().map(PathBuf::from),
         runtime_dir: a.runtime_dir.as_ref().map(PathBuf::from),
         audit_log: a.audit_log.as_ref().map(PathBuf::from),
-        politica,
+        policy,
     }))
 }
 
@@ -824,7 +838,7 @@ fn save_png(fb: &rfb_client::Framebuffer, path: &str) -> Result<f64, String> {
     Ok(img.non_black_percent())
 }
 
-/// Costruisce la configurazione della console dai soli percorsi forniti.
+/// Builds the console configuration from the given paths only.
 fn console_config(
     a: &ConsoleArgs,
 ) -> Result<Option<lightvm_desktop::console::ConsoleConfig>, String> {
@@ -834,23 +848,23 @@ fn console_config(
     let vnc = match (&a.vnc_socket, &a.vnc_tls) {
         (None, None) => {
             if a.qmp_socket.is_some() {
-                return Err("--qmp-socket richiede --vnc-socket o --vnc-tls".into());
+                return Err("--qmp-socket requires --vnc-socket or --vnc-tls".into());
             }
             return Ok(None);
         }
         (Some(_), Some(_)) => {
-            return Err("usare --vnc-socket oppure --vnc-tls, non entrambi".into());
+            return Err("use --vnc-socket or --vnc-tls, not both".into());
         }
         (Some(p), None) => Transport::Unix {
             path: PathBuf::from(p),
             imp: match a.vnc_impl.as_deref().unwrap_or("socket2") {
                 "socket2" => UnixImpl::Socket2,
                 "uds" => UnixImpl::UdsWindows,
-                o => return Err(format!("--vnc-impl sconosciuto: {o}")),
+                o => return Err(format!("unknown --vnc-impl: {o}")),
             },
         },
         (None, Some(addr)) => {
-            let dir = PathBuf::from(a.tls_dir.as_deref().ok_or("--vnc-tls richiede --tls-dir")?);
+            let dir = PathBuf::from(a.tls_dir.as_deref().ok_or("--vnc-tls requires --tls-dir")?);
             Transport::VencryptTls {
                 addr: addr.parse().map_err(|e| format!("--vnc-tls: {e}"))?,
                 tls: TlsConfig {
@@ -865,7 +879,7 @@ fn console_config(
     let qmp = PathBuf::from(
         a.qmp_socket
             .as_deref()
-            .ok_or("--qmp-socket obbligatorio con la console")?,
+            .ok_or("--qmp-socket is mandatory with the console")?,
     );
     let capture = PathBuf::from(a.capture_dir.as_deref().unwrap_or("."));
     let tmp = a
@@ -877,7 +891,7 @@ fn console_config(
     let layout = match a.layout.as_deref().unwrap_or("us") {
         "us" => KeyboardLayout::Us,
         "it" => KeyboardLayout::It,
-        o => return Err(format!("--layout sconosciuto: {o}")),
+        o => return Err(format!("unknown --layout: {o}")),
     };
     Ok(Some(lightvm_desktop::console::ConsoleConfig {
         vnc,

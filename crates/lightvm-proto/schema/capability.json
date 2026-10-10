@@ -1,30 +1,30 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Capability",
-  "description": "Azione autorizzabile su una VM. I nomi serializzati seguono il catalogo MCP\n(ROADMAP 9); `vm.input` copre mouse e tastiera.",
+  "description": "Authorizable action on a VM. Serialized names follow the MCP catalog\n(ROADMAP 9); `vm.input` covers mouse and keyboard.",
   "oneOf": [
     {
-      "description": "Elenco filtrato dal grant.",
+      "description": "List filtered by the grant.",
       "type": "string",
       "const": "vm.list"
     },
     {
-      "description": "Stato.",
+      "description": "Status.",
       "type": "string",
       "const": "vm.status"
     },
     {
-      "description": "Avvio.",
+      "description": "Start.",
       "type": "string",
       "const": "vm.start"
     },
     {
-      "description": "Arresto (ordinario o forzato).",
+      "description": "Stop (ordinary or forced).",
       "type": "string",
       "const": "vm.stop"
     },
     {
-      "description": "Reset: richiede capability esplicita.",
+      "description": "Reset: requires an explicit capability.",
       "type": "string",
       "const": "vm.reset"
     },
@@ -34,22 +34,22 @@
       "const": "vm.screenshot"
     },
     {
-      "description": "Mouse e tastiera.",
+      "description": "Mouse and keyboard.",
       "type": "string",
       "const": "vm.input"
     },
     {
-      "description": "Checkpoint a VM spenta: richiede capability esplicita.",
+      "description": "Checkpoint with the VM off: requires an explicit capability.",
       "type": "string",
       "const": "vm.snapshot"
     },
     {
-      "description": "Ripristino a VM spenta.",
+      "description": "Restore with the VM off.",
       "type": "string",
       "const": "vm.restore"
     },
     {
-      "description": "Eventi LightVM e log QEMU autorizzati.",
+      "description": "Authorized LightVM events and QEMU logs.",
       "type": "string",
       "const": "vm.logs"
     }

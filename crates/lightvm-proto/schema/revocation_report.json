@@ -1,18 +1,18 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "RevocationReport",
-  "description": "Rapporto di una revoca o di un Emergency Stop: distingue la coda scartata\ndalle richieste già inoltrate (ROADMAP 7.3). Non promette annullamenti.",
+  "description": "Report of a revocation or an Emergency Stop: distinguishes the discarded queue\nfrom requests already forwarded (ROADMAP 7.3). It promises no cancellations.",
   "type": "object",
   "properties": {
     "already_forwarded": {
-      "description": "Operazioni già inoltrate al backend: possono aver prodotto effetti.",
+      "description": "Operations already forwarded to the backend: they may have produced effects.",
       "type": "array",
       "items": {
         "$ref": "#/$defs/OperationId"
       }
     },
     "discarded": {
-      "description": "Operazioni in coda scartate senza inoltro (nessun effetto).",
+      "description": "Queued operations discarded without forwarding (no effect).",
       "type": "array",
       "items": {
         "$ref": "#/$defs/OperationId"
@@ -25,7 +25,7 @@
   ],
   "$defs": {
     "OperationId": {
-      "description": "OperationId: UUID versione 7 in minuscolo con trattini.",
+      "description": "OperationId: version 7 UUID, lowercase with hyphens.",
       "type": "string",
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"

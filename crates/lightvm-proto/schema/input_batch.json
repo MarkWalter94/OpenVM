@@ -1,26 +1,26 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "InputBatch",
-  "description": "Lotto di eventi di input riferito a un'esecuzione e a una geometria: il core\nrifiuta lotti riferiti a un `run_id` superato o a una geometria non corrente\n(ROADMAP 6.4). Gli input non vengono mai ripetuti automaticamente.",
+  "description": "Batch of input events tied to a run and a geometry: the core\nrejects batches tied to a superseded `run_id` or a non-current geometry\n(ROADMAP 6.4). Inputs are never repeated automatically.",
   "type": "object",
   "properties": {
     "events": {
-      "description": "Eventi, al massimo [`MAX_INPUT_EVENTS_PER_REQUEST`].",
+      "description": "Events, at most [`MAX_INPUT_EVENTS_PER_REQUEST`].",
       "type": "array",
       "items": {
         "$ref": "#/$defs/InputEvent"
       }
     },
     "geometry": {
-      "description": "Geometria su cui il chiamante ha calcolato le coordinate.",
+      "description": "Geometry on which the caller computed the coordinates.",
       "$ref": "#/$defs/DisplayGeometry"
     },
     "run_id": {
-      "description": "Esecuzione attesa.",
+      "description": "Expected run.",
       "$ref": "#/$defs/RunId"
     },
     "vm_id": {
-      "description": "VM destinataria.",
+      "description": "Target VM.",
       "$ref": "#/$defs/VmId"
     }
   },
@@ -32,18 +32,18 @@
   ],
   "$defs": {
     "DisplayGeometry": {
-      "description": "Geometria del display guest in pixel.",
+      "description": "Guest display geometry in pixels.",
       "type": "object",
       "properties": {
         "height": {
-          "description": "Altezza (1..=8192).",
+          "description": "Height (1..=8192).",
           "type": "integer",
           "format": "uint32",
           "maximum": 8192,
           "minimum": 1
         },
         "width": {
-          "description": "Larghezza (1..=8192).",
+          "description": "Width (1..=8192).",
           "type": "integer",
           "format": "uint32",
           "maximum": 8192,
@@ -56,10 +56,10 @@
       ]
     },
     "InputEvent": {
-      "description": "Evento di input elementare.",
+      "description": "Elementary input event.",
       "oneOf": [
         {
-          "description": "Tasto.",
+          "description": "Key.",
           "type": "object",
           "properties": {
             "type": {
@@ -73,7 +73,7 @@
           ]
         },
         {
-          "description": "Movimento assoluto.",
+          "description": "Absolute movement.",
           "type": "object",
           "properties": {
             "type": {
@@ -87,7 +87,7 @@
           ]
         },
         {
-          "description": "Pulsante.",
+          "description": "Button.",
           "type": "object",
           "properties": {
             "type": {
@@ -103,15 +103,15 @@
       ]
     },
     "KeyAction": {
-      "description": "Pressione o rilascio di un tasto.",
+      "description": "Press or release of a key.",
       "type": "object",
       "properties": {
         "down": {
-          "description": "`true` = premuto, `false` = rilasciato.",
+          "description": "`true` = pressed, `false` = released.",
           "type": "boolean"
         },
         "qcode": {
-          "description": "Tasto QEMU.",
+          "description": "QEMU key.",
           "$ref": "#/$defs/QCode"
         }
       },
@@ -121,45 +121,45 @@
       ]
     },
     "MouseButton": {
-      "description": "Pulsante del puntatore (nomi QMP `InputButton` ammessi).",
+      "description": "Pointer button (allowed QMP `InputButton` names).",
       "oneOf": [
         {
-          "description": "Sinistro.",
+          "description": "Left.",
           "type": "string",
           "const": "left"
         },
         {
-          "description": "Centrale.",
+          "description": "Middle.",
           "type": "string",
           "const": "middle"
         },
         {
-          "description": "Destro.",
+          "description": "Right.",
           "type": "string",
           "const": "right"
         },
         {
-          "description": "Rotella su.",
+          "description": "Wheel up.",
           "type": "string",
           "const": "wheel_up"
         },
         {
-          "description": "Rotella giù.",
+          "description": "Wheel down.",
           "type": "string",
           "const": "wheel_down"
         }
       ]
     },
     "PointerButton": {
-      "description": "Pressione o rilascio di un pulsante del puntatore.",
+      "description": "Press or release of a pointer button.",
       "type": "object",
       "properties": {
         "button": {
-          "description": "Pulsante.",
+          "description": "Button.",
           "$ref": "#/$defs/MouseButton"
         },
         "down": {
-          "description": "`true` = premuto, `false` = rilasciato.",
+          "description": "`true` = pressed, `false` = released.",
           "type": "boolean"
         }
       },
@@ -169,18 +169,18 @@
       ]
     },
     "PointerMove": {
-      "description": "Movimento assoluto del puntatore in coordinate QEMU 0..=32767 su ciascun asse.",
+      "description": "Absolute pointer movement in QEMU coordinates 0..=32767 on each axis.",
       "type": "object",
       "properties": {
         "x": {
-          "description": "Asse X (0..=32767).",
+          "description": "X axis (0..=32767).",
           "type": "integer",
           "format": "uint16",
           "maximum": 32767,
           "minimum": 0
         },
         "y": {
-          "description": "Asse Y (0..=32767).",
+          "description": "Y axis (0..=32767).",
           "type": "integer",
           "format": "uint16",
           "maximum": 32767,
@@ -193,18 +193,18 @@
       ]
     },
     "QCode": {
-      "description": "QKeyCode QEMU.",
+      "description": "QEMU QKeyCode.",
       "type": "string",
       "pattern": "^[a-z0-9_]{1,32}$"
     },
     "RunId": {
-      "description": "RunId: UUID versione 7 in minuscolo con trattini.",
+      "description": "RunId: version 7 UUID, lowercase with hyphens.",
       "type": "string",
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     },
     "VmId": {
-      "description": "VmId: UUID versione 7 in minuscolo con trattini.",
+      "description": "VmId: version 7 UUID, lowercase with hyphens.",
       "type": "string",
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"

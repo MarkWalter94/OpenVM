@@ -1,6 +1,6 @@
 [package]
 name = "lightvm-desktop"
-description = "LightVM: interfaccia desktop nativa egui/eframe (spike F0)"
+description = "LightVM: native egui/eframe desktop interface (F0 spike)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,44 +13,43 @@ name = "lightvm-desktop"
 path = "src/main.rs"
 
 [features]
-# Backend di rendering (ADR-0014, F1-16): la build predefinita include glow e
-# wgpu, così la selezione automatica può ripiegare glow → wgpu (DX12 su
-# hardware) → wgpu su rasterizzatore software (WARP). Con un solo backend
-# compilato (`--no-default-features --features glow|wgpu`) il ripiego si
-# limita ai tentativi disponibili.
+# Rendering backends (ADR-0014, F1-16): the default build includes glow and
+# wgpu, so the automatic selection can fall back glow → wgpu (DX12 on
+# hardware) → wgpu on a software rasterizer (WARP). With a single backend
+# compiled (`--no-default-features --features glow|wgpu`) the fallback is
+# limited to the available attempts.
 default = ["wgpu", "glow"]
 wgpu = ["eframe/wgpu"]
 glow = ["eframe/glow"]
 
 [dependencies]
-# `links` (apertura automatica di URL) è escluso di proposito: ROADMAP 6.0 vieta
-# link apribili automaticamente. `persistence` non serve allo spike.
-# Nota F1-13: eframe 0.36.2 abilita sempre `egui-winit/clipboard` sui target
-# nativi (dipendenza non opzionale nel suo Cargo.toml), quindi la lettura degli
-# appunti host non si può disattivare dalle feature: vedi `src/appunti.rs`.
+# `links` (automatic opening of URLs) is excluded on purpose: ROADMAP 6.0
+# forbids automatically openable links. `persistence` is not needed by the spike.
+# Note F1-13: eframe 0.36.2 always enables `egui-winit/clipboard` on native
+# targets (non-optional dependency in its Cargo.toml), so reading the host
+# clipboard cannot be disabled through features: see `src/clipboard.rs`.
 eframe = { workspace = true, features = ["accesskit", "default_fonts", "wayland", "x11"] }
 egui = { workspace = true, features = ["default_fonts"] }
 egui_extras = { workspace = true }
-# Console reale F0-04: client RFB in sola lettura e QMP dello spike.
+# Real console F0-04: read-only RFB client and QMP of the spike.
 rfb-client = { path = "../../crates/rfb-client" }
 f0-console = { path = "../../spikes/f0-console" }
-# Supervisor come processo figlio e IPC (F1-11): solo il lato client del
-# servizio, senza `qemu-backend` (ADR-0024).
+# Supervisor as a child process and IPC (F1-11): only the client side of the
+# service, without `qemu-backend` (ADR-0024).
 lightvm-proto = { path = "../../crates/lightvm-proto" }
 lightvm-service = { path = "../../crates/lightvm-service", default-features = false }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 tokio = { version = "=1.53.2", features = ["rt", "sync", "time", "macros"] }
 
-# Selettore di cartelle nativo per la pagina Settings (nessun campo di testo):
-# solo Windows, target dell'MVP; altrove i percorsi arrivano dalla riga di
-# comando.
+# Native folder picker for the Settings page (no text field): Windows only,
+# the MVP target; elsewhere the paths come from the command line.
 [target.'cfg(windows)'.dependencies]
 rfd = { version = "=0.15.4", default-features = false }
 
 [dev-dependencies]
-# `snapshot` + `wgpu`: istantanee grafiche confrontate con i file in
-# `tests/snapshots/` (F1-19, ADR-0022); tolleranza in `kittest.toml`.
+# `snapshot` + `wgpu`: graphical snapshots compared with the files in
+# `tests/snapshots/` (F1-19, ADR-0022); tolerance in `kittest.toml`.
 egui_kittest = { workspace = true, features = ["snapshot", "wgpu"] }
 
 [lints]

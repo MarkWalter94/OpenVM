@@ -1,6 +1,6 @@
-//! Legge dal `Cargo.lock` del workspace le versioni effettive di egui, eframe e
-//! wgpu, così che lo smoke test stampi le versioni realmente compilate e non
-//! valori scritti a mano.
+//! Reads from the workspace `Cargo.lock` the effective versions of egui,
+//! eframe and wgpu, so that the smoke test prints the versions actually
+//! compiled and not hand-written values.
 
 use std::path::PathBuf;
 
@@ -15,7 +15,7 @@ fn main() {
         ("wgpu", "LIGHTVM_WGPU_VERSION"),
         ("glow", "LIGHTVM_GLOW_VERSION"),
     ] {
-        let version = find_version(&text, pkg).unwrap_or_else(|| "sconosciuta".to_owned());
+        let version = find_version(&text, pkg).unwrap_or_else(|| "unknown".to_owned());
         println!("cargo:rustc-env={var}={version}");
     }
 }

@@ -1,15 +1,15 @@
 [package]
 name = "lightvm-mcp"
-description = "LightVM: spike F1-19 dell'SDK MCP (rmcp) con trasporto stdio e tool finti; non è l'adapter di prodotto (F5)"
+description = "LightVM: F1-19 spike of the MCP SDK (rmcp) with stdio transport and fake tools; not the product adapter (F5)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
-# Spike di selezione dell'SDK (ADR-0021, docs/verification/F1-06-mcp-sdk.md).
-# Il crate di prodotto `mcp-server` nasce in F5 (ROADMAP 6.2): questo crate
-# serve solo a provare l'SDK con la revisione MCP 2025-11-25 su stdio.
+# SDK selection spike (ADR-0021, docs/verification/F1-06-mcp-sdk.md).
+# The product crate `mcp-server` is born in F5 (ROADMAP 6.2): this crate only
+# serves to try the SDK with MCP revision 2025-11-25 over stdio.
 
 [lib]
 path = "src/lib.rs"
@@ -18,8 +18,8 @@ path = "src/lib.rs"
 name = "lightvm-mcp-spike"
 path = "src/main.rs"
 
-# Versioni esatte (`=`), nessuna dipendenza git, nessuna feature di rete:
-# niente HTTP, niente OAuth, niente processo figlio lato client.
+# Exact versions (`=`), no git dependencies, no network features:
+# no HTTP, no OAuth, no client-side child process.
 [dependencies]
 rmcp = { version = "=3.5.1", default-features = false, features = ["server", "macros", "transport-io"] }
 schemars = { version = "=1.2.2", default-features = false, features = ["derive", "std"] }

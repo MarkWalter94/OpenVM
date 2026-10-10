@@ -1,23 +1,23 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "AuditEvent",
-  "description": "Evento di audit. `seq` è l'ordine totale assegnato dal core, strettamente crescente.",
+  "description": "Audit event. `seq` is the total order assigned by the core, strictly increasing.",
   "type": "object",
   "properties": {
     "action": {
-      "description": "Azione.",
+      "description": "Action.",
       "$ref": "#/$defs/AuditAction"
     },
     "actor": {
-      "description": "Attore.",
+      "description": "Actor.",
       "$ref": "#/$defs/Actor"
     },
     "at": {
-      "description": "Istante UTC.",
+      "description": "UTC instant.",
       "$ref": "#/$defs/UtcTimestamp"
     },
     "capability": {
-      "description": "Capability valutata (per i dinieghi).",
+      "description": "Capability evaluated (for denials).",
       "anyOf": [
         {
           "$ref": "#/$defs/Capability"
@@ -28,7 +28,7 @@
       ]
     },
     "error": {
-      "description": "Codice d'errore pubblico (per dinieghi e fallimenti).",
+      "description": "Public error code (for denials and failures).",
       "anyOf": [
         {
           "$ref": "#/$defs/ErrorCode"
@@ -39,7 +39,7 @@
       ]
     },
     "operation_id": {
-      "description": "Operazione coinvolta.",
+      "description": "Operation involved.",
       "anyOf": [
         {
           "$ref": "#/$defs/OperationId"
@@ -50,11 +50,11 @@
       ]
     },
     "outcome": {
-      "description": "Esito.",
+      "description": "Outcome.",
       "$ref": "#/$defs/AuditOutcome"
     },
     "run_id": {
-      "description": "Esecuzione coinvolta.",
+      "description": "Run involved.",
       "anyOf": [
         {
           "$ref": "#/$defs/RunId"
@@ -65,13 +65,13 @@
       ]
     },
     "seq": {
-      "description": "Ordine (da 1, strettamente crescente).",
+      "description": "Order (from 1, strictly increasing).",
       "type": "integer",
       "format": "uint64",
       "minimum": 0
     },
     "session_id": {
-      "description": "Sessione coinvolta.",
+      "description": "Session involved.",
       "anyOf": [
         {
           "$ref": "#/$defs/SessionId"
@@ -82,7 +82,7 @@
       ]
     },
     "termination": {
-      "description": "Causa di terminazione (per `session_terminate`).",
+      "description": "Termination cause (for `session_terminate`).",
       "anyOf": [
         {
           "$ref": "#/$defs/TerminationCause"
@@ -93,7 +93,7 @@
       ]
     },
     "vm_id": {
-      "description": "VM coinvolta.",
+      "description": "VM involved.",
       "anyOf": [
         {
           "$ref": "#/$defs/VmId"
@@ -113,10 +113,10 @@
   ],
   "$defs": {
     "Actor": {
-      "description": "Attore registrato nell'audit (senza segreti).",
+      "description": "Actor recorded in the audit (without secrets).",
       "oneOf": [
         {
-          "description": "Utente locale.",
+          "description": "Local user.",
           "type": "object",
           "properties": {
             "kind": {
@@ -129,7 +129,7 @@
           ]
         },
         {
-          "description": "Sessione agente.",
+          "description": "Agent session.",
           "type": "object",
           "properties": {
             "kind": {
@@ -137,7 +137,7 @@
               "const": "agent"
             },
             "session_id": {
-              "description": "Sessione.",
+              "description": "Session.",
               "$ref": "#/$defs/SessionId"
             }
           },
@@ -147,7 +147,7 @@
           ]
         },
         {
-          "description": "Supervisor (scadenze, riconciliazione, osservazioni).",
+          "description": "Supervisor (expiries, reconciliation, observations).",
           "type": "object",
           "properties": {
             "kind": {
@@ -162,25 +162,25 @@
       ]
     },
     "AuditAction": {
-      "description": "Tipo di azione registrata.",
+      "description": "Type of recorded action.",
       "oneOf": [
         {
-          "description": "Creazione VM.",
+          "description": "VM creation.",
           "type": "string",
           "const": "vm_create"
         },
         {
-          "description": "Avvio VM (richiesta inoltrata o esito).",
+          "description": "VM start (request forwarded or outcome).",
           "type": "string",
           "const": "vm_start"
         },
         {
-          "description": "Arresto VM (ordinario o forzato).",
+          "description": "VM stop (ordinary or forced).",
           "type": "string",
           "const": "vm_stop"
         },
         {
-          "description": "Reset VM.",
+          "description": "VM reset.",
           "type": "string",
           "const": "vm_reset"
         },
@@ -190,12 +190,12 @@
           "const": "vm_screenshot"
         },
         {
-          "description": "Input (solo conteggio implicito, mai il contenuto).",
+          "description": "Input (implicit count only, never the content).",
           "type": "string",
           "const": "vm_input"
         },
         {
-          "description": "Cambio di stato osservato (processo/QMP).",
+          "description": "Observed state change (process/QMP).",
           "type": "string",
           "const": "vm_state_observed"
         },
@@ -205,97 +205,97 @@
           "const": "emergency_stop"
         },
         {
-          "description": "Creazione sessione.",
+          "description": "Session creation.",
           "type": "string",
           "const": "session_create"
         },
         {
-          "description": "Pausa sessione.",
+          "description": "Session pause.",
           "type": "string",
           "const": "session_pause"
         },
         {
-          "description": "Ripresa sessione.",
+          "description": "Session resume.",
           "type": "string",
           "const": "session_resume"
         },
         {
-          "description": "Terminazione sessione (revoca, scadenza...).",
+          "description": "Session termination (revocation, expiry...).",
           "type": "string",
           "const": "session_terminate"
         },
         {
-          "description": "Operazione scartata prima dell'inoltro.",
+          "description": "Operation discarded before forwarding.",
           "type": "string",
           "const": "operation_discard"
         },
         {
-          "description": "Modifica della configurazione di una VM (risorse e limiti).",
+          "description": "Change to a VM's configuration (resources and limits).",
           "type": "string",
           "const": "vm_configure"
         }
       ]
     },
     "AuditOutcome": {
-      "description": "Esito registrato.",
+      "description": "Recorded outcome.",
       "oneOf": [
         {
-          "description": "Accettata (in coda).",
+          "description": "Accepted (queued).",
           "type": "string",
           "const": "accepted"
         },
         {
-          "description": "Inoltrata al backend.",
+          "description": "Forwarded to the backend.",
           "type": "string",
           "const": "forwarded"
         },
         {
-          "description": "Completata.",
+          "description": "Completed.",
           "type": "string",
           "const": "succeeded"
         },
         {
-          "description": "Fallita.",
+          "description": "Failed.",
           "type": "string",
           "const": "failed"
         },
         {
-          "description": "Negata: nessun effetto.",
+          "description": "Denied: no effect.",
           "type": "string",
           "const": "denied"
         },
         {
-          "description": "Scartata prima dell'inoltro: nessun effetto.",
+          "description": "Discarded before forwarding: no effect.",
           "type": "string",
           "const": "discarded"
         }
       ]
     },
     "Capability": {
-      "description": "Azione autorizzabile su una VM. I nomi serializzati seguono il catalogo MCP\n(ROADMAP 9); `vm.input` copre mouse e tastiera.",
+      "description": "Authorizable action on a VM. Serialized names follow the MCP catalog\n(ROADMAP 9); `vm.input` covers mouse and keyboard.",
       "oneOf": [
         {
-          "description": "Elenco filtrato dal grant.",
+          "description": "List filtered by the grant.",
           "type": "string",
           "const": "vm.list"
         },
         {
-          "description": "Stato.",
+          "description": "Status.",
           "type": "string",
           "const": "vm.status"
         },
         {
-          "description": "Avvio.",
+          "description": "Start.",
           "type": "string",
           "const": "vm.start"
         },
         {
-          "description": "Arresto (ordinario o forzato).",
+          "description": "Stop (ordinary or forced).",
           "type": "string",
           "const": "vm.stop"
         },
         {
-          "description": "Reset: richiede capability esplicita.",
+          "description": "Reset: requires an explicit capability.",
           "type": "string",
           "const": "vm.reset"
         },
@@ -305,110 +305,110 @@
           "const": "vm.screenshot"
         },
         {
-          "description": "Mouse e tastiera.",
+          "description": "Mouse and keyboard.",
           "type": "string",
           "const": "vm.input"
         },
         {
-          "description": "Checkpoint a VM spenta: richiede capability esplicita.",
+          "description": "Checkpoint with the VM off: requires an explicit capability.",
           "type": "string",
           "const": "vm.snapshot"
         },
         {
-          "description": "Ripristino a VM spenta.",
+          "description": "Restore with the VM off.",
           "type": "string",
           "const": "vm.restore"
         },
         {
-          "description": "Eventi LightVM e log QEMU autorizzati.",
+          "description": "Authorized LightVM events and QEMU logs.",
           "type": "string",
           "const": "vm.logs"
         }
       ]
     },
     "ErrorCode": {
-      "description": "Codice stabile di un errore operativo. I nomi serializzati non cambiano mai;\nnuovi codici si aggiungono soltanto.",
+      "description": "Stable code of an operational error. Serialized names never change;\nnew codes are only ever added.",
       "oneOf": [
         {
-          "description": "Chiamante identificato (credenziale valida) ma non autorizzato all'azione:\nVM fuori allowlist, capability mancante, sessione in pausa, ruolo\ninsufficiente. Credenziali assenti o non valide: [`ErrorCode::Unauthenticated`].",
+          "description": "Caller identified (valid credential) but not authorized for the action:\nVM outside the allowlist, missing capability, paused session, insufficient\nrole. Missing or invalid credentials: [`ErrorCode::Unauthenticated`].",
           "type": "string",
           "const": "permission_denied"
         },
         {
-          "description": "Sessione o lease scaduti: serve una nuova autorizzazione nell'app.",
+          "description": "Session or lease expired: a new authorization in the app is needed.",
           "type": "string",
           "const": "session_expired"
         },
         {
-          "description": "Un'altra mutazione è in corso o in coda sulla stessa VM: ritentabile.",
+          "description": "Another mutation is in progress or queued on the same VM: retryable.",
           "type": "string",
           "const": "vm_busy"
         },
         {
-          "description": "Capacità non disponibile su questo host, build o fase.",
+          "description": "Capability not available on this host, build or phase.",
           "type": "string",
           "const": "unsupported"
         },
         {
-          "description": "L'azione non è ammessa nello stato corrente (o riferisce un `run_id` superato).",
+          "description": "The action is not allowed in the current state (or refers to a superseded `run_id`).",
           "type": "string",
           "const": "state_conflict"
         },
         {
-          "description": "Limite di risorse, quota o dimensione superato.",
+          "description": "Resource, quota or size limit exceeded.",
           "type": "string",
           "const": "resource_limit"
         },
         {
-          "description": "Argomento non valido (formato, intervallo, nome, percorso rifiutato).",
+          "description": "Invalid argument (format, range, name, rejected path).",
           "type": "string",
           "const": "invalid_argument"
         },
         {
-          "description": "Oggetto inesistente o non visibile al chiamante.",
+          "description": "Object does not exist or is not visible to the caller.",
           "type": "string",
           "const": "not_found"
         },
         {
-          "description": "Guasto dell'infrastruttura (QEMU, QMP, storage, OS) non imputabile al chiamante.",
+          "description": "Infrastructure failure (QEMU, QMP, storage, OS) not attributable to the caller.",
           "type": "string",
           "const": "infrastructure_error"
         },
         {
-          "description": "Nessuna credenziale valida: credenziale IPC o token di sessione assente,\nmalformato, sconosciuto, revocato o riusato dopo un riavvio del supervisor.\nServe una nuova autorizzazione nell'app. Aggiunto in coda ai primi nove\ncodici, che restano invariati.",
+          "description": "No valid credential: IPC credential or session token missing,\nmalformed, unknown, revoked or reused after a supervisor restart.\nA new authorization in the app is needed. Appended after the first nine\ncodes, which remain unchanged.",
           "type": "string",
           "const": "unauthenticated"
         }
       ]
     },
     "OperationId": {
-      "description": "OperationId: UUID versione 7 in minuscolo con trattini.",
+      "description": "OperationId: version 7 UUID, lowercase with hyphens.",
       "type": "string",
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     },
     "RunId": {
-      "description": "RunId: UUID versione 7 in minuscolo con trattini.",
+      "description": "RunId: version 7 UUID, lowercase with hyphens.",
       "type": "string",
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     },
     "SessionId": {
-      "description": "SessionId: UUID versione 7 in minuscolo con trattini.",
+      "description": "SessionId: version 7 UUID, lowercase with hyphens.",
       "type": "string",
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     },
     "TerminationCause": {
-      "description": "Causa di terminazione di una sessione (registrata nel report, ROADMAP 9).",
+      "description": "Termination cause of a session (recorded in the report, ROADMAP 9).",
       "oneOf": [
         {
-          "description": "Chiusura ordinaria dall'app.",
+          "description": "Ordinary close from the app.",
           "type": "string",
           "const": "completed"
         },
         {
-          "description": "Revoca dell'utente.",
+          "description": "Revoked by the user.",
           "type": "string",
           "const": "revoked"
         },
@@ -418,54 +418,54 @@
           "const": "emergency_stop"
         },
         {
-          "description": "Scadenza del grant.",
+          "description": "Grant expired.",
           "type": "string",
           "const": "grant_expired"
         },
         {
-          "description": "Lease non rinnovato entro il limite.",
+          "description": "Lease not renewed within the limit.",
           "type": "string",
           "const": "lease_expired"
         },
         {
-          "description": "Perdita del client o dell'adapter.",
+          "description": "Loss of the client or of the adapter.",
           "type": "string",
           "const": "client_lost"
         },
         {
-          "description": "Chiusura o crash della UI.",
+          "description": "UI closed or crashed.",
           "type": "string",
           "const": "ui_closed"
         },
         {
-          "description": "Perdita o riavvio del supervisor.",
+          "description": "Supervisor lost or restarted.",
           "type": "string",
           "const": "supervisor_lost"
         },
         {
-          "description": "Ripresa dell'host da sospensione.",
+          "description": "Host resumed from sleep.",
           "type": "string",
           "const": "host_resumed"
         },
         {
-          "description": "VM fallita o terminata durante la sessione.",
+          "description": "VM failed or terminated during the session.",
           "type": "string",
           "const": "vm_terminated"
         },
         {
-          "description": "Ripristino di baseline: la sessione di controllo si chiude (ROADMAP 8).",
+          "description": "Baseline restore: the control session closes (ROADMAP 8).",
           "type": "string",
           "const": "restored"
         }
       ]
     },
     "UtcTimestamp": {
-      "description": "Istante UTC RFC 3339 con suffisso Z, precisione al millisecondo.",
+      "description": "RFC 3339 UTC instant with Z suffix, millisecond precision.",
       "type": "string",
       "format": "date-time"
     },
     "VmId": {
-      "description": "VmId: UUID versione 7 in minuscolo con trattini.",
+      "description": "VmId: version 7 UUID, lowercase with hyphens.",
       "type": "string",
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"

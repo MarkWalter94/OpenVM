@@ -1,9 +1,9 @@
-//! Errori del backend e corrispondenza con gli errori pubblici stabili di
+//! Backend errors and their mapping to the stable public errors of
 //! `lightvm-proto` ([`ErrorCode`], [`PublicError`]; ROADMAP 6.3).
 //!
-//! Il messaggio pubblico non contiene percorsi host né estratti di stderr che
-//! potrebbero contenerli: il dettaglio completo resta nel `Display` di
-//! [`BackendError`], destinato ai log locali del supervisor.
+//! The public message contains neither host paths nor stderr excerpts that
+//! could contain them: the full detail stays in the `Display` of
+//! [`BackendError`], meant for the supervisor's local logs.
 
 use std::fmt;
 use std::io;
@@ -13,62 +13,62 @@ use lightvm_proto::{ErrorCode, PublicError};
 use crate::probe::AcceleratorStatus;
 use crate::qmp::QmpError;
 
-/// Errore del backend QEMU.
+/// QEMU backend error.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum BackendError {
-    /// Parametro rifiutato dalla validazione (grammatica, percorso, intervallo).
+    /// Parameter rejected by validation (grammar, path, range).
     InvalidArgument {
-        /// Campo interessato.
+        /// Field concerned.
         field: &'static str,
-        /// Motivo leggibile.
+        /// Human-readable reason.
         reason: String,
     },
-    /// Capacità non disponibile sull'host.
+    /// Capability not available on the host.
     Unsupported {
-        /// Che cosa manca.
+        /// What is missing.
         what: String,
-        /// Suggerimento per l'utente.
+        /// Hint for the user.
         hint: String,
     },
-    /// Binario QEMU con hash SHA-256 assente dalla lista approvata (ADR-0010).
+    /// QEMU binary whose SHA-256 hash is not in the approved list (ADR-0010).
     UnapprovedBinary {
-        /// Binario (`qemu-system-x86_64` o `qemu-img`).
+        /// Binary (`qemu-system-x86_64` or `qemu-img`).
         binary: &'static str,
-        /// SHA-256 calcolato.
+        /// Computed SHA-256.
         sha256: String,
     },
-    /// Acceleratore non disponibile: nessun fallback TCG (ADR-0007).
+    /// Accelerator not available: no TCG fallback (ADR-0007).
     AcceleratorUnavailable(AcceleratorStatus),
-    /// Probe non riuscito (binario non eseguibile, output non riconosciuto).
+    /// Probe failed (binary not executable, unrecognised output).
     Probe(String),
-    /// Avvio del processo non riuscito.
+    /// Process spawn failed.
     Spawn(io::Error),
-    /// QEMU è uscito durante l'avvio.
+    /// QEMU exited during startup.
     StartupFailed {
-        /// Codice d'uscita, se noto.
+        /// Exit code, if known.
         exit_code: Option<u32>,
-        /// Ultime righe di stderr.
+        /// Last lines of stderr.
         stderr_tail: String,
     },
-    /// Interfaccia di rete inattesa nel guest (profilo offline, ADR-0004).
+    /// Unexpected network interface in the guest (offline profile, ADR-0004).
     UnexpectedNetwork(String),
-    /// Errore del canale QMP.
+    /// QMP channel error.
     Qmp(QmpError),
-    /// Stato incompatibile con l'operazione richiesta.
+    /// State incompatible with the requested operation.
     StateConflict(String),
-    /// File della VM in uso da un altro processo.
+    /// VM file in use by another process.
     VmBusy(String),
-    /// Limite superato (dimensione screenshot, memoria, vCPU).
+    /// Limit exceeded (screenshot size, memory, vCPUs).
     ResourceLimit(String),
-    /// Operazione non conclusa entro il tempo massimo.
+    /// Operation not completed within the maximum time.
     Timeout(&'static str),
-    /// Errore di I/O.
+    /// I/O error.
     Io(io::Error),
 }
 
 impl BackendError {
-    /// Crea un errore di validazione.
+    /// Creates a validation error.
     pub fn invalid(field: &'static str, reason: impl Into<String>) -> Self {
         Self::InvalidArgument {
             field,
@@ -76,7 +76,7 @@ impl BackendError {
         }
     }
 
-    /// Codice pubblico stabile.
+    /// Stable public code.
     pub fn code(&self) -> ErrorCode {
         match self {
             Self::InvalidArgument { .. } => ErrorCode::InvalidArgument,
@@ -96,35 +96,35 @@ impl BackendError {
         }
     }
 
-    /// Errore pubblico stabile, senza percorsi host né estratti di stderr.
+    /// Stable public error, without host paths or stderr excerpts.
     pub fn to_public(&self) -> PublicError {
         let code = self.code();
         let msg = match self {
             Self::InvalidArgument { field, reason } => {
-                format!("parametro `{field}` rifiutato: {reason}")
+                format!("parameter `{field}` rejected: {reason}")
             }
-            Self::Unsupported { what, hint } => format!("non supportato: {what}. {hint}"),
+            Self::Unsupported { what, hint } => format!("not supported: {what}. {hint}"),
             Self::UnapprovedBinary { binary, .. } => format!(
-                "il binario {binary} non corrisponde a una build QEMU approvata (hash SHA-256 \
-                 diverso da quelli registrati): avvio rifiutato"
+                "the {binary} binary does not match an approved QEMU build (SHA-256 hash \
+                 differs from the registered ones): launch refused"
             ),
             Self::AcceleratorUnavailable(status) => status.public_message(),
-            Self::Probe(_) => "rilevamento delle capacità QEMU non riuscito".to_owned(),
-            Self::Spawn(_) => "avvio del processo QEMU non riuscito".to_owned(),
+            Self::Probe(_) => "QEMU capability detection failed".to_owned(),
+            Self::Spawn(_) => "failed to start the QEMU process".to_owned(),
             Self::StartupFailed { exit_code, .. } => match exit_code {
-                Some(c) => format!("QEMU è terminato durante l'avvio (codice {c:#x})"),
-                None => "QEMU non ha completato l'avvio".to_owned(),
+                Some(c) => format!("QEMU terminated during startup (code {c:#x})"),
+                None => "QEMU did not complete startup".to_owned(),
             },
             Self::UnexpectedNetwork(_) => {
-                "interfaccia di rete inattesa nel guest: avvio interrotto (profilo offline)"
+                "unexpected network interface in the guest: launch aborted (offline profile)"
                     .to_owned()
             }
-            Self::Qmp(e) => format!("canale di controllo QEMU: {}", e.public_summary()),
-            Self::StateConflict(m) => format!("stato incompatibile: {m}"),
-            Self::VmBusy(_) => "file della VM in uso da un altro processo".to_owned(),
-            Self::ResourceLimit(m) => format!("limite superato: {m}"),
-            Self::Timeout(what) => format!("tempo scaduto: {what}"),
-            Self::Io(_) => "errore di I/O del backend QEMU".to_owned(),
+            Self::Qmp(e) => format!("QEMU control channel: {}", e.public_summary()),
+            Self::StateConflict(m) => format!("incompatible state: {m}"),
+            Self::VmBusy(_) => "VM file in use by another process".to_owned(),
+            Self::ResourceLimit(m) => format!("limit exceeded: {m}"),
+            Self::Timeout(what) => format!("timed out: {what}"),
+            Self::Io(_) => "QEMU backend I/O error".to_owned(),
         };
         let retryable = matches!(self, Self::VmBusy(_) | Self::Timeout(_));
         PublicError::new(code, msg).with_retryable(retryable)
@@ -135,36 +135,36 @@ impl fmt::Display for BackendError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidArgument { field, reason } => {
-                write!(f, "parametro `{field}` rifiutato: {reason}")
+                write!(f, "parameter `{field}` rejected: {reason}")
             }
-            Self::Unsupported { what, hint } => write!(f, "non supportato: {what}. {hint}"),
+            Self::Unsupported { what, hint } => write!(f, "not supported: {what}. {hint}"),
             Self::UnapprovedBinary { binary, sha256 } => write!(
                 f,
-                "binario {binary} non approvato: SHA-256 {sha256} assente dalla lista approvata"
+                "binary {binary} not approved: SHA-256 {sha256} not in the approved list"
             ),
             Self::AcceleratorUnavailable(status) => write!(f, "{status}"),
-            Self::Probe(m) => write!(f, "rilevamento delle capacità QEMU non riuscito: {m}"),
-            Self::Spawn(e) => write!(f, "avvio di QEMU non riuscito: {e}"),
+            Self::Probe(m) => write!(f, "QEMU capability detection failed: {m}"),
+            Self::Spawn(e) => write!(f, "failed to start QEMU: {e}"),
             Self::StartupFailed {
                 exit_code,
                 stderr_tail,
             } => {
-                write!(f, "QEMU è terminato durante l'avvio")?;
+                write!(f, "QEMU terminated during startup")?;
                 if let Some(c) = exit_code {
-                    write!(f, " (codice {c:#x})")?;
+                    write!(f, " (code {c:#x})")?;
                 }
                 if !stderr_tail.is_empty() {
                     write!(f, ": {stderr_tail}")?;
                 }
                 Ok(())
             }
-            Self::UnexpectedNetwork(m) => write!(f, "interfaccia di rete inattesa: {m}"),
+            Self::UnexpectedNetwork(m) => write!(f, "unexpected network interface: {m}"),
             Self::Qmp(e) => write!(f, "{e}"),
-            Self::StateConflict(m) => write!(f, "stato incompatibile: {m}"),
-            Self::VmBusy(m) => write!(f, "risorsa occupata: {m}"),
-            Self::ResourceLimit(m) => write!(f, "limite superato: {m}"),
-            Self::Timeout(what) => write!(f, "tempo scaduto: {what}"),
-            Self::Io(e) => write!(f, "errore di I/O: {e}"),
+            Self::StateConflict(m) => write!(f, "incompatible state: {m}"),
+            Self::VmBusy(m) => write!(f, "resource busy: {m}"),
+            Self::ResourceLimit(m) => write!(f, "limit exceeded: {m}"),
+            Self::Timeout(what) => write!(f, "timed out: {what}"),
+            Self::Io(e) => write!(f, "I/O error: {e}"),
         }
     }
 }
@@ -192,7 +192,7 @@ impl From<io::Error> for BackendError {
 }
 
 impl From<PublicError> for BackendError {
-    /// Errori di validazione dei tipi di `lightvm-proto` (geometria, coordinate).
+    /// Validation errors of the `lightvm-proto` types (geometry, coordinates).
     fn from(e: PublicError) -> Self {
         match e.code {
             ErrorCode::ResourceLimit => Self::ResourceLimit(e.message),
@@ -208,7 +208,7 @@ impl From<&BackendError> for PublicError {
     }
 }
 
-/// Risultato del backend.
+/// Backend result.
 pub type Result<T, E = BackendError> = std::result::Result<T, E>;
 
 #[cfg(test)]
@@ -218,7 +218,7 @@ mod tests {
     use crate::probe::UnavailableReason;
 
     #[test]
-    fn codici_pubblici_stabili() {
+    fn stable_public_codes() {
         assert_eq!(
             BackendError::invalid("x", "y").code().as_str(),
             "invalid_argument"
@@ -240,15 +240,15 @@ mod tests {
     }
 
     #[test]
-    fn messaggio_pubblico_senza_percorsi() {
-        let e = BackendError::VmBusy(r"`E:\segreto\disco.qcow2` aperto".into());
+    fn public_message_without_paths() {
+        let e = BackendError::VmBusy(r"`E:\secret\disk.qcow2` open".into());
         let p = e.to_public();
         assert_eq!(p.code, ErrorCode::VmBusy);
-        assert!(!p.message.contains("segreto"));
+        assert!(!p.message.contains("secret"));
         assert!(p.retryable);
         let e = BackendError::StartupFailed {
             exit_code: Some(1),
-            stderr_tail: r"C:\Users\x\qemu.exe: errore".into(),
+            stderr_tail: r"C:\Users\x\qemu.exe: error".into(),
         };
         assert!(!e.to_public().message.contains("Users"));
         let e = BackendError::UnapprovedBinary {
@@ -259,7 +259,7 @@ mod tests {
     }
 
     #[test]
-    fn acceleratore_assente_errore_chiaro() {
+    fn missing_accelerator_clear_error() {
         let e = BackendError::AcceleratorUnavailable(AcceleratorStatus::Unavailable {
             accelerator: Accelerator::Whpx,
             reason: UnavailableReason::NotCompiled {

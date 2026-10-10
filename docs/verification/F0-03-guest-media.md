@@ -1,34 +1,34 @@
-# F0-03 — Guest di riferimento: scelta della release e verifica del supporto
+# F0-03 — Reference guest: release choice and media verification
 
-- Data di esecuzione (UTC): 2026-10-09 (download e verifiche tra 10:04:49Z e 10:14:11Z)
-- Esecutore: agente release/sicurezza (Claude Code)
-- Passo della roadmap: sezione 4 (MVP, "un solo guest di riferimento: Ubuntu LTS x86_64, con versione e checksum fissati in F0"), sezione 10 F0 ("fissare binario, versione, firmware e guest con checksum"), sezione 17 (decisione "release guest e firmware")
-- ADR collegati: ADR su release guest e firmware (da scrivere; vedi "Decisioni proposte")
-- Esito complessivo: **verificato** (integrità e firma del supporto). Boot del guest: **non eseguito** (fuori ambito di questa prova).
+- Execution date (UTC): 2026-10-09 (downloads and checks between 10:04:49Z and 10:14:11Z)
+- Executed by: release/security agent (Claude Code)
+- Roadmap step: section 4 (MVP, "a single reference guest: Ubuntu LTS x86_64, with version and checksum pinned in F0"), section 10 F0 ("pin binary, version, firmware and guest with checksums"), section 17 (decision "guest and firmware release")
+- Related ADRs: ADR on guest and firmware release (to be written; see "Proposed decisions")
+- Overall outcome: **verified** (integrity and signature of the media). Guest boot: **not executed** (out of scope of this test).
 
-## Scopo
+## Purpose
 
-Scegliere e procurare il guest di riferimento del MVP con provenienza verificata: immagine desktop amd64 di Ubuntu LTS, versione e SHA-256 fissati, firma del file dei checksum verificata con la chiave ufficiale delle immagini Ubuntu.
+Choose and obtain the MVP reference guest with verified provenance: Ubuntu LTS amd64 desktop image, version and SHA-256 pinned, signature of the checksum file verified with the official Ubuntu image key.
 
-Questa prova **non** dimostra: che l'ISO si avvii in QEMU/WHPX, che il contenuto sia privo di vulnerabilità o di codice malevolo, né alcuna compatibilità del guest con LightVM. Il file ISO non è stato eseguito né montato.
+This test does **not** demonstrate: that the ISO boots in QEMU/WHPX, that the content is free of vulnerabilities or malicious code, nor any compatibility of the guest with LightVM. The ISO file was neither executed nor mounted.
 
-## Ambiente
+## Environment
 
-| Voce | Valore |
+| Item | Value |
 | --- | --- |
-| Host | workstation di sviluppo, Windows 11 Pro |
-| OS e build | Windows 10.0.26200.9457 (output di `ver`); shell Git Bash `MINGW64_NT-10.0-26200 3.4.10` |
-| Acceleratore e stato | non rilevante per questa prova |
-| Strumenti | `curl 8.7.1 (x86_64-w64-mingw32) ... Schannel`; `gpg (GnuPG) 2.4.5`, `libgcrypt 1.9.4`; `sha256sum (GNU coreutils) 8.32` |
-| Binario QEMU | non usato |
-| Firmware | non usato |
+| Host | development workstation, Windows 11 Pro |
+| OS and build | Windows 10.0.26200.9457 (output of `ver`); Git Bash shell `MINGW64_NT-10.0-26200 3.4.10` |
+| Accelerator and state | not relevant for this test |
+| Tools | `curl 8.7.1 (x86_64-w64-mingw32) ... Schannel`; `gpg (GnuPG) 2.4.5`, `libgcrypt 1.9.4`; `sha256sum (GNU coreutils) 8.32` |
+| QEMU binary | not used |
+| Firmware | not used |
 | Guest / media | `ubuntu-26.04.1-desktop-amd64.iso`, SHA-256 `601e30fbf5d97759367c632e2c33630665039b7e2158fd068403da3ccf1bda1f` |
-| Sessione grafica | non rilevante |
-| Altre condizioni | Keyring GPG dedicato `lab/media/gnupg` (variabile `GNUPGHOME`), separato dal keyring utente |
+| Graphics session | not relevant |
+| Other conditions | Dedicated GPG keyring `lab/media/gnupg` (variable `GNUPGHOME`), separate from the user keyring |
 
-## Release LTS osservate e motivazione della scelta
+## LTS releases observed and rationale for the choice
 
-Comando:
+Command:
 
 ```bash
 curl -s https://releases.ubuntu.com/ -o lab/media/evidence/releases-index.html
@@ -50,9 +50,9 @@ Ubuntu 26.04.1 LTS (Resolute Raccoon)
 Ubuntu 26.10 (Stonking Stingray)
 ```
 
-Directory presenti nell'indice (estratto `href`): `14.04.6/ 16.04.7/ 18.04.6/ 20.04.6/ 22.04.5/ 24.04.2/ 24.04.3/ 24.04.4/ 24.04.5/ 24.04.5.1/ 25.10/ 26.04/ 26.04.1/ 26.10/` più alias per nome in codice. 25.10 e 26.10 non sono LTS (nessuna etichetta "LTS" nel titolo).
+Directories present in the index (`href` excerpt): `14.04.6/ 16.04.7/ 18.04.6/ 20.04.6/ 22.04.5/ 24.04.2/ 24.04.3/ 24.04.4/ 24.04.5/ 24.04.5.1/ 25.10/ 26.04/ 26.04.1/ 26.10/` plus aliases by code name. 25.10 and 26.10 are not LTS (no "LTS" label in the title).
 
-Elenco della directory `https://releases.ubuntu.com/26.04.1/` (estratto delle immagini desktop e dei checksum; `26.04/` restituisce lo stesso elenco):
+Listing of the directory `https://releases.ubuntu.com/26.04.1/` (excerpt of the desktop images and checksums; `26.04/` returns the same listing):
 
 ```text
 SHA256SUMS                            2026-08-27 22:43   588
@@ -62,13 +62,13 @@ ubuntu-26.04.1-desktop-amd64.iso      2026-08-26 06:38   6.0G
 ubuntu-26.04.1-live-server-amd64.iso  2026-08-26 05:14   2.7G
 ```
 
-Criterio applicato: ultima point release della LTS più recente che abbia almeno una point release pubblicata. La LTS più recente è la 26.04 (Resolute Raccoon) e ha la point release 26.04.1 pubblicata (ISO datata 2026-08-26). Nessuna 26.04.2 è presente nell'indice. **Scelta: Ubuntu 26.04.1 LTS, immagine desktop amd64** (il MVP richiede un guest grafico; l'immagine server è esclusa). La LTS precedente (24.04.x) non è necessaria.
+Criterion applied: latest point release of the most recent LTS that has at least one published point release. The most recent LTS is 26.04 (Resolute Raccoon) and it has point release 26.04.1 published (ISO dated 2026-08-26). No 26.04.2 is present in the index. **Choice: Ubuntu 26.04.1 LTS, amd64 desktop image** (the MVP requires a graphical guest; the server image is excluded). The previous LTS (24.04.x) is not needed.
 
-## Procedura
+## Procedure
 
-Tutti i comandi eseguiti in `E:\OpenVM\lab\media` (Git Bash).
+All commands run in `E:\OpenVM\lab\media` (Git Bash).
 
-1. Checksum, firma e intestazioni HTTP dell'ISO:
+1. Checksums, signature and HTTP headers of the ISO:
 
 ```bash
 B=https://releases.ubuntu.com/26.04.1
@@ -77,9 +77,9 @@ curl -L --fail --retry 5 --retry-delay 10 -o SHA256SUMS.gpg $B/SHA256SUMS.gpg
 curl -sIL $B/ubuntu-26.04.1-desktop-amd64.iso
 ```
 
-Intestazioni rilevanti: `HTTP/1.1 200 OK`, `Content-Length: 6482409472`, `Last-Modified: Wed, 26 Aug 2026 06:38:13 GMT`, `ETag: "18261b800-659ed76a65f40"`. Nessun redirect.
+Relevant headers: `HTTP/1.1 200 OK`, `Content-Length: 6482409472`, `Last-Modified: Wed, 26 Aug 2026 06:38:13 GMT`, `ETag: "18261b800-659ed76a65f40"`. No redirect.
 
-Contenuto di `SHA256SUMS`:
+Content of `SHA256SUMS`:
 
 ```text
 487f87faaf547ea30e0aba4d5b53346292571256b25333a978db1692bcee9dd2 *ubuntu-26.04-desktop-amd64.iso
@@ -90,7 +90,7 @@ cc8a95cde20f6ced61a322420de00f10cc3c90ced545daa46cb9c1a117f1d927 *ubuntu-26.04.1
 48d56724b5c8e60f24893e83e73bbb58c60b3ca22fba3da977075420acd54104 *ubuntu-26.04.1-wsl-amd64.wsl
 ```
 
-2. Download dell'ISO in background, con ripresa:
+2. Download of the ISO in the background, with resume:
 
 ```bash
 curl -L --fail --retry 5 --retry-delay 10 -C - -s -S \
@@ -98,9 +98,9 @@ curl -L --fail --retry 5 --retry-delay 10 -C - -s -S \
   https://releases.ubuntu.com/26.04.1/ubuntu-26.04.1-desktop-amd64.iso
 ```
 
-Esito: `exit=0` (log `evidence/curl-iso.log`), nessun errore riportato, nessuna ripresa necessaria. Dimensione finale (`stat -c %s`): **6482409472 byte**, uguale al `Content-Length`.
+Outcome: `exit=0` (log `evidence/curl-iso.log`), no error reported, no resume needed. Final size (`stat -c %s`): **6482409472 bytes**, equal to the `Content-Length`.
 
-3. Identificazione della chiave di firma:
+3. Identification of the signing key:
 
 ```bash
 gpg --list-packets SHA256SUMS.gpg
@@ -116,9 +116,9 @@ gpg --list-packets SHA256SUMS.gpg
 	data: [4096 bits]
 ```
 
-Il file contiene una sola firma (RSA 4096, digest algo 10 = SHA-512). Prima dell'importazione, `gpg --verify` riportava `Can't check signature: No public key`.
+The file contains a single signature (RSA 4096, digest algo 10 = SHA-512). Before the import, `gpg --verify` reported `Can't check signature: No public key`.
 
-4. Importazione della chiave dal keyserver ufficiale, in un keyring dedicato:
+4. Import of the key from the official keyserver, into a dedicated keyring:
 
 ```bash
 export GNUPGHOME=/e/OpenVM/lab/media/gnupg
@@ -135,7 +135,7 @@ pub   rsa4096/D94AA3F0EFE21092 2012-05-11 [SC]
 uid                 [ unknown] Ubuntu CD Image Automatic Signing Key (2012) <cdimage@ubuntu.com>
 ```
 
-5. Confronto con la documentazione ufficiale Ubuntu: `curl -sL https://ubuntu.com/tutorials/how-to-verify-ubuntu` (URL effettivo invariato, HTTP 200; copia in `lab/media/evidence/tutorial-verify.html`, SHA-256 `0d729e63cf9f896e430c412b6837362a96c756accbc6a926116f9afb19b8399c`). Impronte indicate nella pagina:
+5. Comparison with the official Ubuntu documentation: `curl -sL https://ubuntu.com/tutorials/how-to-verify-ubuntu` (effective URL unchanged, HTTP 200; copy in `lab/media/evidence/tutorial-verify.html`, SHA-256 `0d729e63cf9f896e430c412b6837362a96c756accbc6a926116f9afb19b8399c`). Fingerprints given on the page:
 
 ```text
 pub   dsa1024/46181433FBB75451 2004-12-30 [SC]
@@ -144,9 +144,9 @@ pub   rsa4096/D94AA3F0EFE21092 2012-05-11 [SC]
       Key fingerprint = 8439 38DF 228D 22F7 B374  2BC0 D94A A3F0 EFE2 1092
 ```
 
-La chiave che ha firmato `SHA256SUMS` (D94AA3F0EFE21092) coincide carattere per carattere con l'impronta della chiave 2012 indicata nel tutorial. La chiave DSA 2004 (46181433FBB75451) citata nel tutorial non è usata da questa firma e non è stata importata.
+The key that signed `SHA256SUMS` (D94AA3F0EFE21092) matches character by character the fingerprint of the 2012 key given in the tutorial. The 2004 DSA key (46181433FBB75451) mentioned in the tutorial is not used by this signature and was not imported.
 
-6. Verifica del checksum (solo la riga pertinente):
+6. Checksum verification (only the relevant line):
 
 ```bash
 grep ' \*ubuntu-26.04.1-desktop-amd64.iso$' SHA256SUMS > evidence/SHA256SUMS.desktop-26.04.1
@@ -158,7 +158,7 @@ ubuntu-26.04.1-desktop-amd64.iso: OK
 exit=0
 ```
 
-7. Verifica della firma:
+7. Signature verification:
 
 ```bash
 GNUPGHOME=/e/OpenVM/lab/media/gnupg gpg --keyid-format long --verify SHA256SUMS.gpg SHA256SUMS
@@ -174,35 +174,35 @@ Primary key fingerprint: 8439 38DF 228D 22F7 B374  2BC0 D94A A3F0 EFE2 1092
 exit=0
 ```
 
-L'orario `Fri Aug 28 00:43:09 2026` è in ora locale (CEST); il pacchetto firma riporta `sig created 2026-08-27` (UTC).
+The time `Fri Aug 28 00:43:09 2026` is in local time (CEST); the signature packet reports `sig created 2026-08-27` (UTC).
 
-**Avvertenza di fiducia spiegata.** `Good signature` significa che `SHA256SUMS` è stato firmato con la chiave privata corrispondente alla chiave pubblica importata e non è stato alterato. L'avvertenza `not certified with a trusted signature` e il marcatore `[unknown]` indicano soltanto che nel keyring locale nessuna chiave fidata ha certificato questa chiave: non esiste un percorso nel Web of Trust. Non è un errore di verifica. Il legame tra chiave e proprietario è stato stabilito fuori banda, confrontando l'impronta completa con la pagina ufficiale `ubuntu.com` servita via HTTPS (passo 5). Non è stata assegnata fiducia locale alla chiave (`--edit-key trust` non eseguito), per non mascherare questa distinzione.
+**Trust warning explained.** `Good signature` means that `SHA256SUMS` was signed with the private key corresponding to the imported public key and has not been altered. The warning `not certified with a trusted signature` and the `[unknown]` marker only indicate that no trusted key in the local keyring has certified this key: there is no path in the Web of Trust. It is not a verification error. The link between key and owner was established out of band, by comparing the full fingerprint with the official `ubuntu.com` page served over HTTPS (step 5). No local trust was assigned to the key (`--edit-key trust` not run), so as not to mask this distinction.
 
-8. Attestazione: con entrambe le verifiche riuscite è stato creato `lab/media/ubuntu-26.04.1-desktop-amd64.iso.verified` (data UTC, SHA-256, dimensione, impronta della chiave, URL) ed è stato completato `lab/media/MANIFEST.md`.
+8. Attestation: with both checks successful, `lab/media/ubuntu-26.04.1-desktop-amd64.iso.verified` was created (UTC date, SHA-256, size, key fingerprint, URL) and `lab/media/MANIFEST.md` was completed.
 
-## Risultati
+## Results
 
-| Voce | Esito | Evidenza |
+| Item | Outcome | Evidence |
 | --- | --- | --- |
-| Scelta della release (criterio point release) | verificato | indice `releases.ubuntu.com` osservato il 2026-10-09: 26.04.1 LTS è l'ultima point release della LTS più recente |
-| Download ISO completo | verificato | `curl` exit 0; 6482409472 byte = `Content-Length` |
-| SHA-256 ISO contro `SHA256SUMS` | verificato | `ubuntu-26.04.1-desktop-amd64.iso: OK` |
-| Firma GPG di `SHA256SUMS` | verificato | `Good signature`, chiave `8439 38DF 228D 22F7 B374 2BC0 D94A A3F0 EFE2 1092` |
-| Impronta chiave contro documentazione ufficiale | verificato | coincidente con https://ubuntu.com/tutorials/how-to-verify-ubuntu |
-| Presenza della catena UEFI/Secure Boot nel media | verificato sull'elenco pubblicato, non sull'ISO | vedi sezione Firmware |
-| Boot del guest in QEMU/WHPX | non eseguito | fuori ambito (F0-02 / prove successive) |
+| Release choice (point release criterion) | verified | `releases.ubuntu.com` index observed on 2026-10-09: 26.04.1 LTS is the latest point release of the most recent LTS |
+| Complete ISO download | verified | `curl` exit 0; 6482409472 bytes = `Content-Length` |
+| ISO SHA-256 against `SHA256SUMS` | verified | `ubuntu-26.04.1-desktop-amd64.iso: OK` |
+| GPG signature of `SHA256SUMS` | verified | `Good signature`, key `8439 38DF 228D 22F7 B374 2BC0 D94A A3F0 EFE2 1092` |
+| Key fingerprint against official documentation | verified | matches https://ubuntu.com/tutorials/how-to-verify-ubuntu |
+| Presence of the UEFI/Secure Boot chain in the media | verified on the published listing, not on the ISO | see Firmware section |
+| Guest boot in QEMU/WHPX | not executed | out of scope (F0-02 / later tests) |
 
-Artefatti fissati:
+Pinned artifacts:
 
-| Artefatto | SHA-256 | Dimensione |
+| Artifact | SHA-256 | Size |
 | --- | --- | --- |
-| `ubuntu-26.04.1-desktop-amd64.iso` | `601e30fbf5d97759367c632e2c33630665039b7e2158fd068403da3ccf1bda1f` | 6482409472 byte |
-| `SHA256SUMS` | `4adde9f7e7760a624db5821ad75679a76b9cde1e0d3e9cb2117cfe7d8043fa43` | 588 byte |
-| `SHA256SUMS.gpg` | `055292b53dffbc5387c1691e8c2357df0b4db88e7d7fd4c1b36fadf068479c5d` | 833 byte |
+| `ubuntu-26.04.1-desktop-amd64.iso` | `601e30fbf5d97759367c632e2c33630665039b7e2158fd068403da3ccf1bda1f` | 6482409472 bytes |
+| `SHA256SUMS` | `4adde9f7e7760a624db5821ad75679a76b9cde1e0d3e9cb2117cfe7d8043fa43` | 588 bytes |
+| `SHA256SUMS.gpg` | `055292b53dffbc5387c1691e8c2357df0b4db88e7d7fd4c1b36fadf068479c5d` | 833 bytes |
 
-## Firmware richiesto e profilo VM di riferimento
+## Required firmware and reference VM profile
 
-Per non montare l'ISO è stato scaricato l'elenco dei contenuti che Ubuntu pubblica accanto all'immagine: `https://releases.ubuntu.com/26.04.1/ubuntu-26.04.1-desktop-amd64.list`, 951 righe. Questo file non è coperto da `SHA256SUMS`, quindi ha valore indicativo. Righe rilevanti:
+To avoid mounting the ISO, the content listing that Ubuntu publishes next to the image was downloaded: `https://releases.ubuntu.com/26.04.1/ubuntu-26.04.1-desktop-amd64.list`, 951 lines. This file is not covered by `SHA256SUMS`, so it is only indicative. Relevant lines:
 
 ```text
 /EFI/boot/bootx64.efi
@@ -213,36 +213,36 @@ Per non montare l'ISO è stato scaricato l'elenco dei contenuti che Ubuntu pubbl
 /boot/grub/i386-pc/eltorito.img
 ```
 
-- Firmware previsto per il riferimento: **UEFI x86_64** (in QEMU, OVMF/edk2). Il media contiene il loader EFI di fallback (`bootx64.efi`, lo shim firmato in Ubuntu), GRUB EFI e MokManager (`mmx64.efi`): la catena di avvio Secure Boot è presente.
-- **Secure Boot non è necessario** per Ubuntu: la stessa catena shim/GRUB si avvia anche con Secure Boot disattivato. È però supportato, quindi in futuro si può provare anche una variante OVMF con Secure Boot attivo. Questa nota si basa sull'elenco dei file e sul comportamento documentato di Ubuntu, non su un boot eseguito.
-- Il media contiene anche `i386-pc/eltorito.img` (avvio BIOS legacy). La roadmap include l'NVRAM UEFI nel modello di consistenza (sezione 8), quindi il BIOS legacy non è proposto come riferimento.
-- UEFI implica un file di variabili NVRAM per ogni VM, da includere in baseline, overlay e ripristino (roadmap, sezione 8).
-- Profilo minimo di VM consigliato dalla roadmap per il riferimento (sezione 13): **2 vCPU, 4 GiB di RAM, display 1280×720**, su un host di riferimento con almeno 4 core/8 thread, 16 GiB di RAM, SSD e almeno 100 GiB liberi.
+- Firmware planned for the reference: **UEFI x86_64** (in QEMU, OVMF/edk2). The media contains the fallback EFI loader (`bootx64.efi`, the signed shim in Ubuntu), GRUB EFI and MokManager (`mmx64.efi`): the Secure Boot boot chain is present.
+- **Secure Boot is not required** for Ubuntu: the same shim/GRUB chain also boots with Secure Boot disabled. It is however supported, so in the future an OVMF variant with Secure Boot enabled can also be tested. This note is based on the file listing and on Ubuntu's documented behaviour, not on an actual boot.
+- The media also contains `i386-pc/eltorito.img` (legacy BIOS boot). The roadmap includes the UEFI NVRAM in the consistency model (section 8), so legacy BIOS is not proposed as the reference.
+- UEFI implies one NVRAM variables file per VM, to be included in baseline, overlay and restore (roadmap, section 8).
+- Minimum VM profile recommended by the roadmap for the reference (section 13): **2 vCPUs, 4 GiB of RAM, 1280×720 display**, on a reference host with at least 4 cores/8 threads, 16 GiB of RAM, SSD and at least 100 GiB free.
 
-## Limiti
+## Limits
 
-- La verifica GPG dimostra l'integrità e la provenienza di `SHA256SUMS` rispetto alla chiave di firma delle immagini Ubuntu e, tramite lo SHA-256, quelle dell'ISO. Non dimostra che il contenuto sia sicuro, privo di vulnerabilità o adatto al prodotto.
-- La fiducia nella chiave si basa sul keyserver `keyserver.ubuntu.com` e sulla pagina HTTPS `ubuntu.com`, cioè sull'infrastruttura dello stesso editore. Non c'è un'attestazione indipendente tramite Web of Trust.
-- La chiave D94AA3F0EFE21092 risale al 2012 (RSA 4096) e l'elenco non mostra una data di scadenza. Lo stato di revoca è quello restituito dal keyserver al momento dell'importazione: nessuna revoca mostrata.
-- `releases.ubuntu.com/26.04/` e `/26.04.1/` mostrano lo stesso contenuto. Una futura 26.04.2 o una ripubblicazione cambierebbe `SHA256SUMS` in quella directory: il riferimento resta fissato all'hash indicato sopra, non all'URL.
-- L'ISO non è stata avviata. Firmware e compatibilità con QEMU/WHPX restano da provare.
-- Un primo `gpg --verify`, eseguito prima di impostare `GNUPGHOME`, ha creato la directory vuota `~/.gnupg` dell'utente (`gpg: directory '/c/Users/mortali/.gnupg' created`). In quel keyring non è stata importata nessuna chiave.
-- L'ISO in `lab/media/` non è ancora una copia gestita in sola lettura nel senso del registro media approvato (sezione 6.3): è soltanto un artefatto di laboratorio.
+- The GPG verification demonstrates the integrity and provenance of `SHA256SUMS` with respect to the Ubuntu image signing key and, through the SHA-256, those of the ISO. It does not demonstrate that the content is safe, free of vulnerabilities or suitable for the product.
+- Trust in the key relies on the keyserver `keyserver.ubuntu.com` and on the HTTPS page `ubuntu.com`, i.e. on the same publisher's infrastructure. There is no independent attestation through the Web of Trust.
+- The key D94AA3F0EFE21092 dates from 2012 (RSA 4096) and the listing shows no expiry date. The revocation status is the one returned by the keyserver at import time: no revocation shown.
+- `releases.ubuntu.com/26.04/` and `/26.04.1/` show the same content. A future 26.04.2 or a republication would change `SHA256SUMS` in that directory: the reference stays pinned to the hash given above, not to the URL.
+- The ISO was not booted. Firmware and compatibility with QEMU/WHPX remain to be tested.
+- A first `gpg --verify`, run before setting `GNUPGHOME`, created the user's empty `~/.gnupg` directory (`gpg: directory '/c/Users/mortali/.gnupg' created`). No key was imported into that keyring.
+- The ISO in `lab/media/` is not yet a managed read-only copy in the sense of the approved media registry (section 6.3): it is only a lab artifact.
 
-## Azioni richieste
+## Required actions
 
-- Prova di boot del guest con QEMU/WHPX e firmware OVMF fissato (F0-02 o file successivo), registrando l'hash del firmware usato.
-- Registrare release guest e firmware nell'ADR dedicato, e in `docs/COMPATIBILITY.md` solo dopo il boot.
-- Prima di ogni release, controllare se sono usciti una nuova point release o un avviso di sicurezza che rendano necessario aggiornare il riferimento (sezione 17: non si congela una versione vulnerabile).
+- Guest boot test with QEMU/WHPX and pinned OVMF firmware (F0-02 or a later file), recording the hash of the firmware used.
+- Record guest and firmware release in the dedicated ADR, and in `docs/COMPATIBILITY.md` only after the boot.
+- Before each release, check whether a new point release or a security advisory has come out that makes it necessary to update the reference (section 17: a vulnerable version is not frozen).
 
-## Decisioni proposte
+## Proposed decisions
 
-Proposte per l'ADR "release guest e firmware" (non sono decisioni finché l'ADR non è scritto):
+Proposals for the ADR "guest and firmware release" (they are not decisions until the ADR is written):
 
-1. Guest di riferimento del MVP: **Ubuntu 26.04.1 LTS desktop amd64**, file `ubuntu-26.04.1-desktop-amd64.iso`, SHA-256 `601e30fbf5d97759367c632e2c33630665039b7e2158fd068403da3ccf1bda1f`, 6482409472 byte.
-2. L'identità del media è fissata dall'hash, non dall'URL o dal nome del file. Un cambio di hash richiede un aggiornamento dell'ADR con una nuova verifica.
-3. Catena di fiducia accettata: `SHA256SUMS` firmato dalla chiave `8439 38DF 228D 22F7 B374 2BC0 D94A A3F0 EFE2 1092` (Ubuntu CD Image Automatic Signing Key 2012). L'impronta va fissata nel repository e confrontata a ogni nuova acquisizione, usando un keyring dedicato.
-4. Firmware: UEFI x86_64 (OVMF/edk2, versione e hash da fissare con F0-02), con NVRAM per VM inclusa nel modello di ripristino. Secure Boot non è richiesto per il riferimento; la variante con Secure Boot attivo è un test opzionale.
-5. Profilo VM di riferimento: 2 vCPU, 4 GiB, display 1280×720 (roadmap, sezione 13).
-6. Criterio di aggiornamento: adottare una nuova point release della stessa LTS solo dopo una nuova verifica (checksum, firma, boot). Il passaggio a una nuova LTS si valuta solo dopo la sua prima point release.
-7. Alternativa scartata: 24.04.x LTS. È disponibile, ma non è la LTS più recente con una point release.
+1. MVP reference guest: **Ubuntu 26.04.1 LTS desktop amd64**, file `ubuntu-26.04.1-desktop-amd64.iso`, SHA-256 `601e30fbf5d97759367c632e2c33630665039b7e2158fd068403da3ccf1bda1f`, 6482409472 bytes.
+2. The identity of the media is pinned by the hash, not by the URL or the file name. A change of hash requires an update of the ADR with a new verification.
+3. Accepted chain of trust: `SHA256SUMS` signed by the key `8439 38DF 228D 22F7 B374 2BC0 D94A A3F0 EFE2 1092` (Ubuntu CD Image Automatic Signing Key 2012). The fingerprint must be pinned in the repository and compared at every new acquisition, using a dedicated keyring.
+4. Firmware: UEFI x86_64 (OVMF/edk2, version and hash to be pinned with F0-02), with per-VM NVRAM included in the restore model. Secure Boot is not required for the reference; the variant with Secure Boot enabled is an optional test.
+5. Reference VM profile: 2 vCPUs, 4 GiB, 1280×720 display (roadmap, section 13).
+6. Update criterion: adopt a new point release of the same LTS only after a new verification (checksum, signature, boot). Moving to a new LTS is evaluated only after its first point release.
+7. Rejected alternative: 24.04.x LTS. It is available, but it is not the most recent LTS with a point release.

@@ -1,9 +1,9 @@
-//! Interruzione delle operazioni composte attraverso le API di alto livello:
-//! il produttore dei file (in prodotto `qemu-img`, qui una closure) fallisce a
-//! metà di una promozione di baseline o di una preparazione di esecuzione.
-//! Completa `journal.rs`, che simula i crash costruendo gli intenti a mano.
-//! In coda: riconciliazione che non riesce a risolvere un intento ("da
-//! verificare").
+//! Interruption of composite operations through the high-level APIs: the
+//! file producer (`qemu-img` in the product, a closure here) fails halfway
+//! through a baseline promotion or a run preparation.
+//! Complements `journal.rs`, which simulates crashes by building intents by
+//! hand. At the end: reconciliation that cannot resolve an intent ("needs
+//! review").
 
 mod common;
 
@@ -17,7 +17,7 @@ use vm_storage::{
 fn req(vm: &VmId) -> PromoteBaseline {
     PromoteBaseline {
         vm_id: *vm,
-        label: "seconda baseline".into(),
+        label: "second baseline".into(),
         clean_shutdown: true,
         protected: false,
         virtual_size_bytes: 1 << 30,
@@ -25,20 +25,17 @@ fn req(vm: &VmId) -> PromoteBaseline {
 }
 
 fn producer_failure() -> StorageError {
-    StorageError::Unsupported("produttore interrotto (simulato)")
+    StorageError::Unsupported("producer interrupted (simulated)")
 }
 
-/// Nessun file sotto `vms/<vm>/base` oltre alle baseline indicate, `tmp/`
-/// vuota, nessun intento aperto, VM non occupata.
+/// No files under `vms/<vm>/base` other than the given baselines, `tmp/`
+/// empty, no open intents, VM not busy.
 fn assert_clean(dir: &Path, cat: &mut Catalog, vm: &VmId, baselines: &[BaselineId]) {
-    assert!(
-        cat.open_intents().unwrap().is_empty(),
-        "nessun intento aperto"
-    );
+    assert!(cat.open_intents().unwrap().is_empty(), "no open intents");
     assert_eq!(
         std::fs::read_dir(dir.join("tmp")).unwrap().count(),
         0,
-        "tmp/ vuota"
+        "tmp/ empty"
     );
     let base_dir = dir.join("vms").join(vm.to_string()).join("base");
     let mut found: Vec<String> = match std::fs::read_dir(&base_dir) {
@@ -50,12 +47,12 @@ fn assert_clean(dir: &Path, cat: &mut Catalog, vm: &VmId, baselines: &[BaselineI
     found.sort();
     let mut want: Vec<String> = baselines.iter().map(ToString::to_string).collect();
     want.sort();
-    assert_eq!(found, want, "solo le baseline registrate su disco");
+    assert_eq!(found, want, "only the registered baselines on disk");
     let rows = cat.read(|tx| tx.baselines_of_vm(vm)).unwrap();
     assert_eq!(
         rows.len(),
         baselines.len(),
-        "solo le baseline registrate nel DB"
+        "only the registered baselines in the DB"
     );
 }
 
@@ -68,8 +65,8 @@ fn promotion_interrupted_while_writing_the_disk_leaves_nothing() {
         .promote_baseline(
             &req(&vm),
             |p| {
-                // File parziale, poi interruzione.
-                common::write_bytes(p, b"QFI\xfb parziale")?;
+                // Partial file, then interruption.
+                common::write_bytes(p, b"QFI\xfb partial")?;
                 Err(producer_failure())
             },
             None,
@@ -77,7 +74,7 @@ fn promotion_interrupted_while_writing_the_disk_leaves_nothing() {
         .unwrap_err();
     assert!(matches!(err, StorageError::Unsupported(_)), "{err:?}");
     assert_clean(dir.path(), &mut cat, &vm, &[]);
-    // La VM non resta occupata: una promozione successiva riesce.
+    // The VM does not stay busy: a subsequent promotion succeeds.
     let b = common::baseline(&mut cat, &vm, false);
     assert_clean(dir.path(), &mut cat, &vm, &[b]);
 }
@@ -92,16 +89,16 @@ fn promotion_interrupted_while_writing_vars_removes_the_published_disk() {
     let err = cat
         .promote_baseline(
             &req(&vm),
-            |p| common::write_bytes(p, b"QFI\xfb seconda base completa"),
+            |p| common::write_bytes(p, b"QFI\xfb complete second base"),
             Some(Box::new(|p: &Path| {
-                common::write_bytes(p, b"OVMF parziale")?;
+                common::write_bytes(p, b"OVMF partial")?;
                 Err(producer_failure())
             })),
         )
         .unwrap_err();
     assert!(matches!(err, StorageError::Unsupported(_)), "{err:?}");
-    // Il disco della seconda baseline era già pubblicato (intento `applied`):
-    // l'annullamento lo rimuove insieme alla directory.
+    // The second baseline's disk was already published (intent `applied`):
+    // the rollback removes it together with the directory.
     assert_clean(dir.path(), &mut cat, &vm, &[first]);
     assert_eq!(common::base_hash(&mut cat, &first), first_hash);
     assert!(
@@ -121,7 +118,7 @@ fn preparation_interrupted_while_writing_the_overlay_leaves_nothing() {
     let err = cat
         .prepare_run_from_baseline(&vm, &b, |tmp, base| {
             assert!(base.is_file());
-            common::write_bytes(tmp, b"QFI\xfb overlay parziale")?;
+            common::write_bytes(tmp, b"QFI\xfb overlay partial")?;
             Err(producer_failure())
         })
         .unwrap_err();
@@ -131,20 +128,20 @@ fn preparation_interrupted_while_writing_the_overlay_leaves_nothing() {
     let n = std::fs::read_dir(&overlays)
         .map(|it| it.count())
         .unwrap_or(0);
-    assert_eq!(n, 0, "nessun overlay");
+    assert_eq!(n, 0, "no overlay");
     let vm_rec = cat.read(|tx| tx.vm(&vm)).unwrap();
     assert_eq!(vm_rec.lifecycle, Lifecycle::Stopped);
     assert_eq!(common::base_hash(&mut cat, &b), hash);
-    // Nessuna esecuzione registrata; una preparazione successiva riesce.
+    // No run recorded; a subsequent preparation succeeds.
     let run = common::run_from(&mut cat, &vm, &b);
     assert_eq!(cat.read(|tx| tx.run(&run.run_id)).unwrap().vm_id, vm);
 }
 
 #[test]
 fn interrupted_preparation_then_crash_is_reconciled_at_open() {
-    // Processo ucciso durante il produttore: nessun codice di annullamento.
-    // Simulato con un panico nella closure (che salta `abort`), poi il
-    // catalogo viene rilasciato e riaperto.
+    // Process killed during the producer: no rollback code runs.
+    // Simulated with a panic in the closure (which skips `abort`), then the
+    // catalog is released and reopened.
     let dir = common::tempdir();
     let (vm, b) = {
         let mut cat = Catalog::open(dir.path()).unwrap();
@@ -152,12 +149,12 @@ fn interrupted_preparation_then_crash_is_reconciled_at_open() {
         let b = common::baseline(&mut cat, &vm, true);
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _ = cat.prepare_run_from_baseline(&vm, &b, |tmp, _| {
-                common::write_bytes(tmp, b"QFI\xfb overlay parziale").unwrap();
-                panic!("processo terminato durante qemu-img (simulato)");
+                common::write_bytes(tmp, b"QFI\xfb overlay partial").unwrap();
+                panic!("process terminated during qemu-img (simulated)");
             });
         }));
         assert!(r.is_err());
-        // Il panico ha saltato l'annullamento: un intento resta aperto.
+        // The panic skipped the rollback: one intent remains open.
         assert_eq!(cat.open_intents().unwrap().len(), 1);
         (vm, b)
     };
@@ -183,20 +180,20 @@ fn unresolvable_intent_is_marked_needs_review_and_retried() {
             let _ = cat.prepare_run_from_baseline(&vm, &b, |tmp, _| {
                 common::write_bytes(tmp, b"QFI\xfb overlay").unwrap();
                 temp = Some(tmp.to_path_buf());
-                panic!("crash simulato");
+                panic!("simulated crash");
             });
         }));
         assert!(r.is_err());
         (vm, b, temp.unwrap())
     };
-    // Un altro processo tiene il temporaneo aperto in modo esclusivo: la
-    // riconciliazione non può rimuoverlo.
+    // Another process holds the temporary file open exclusively: the
+    // reconciliation cannot remove it.
     let holder = std::fs::OpenOptions::new()
         .read(true)
         .share_mode(0)
         .open(&temp)
         .unwrap();
-    let mut cat = Catalog::open(dir.path()).expect("apertura nonostante l'intento irrisolto");
+    let mut cat = Catalog::open(dir.path()).expect("open despite the unresolved intent");
     let rep = cat.open_report().unwrap().recovery.clone();
     assert_eq!(rep.intents.len(), 1, "{rep:?}");
     assert_eq!(rep.intents[0].outcome, RecoveryOutcome::NeedsReview);
@@ -208,8 +205,8 @@ fn unresolvable_intent_is_marked_needs_review_and_retried() {
         cat.read(|tx| tx.vm(&vm)).unwrap().lifecycle,
         Lifecycle::Recovering
     );
-    // La VM resta bloccata finché l'intento non è risolto: `recovering`
-    // (nessuna esecuzione) e occupata nel journal (nessun nuovo intento).
+    // The VM stays blocked until the intent is resolved: `recovering`
+    // (no run) and busy in the journal (no new intent).
     let err = cat
         .prepare_run_from_baseline(&vm, &b, |t, _| common::write_bytes(t, b"x"))
         .unwrap_err();
@@ -225,7 +222,7 @@ fn unresolvable_intent_is_marked_needs_review_and_retried() {
         .prepare_run_from_baseline(&vm, &b, |t, _| common::write_bytes(t, b"x"))
         .unwrap_err();
     assert!(matches!(err, StorageError::VmBusy(_)), "{err:?}");
-    // Rimossa la causa, la riconciliazione successiva conclude l'intento.
+    // Once the cause is removed, the next reconciliation concludes the intent.
     drop(holder);
     let rep = cat.recover().unwrap();
     assert_eq!(rep.intents.len(), 1);
@@ -239,9 +236,9 @@ fn unresolvable_intent_is_marked_needs_review_and_retried() {
 
 #[test]
 fn crash_between_link_and_temp_removal_keeps_the_base_readonly() {
-    // Pubblicazione con collegamento fisico: temporaneo e destinazione sono lo
-    // stesso file finché il temporaneo non è rimosso. Crash in quel punto con
-    // la riga già registrata: completamento in avanti, base in sola lettura.
+    // Publication via hard link: temporary and destination are the same file
+    // until the temporary is removed. Crash at that point with the row
+    // already recorded: roll forward, base read-only.
     use vm_storage::{
         CatalogLayout, DiskId, DiskRecord, DiskRole, DiskStatus, IntentKind, IntentSpec,
         TargetKind, now_rfc3339,
@@ -294,7 +291,7 @@ fn crash_between_link_and_temp_removal_keeps_the_base_readonly() {
             .unwrap()
             .permissions()
             .readonly(),
-        "base di nuovo in sola lettura"
+        "base read-only again"
     );
     assert_eq!(cat.read(|tx| tx.disk(&disk)).unwrap().disk_id, disk);
     assert_eq!(

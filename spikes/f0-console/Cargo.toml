@@ -1,6 +1,6 @@
 [package]
 name = "f0-console"
-description = "Spike F0-04: QMP minimo (input, screendump), sonde e misure della console"
+description = "Spike F0-04: minimal QMP (input, screendump), console probes and measurements"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -15,7 +15,7 @@ path = "src/lib.rs"
 name = "f0-console"
 path = "src/main.rs"
 
-# Versioni esatte, nessuna sorgente git (ADR-0023).
+# Exact versions, no git sources (ADR-0023).
 [dependencies]
 rfb-client = { path = "../../crates/rfb-client" }
 serde_json = "=1.0.151"

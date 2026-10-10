@@ -1,9 +1,9 @@
-//! Ciclo principale del supervisor: un thread dedicato possiede il motore
-//! delle VM ([`VmEngine`], con `vm_core::Core`) e l'host ([`Backend`]) come
-//! unico proprietario (nessun lock condiviso sullo stato VM) e serve i comandi
-//! in ordine. L'Emergency Stop NON passa da qui: usa [`EmergencyStop`],
-//! ottenuto dall'host all'avvio e chiamabile da qualunque task (ROADMAP 7.3,
-//! ADR-0009); solo dopo la terminazione il supervisor la registra nel core.
+//! Supervisor main loop: a dedicated thread owns the VM engine ([`VmEngine`],
+//! with `vm_core::Core`) and the host ([`Backend`]) as sole owner (no shared
+//! lock on VM state) and serves commands in order. The Emergency Stop does NOT
+//! go through here: it uses [`EmergencyStop`], obtained from the host at
+//! startup and callable from any task (ROADMAP 7.3, ADR-0009); only after the
+//! termination does the supervisor record it in the core.
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
@@ -17,51 +17,51 @@ use tokio::sync::{OwnedSemaphorePermit, broadcast, oneshot, watch};
 
 use crate::engine::VmEngine;
 
-/// Host del servizio: processi, sessioni agente e percorso prioritario.
+/// Service host: processes, agent sessions and priority path.
 ///
-/// Implementazioni: [`crate::adapters::backend::QemuHost`] (reale) e
-/// [`crate::fakes::FakeHost`] (test).
+/// Implementations: [`crate::adapters::backend::QemuHost`] (real) and
+/// [`crate::fakes::FakeHost`] (tests).
 pub trait Backend: Send + 'static {
-    /// Nome del backend.
+    /// Backend name.
     fn name(&self) -> String;
-    /// Acceleratore rilevato, se presente.
+    /// Detected accelerator, if any.
     fn accelerator(&self) -> Option<String>;
-    /// Gestore dell'Emergency Stop, chiamabile fuori dal thread del supervisor.
+    /// Emergency Stop handler, callable outside the supervisor thread.
     fn emergency_handle(&self) -> Arc<dyn EmergencyStop>;
-    /// Arresta le sessioni agente: nessun nuovo inoltro, coda dell'agente scartata.
+    /// Stops agent sessions: no new forwarding, the agent queue is discarded.
     fn stop_agent_sessions(&mut self, reason: StopReason);
-    /// Hook chiamato alla perdita della UI, prima che il servizio applichi
-    /// [`ParentLossPolicy`] (ADR-0015 parte B): con `shutdown_vms` il backend
-    /// adotta l'attesa ACPI indicata per l'arresto che segue.
+    /// Hook called when the UI is lost, before the service applies
+    /// [`ParentLossPolicy`] (ADR-0015 part B): with `shutdown_vms` the backend
+    /// adopts the given ACPI wait for the shutdown that follows.
     fn on_parent_lost(&mut self, policy: ParentLossPolicy);
-    /// Chiamato all'inizio dell'arresto controllato del servizio, prima che
-    /// il motore arresti le VM: il backend adotta un arresto ordinato che
-    /// stia nel timeout del servizio (se una politica non ne ha già scelto uno).
+    /// Called at the start of the controlled service shutdown, before the
+    /// engine stops the VMs: the backend adopts an orderly shutdown that fits
+    /// within the service timeout (unless a policy has already chosen one).
     fn prepare_shutdown(&mut self) {}
-    /// Rilascio finale dell'host (chiamato durante lo shutdown, dopo l'arresto
-    /// delle VM da parte del motore).
+    /// Final release of the host (called during shutdown, after the engine has
+    /// stopped the VMs).
     fn shutdown(&mut self);
 }
 
-/// Percorso prioritario di arresto.
+/// Priority stop path.
 pub trait EmergencyStop: Send + Sync + 'static {
-    /// Termina l'albero dei processi con primitive OS senza attendere QMP.
-    /// Deve restituire solo dopo aver osservato la fine dei processi o un timeout.
+    /// Terminates the process tree with OS primitives without waiting for QMP.
+    /// Must return only after observing the end of the processes or a timeout.
     fn emergency_stop_all(&self) -> EmergencyOutcome;
 }
 
-/// Esito osservato dell'Emergency Stop.
+/// Observed outcome of the Emergency Stop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct EmergencyOutcome {
-    /// Processi di cui è stata osservata la fine.
+    /// Processes whose end was observed.
     pub processes_terminated: u32,
-    /// Vero solo se la fine di tutti i processi è stata osservata.
+    /// True only if the end of all processes was observed.
     pub completed: bool,
 }
 
 pub use lightvm_proto::ipc::ParentLossPolicy;
 
-/// Richieste servite dal thread del supervisor.
+/// Requests served by the supervisor thread.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SupervisorRequest {
     Ping,
@@ -78,8 +78,8 @@ pub(crate) enum SupervisorRequest {
 }
 
 impl SupervisorRequest {
-    /// Richiesta che modifica VM o catalogo: scartata se accodata prima di
-    /// un Emergency Stop.
+    /// Request that modifies VMs or the catalog: discarded if queued before an
+    /// Emergency Stop.
     fn is_mutation(&self) -> bool {
         matches!(
             self,
@@ -93,19 +93,19 @@ pub(crate) type Reply = oneshot::Sender<Result<ResponseBody, ReplyError>>;
 pub(crate) enum Command {
     Request {
         req: SupervisorRequest,
-        /// Chiamante verso il core; `None` per i ruoli senza permessi VM.
+        /// Caller towards the core; `None` for roles without VM permissions.
         caller: Option<Caller>,
-        /// Revoca della connessione: ricontrollata immediatamente prima di
-        /// eseguire (doppio controllo, ROADMAP 7.3).
+        /// Connection revocation: checked again immediately before executing
+        /// (double check, ROADMAP 7.3).
         revoked: watch::Receiver<bool>,
-        /// Generazione dell'Emergency Stop al momento dell'accodamento.
+        /// Emergency Stop generation at the time of queueing.
         epoch: u64,
         reply: Reply,
-        /// Posto in coda: rilasciato quando il comando è servito.
+        /// Queue slot: released when the command is served.
         _permit: OwnedSemaphorePermit,
     },
-    /// L'Emergency Stop ha già terminato i processi: registrazione nel core
-    /// con l'attore che l'ha deciso.
+    /// The Emergency Stop has already terminated the processes: record it in the
+    /// core with the actor who decided it.
     EmergencyReconcile(Actor),
     ParentLost {
         policy: ParentLossPolicy,
@@ -127,7 +127,7 @@ impl std::fmt::Debug for Command {
     }
 }
 
-/// Errore per credenziale o connessione non più valida.
+/// Error for a credential or connection that is no longer valid.
 pub(crate) fn unauthenticated(message: &str) -> ReplyError {
     ReplyError::Operational(PublicError::unauthenticated(message))
 }
@@ -139,12 +139,12 @@ pub(crate) struct SupervisorThread {
     pub(crate) max_frame: u32,
     pub(crate) emergency_epoch: Arc<AtomicU64>,
     pub(crate) parent_loss_policy: Arc<Mutex<ParentLossPolicy>>,
-    /// VM con processo, letto dal conduttore dell'arresto per il suo budget.
+    /// VMs with a process, read by the shutdown driver for its budget.
     pub(crate) vms_with_process: Arc<AtomicUsize>,
 }
 
-/// Intervallo con cui, senza comandi, il supervisor osserva le uscite dei
-/// processi (spegnimento dal guest, crash) e ne pubblica gli eventi.
+/// Interval at which, without commands, the supervisor observes process exits
+/// (shutdown from the guest, crash) and publishes their events.
 const OBSERVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
 impl SupervisorThread {
@@ -169,12 +169,12 @@ impl SupervisorThread {
                     _permit,
                 } => {
                     let res = if *revoked.borrow() {
-                        Err(unauthenticated("connessione revocata"))
+                        Err(unauthenticated("connection revoked"))
                     } else if req.is_mutation()
                         && epoch != self.emergency_epoch.load(Ordering::SeqCst)
                     {
                         Err(ReplyError::Operational(PublicError::state_conflict(
-                            "richiesta scartata dall'Emergency Stop",
+                            "request discarded by the Emergency Stop",
                         )))
                     } else {
                         self.handle(req, caller.as_ref())
@@ -194,12 +194,12 @@ impl SupervisorThread {
                     let _ = self.events.send(ServiceEvent::ServiceState {
                         state: ServiceState::Stopping,
                     });
-                    // Le richieste ancora in coda non vengono eseguite.
+                    // Requests still in the queue are not executed.
                     while let Ok(pending) = rx.try_recv() {
                         match pending {
                             Command::Request { reply, .. } => {
                                 let _ = reply.send(Err(ReplyError::Operational(
-                                    PublicError::state_conflict("servizio in arresto"),
+                                    PublicError::state_conflict("service shutting down"),
                                 )));
                             }
                             Command::EmergencyReconcile(actor) => {
@@ -237,9 +237,7 @@ impl SupervisorThread {
         caller: Option<&Caller>,
     ) -> Result<ResponseBody, ReplyError> {
         let who = || {
-            caller.ok_or_else(|| {
-                PublicError::permission_denied("nessun permesso sulle VM per questo ruolo")
-            })
+            caller.ok_or_else(|| PublicError::permission_denied("no VM permissions for this role"))
         };
         let r = match req {
             SupervisorRequest::Ping => Ok(ResponseBody::Pong),

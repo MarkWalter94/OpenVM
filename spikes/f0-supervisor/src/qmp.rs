@@ -1,4 +1,4 @@
-//! Client QMP minimo su socket Unix (AF_UNIX) per Windows.
+//! Minimal QMP client over a Unix socket (AF_UNIX) for Windows.
 
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
@@ -7,18 +7,18 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use uds_windows::UnixStream;
 
-/// Connessione QMP sincrona con raccolta degli eventi.
+/// Synchronous QMP connection with event collection.
 #[derive(Debug)]
 pub struct Qmp {
     reader: BufReader<UnixStream>,
     writer: UnixStream,
-    /// Eventi ricevuti con l'istante di ricezione.
+    /// Events received with the instant of reception.
     pub events: Vec<(Instant, Value)>,
 }
 
 impl Qmp {
-    /// Si collega ritentando fino a `timeout` (QEMU crea il socket dopo l'avvio)
-    /// ed esegue la negoziazione `qmp_capabilities`.
+    /// Connects, retrying until `timeout` (QEMU creates the socket after startup),
+    /// and performs the `qmp_capabilities` negotiation.
     pub fn connect(path: &Path, timeout: Duration) -> io::Result<Qmp> {
         let start = Instant::now();
         let stream = loop {
@@ -40,7 +40,7 @@ impl Qmp {
         };
         let greeting = q.read_value()?;
         if greeting.get("QMP").is_none() {
-            return Err(io::Error::other(format!("greeting inatteso: {greeting}")));
+            return Err(io::Error::other(format!("unexpected greeting: {greeting}")));
         }
         q.execute("qmp_capabilities", None)?;
         Ok(q)
@@ -50,7 +50,7 @@ impl Qmp {
         let mut line = String::new();
         let n = self.reader.read_line(&mut line)?;
         if n == 0 {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "QMP chiuso"));
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "QMP closed"));
         }
         serde_json::from_str(&line).map_err(io::Error::other)
     }
@@ -59,7 +59,7 @@ impl Qmp {
         self.reader.get_ref().set_read_timeout(Some(t))
     }
 
-    /// Esegue un comando e restituisce `return` (o errore con `error`).
+    /// Executes a command and returns `return` (or an error with `error`).
     pub fn execute(&mut self, cmd: &str, args: Option<Value>) -> io::Result<Value> {
         let msg = match args {
             Some(a) => json!({"execute": cmd, "arguments": a}),
@@ -78,12 +78,12 @@ impl Qmp {
                 return Ok(r.clone());
             }
             if let Some(e) = v.get("error") {
-                return Err(io::Error::other(format!("errore QMP {cmd}: {e}")));
+                return Err(io::Error::other(format!("QMP error {cmd}: {e}")));
             }
         }
     }
 
-    /// Attende un evento con nome dato fino a `timeout`.
+    /// Waits for an event with the given name until `timeout`.
     pub fn wait_event(&mut self, name: &str, timeout: Duration) -> io::Result<Option<Value>> {
         if let Some((_, v)) = self.events.iter().find(|(_, v)| v["event"] == name) {
             return Ok(Some(v.clone()));
@@ -116,7 +116,7 @@ impl Qmp {
         }
     }
 
-    /// Invia un tasto (o combinazione) con `send-key`.
+    /// Sends a key (or combination) with `send-key`.
     pub fn send_keys(&mut self, qcodes: &[&str]) -> io::Result<()> {
         let keys: Vec<Value> = qcodes
             .iter()
@@ -126,11 +126,11 @@ impl Qmp {
         Ok(())
     }
 
-    /// Digita testo ASCII con layout US tramite `send-key`.
+    /// Types ASCII text with the US layout via `send-key`.
     pub fn type_text(&mut self, text: &str) -> io::Result<()> {
         for c in text.chars() {
             let (shift, code) = qcode_for(c)
-                .ok_or_else(|| io::Error::other(format!("carattere non mappato: {c:?}")))?;
+                .ok_or_else(|| io::Error::other(format!("unmapped character: {c:?}")))?;
             if shift {
                 self.send_keys(&["shift", code])?;
             } else {
@@ -142,7 +142,7 @@ impl Qmp {
     }
 }
 
-/// Mappa carattere → (shift, qcode) per layout US.
+/// Maps character → (shift, qcode) for the US layout.
 pub fn qcode_for(c: char) -> Option<(bool, &'static str)> {
     const LETTERS: [&str; 26] = [
         "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r",

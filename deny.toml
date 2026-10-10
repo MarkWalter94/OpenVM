@@ -1,12 +1,12 @@
-# cargo-deny: licenze, advisory, sorgenti e duplicati (ROADMAP 6.0, 6.3; ADR-0023).
-# Eseguito in CI (job `cargo-deny` in .github/workflows/ci.yml) e in locale con
-# `cargo deny --locked check`. Inventario e motivazioni:
-# docs/verification/F1-07-licenze-packaging.md (il primo controllo è in
-# docs/verification/F1-04-service-ipc-ci.md). Lo strumento non sostituisce la
-# revisione umana delle licenze non standard (ADR-0023).
+# cargo-deny: licences, advisories, sources and duplicates (ROADMAP 6.0, 6.3; ADR-0023).
+# Run in CI (job `cargo-deny` in .github/workflows/ci.yml) and locally with
+# `cargo deny --locked check`. Inventory and rationale:
+# docs/verification/F1-07-licences-packaging.md (the first check is in
+# docs/verification/F1-04-service-ipc-ci.md). The tool does not replace human
+# review of non-standard licences (ADR-0023).
 
 [graph]
-# Target dichiarati o in osservazione (macOS solo portabilità).
+# Declared or observed targets (macOS for portability only).
 targets = [
     "x86_64-pc-windows-msvc",
     "x86_64-unknown-linux-gnu",
@@ -19,16 +19,16 @@ no-default-features = false
 feature-depth = 1
 
 [advisories]
-# Database RustSec; nessuna eccezione. Una versione vulnerabile non si congela
-# per rispettare il testo (ROADMAP 17).
+# RustSec database; no exceptions. A vulnerable version is not frozen
+# to comply with the text (ROADMAP 17).
 ignore = []
 
 [licenses]
-# Solo licenze permissive compatibili con la distribuzione MIT del binario.
-# Tutto ciò che non è elencato è negato: in particolare GPL, LGPL, AGPL, MPL,
-# EPL, CDDL, SSPL, licenze "source available" e licenze sconosciute. Le
-# espressioni `OR` con un'opzione copyleft (per esempio `self_cell`:
-# `Apache-2.0 OR GPL-2.0-only`) passano perché si usa il ramo permissivo.
+# Only permissive licences compatible with MIT distribution of the binary.
+# Everything not listed is denied: in particular GPL, LGPL, AGPL, MPL,
+# EPL, CDDL, SSPL, "source available" licences and unknown licences.
+# `OR` expressions with a copyleft option (for example `self_cell`:
+# `Apache-2.0 OR GPL-2.0-only`) pass because the permissive branch is used.
 allow = [
     "0BSD",
     "Apache-2.0",
@@ -43,38 +43,38 @@ allow = [
     "Zlib",
 ]
 confidence-threshold = 0.8
-# Font incorporati da egui: licenze specifiche dei font, ammesse solo per
-# questo crate. Testi da includere nell'inventario di terze parti (F6).
+# Fonts embedded by egui: font-specific licences, allowed only for
+# this crate. Texts to include in the third-party inventory (F6).
 exceptions = [
     { crate = "epaint_default_fonts", allow = ["OFL-1.1", "Ubuntu-font-1.0"] },
 ]
 
 [licenses.private]
-# I crate del workspace hanno `publish = false` e licenza MIT.
+# Workspace crates have `publish = false` and the MIT licence.
 ignore = true
 registries = []
 
 [bans]
-# Duplicati segnalati, non bloccanti: arrivano dalle dipendenze di eframe/wgpu.
+# Duplicates reported, not blocking: they come from eframe/wgpu dependencies.
 multiple-versions = "warn"
 wildcards = "deny"
 highlight = "all"
 workspace-default-features = "allow"
 external-default-features = "allow"
 allow-wildcard-paths = true
-# Profilo offline (ADR-0004) e build senza strumenti esterni: nessun client
-# HTTP, nessuno stack TLS di sistema, nessun provider crittografico che
-# richieda CMake/NASM (rfb-client usa `ring`, F0-04).
+# Offline profile (ADR-0004) and build without external tools: no HTTP
+# client, no system TLS stack, no crypto provider that requires
+# CMake/NASM (rfb-client uses `ring`, F0-04).
 deny = [
-    { crate = "reqwest", reason = "nessun client HTTP nel prodotto MVP offline (ADR-0004)" },
-    { crate = "hyper", reason = "nessuno stack HTTP nel prodotto MVP offline (ADR-0004)" },
-    { crate = "oauth2", reason = "MCP su stdio senza OAuth HTTP (ROADMAP 9)" },
-    { crate = "openssl-sys", reason = "TLS solo tramite rustls (ADR-0013)" },
-    { crate = "native-tls", reason = "TLS solo tramite rustls (ADR-0013)" },
-    { crate = "aws-lc-sys", reason = "richiede CMake/NASM sull'host di build (F0-04)" },
+    { crate = "reqwest", reason = "no HTTP client in the offline MVP product (ADR-0004)" },
+    { crate = "hyper", reason = "no HTTP stack in the offline MVP product (ADR-0004)" },
+    { crate = "oauth2", reason = "MCP over stdio without HTTP OAuth (ROADMAP 9)" },
+    { crate = "openssl-sys", reason = "TLS only through rustls (ADR-0013)" },
+    { crate = "native-tls", reason = "TLS only through rustls (ADR-0013)" },
+    { crate = "aws-lc-sys", reason = "requires CMake/NASM on the build host (F0-04)" },
 ]
-# SDK MCP (ADR-0021): solo server su stdio. Le feature di trasporto HTTP,
-# OAuth e client sono negate anche se in futuro una dipendenza le attivasse.
+# MCP SDK (ADR-0021): stdio server only. HTTP transport, OAuth and client
+# features are denied even if a dependency were to enable them in the future.
 features = [
     { crate = "rmcp", deny = [
         "auth",
@@ -94,7 +94,7 @@ features = [
 ]
 
 [sources]
-# Solo crates.io; nessuna dipendenza git né registri alternativi (ROADMAP 6.3).
+# crates.io only; no git dependencies or alternative registries (ROADMAP 6.3).
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]

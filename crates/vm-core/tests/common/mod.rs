@@ -1,5 +1,5 @@
-//! Implementazioni finte delle porte, in memoria. Nessun QEMU, nessun SQLite:
-//! i test che le usano verificano logica e protocollo, non il boot reale.
+//! Fake in-memory implementations of the ports. No QEMU, no SQLite:
+//! the tests that use them check logic and protocol, not the real boot.
 
 #![allow(dead_code, unreachable_pub)]
 
@@ -51,7 +51,7 @@ pub struct MemStoreInner {
     pub media: BTreeMap<MediaId, MediaEntry>,
     pub ops: BTreeMap<OperationId, OperationRecord>,
     pub runs: BTreeMap<RunId, RunRecord>,
-    /// Sequenza degli stati persistiti, per verificare le transizioni.
+    /// Sequence of persisted states, to check the transitions.
     pub state_log: Vec<(VmId, VmState)>,
 }
 
@@ -73,8 +73,8 @@ impl CatalogStore for MemStore {
                 *v = vm.clone();
                 Ok(())
             }
-            Some(_) => Err(PublicError::state_conflict("revisione diversa")),
-            None => Err(PublicError::not_found("VM inesistente")),
+            Some(_) => Err(PublicError::state_conflict("different revision")),
+            None => Err(PublicError::not_found("VM does not exist")),
         }
     }
     fn list_vms(&self) -> Result<Vec<VmRecord>, PublicError> {
@@ -123,15 +123,15 @@ impl CatalogStore for MemStore {
     }
 }
 
-/// Audit in memoria. Con il secondo campo a `true` ogni scrittura fallisce
-/// (destinazione dell'audit non disponibile).
+/// In-memory audit. With the second field set to `true` every write fails
+/// (audit destination unavailable).
 #[derive(Clone, Debug, Default)]
 pub struct MemAudit(pub Rc<RefCell<Vec<AuditEvent>>>, pub Rc<Cell<bool>>);
 
 impl AuditSink for MemAudit {
     fn append(&mut self, event: &AuditEvent) -> Result<(), PublicError> {
         if self.1.get() {
-            return Err(PublicError::infrastructure("audit non disponibile"));
+            return Err(PublicError::infrastructure("audit unavailable"));
         }
         self.0.borrow_mut().push(event.clone());
         Ok(())
@@ -226,16 +226,16 @@ impl VmBackend for FakeBackend {
     }
 }
 
-/// Ispettore che restituisce i fatti registrati, salvo sostituzioni simulate.
+/// Inspector that returns the registered facts, except for simulated replacements.
 #[derive(Debug, Default)]
 pub struct FakeInspector {
-    /// Contenuto sostituito (hash diverso).
+    /// Replaced content (different hash).
     pub replaced: BTreeSet<MediaId>,
-    /// Copia gestita trovata scrivibile.
+    /// Managed copy found writable.
     pub writable: BTreeSet<MediaId>,
-    /// Identità OS diversa (file sostituito con stesso contenuto).
+    /// Different OS identity (file replaced with the same content).
     pub moved: BTreeSet<MediaId>,
-    /// Ispezione impossibile (file mancante o illeggibile).
+    /// Inspection impossible (file missing or unreadable).
     pub unreadable: BTreeSet<MediaId>,
 }
 
@@ -243,7 +243,7 @@ impl MediaInspector for FakeInspector {
     fn inspect(&mut self, entry: &MediaEntry) -> Result<ObservedMediaFacts, PublicError> {
         let id = entry.record.id;
         if self.unreadable.contains(&id) {
-            return Err(PublicError::infrastructure("copia gestita non leggibile"));
+            return Err(PublicError::infrastructure("managed copy not readable"));
         }
         let mut sha = entry.record.sha256;
         if self.replaced.contains(&id) {
@@ -351,7 +351,7 @@ impl Harness {
                 kind,
                 sha256: Sha256Digest::from_bytes([1; 32]),
                 size_bytes: 6 * 1024 * 1024 * 1024,
-                declared_origin: Label::parse("scaricata dall'utente").unwrap(),
+                declared_origin: Label::parse("downloaded by the user").unwrap(),
                 managed_path: ManagedRelPath::parse(format!("media/{name}")).unwrap(),
                 file_identity: Some(FileIdentity {
                     volume: 1,
@@ -406,7 +406,7 @@ impl Harness {
         out
     }
 
-    /// Avvia la VM come utente e restituisce il nuovo run_id.
+    /// Starts the VM as the user and returns the new run_id.
     pub fn start(&mut self, vm: VmId) -> RunId {
         let r = self.req(vm, None, VmAction::Start);
         self.core.submit(&Caller::User, r).unwrap();

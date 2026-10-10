@@ -1,9 +1,9 @@
-//! Manifest JSON versionati per VM e baseline, accanto ai dati.
+//! Versioned JSON manifests for VMs and baselines, stored next to the data.
 //!
-//! Il manifest è una copia leggibile e autonoma dei metadati essenziali; il suo
-//! SHA-256 (dei byte scritti) è registrato nel DB. [`Divergence`] elenca le
-//! differenze rilevate tra file e DB. Il manifest non è una prova forense: è
-//! modificabile dallo stesso utente (ROADMAP sezione 9).
+//! The manifest is a readable, self-contained copy of the essential metadata;
+//! its SHA-256 (of the bytes written) is recorded in the DB. [`Divergence`]
+//! lists the differences detected between file and DB. The manifest is not
+//! forensic evidence: the same user can modify it (ROADMAP section 9).
 
 use std::io::{Read, Write};
 use std::path::Path;
@@ -17,114 +17,114 @@ use crate::ids::{BaselineId, MediaId, VmId};
 use crate::layout::CatalogLayout;
 use crate::paths::ManagedPath;
 
-/// Versione del formato dei manifest scritti da questo binario.
+/// Format version of the manifests written by this binary.
 pub const MANIFEST_FORMAT_VERSION: u32 = 1;
 
-/// File gestito citato da un manifest.
+/// Managed file referenced by a manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManifestFile {
-    /// Ruolo (`primary`, `base`, `overlay`, `vars`).
+    /// Role (`primary`, `base`, `overlay`, `vars`).
     pub role: String,
-    /// Percorso relativo alla radice del catalogo.
+    /// Path relative to the catalog root.
     pub path: String,
-    /// SHA-256, se noto.
+    /// SHA-256, if known.
     pub sha256: Option<String>,
 }
 
-/// Media collegato citato dal manifest della VM.
+/// Attached media referenced by the VM manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManifestMedia {
     /// Slot.
     pub slot: MediaSlot,
     /// Media.
     pub media_id: MediaId,
-    /// SHA-256 della copia gestita.
+    /// SHA-256 of the managed copy.
     pub sha256: String,
 }
 
-/// Manifest di una VM (`vms/<vm_id>/manifest.json`).
+/// Manifest of a VM (`vms/<vm_id>/manifest.json`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VmManifest {
     /// Versione del formato.
     pub format_version: u32,
-    /// Sempre `"vm"`.
+    /// Always `"vm"`.
     pub kind: String,
     /// VM.
     pub vm_id: VmId,
-    /// Nome.
+    /// Name.
     pub name: String,
-    /// Sistema operativo guest.
+    /// Guest operating system.
     pub guest_os: String,
-    /// Versione dello schema di configurazione.
+    /// Configuration schema version.
     pub config_version: u32,
-    /// Revisione della configurazione.
+    /// Configuration revision.
     pub config_revision: u64,
-    /// Configurazione.
+    /// Configuration.
     pub config: serde_json::Value,
-    /// Dischi non di baseline (primario e overlay), ordinati per percorso.
+    /// Non-baseline disks (primary and overlays), sorted by path.
     pub disks: Vec<ManifestFile>,
-    /// Media collegati.
+    /// Attached media.
     pub media: Vec<ManifestMedia>,
-    /// Baseline della VM, ordinate.
+    /// Baselines of the VM, sorted.
     pub baselines: Vec<BaselineId>,
 }
 
-/// Manifest di una baseline (`vms/<vm_id>/base/<baseline_id>/manifest.json`).
+/// Manifest of a baseline (`vms/<vm_id>/base/<baseline_id>/manifest.json`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BaselineManifest {
     /// Versione del formato.
     pub format_version: u32,
-    /// Sempre `"baseline"`.
+    /// Always `"baseline"`.
     pub kind: String,
     /// Baseline.
     pub baseline_id: BaselineId,
     /// VM.
     pub vm_id: VmId,
-    /// Etichetta.
+    /// Label.
     pub label: String,
-    /// Revisione della configurazione della VM al momento della baseline.
+    /// VM configuration revision at the time of the baseline.
     pub config_revision: u64,
-    /// Configurazione della VM al momento della baseline.
+    /// VM configuration at the time of the baseline.
     pub config: serde_json::Value,
-    /// Disco base immutabile.
+    /// Immutable base disk.
     pub disk: ManifestFile,
-    /// Stato firmware della baseline.
+    /// Firmware state of the baseline.
     pub vars: Option<ManifestFile>,
-    /// Creata a VM spenta (sempre `true`).
+    /// Created with the VM powered off (always `true`).
     pub created_powered_off: bool,
-    /// Arresto pulito osservato.
+    /// Clean shutdown observed.
     pub clean_shutdown: bool,
-    /// Creazione (UTC).
+    /// Creation time (UTC).
     pub created_at: String,
 }
 
-/// Divergenza tra manifest su file e catalogo.
+/// Divergence between the on-disk manifest and the catalog.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Divergence {
-    /// Il DB non registra un hash di manifest.
+    /// The DB does not record a manifest hash.
     HashNotRecorded,
-    /// File del manifest assente.
+    /// Manifest file missing.
     ManifestMissing,
-    /// File presente ma illeggibile o non conforme.
+    /// File present but unreadable or non-conforming.
     ManifestUnreadable(String),
-    /// SHA-256 del file diverso da quello registrato.
+    /// File SHA-256 differs from the recorded one.
     HashMismatch {
-        /// Registrato nel DB.
+        /// Recorded in the DB.
         recorded: String,
-        /// Calcolato sul file.
+        /// Computed on the file.
         actual: String,
     },
-    /// Formato più recente di quello supportato.
+    /// Format newer than the supported one.
     UnsupportedFormat(u32),
-    /// Campo diverso dal DB.
+    /// Field differs from the DB.
     FieldMismatch(&'static str),
-    /// File di dati citato assente.
+    /// Referenced data file missing.
     DataFileMissing(String),
-    /// SHA-256 di un file di dati diverso (solo verifica profonda).
+    /// SHA-256 of a data file differs (deep verification only).
     DataHashMismatch(String),
 }
 
-/// SHA-256 esadecimale di un file, letto a blocchi.
+/// Hex SHA-256 of a file, read in chunks.
 pub fn sha256_file(path: &Path) -> Result<String> {
     let mut f = std::fs::File::open(path).map_err(|e| StorageError::io(path, e))?;
     let mut h = Sha256::new();
@@ -139,9 +139,9 @@ pub fn sha256_file(path: &Path) -> Result<String> {
     Ok(crate::hex(&h.finalize()))
 }
 
-/// Serializza in JSON leggibile e scrive in modo atomico: file temporaneo in
-/// `tmp/`, `sync_all`, rinomina sulla destinazione. Restituisce lo SHA-256 dei
-/// byte scritti.
+/// Serializes to human-readable JSON and writes atomically: temporary file in
+/// `tmp/`, `sync_all`, rename onto the destination. Returns the SHA-256 of the
+/// bytes written.
 pub(crate) fn write_atomic<T: Serialize>(
     layout: &CatalogLayout,
     rel: &ManagedPath,
@@ -168,7 +168,7 @@ pub(crate) fn write_atomic<T: Serialize>(
     Ok(sha)
 }
 
-/// Legge un manifest verificandone l'hash rispetto a `recorded`.
+/// Reads a manifest, checking its hash against `recorded`.
 pub(crate) fn read_checked<T: for<'de> Deserialize<'de>>(
     layout: &CatalogLayout,
     rel: &ManagedPath,

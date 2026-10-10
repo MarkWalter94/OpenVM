@@ -1,8 +1,8 @@
-//! Console reale dello spike F0-04: framebuffer dal client RFB in sola lettura
-//! (`rfb-client`) e input verso QEMU **solo** tramite QMP (`input-send-event`).
+//! Real console of the F0-04 spike: framebuffer from the read-only RFB client
+//! (`rfb-client`) and input to QEMU **only** through QMP (`input-send-event`).
 //!
-//! La UI non costruisce alcuna configurazione QEMU: riceve i percorsi dei
-//! socket da riga di comando e non espone campi di testo.
+//! The UI builds no QEMU configuration: it receives the socket paths from the
+//! command line and exposes no text fields.
 
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -13,42 +13,42 @@ use f0_console::qmp::{Button, InputEvent, Qmp, scale_abs};
 use rfb_client::{Framebuffer, Rect, Session, SessionConfig, SessionEvent, Transport};
 
 use crate::keymap::{self, KeyboardLayout};
-use crate::tema;
+use crate::theme;
 
-/// Parametri della console reale (da riga di comando).
+/// Parameters of the real console (from the command line).
 #[derive(Clone, Debug)]
 pub struct ConsoleConfig {
-    /// Trasporto RFB.
+    /// RFB transport.
     pub vnc: Transport,
-    /// Socket Unix QMP.
+    /// QMP Unix socket.
     pub qmp_socket: PathBuf,
-    /// Directory in cui salvare gli screenshot (il PPM temporaneo va in `tmp_dir`).
+    /// Directory where screenshots are saved (the temporary PPM goes to `tmp_dir`).
     pub capture_dir: PathBuf,
-    /// Directory privata per il PPM temporaneo di `screendump`.
+    /// Private directory for the temporary PPM of `screendump`.
     pub tmp_dir: PathBuf,
-    /// Layout dichiarato del guest.
+    /// Declared layout of the guest.
     pub layout: KeyboardLayout,
-    /// Massimo di aggiornamenti RFB al secondo.
+    /// Maximum RFB updates per second.
     pub max_fps: u32,
 }
 
-/// Comandi verso il thread QMP.
+/// Commands to the QMP thread.
 #[derive(Debug)]
 pub enum QmpCmd {
-    /// Eventi di input da inviare in un'unica `input-send-event`.
+    /// Input events to send in a single `input-send-event`.
     Input(Vec<InputEvent>),
     /// Screenshot via `screendump`.
     Screenshot,
 }
 
-/// Stato dei tasti e dei pulsanti inoltrati, per il rilascio alla perdita di focus.
+/// State of the forwarded keys and buttons, for releasing them when focus is lost.
 #[derive(Debug, Default)]
 pub struct InputState {
     pressed_keys: Vec<&'static str>,
     pressed_buttons: Vec<Button>,
     last_abs: Option<(u32, u32)>,
-    /// Puntatore sopra l'immagine della console: solo allora la rotella va
-    /// al guest.
+    /// Pointer over the console image: only then does the wheel go to the
+    /// guest.
     pointer_inside: bool,
 }
 
@@ -62,16 +62,16 @@ fn egui_button(b: egui::PointerButton) -> Option<Button> {
 }
 
 impl InputState {
-    /// Tasti attualmente premuti verso il guest.
+    /// Keys currently pressed towards the guest.
     pub fn pressed_keys(&self) -> &[&'static str] {
         &self.pressed_keys
     }
 
-    /// Traduce gli eventi egui di un frame in eventi QMP.
-    /// - `keyboard`: la console ha il focus della tastiera;
-    /// - `to_fb`: converte una posizione dello schermo in pixel del guest
-    ///   (`None` fuori dall'immagine);
-    /// - `geom`: geometria corrente del guest, per scalare gli assi.
+    /// Translates the egui events of a frame into QMP events.
+    /// - `keyboard`: the console has keyboard focus;
+    /// - `to_fb`: converts a screen position into guest pixels (`None`
+    ///   outside the image);
+    /// - `geom`: current guest geometry, to scale the axes.
     pub fn translate(
         &mut self,
         events: &[egui::Event],
@@ -92,7 +92,7 @@ impl InputState {
                         continue;
                     };
                     if *pressed {
-                        // L'autorepeat è prodotto dal guest finché il tasto resta premuto.
+                        // Autorepeat is produced by the guest while the key stays pressed.
                         if *repeat || self.pressed_keys.contains(&q) {
                             continue;
                         }
@@ -109,11 +109,12 @@ impl InputState {
                         });
                     }
                 }
-                // egui-winit trasforma Ctrl+C/X/V in eventi dedicati senza `Key`:
-                // si ricostruisce la pressione del tasto (Ctrl è già premuto).
-                // Il contenuto di `Paste` (appunti host) è scartato. Di norma
-                // `Paste` non arriva qui: `crate::appunti` lo sostituisce prima
-                // con i tasti fisici; questo ramo resta come seconda difesa.
+                // egui-winit turns Ctrl+C/X/V into dedicated events without
+                // `Key`: the key press is reconstructed (Ctrl is already
+                // pressed). The content of `Paste` (host clipboard) is
+                // discarded. Normally `Paste` does not get here:
+                // `crate::clipboard` replaces it earlier with the physical
+                // keys; this branch remains as a second defence.
                 egui::Event::Copy if keyboard => tap(&mut out, "c"),
                 egui::Event::Cut if keyboard => tap(&mut out, "x"),
                 egui::Event::Paste(_) if keyboard => tap(&mut out, "v"),
@@ -185,8 +186,8 @@ impl InputState {
         }
     }
 
-    /// Rilascia tutti i tasti e i pulsanti premuti (perdita di focus,
-    /// disconnessione, chiusura).
+    /// Releases all pressed keys and buttons (focus loss, disconnection,
+    /// close).
     pub fn release_all(&mut self) -> Vec<InputEvent> {
         let mut out: Vec<InputEvent> = self
             .pressed_keys
@@ -217,33 +218,33 @@ fn tap(out: &mut Vec<InputEvent>, q: &'static str) {
     });
 }
 
-/// Stato visibile della connessione.
+/// Visible state of the connection.
 #[derive(Clone, Debug, Default)]
 pub struct LinkStatus {
-    /// Testo dello stato RFB.
+    /// Text of the RFB state.
     pub rfb: String,
-    /// Testo dello stato QMP.
+    /// Text of the QMP state.
     pub qmp: String,
-    /// Esito dell'ultimo screenshot.
+    /// Outcome of the last screenshot.
     pub screenshot: String,
 }
 
-/// Contatori della console per lo smoke.
+/// Console counters for the smoke test.
 #[derive(Clone, Debug, Default)]
 pub struct ConsoleStats {
-    /// Aggiornamenti RFB ricevuti dalla UI.
+    /// RFB updates received by the UI.
     pub rfb_updates: u64,
-    /// Chiamate `set_partial`/`set` sulla texture.
+    /// `set_partial`/`set` calls on the texture.
     pub texture_uploads: u64,
-    /// Pixel caricati nella texture.
+    /// Pixels uploaded to the texture.
     pub uploaded_pixels: u64,
-    /// Eventi di input inviati al thread QMP.
+    /// Input events sent to the QMP thread.
     pub input_events: u64,
-    /// Ridimensionamenti.
+    /// Resizes.
     pub resizes: u64,
 }
 
-/// Console collegata a QEMU.
+/// Console connected to QEMU.
 pub struct LiveConsole {
     config: ConsoleConfig,
     session: Option<Session>,
@@ -256,9 +257,9 @@ pub struct LiveConsole {
     connected: bool,
     input: InputState,
     had_focus: bool,
-    /// Frame sintetico da caricare (solo test: nessuna connessione a QEMU).
-    sintetico: Option<egui::ColorImage>,
-    /// Contatori.
+    /// Synthetic frame to upload (tests only: no connection to QEMU).
+    synthetic: Option<egui::ColorImage>,
+    /// Counters.
     pub stats: ConsoleStats,
 }
 
@@ -273,7 +274,7 @@ impl std::fmt::Debug for LiveConsole {
 }
 
 impl LiveConsole {
-    /// Crea la console (la connessione parte al primo frame).
+    /// Creates the console (the connection starts at the first frame).
     pub fn new(config: ConsoleConfig) -> Self {
         Self {
             config,
@@ -282,8 +283,8 @@ impl LiveConsole {
             fb: None,
             qmp_tx: None,
             status: Arc::new(Mutex::new(LinkStatus {
-                rfb: "non avviata".into(),
-                qmp: "non avviato".into(),
+                rfb: "not started".into(),
+                qmp: "not started".into(),
                 screenshot: String::new(),
             })),
             texture: None,
@@ -291,24 +292,24 @@ impl LiveConsole {
             connected: false,
             input: InputState::default(),
             had_focus: false,
-            sintetico: None,
+            synthetic: None,
             stats: ConsoleStats::default(),
         }
     }
 
-    /// Console senza QEMU con un frame fisso, per i test headless (istantanee
-    /// e inoltro dei tasti). Non apre socket né thread: gli eventi che la UI
-    /// invierebbe via QMP arrivano sul `Receiver` restituito. Non è
-    /// raggiungibile da riga di comando (ADR-0022, criterio 5).
+    /// Console without QEMU with a fixed frame, for headless tests
+    /// (snapshots and key forwarding). It opens no socket or thread: the
+    /// events the UI would send via QMP arrive on the returned `Receiver`. It
+    /// is not reachable from the command line (ADR-0022, criterion 5).
     #[doc(hidden)]
-    pub fn sintetica(layout: KeyboardLayout, frame: egui::ColorImage) -> (Self, Receiver<QmpCmd>) {
-        let dir = std::env::temp_dir().join("lightvm-console-sintetica");
+    pub fn synthetic(layout: KeyboardLayout, frame: egui::ColorImage) -> (Self, Receiver<QmpCmd>) {
+        let dir = std::env::temp_dir().join("lightvm-synthetic-console");
         let mut c = Self::new(ConsoleConfig {
             vnc: Transport::Unix {
-                path: dir.join("nessun-socket"),
+                path: dir.join("no-socket"),
                 imp: rfb_client::UnixImpl::Socket2,
             },
-            qmp_socket: dir.join("nessun-socket"),
+            qmp_socket: dir.join("no-socket"),
             capture_dir: dir.clone(),
             tmp_dir: dir,
             layout,
@@ -322,24 +323,24 @@ impl LiveConsole {
             u16::try_from(frame.size[1]).unwrap_or(u16::MAX),
         );
         if let Ok(mut s) = c.status.lock() {
-            s.rfb = "frame sintetico (test, nessun QEMU)".into();
-            s.qmp = "canale di test".into();
+            s.rfb = "synthetic frame (test, no QEMU)".into();
+            s.qmp = "test channel".into();
         }
-        c.sintetico = Some(frame);
+        c.synthetic = Some(frame);
         (c, rx)
     }
 
-    /// Layout dichiarato.
+    /// Declared layout.
     pub fn layout(&self) -> KeyboardLayout {
         self.config.layout
     }
 
-    /// Geometria corrente del guest.
+    /// Current guest geometry.
     pub fn geometry(&self) -> (u16, u16) {
         self.geometry
     }
 
-    /// Copia del framebuffer condiviso (per lo smoke).
+    /// Copy of the shared framebuffer (for the smoke test).
     pub fn framebuffer_snapshot(&self) -> Option<Framebuffer> {
         self.fb
             .as_ref()
@@ -363,7 +364,7 @@ impl LiveConsole {
         self.session = Some(session);
         self.events = Some(rx);
         if let Ok(mut s) = self.status.lock() {
-            s.rfb = "connessione in corso".into();
+            s.rfb = "connecting".into();
         }
 
         let (qtx, qrx) = channel::<QmpCmd>();
@@ -386,7 +387,7 @@ impl LiveConsole {
         }
     }
 
-    /// Il pannello non è visibile: rilascia i tasti se aveva il focus.
+    /// The panel is not visible: releases the keys if it had focus.
     pub fn on_hidden(&mut self) {
         if self.had_focus {
             self.release_all();
@@ -394,14 +395,14 @@ impl LiveConsole {
         }
     }
 
-    /// Chiede uno screenshot via QMP.
+    /// Requests a screenshot via QMP.
     pub fn request_screenshot(&mut self) {
         if let Some(tx) = &self.qmp_tx {
             let _ = tx.send(QmpCmd::Screenshot);
         }
     }
 
-    /// Rilascia tutti i tasti premuti verso il guest.
+    /// Releases all keys pressed towards the guest.
     pub fn release_all(&mut self) {
         let ev = self.input.release_all();
         self.send(ev);
@@ -418,7 +419,7 @@ impl LiveConsole {
                     self.geometry = (init.width, init.height);
                     full = true;
                     if let Ok(mut s) = self.status.lock() {
-                        s.rfb = format!("connesso ({security}), desktop \"{}\"", init.name);
+                        s.rfb = format!("connected ({security}), desktop \"{}\"", init.name);
                     }
                 }
                 SessionEvent::Update(u) => {
@@ -434,8 +435,8 @@ impl LiveConsole {
                     self.connected = false;
                     if let Ok(mut s) = self.status.lock() {
                         s.rfb = match error {
-                            Some(e) => format!("disconnesso: {e}"),
-                            None => "disconnesso".into(),
+                            Some(e) => format!("disconnected: {e}"),
+                            None => "disconnected".into(),
                         };
                     }
                 }
@@ -465,7 +466,7 @@ impl LiveConsole {
             self.stats.uploaded_pixels += (size[0] * size[1]) as u64;
             return;
         }
-        // Molti rettangoli piccoli: un solo caricamento del rettangolo che li contiene.
+        // Many small rectangles: a single upload of the rectangle containing them.
         if dirty.len() > 32 {
             let u = dirty.iter().skip(1).fold(dirty[0], |a, r| a.union(r));
             dirty = vec![u];
@@ -491,11 +492,11 @@ impl LiveConsole {
         }
     }
 
-    /// Disegna il pannello Console.
+    /// Draws the Console panel.
     pub fn ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        if let Some(frame) = self.sintetico.take() {
+        if let Some(frame) = self.synthetic.take() {
             self.texture =
-                Some(ctx.load_texture("console-sintetica", frame, egui::TextureOptions::LINEAR));
+                Some(ctx.load_texture("console-synthetic", frame, egui::TextureOptions::LINEAR));
             self.stats.texture_uploads += 1;
         } else if self.session.is_none() && self.texture.is_none() {
             self.start(ctx);
@@ -503,12 +504,12 @@ impl LiveConsole {
         self.pump_updates(ctx);
         let status = self.status.lock().map(|s| s.clone()).unwrap_or_default();
 
-        let p = tema::Palette::di(ui);
+        let p = theme::Palette::of(ui);
         let mut screenshot = false;
-        tema::intestazione(
+        theme::page_header(
             ui,
             "Console",
-            "Schermo del guest: clic sull'immagine per inviare tastiera e mouse.",
+            "Screen of the guest: click on the image to send keyboard and mouse.",
             |ui| screenshot = ui.button("Screenshot").clicked(),
         );
         if screenshot {
@@ -516,20 +517,20 @@ impl LiveConsole {
         }
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 18.0;
-            let tono = if self.connected {
-                tema::Tono::Positivo
+            let tone = if self.connected {
+                theme::Tone::Positive
             } else {
-                tema::Tono::Pericolo
+                theme::Tone::Danger
             };
-            tema::stato(ui, &format!("RFB: {}", status.rfb), tono);
-            let debole = |t: String| egui::RichText::new(t).color(p.testo_debole);
-            ui.label(debole(format!(
-                "Geometria: {}×{}",
+            theme::status(ui, &format!("RFB: {}", status.rfb), tone);
+            let weak = |t: String| egui::RichText::new(t).color(p.text_weak);
+            ui.label(weak(format!(
+                "Geometry: {}×{}",
                 self.geometry.0, self.geometry.1
             )));
-            ui.label(debole(format!("Input QMP: {}", status.qmp)));
-            ui.label(debole(format!(
-                "Layout guest: {}",
+            ui.label(weak(format!("QMP input: {}", status.qmp)));
+            ui.label(weak(format!(
+                "Guest layout: {}",
                 self.config.layout.label()
             )));
         });
@@ -537,13 +538,13 @@ impl LiveConsole {
             ui.label(
                 egui::RichText::new(&status.screenshot)
                     .small()
-                    .color(p.testo_debole),
+                    .color(p.text_weak),
             );
         }
         ui.add_space(8.0);
 
         let Some(tex) = &self.texture else {
-            ui.label("In attesa del primo aggiornamento del framebuffer…");
+            ui.label("Waiting for the first framebuffer update…");
             return;
         };
         let avail = ui.available_size();
@@ -559,12 +560,12 @@ impl LiveConsole {
         let resp = ui.add(
             egui::Image::new((tex.id(), size))
                 .sense(egui::Sense::click_and_drag())
-                .alt_text("Framebuffer della console del guest"),
+                .alt_text("Guest console framebuffer"),
         );
         if resp.clicked() || resp.drag_started() {
             resp.request_focus();
         }
-        // Con il focus, Tab, frecce ed Esc vanno al guest e non alla navigazione egui.
+        // With focus, Tab, arrows and Esc go to the guest and not to egui navigation.
         ui.memory_mut(|m| {
             m.set_focus_lock_filter(
                 resp.id,
@@ -596,13 +597,13 @@ impl LiveConsole {
         let events = ctx.input(|i| i.events.clone());
         let out = self.input.translate(&events, focused, &to_fb, geom);
         self.send(out);
-        let bordo = if focused {
-            egui::Stroke::new(2.0, p.accento)
+        let border = if focused {
+            egui::Stroke::new(2.0, p.accent)
         } else {
-            egui::Stroke::new(1.0, p.bordo)
+            egui::Stroke::new(1.0, p.border)
         };
         ui.painter()
-            .rect_stroke(rect, 2.0, bordo, egui::StrokeKind::Outside);
+            .rect_stroke(rect, 2.0, border, egui::StrokeKind::Outside);
     }
 }
 
@@ -629,11 +630,11 @@ fn qmp_worker(
 ) {
     let mut q = match Qmp::connect(&cfg.qmp_socket) {
         Ok(q) => {
-            set_status(status, |s| s.qmp = "connesso".into());
+            set_status(status, |s| s.qmp = "connected".into());
             q
         }
         Err(e) => {
-            set_status(status, |s| s.qmp = format!("errore: {e}"));
+            set_status(status, |s| s.qmp = format!("error: {e}"));
             ctx.request_repaint();
             return;
         }
@@ -644,7 +645,7 @@ fn qmp_worker(
         match cmd {
             QmpCmd::Input(ev) => {
                 if let Err(e) = q.send_input(&ev) {
-                    set_status(status, |s| s.qmp = format!("errore: {e}"));
+                    set_status(status, |s| s.qmp = format!("error: {e}"));
                     ctx.request_repaint();
                 }
             }
@@ -669,7 +670,7 @@ fn qmp_worker(
                         out.display()
                     ))
                 })();
-                let text = res.unwrap_or_else(|e| format!("screenshot fallito: {e}"));
+                let text = res.unwrap_or_else(|e| format!("screenshot failed: {e}"));
                 println!("SCREENSHOT {text}");
                 set_status(status, |s| s.screenshot = text);
                 ctx.request_repaint();
@@ -693,7 +694,7 @@ mod tests {
     }
 
     #[test]
-    fn tasti_solo_con_focus_e_rilascio_alla_perdita() {
+    fn keys_only_with_focus_and_release_on_loss() {
         let mut st = InputState::default();
         let none = |_p: egui::Pos2| None;
         let ev = [key(egui::Key::ControlLeft, true), key(egui::Key::T, true)];
@@ -730,7 +731,7 @@ mod tests {
     }
 
     #[test]
-    fn puntatore_scalato_e_pulsanti() {
+    fn pointer_scaled_and_buttons() {
         let mut st = InputState::default();
         let to_fb = |p: egui::Pos2| Some((p.x as u32, p.y as u32));
         let ev = [
@@ -766,10 +767,10 @@ mod tests {
     }
 
     #[test]
-    fn rotella_solo_con_il_puntatore_sopra_la_console() {
+    fn wheel_only_with_pointer_over_the_console() {
         let mut st = InputState::default();
-        let dentro = |p: egui::Pos2| (p.x < 100.0).then_some((p.x as u32, p.y as u32));
-        let rotella = egui::Event::MouseWheel {
+        let inside = |p: egui::Pos2| (p.x < 100.0).then_some((p.x as u32, p.y as u32));
+        let wheel = egui::Event::MouseWheel {
             unit: egui::MouseWheelUnit::Line,
             delta: egui::vec2(0.0, 1.0),
             phase: egui::TouchPhase::Move,
@@ -777,9 +778,9 @@ mod tests {
         };
         let ev = [
             egui::Event::PointerMoved(egui::pos2(10.0, 10.0)),
-            rotella.clone(),
+            wheel.clone(),
         ];
-        let out = st.translate(&ev, false, &dentro, (100, 100));
+        let out = st.translate(&ev, false, &inside, (100, 100));
         assert!(out.iter().any(|e| matches!(
             e,
             InputEvent::Btn {
@@ -787,21 +788,21 @@ mod tests {
                 ..
             }
         )));
-        // Fuori dall'immagine (intestazione, barra laterale): nessun inoltro.
+        // Outside the image (header, sidebar): no forwarding.
         let ev = [
             egui::Event::PointerMoved(egui::pos2(500.0, 10.0)),
-            rotella.clone(),
+            wheel.clone(),
         ];
-        assert!(st.translate(&ev, false, &dentro, (100, 100)).is_empty());
-        let ev = [egui::Event::PointerGone, rotella];
-        assert!(st.translate(&ev, false, &dentro, (100, 100)).is_empty());
+        assert!(st.translate(&ev, false, &inside, (100, 100)).is_empty());
+        let ev = [egui::Event::PointerGone, wheel];
+        assert!(st.translate(&ev, false, &inside, (100, 100)).is_empty());
     }
 
     #[test]
-    fn incolla_non_inoltra_il_testo() {
+    fn paste_does_not_forward_the_text() {
         let mut st = InputState::default();
         let none = |_p: egui::Pos2| None;
-        let out = st.translate(&[egui::Event::Paste("segreto".into())], true, &none, (1, 1));
+        let out = st.translate(&[egui::Event::Paste("secret".into())], true, &none, (1, 1));
         assert_eq!(
             out,
             vec![

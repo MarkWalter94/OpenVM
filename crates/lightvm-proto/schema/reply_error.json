@@ -1,10 +1,10 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "ReplyError",
-  "description": "Errore di risposta: operativo oppure di protocollo, mai confusi.\n\nForma JSON: `{\"kind\": \"operational\", ...PublicError}` oppure\n`{\"kind\": \"protocol\", ...ProtocolError}`.",
+  "description": "Reply error: either operational or protocol, never mixed up.\n\nJSON shape: `{\"kind\": \"operational\", ...PublicError}` or\n`{\"kind\": \"protocol\", ...ProtocolError}`.",
   "oneOf": [
     {
-      "description": "Richiesta compresa ma rifiutata o fallita.",
+      "description": "Request understood but rejected or failed.",
       "type": "object",
       "properties": {
         "kind": {
@@ -18,7 +18,7 @@
       ]
     },
     {
-      "description": "Richiesta non compresa: nessun effetto tentato.",
+      "description": "Request not understood: no effect attempted.",
       "type": "object",
       "properties": {
         "kind": {
@@ -34,70 +34,70 @@
   ],
   "$defs": {
     "ErrorCode": {
-      "description": "Codice stabile di un errore operativo. I nomi serializzati non cambiano mai;\nnuovi codici si aggiungono soltanto.",
+      "description": "Stable code of an operational error. Serialized names never change;\nnew codes are only ever added.",
       "oneOf": [
         {
-          "description": "Chiamante identificato (credenziale valida) ma non autorizzato all'azione:\nVM fuori allowlist, capability mancante, sessione in pausa, ruolo\ninsufficiente. Credenziali assenti o non valide: [`ErrorCode::Unauthenticated`].",
+          "description": "Caller identified (valid credential) but not authorized for the action:\nVM outside the allowlist, missing capability, paused session, insufficient\nrole. Missing or invalid credentials: [`ErrorCode::Unauthenticated`].",
           "type": "string",
           "const": "permission_denied"
         },
         {
-          "description": "Sessione o lease scaduti: serve una nuova autorizzazione nell'app.",
+          "description": "Session or lease expired: a new authorization in the app is needed.",
           "type": "string",
           "const": "session_expired"
         },
         {
-          "description": "Un'altra mutazione è in corso o in coda sulla stessa VM: ritentabile.",
+          "description": "Another mutation is in progress or queued on the same VM: retryable.",
           "type": "string",
           "const": "vm_busy"
         },
         {
-          "description": "Capacità non disponibile su questo host, build o fase.",
+          "description": "Capability not available on this host, build or phase.",
           "type": "string",
           "const": "unsupported"
         },
         {
-          "description": "L'azione non è ammessa nello stato corrente (o riferisce un `run_id` superato).",
+          "description": "The action is not allowed in the current state (or refers to a superseded `run_id`).",
           "type": "string",
           "const": "state_conflict"
         },
         {
-          "description": "Limite di risorse, quota o dimensione superato.",
+          "description": "Resource, quota or size limit exceeded.",
           "type": "string",
           "const": "resource_limit"
         },
         {
-          "description": "Argomento non valido (formato, intervallo, nome, percorso rifiutato).",
+          "description": "Invalid argument (format, range, name, rejected path).",
           "type": "string",
           "const": "invalid_argument"
         },
         {
-          "description": "Oggetto inesistente o non visibile al chiamante.",
+          "description": "Object does not exist or is not visible to the caller.",
           "type": "string",
           "const": "not_found"
         },
         {
-          "description": "Guasto dell'infrastruttura (QEMU, QMP, storage, OS) non imputabile al chiamante.",
+          "description": "Infrastructure failure (QEMU, QMP, storage, OS) not attributable to the caller.",
           "type": "string",
           "const": "infrastructure_error"
         },
         {
-          "description": "Nessuna credenziale valida: credenziale IPC o token di sessione assente,\nmalformato, sconosciuto, revocato o riusato dopo un riavvio del supervisor.\nServe una nuova autorizzazione nell'app. Aggiunto in coda ai primi nove\ncodici, che restano invariati.",
+          "description": "No valid credential: IPC credential or session token missing,\nmalformed, unknown, revoked or reused after a supervisor restart.\nA new authorization in the app is needed. Appended after the first nine\ncodes, which remain unchanged.",
           "type": "string",
           "const": "unauthenticated"
         }
       ]
     },
     "ProtocolError": {
-      "description": "Errore di protocollo: distinto dagli errori operativi (ROADMAP 9).",
+      "description": "Protocol error: distinct from operational errors (ROADMAP 9).",
       "type": "object",
       "properties": {
         "code": {
-          "description": "Codice stabile.",
+          "description": "Stable code.",
           "$ref": "#/$defs/ProtocolErrorCode"
         },
         "message": {
-          "description": "Messaggio per persone, senza segreti.",
+          "description": "Message for humans, without secrets.",
           "type": "string"
         }
       },
@@ -107,45 +107,45 @@
       ]
     },
     "ProtocolErrorCode": {
-      "description": "Codice di un errore di protocollo (richiesta non compresa, nessun effetto tentato).",
+      "description": "Code of a protocol error (request not understood, no effect attempted).",
       "oneOf": [
         {
-          "description": "Messaggio non decodificabile o non conforme allo schema.",
+          "description": "Message not decodable or not conforming to the schema.",
           "type": "string",
           "const": "malformed_message"
         },
         {
-          "description": "Versione di protocollo non supportata.",
+          "description": "Unsupported protocol version.",
           "type": "string",
           "const": "unsupported_version"
         },
         {
-          "description": "Metodo o tipo di richiesta sconosciuto.",
+          "description": "Unknown method or request type.",
           "type": "string",
           "const": "unknown_method"
         },
         {
-          "description": "Messaggio oltre la dimensione massima ammessa.",
+          "description": "Message exceeds the maximum allowed size.",
           "type": "string",
           "const": "message_too_large"
         },
         {
-          "description": "Mantenuto per compatibilità del contratto ma **non emesso**: una credenziale\nassente o non valida produce l'errore operativo [`ErrorCode::Unauthenticated`]\n(vedi la documentazione del modulo).",
+          "description": "Kept for contract compatibility but **not emitted**: a missing or invalid\ncredential produces the operational error [`ErrorCode::Unauthenticated`]\n(see the module documentation).",
           "type": "string",
           "const": "unauthenticated"
         }
       ]
     },
     "PublicError": {
-      "description": "Errore operativo pubblico.\n\nForma JSON: `{\"code\": \"...\", \"message\": \"...\", \"details\": {..}?, \"retryable\": bool}`.",
+      "description": "Public operational error.\n\nJSON shape: `{\"code\": \"...\", \"message\": \"...\", \"details\": {..}?, \"retryable\": bool}`.",
       "type": "object",
       "properties": {
         "code": {
-          "description": "Codice stabile.",
+          "description": "Stable code.",
           "$ref": "#/$defs/ErrorCode"
         },
         "details": {
-          "description": "Dettagli strutturati opzionali (chiavi e valori testuali, senza segreti).",
+          "description": "Optional structured details (textual keys and values, without secrets).",
           "type": [
             "object",
             "null"
@@ -155,11 +155,11 @@
           }
         },
         "message": {
-          "description": "Messaggio per persone, senza segreti né percorsi host.",
+          "description": "Message for humans, without secrets or host paths.",
           "type": "string"
         },
         "retryable": {
-          "description": "`true` se ritentare la stessa richiesta idempotente può riuscire.",
+          "description": "`true` if retrying the same idempotent request may succeed.",
           "type": "boolean"
         }
       },

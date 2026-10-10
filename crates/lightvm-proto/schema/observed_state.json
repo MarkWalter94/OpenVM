@@ -1,15 +1,15 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "ObservedState",
-  "description": "Stato osservato di una VM, con origine e istante.",
+  "description": "Observed state of a VM, with source and instant.",
   "type": "object",
   "properties": {
     "observed_at": {
-      "description": "Istante dell'osservazione.",
+      "description": "Instant of the observation.",
       "$ref": "#/$defs/UtcTimestamp"
     },
     "run_id": {
-      "description": "Esecuzione a cui l'osservazione si riferisce, se esiste un processo.",
+      "description": "Run the observation refers to, if a process exists.",
       "anyOf": [
         {
           "$ref": "#/$defs/RunId"
@@ -20,11 +20,11 @@
       ]
     },
     "source": {
-      "description": "Origine dell'osservazione.",
+      "description": "Source of the observation.",
       "$ref": "#/$defs/ObservationSource"
     },
     "state": {
-      "description": "Stato osservato.",
+      "description": "Observed state.",
       "$ref": "#/$defs/VmState"
     }
   },
@@ -35,66 +35,66 @@
   ],
   "$defs": {
     "ObservationSource": {
-      "description": "Origine di un'osservazione di stato.",
+      "description": "Source of a state observation.",
       "oneOf": [
         {
-          "description": "Handle del processo QEMU (vivo, terminato, codice d'uscita).",
+          "description": "QEMU process handle (alive, terminated, exit code).",
           "type": "string",
           "const": "process"
         },
         {
-          "description": "Risposta o evento QMP (`query-status`, `SHUTDOWN`, ...).",
+          "description": "QMP reply or event (`query-status`, `SHUTDOWN`, ...).",
           "type": "string",
           "const": "qmp"
         },
         {
-          "description": "Valore persistito nel catalogo: indicativo, mai sufficiente da solo.",
+          "description": "Value persisted in the catalog: a hint, never sufficient on its own.",
           "type": "string",
           "const": "database"
         }
       ]
     },
     "RunId": {
-      "description": "RunId: UUID versione 7 in minuscolo con trattini.",
+      "description": "RunId: version 7 UUID, lowercase with hyphens.",
       "type": "string",
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     },
     "UtcTimestamp": {
-      "description": "Istante UTC RFC 3339 con suffisso Z, precisione al millisecondo.",
+      "description": "RFC 3339 UTC instant with Z suffix, millisecond precision.",
       "type": "string",
       "format": "date-time"
     },
     "VmState": {
-      "description": "Stato del ciclo di vita di una VM.",
+      "description": "Lifecycle state of a VM.",
       "oneOf": [
         {
-          "description": "Processo assente e file rilasciati. Unico stato per operazioni su dischi, NVRAM e media.",
+          "description": "Process absent and files released. The only state for operations on disks, NVRAM and media.",
           "type": "string",
           "const": "stopped"
         },
         {
-          "description": "Spawn avviato, nuovo `run_id` assegnato, QMP non ancora pronto.",
+          "description": "Spawn started, new `run_id` assigned, QMP not ready yet.",
           "type": "string",
           "const": "starting"
         },
         {
-          "description": "Processo vivo e QMP pronto.",
+          "description": "Process alive and QMP ready.",
           "type": "string",
           "const": "running"
         },
         {
-          "description": "Arresto richiesto; completo solo a fine processo osservata.",
+          "description": "Stop requested; complete only once the process end is observed.",
           "type": "string",
           "const": "stopping"
         },
         {
-          "description": "Errore di avvio o uscita inattesa. Nessuna promozione automatica a baseline.",
+          "description": "Start error or unexpected exit. No automatic promotion to baseline.",
           "type": "string",
           "const": "failed"
         },
         {
-          "description": "Riconciliazione dopo crash (journal, file, processi): nessuna mutazione esterna.",
+          "description": "Reconciliation after a crash (journal, files, processes): no external mutation.",
           "type": "string",
           "const": "recovering"
         }

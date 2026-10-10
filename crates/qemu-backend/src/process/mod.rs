@@ -1,16 +1,16 @@
-//! Contenimento dei processi QEMU e identità del processo (ROADMAP 6.1, 7.2
-//! punto 4, 7.3; ADR-0002, ADR-0009, ADR-0015; F0-06, F0-07).
+//! Containment of the QEMU processes and process identity (ROADMAP 6.1, 7.2
+//! point 4, 7.3; ADR-0002, ADR-0009, ADR-0015; F0-06, F0-07).
 //!
-//! Un [`ProcessContainer`] per esecuzione:
+//! One [`ProcessContainer`] per run:
 //!
-//! - Windows: Job Object anonimo con `KILL_ON_JOB_CLOSE`, senza breakaway;
-//!   il processo vi entra **alla creazione** (`PROC_THREAD_ATTRIBUTE_JOB_LIST`).
-//!   La morte del supervisor chiude l'handle del job e termina QEMU (F0-06,
-//!   scenario a). L'Emergency Stop è `TerminateJobObject`.
-//! - Linux: firma pronta, implementazione rinviata. F0-07 propone
-//!   `PR_SET_PDEATHSIG(SIGKILL)` impostato da un thread di spawn dedicato più un
-//!   cgroup v2 per VM con `cgroup.kill` dentro uno scope systemd delegato;
-//!   [`new_container`] restituisce oggi un errore `unsupported`.
+//! - Windows: anonymous Job Object with `KILL_ON_JOB_CLOSE`, without breakaway;
+//!   the process enters it **at creation** (`PROC_THREAD_ATTRIBUTE_JOB_LIST`).
+//!   The death of the supervisor closes the job handle and terminates QEMU (F0-06,
+//!   scenario a). The Emergency Stop is `TerminateJobObject`.
+//! - Linux: signature ready, implementation deferred. F0-07 proposes
+//!   `PR_SET_PDEATHSIG(SIGKILL)` set from a dedicated spawn thread plus a
+//!   per-VM cgroup v2 with `cgroup.kill` inside a delegated systemd scope;
+//!   [`new_container`] currently returns an `unsupported` error.
 
 use std::ffi::OsString;
 use std::fmt;
@@ -25,51 +25,51 @@ use crate::paths::ManagedPath;
 #[cfg(windows)]
 mod windows;
 
-/// Meccanismo di contenimento effettivo.
+/// Effective containment mechanism.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContainmentMechanism {
-    /// Job Object Windows con `KILL_ON_JOB_CLOSE`, processo nel job dalla creazione.
+    /// Windows Job Object with `KILL_ON_JOB_CLOSE`, process in the job from creation.
     WindowsJobObject,
-    /// Linux: cgroup v2 delegato con `cgroup.kill` più `PR_SET_PDEATHSIG` (rinviato).
+    /// Linux: delegated cgroup v2 with `cgroup.kill` plus `PR_SET_PDEATHSIG` (deferred).
     LinuxCgroupPdeathsig,
 }
 
-/// Identità serializzabile del processo: PID più tempo di creazione. Il PID da
-/// solo può essere riassegnato (F0-06, sezione 3); l'identità primaria resta
-/// l'handle posseduto da [`ChildProcess`].
+/// Serializable process identity: PID plus creation time. The PID alone
+/// can be reassigned (F0-06, section 3); the primary identity remains
+/// the handle owned by [`ChildProcess`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ProcessIdentity {
-    /// Esecuzione a cui appartiene il processo.
+    /// Run the process belongs to.
     pub run_id: RunId,
-    /// PID (informativo).
+    /// PID (informational).
     pub pid: u32,
-    /// Tempo di creazione (Windows: FILETIME in unità da 100 ns).
+    /// Creation time (Windows: FILETIME in 100 ns units).
     pub creation_time: u64,
 }
 
-/// Stato di un processo cercato per identità (PID + tempo di creazione).
+/// State of a process looked up by identity (PID + creation time).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IdentityStatus {
-    /// Nessun processo con quel PID.
+    /// No process with that PID.
     NotFound,
-    /// Il PID è stato riassegnato a un altro processo.
+    /// The PID has been reassigned to another process.
     Reused,
-    /// Stesso processo, terminato ma ancora referenziato da un handle.
+    /// Same process, exited but still referenced by a handle.
     Exited,
-    /// Stesso processo, in esecuzione.
+    /// Same process, running.
     Alive,
 }
 
 impl IdentityStatus {
-    /// `true` se il processo con questa identità è ancora in esecuzione.
+    /// `true` if the process with this identity is still running.
     pub fn is_alive(self) -> bool {
         matches!(self, Self::Alive)
     }
 }
 
 impl ProcessIdentity {
-    /// Cerca il processo con questa identità senza toccarlo (verifica di
-    /// assenza di orfani, riconciliazione dopo un riavvio del supervisor).
+    /// Looks up the process with this identity without touching it (check for
+    /// absence of orphans, reconciliation after a supervisor restart).
     pub fn status(&self) -> Result<IdentityStatus> {
         #[cfg(windows)]
         {
@@ -84,41 +84,41 @@ impl ProcessIdentity {
         #[cfg(not(windows))]
         {
             Err(crate::error::BackendError::Unsupported {
-                what: "verifica dell'identità del processo su questo sistema".into(),
-                hint: "implementazione Linux (pidfd) non ancora presente".into(),
+                what: "process identity verification on this system".into(),
+                hint: "Linux implementation (pidfd) not yet available".into(),
             })
         }
     }
 }
 
-/// Codice d'uscita usato dall'Emergency Stop con `TerminateJobObject`.
+/// Exit code used by the Emergency Stop with `TerminateJobObject`.
 pub const EMERGENCY_EXIT_CODE: u32 = 0xE5E5;
 
-/// Classe del codice d'uscita di QEMU su Windows (F0-06 §2b, F0-08).
+/// Class of the QEMU exit code on Windows (F0-06 §2b, F0-08).
 ///
-/// Il codice da solo non distingue sempre la causa (`taskkill /F` produce 1,
-/// come un errore di QEMU): la causa definitiva combina codice e azioni del
-/// backend (vedi [`crate::run::ExitCause`]).
+/// The code alone does not always distinguish the cause (`taskkill /F` yields 1,
+/// like a QEMU error): the definitive cause combines code and backend
+/// actions (see [`crate::run::ExitCause`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExitCodeClass {
-    /// 0: uscita ordinata (`quit`, spegnimento del guest, chiusura del job).
+    /// 0: orderly exit (`quit`, guest shutdown, job closure).
     Clean,
-    /// 1: errore di QEMU (riga di comando, acceleratore) o `taskkill /F`.
+    /// 1: QEMU error (command line, accelerator) or `taskkill /F`.
     QemuErrorOrForcedKill,
-    /// [`EMERGENCY_EXIT_CODE`]: terminazione del job richiesta dal backend.
+    /// [`EMERGENCY_EXIT_CODE`]: job termination requested by the backend.
     EmergencyStop,
-    /// `0xFFFFFFFF`: `TerminateProcess(-1)` esterno (per esempio `Stop-Process`).
+    /// `0xFFFFFFFF`: external `TerminateProcess(-1)` (for example `Stop-Process`).
     ExternalTermination,
-    /// NTSTATUS di errore (`0xC0000000` e oltre): eccezione o crash, compreso
-    /// il superamento del limite di memoria del job (F0-08).
+    /// Error NTSTATUS (`0xC0000000` and above): exception or crash, including
+    /// exceeding the job memory limit (F0-08).
     Exception(u32),
-    /// Altro codice.
+    /// Other code.
     Other(u32),
-    /// Codice non disponibile.
+    /// Code not available.
     Unknown,
 }
 
-/// Classifica un codice d'uscita.
+/// Classifies an exit code.
 pub fn classify_exit_code(code: Option<u32>) -> ExitCodeClass {
     match code {
         None => ExitCodeClass::Unknown,
@@ -131,29 +131,29 @@ pub fn classify_exit_code(code: Option<u32>) -> ExitCodeClass {
     }
 }
 
-/// Richiesta di avvio di un processo nel contenitore.
+/// Request to start a process in the container.
 #[derive(Clone, Debug)]
 pub struct SpawnRequest {
-    /// Esecuzione a cui apparterrà il processo.
+    /// Run the process will belong to.
     pub run_id: RunId,
-    /// Eseguibile approvato.
+    /// Approved executable.
     pub program: ManagedPath,
-    /// Argomenti strutturati.
+    /// Structured arguments.
     pub args: Vec<OsString>,
-    /// Ambiente completo del figlio (nessuna eredità dal supervisor).
+    /// Complete environment of the child (nothing inherited from the supervisor).
     pub env: Vec<(OsString, OsString)>,
-    /// File che riceve stdout.
+    /// File receiving stdout.
     pub stdout: ManagedPath,
-    /// File che riceve stderr.
+    /// File receiving stderr.
     pub stderr: ManagedPath,
 }
 
-/// Ambiente minimo per QEMU su questo host.
+/// Minimal environment for QEMU on this host.
 ///
-/// F0-06 (1b): con ambiente vuoto Winsock non si inizializza e QEMU non crea il
-/// socket QMP; con il solo `SystemRoot` QMP e WHPX funzionano. Non servono
-/// `PATH`, `TEMP`, `USERPROFILE`, `APPDATA` con firmware a percorsi assoluti e
-/// `-no-user-config`. Nessuna credenziale (provider, client MCP) è trasmessa.
+/// F0-06 (1b): with an empty environment Winsock does not initialise and QEMU does not create the
+/// QMP socket; with only `SystemRoot` QMP and WHPX work. `PATH`, `TEMP`,
+/// `USERPROFILE`, `APPDATA` are not needed with firmware at absolute paths and
+/// `-no-user-config`. No credential (provider, MCP client) is passed on.
 pub fn minimal_environment() -> Vec<(OsString, OsString)> {
     let mut env = Vec::new();
     if cfg!(windows) {
@@ -163,82 +163,82 @@ pub fn minimal_environment() -> Vec<(OsString, OsString)> {
     env
 }
 
-/// Contenitore dei processi di un'esecuzione.
+/// Container of the processes of a run.
 pub trait ProcessContainer: Send + Sync + fmt::Debug {
-    /// Avvia il processo già dentro il contenitore (nessuna finestra temporale
-    /// in cui il processo è fuori dal contenitore).
+    /// Starts the process already inside the container (no time window
+    /// in which the process is outside the container).
     fn spawn(&self, req: &SpawnRequest) -> Result<ChildProcess>;
 
-    /// Termina con primitive OS tutti i processi del contenitore, senza QMP
-    /// (Emergency Stop, ADR-0009). Non attende: vedi [`Self::active_count`].
+    /// Terminates all processes of the container with OS primitives, without QMP
+    /// (Emergency Stop, ADR-0009). Does not wait: see [`Self::active_count`].
     fn kill_all(&self, exit_code: u32) -> Result<()>;
 
-    /// Processi ancora attivi nel contenitore.
+    /// Processes still active in the container.
     fn active_count(&self) -> Result<u32>;
 
-    /// Meccanismo effettivo.
+    /// Effective mechanism.
     fn mechanism(&self) -> ContainmentMechanism;
 
-    /// Verifica che il processo appartenga al contenitore e che il
-    /// contenitore termini i processi alla propria chiusura.
+    /// Verifies that the process belongs to the container and that the
+    /// container terminates the processes when it is closed.
     fn verify_membership(&self, child: &ChildProcess) -> Result<()>;
 
-    /// Limiti applicati e picco di memoria.
+    /// Applied limits and memory peak.
     fn limit_report(&self) -> Result<JobLimitReport>;
 }
 
-/// Limiti del contenitore, applicati prima dello spawn (ADR-0017).
+/// Container limits, applied before the spawn (ADR-0017).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct JobLimits {
-    /// Tetto CPU rigido in centesimi di punto percentuale di tutti i processori
-    /// logici (1..=10000; 2500 = 25 % della macchina).
+    /// Hard CPU cap in hundredths of a percentage point of all logical
+    /// processors (1..=10000; 2500 = 25 % of the machine).
     pub cpu_rate: Option<u32>,
-    /// Memoria massima dell'intero contenitore in byte (QEMU compreso).
+    /// Maximum memory of the whole container in bytes (QEMU included).
     pub job_memory_bytes: Option<u64>,
 }
 
 impl JobLimits {
-    /// Validazione dei valori.
+    /// Validation of the values.
     pub fn validate(&self) -> Result<()> {
         if let Some(r) = self.cpu_rate
             && !(1..=10_000).contains(&r)
         {
             return Err(crate::error::BackendError::invalid(
                 "cpu_rate",
-                "tetto CPU fuori dall'intervallo 1..=10000",
+                "CPU cap outside the range 1..=10000",
             ));
         }
         if self.job_memory_bytes == Some(0) {
             return Err(crate::error::BackendError::invalid(
                 "job_memory_bytes",
-                "limite di memoria nullo",
+                "zero memory limit",
             ));
         }
         Ok(())
     }
 }
 
-/// Limiti letti dal contenitore e picco di memoria osservato.
+/// Limits read from the container and observed memory peak.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct JobLimitReport {
-    /// Tetto CPU attivo.
+    /// Active CPU cap.
     pub cpu_rate: Option<u32>,
-    /// Memoria massima attiva in byte.
+    /// Active maximum memory in bytes.
     pub job_memory_bytes: Option<u64>,
-    /// Picco di memoria del contenitore in byte.
+    /// Container memory peak in bytes.
     pub peak_job_memory_bytes: u64,
 }
 
 impl JobLimitReport {
-    /// `true` se il picco ha raggiunto il limite di memoria (uscita probabile
-    /// per superamento del limite: il job rifiuta le allocazioni oltre).
+    /// `true` if the peak reached the memory limit (likely exit
+    /// due to exceeding the limit: the job refuses allocations beyond it).
     pub fn memory_limit_reached(&self) -> bool {
         self.job_memory_bytes
             .is_some_and(|l| self.peak_job_memory_bytes.saturating_add(16 << 20) >= l)
     }
 }
 
-/// Crea il contenitore per una nuova esecuzione con i limiti indicati.
+/// Creates the container for a new run with the given limits.
 pub fn new_container(limits: &JobLimits) -> Result<Arc<dyn ProcessContainer>> {
     limits.validate()?;
     #[cfg(windows)]
@@ -248,17 +248,17 @@ pub fn new_container(limits: &JobLimits) -> Result<Arc<dyn ProcessContainer>> {
     #[cfg(not(windows))]
     {
         let _ = limits;
-        // TODO(F1/R2a): cgroup v2 delegato + `cgroup.kill` e
-        // `PR_SET_PDEATHSIG(SIGKILL)` da thread di spawn dedicato (F0-07).
+        // TODO(F1/R2a): delegated cgroup v2 + `cgroup.kill` and
+        // `PR_SET_PDEATHSIG(SIGKILL)` from a dedicated spawn thread (F0-07).
         Err(crate::error::BackendError::Unsupported {
-            what: "contenimento dei processi QEMU su questo sistema operativo".into(),
-            hint: "implementazione Linux (cgroup v2 + PR_SET_PDEATHSIG, F0-07) non ancora presente"
+            what: "containment of QEMU processes on this operating system".into(),
+            hint: "Linux implementation (cgroup v2 + PR_SET_PDEATHSIG, F0-07) not yet available"
                 .into(),
         })
     }
 }
 
-/// Processo figlio posseduto: l'handle è l'identità primaria.
+/// Owned child process: the handle is the primary identity.
 #[derive(Debug)]
 pub struct ChildProcess {
     identity: ProcessIdentity,
@@ -267,13 +267,13 @@ pub struct ChildProcess {
 }
 
 impl ChildProcess {
-    /// Identità serializzabile.
+    /// Serializable identity.
     pub fn identity(&self) -> ProcessIdentity {
         self.identity
     }
 
-    /// Attende l'uscita fino a `timeout` (`None` = senza limite). Restituisce
-    /// il codice d'uscita se il processo è terminato.
+    /// Waits for exit up to `timeout` (`None` = no limit). Returns
+    /// the exit code if the process has exited.
     pub fn wait(&self, timeout: Option<Duration>) -> Result<Option<u32>> {
         #[cfg(windows)]
         {
@@ -284,12 +284,12 @@ impl ChildProcess {
         {
             let _ = timeout;
             Err(crate::error::BackendError::StateConflict(
-                "processo non gestito su questo sistema".into(),
+                "process not managed on this system".into(),
             ))
         }
     }
 
-    /// Codice d'uscita se il processo è già terminato.
+    /// Exit code if the process has already exited.
     pub fn try_exit_code(&self) -> Result<Option<u32>> {
         self.wait(Some(Duration::ZERO))
     }
@@ -300,7 +300,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn classi_dei_codici_di_uscita() {
+    fn exit_code_classes() {
         assert_eq!(classify_exit_code(None), ExitCodeClass::Unknown);
         assert_eq!(classify_exit_code(Some(0)), ExitCodeClass::Clean);
         assert_eq!(

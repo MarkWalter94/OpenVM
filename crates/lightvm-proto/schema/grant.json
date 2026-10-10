@@ -1,11 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Grant",
-  "description": "Grant emesso dal supervisor dopo l'approvazione dell'utente nell'app (ROADMAP 9).",
+  "description": "Grant issued by the supervisor after the user's approval in the app (ROADMAP 9).",
   "type": "object",
   "properties": {
     "capabilities": {
-      "description": "Capability concesse.",
+      "description": "Granted capabilities.",
       "type": "array",
       "items": {
         "$ref": "#/$defs/Capability"
@@ -13,27 +13,27 @@
       "uniqueItems": true
     },
     "expires_at": {
-      "description": "Scadenza assoluta UTC.",
+      "description": "Absolute UTC expiry.",
       "$ref": "#/$defs/UtcTimestamp"
     },
     "id": {
-      "description": "Identificativo.",
+      "description": "Identifier.",
       "$ref": "#/$defs/GrantId"
     },
     "policy_revision": {
-      "description": "Revisione della policy con cui il grant è stato emesso.",
+      "description": "Revision of the policy the grant was issued with.",
       "$ref": "#/$defs/PolicyRevision"
     },
     "quotas": {
-      "description": "Quote concesse.",
+      "description": "Granted quotas.",
       "$ref": "#/$defs/Quotas"
     },
     "session_id": {
-      "description": "Sessione a cui è legato.",
+      "description": "Session it is bound to.",
       "$ref": "#/$defs/SessionId"
     },
     "vm_allowlist": {
-      "description": "VM ammesse (allowlist esplicita; vuota = nessuna VM).",
+      "description": "Allowed VMs (explicit allowlist; empty = no VM).",
       "type": "array",
       "items": {
         "$ref": "#/$defs/VmId"
@@ -52,30 +52,30 @@
   ],
   "$defs": {
     "Capability": {
-      "description": "Azione autorizzabile su una VM. I nomi serializzati seguono il catalogo MCP\n(ROADMAP 9); `vm.input` copre mouse e tastiera.",
+      "description": "Authorizable action on a VM. Serialized names follow the MCP catalog\n(ROADMAP 9); `vm.input` covers mouse and keyboard.",
       "oneOf": [
         {
-          "description": "Elenco filtrato dal grant.",
+          "description": "List filtered by the grant.",
           "type": "string",
           "const": "vm.list"
         },
         {
-          "description": "Stato.",
+          "description": "Status.",
           "type": "string",
           "const": "vm.status"
         },
         {
-          "description": "Avvio.",
+          "description": "Start.",
           "type": "string",
           "const": "vm.start"
         },
         {
-          "description": "Arresto (ordinario o forzato).",
+          "description": "Stop (ordinary or forced).",
           "type": "string",
           "const": "vm.stop"
         },
         {
-          "description": "Reset: richiede capability esplicita.",
+          "description": "Reset: requires an explicit capability.",
           "type": "string",
           "const": "vm.reset"
         },
@@ -85,69 +85,69 @@
           "const": "vm.screenshot"
         },
         {
-          "description": "Mouse e tastiera.",
+          "description": "Mouse and keyboard.",
           "type": "string",
           "const": "vm.input"
         },
         {
-          "description": "Checkpoint a VM spenta: richiede capability esplicita.",
+          "description": "Checkpoint with the VM off: requires an explicit capability.",
           "type": "string",
           "const": "vm.snapshot"
         },
         {
-          "description": "Ripristino a VM spenta.",
+          "description": "Restore with the VM off.",
           "type": "string",
           "const": "vm.restore"
         },
         {
-          "description": "Eventi LightVM e log QEMU autorizzati.",
+          "description": "Authorized LightVM events and QEMU logs.",
           "type": "string",
           "const": "vm.logs"
         }
       ]
     },
     "GrantId": {
-      "description": "GrantId: UUID versione 7 in minuscolo con trattini.",
+      "description": "GrantId: version 7 UUID, lowercase with hyphens.",
       "type": "string",
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     },
     "PolicyRevision": {
-      "description": "Revisione monotona della policy applicata (registrata nei report, ROADMAP 9).",
+      "description": "Monotonic revision of the applied policy (recorded in reports, ROADMAP 9).",
       "type": "integer",
       "format": "uint64",
       "minimum": 0
     },
     "Quotas": {
-      "description": "Quote di una sessione o di un livello di policy. Ogni campo è un massimo\ninclusivo; l'intersezione prende il minimo.",
+      "description": "Quotas of a session or of a policy layer. Each field is an inclusive\nmaximum; the intersection takes the minimum.",
       "type": "object",
       "properties": {
         "max_input_events": {
-          "description": "Eventi di input totali ammessi nella sessione.",
+          "description": "Total input events allowed in the session.",
           "type": "integer",
           "format": "uint32",
           "minimum": 0
         },
         "max_operations": {
-          "description": "Operazioni totali ammesse nella sessione.",
+          "description": "Total operations allowed in the session.",
           "type": "integer",
           "format": "uint32",
           "minimum": 0
         },
         "max_queued_operations": {
-          "description": "Operazioni in coda per VM non ancora inoltrate.",
+          "description": "Operations queued per VM and not yet forwarded.",
           "type": "integer",
           "format": "uint32",
           "minimum": 0
         },
         "max_screenshot_bytes": {
-          "description": "Dimensione massima di un singolo screenshot in byte.",
+          "description": "Maximum size of a single screenshot in bytes.",
           "type": "integer",
           "format": "uint64",
           "minimum": 0
         },
         "max_screenshots": {
-          "description": "Screenshot totali ammessi nella sessione.",
+          "description": "Total screenshots allowed in the session.",
           "type": "integer",
           "format": "uint32",
           "minimum": 0
@@ -162,18 +162,18 @@
       ]
     },
     "SessionId": {
-      "description": "SessionId: UUID versione 7 in minuscolo con trattini.",
+      "description": "SessionId: version 7 UUID, lowercase with hyphens.",
       "type": "string",
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     },
     "UtcTimestamp": {
-      "description": "Istante UTC RFC 3339 con suffisso Z, precisione al millisecondo.",
+      "description": "RFC 3339 UTC instant with Z suffix, millisecond precision.",
       "type": "string",
       "format": "date-time"
     },
     "VmId": {
-      "description": "VmId: UUID versione 7 in minuscolo con trattini.",
+      "description": "VmId: version 7 UUID, lowercase with hyphens.",
       "type": "string",
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"

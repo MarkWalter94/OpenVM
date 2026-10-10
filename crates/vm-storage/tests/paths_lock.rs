@@ -1,4 +1,4 @@
-//! Percorsi ostili, junction, lock del catalogo e pulizia prudente di `tmp/`.
+//! Hostile paths, junctions, catalog lock and cautious cleanup of `tmp/`.
 
 mod common;
 
@@ -13,7 +13,7 @@ use vm_storage::{DiskId, RunId};
 fn rejection(err: StorageError) -> PathRejection {
     match err {
         StorageError::InvalidPath { reason, .. } => reason,
-        other => panic!("errore inatteso: {other:?}"),
+        other => panic!("unexpected error: {other:?}"),
     }
 }
 
@@ -30,7 +30,7 @@ fn hostile_managed_paths_are_rejected_before_any_access() {
         "media/CON",
         "/abs/path",
     ] {
-        assert!(ManagedPath::parse(raw).is_err(), "{raw:?} accettato");
+        assert!(ManagedPath::parse(raw).is_err(), "{raw:?} accepted");
     }
 }
 
@@ -59,7 +59,7 @@ fn existing_destination_is_never_overwritten() {
     let mut cat = Catalog::open(dir.path()).unwrap();
     let vm = common::new_vm(&mut cat, "vm");
     let b = common::baseline(&mut cat, &vm, false);
-    // Tentativo di creare un file sopra la base esistente.
+    // Attempt to create a file over the existing base.
     let err = cat
         .begin_intent(IntentSpec {
             kind: IntentKind::CreateOverlay,
@@ -86,7 +86,7 @@ fn junction_inside_catalog_is_refused() {
         .unwrap();
     let link = vm_dir.join("overlays");
     if !common::make_junction(&link, outside.path()) {
-        eprintln!("junction non disponibile: prova saltata");
+        eprintln!("junction not available: test skipped");
         return;
     }
     let run = RunId::new_v7();
@@ -115,7 +115,7 @@ fn junction_inside_catalog_is_refused() {
     assert_eq!(
         std::fs::read_dir(outside.path()).unwrap().count(),
         0,
-        "nulla scritto fuori dal catalogo"
+        "nothing written outside the catalog"
     );
     std::fs::remove_dir(&link).unwrap();
 }
@@ -127,7 +127,7 @@ fn catalog_root_that_is_a_junction_is_refused() {
     std::fs::create_dir(&real).unwrap();
     let link = base.path().join("link");
     if !common::make_junction(&link, &real) {
-        eprintln!("junction non disponibile: prova saltata");
+        eprintln!("junction not available: test skipped");
         return;
     }
     let err = Catalog::open(&link).unwrap_err();
@@ -147,7 +147,7 @@ fn symlink_file_in_managed_path_is_refused() {
     #[cfg(unix)]
     let made = std::os::unix::fs::symlink(&target, &link).is_ok();
     if !made {
-        eprintln!("symlink non consentito (privilegio assente): prova saltata");
+        eprintln!("symlink not allowed (missing privilege): test skipped");
         return;
     }
     let err = cat
@@ -165,16 +165,16 @@ fn second_open_of_same_catalog_is_refused() {
         Err(e @ StorageError::CatalogLocked(_)) => {
             assert_eq!(e.public_code(), Some("vm_busy"));
         }
-        other => panic!("seconda istanza accettata: {other:?}"),
+        other => panic!("second instance accepted: {other:?}"),
     }
-    // Anche da un altro thread.
+    // From another thread too.
     let p = dir.path().to_path_buf();
     let res = std::thread::spawn(move || Catalog::open(&p).map(|_| ()))
         .join()
         .unwrap();
     assert!(matches!(res, Err(StorageError::CatalogLocked(_))));
     drop(first);
-    Catalog::open(dir.path()).expect("lock rilasciato alla chiusura");
+    Catalog::open(dir.path()).expect("lock released on close");
 }
 
 #[test]
@@ -197,7 +197,7 @@ fn tmp_cleanup_is_prudent() {
     std::fs::create_dir(tmp.join("subdir")).unwrap();
     std::fs::write(tmp.join("subdir").join("inner.part"), b"x").unwrap();
     set_old(&tmp.join("subdir").join("inner.part"));
-    // File vecchio fuori da tmp/: mai toccato.
+    // Old file outside tmp/: never touched.
     std::fs::write(dir.path().join("vms").join("keep.txt"), b"x").unwrap();
     set_old(&dir.path().join("vms").join("keep.txt"));
     let outside = common::tempdir();
@@ -206,7 +206,7 @@ fn tmp_cleanup_is_prudent() {
     set_old(&victim);
     let junction = common::make_junction(&tmp.join("jlink"), outside.path());
 
-    // Avvio "precedente" a metà strada: il file vecchio è anteriore, il recente no.
+    // "Previous" start halfway between: the old file predates it, the recent one does not.
     let start = UtcMillis::from_system_time(SystemTime::now() - Duration::from_secs(60));
     let rep = cat.layout().clean_tmp(start, &[]).unwrap();
     assert_eq!(rep.removed, vec!["old.part".to_owned()]);
@@ -214,14 +214,14 @@ fn tmp_cleanup_is_prudent() {
     assert!(rep.skipped.contains(&"subdir".to_owned()));
     assert!(tmp.join("subdir").join("inner.part").exists());
     assert!(dir.path().join("vms").join("keep.txt").exists());
-    assert!(victim.exists(), "nessun accesso attraverso la junction");
+    assert!(victim.exists(), "no access through the junction");
     if junction {
         assert!(rep.skipped.contains(&"jlink".to_owned()));
         std::fs::remove_dir(tmp.join("jlink")).unwrap();
     }
     drop(cat);
 
-    // Alla riapertura il file "recente" è anteriore al nuovo avvio e viene rimosso.
+    // On reopen the "recent" file predates the new start and is removed.
     let cat = Catalog::open(dir.path()).unwrap();
     let rep = &cat.open_report().unwrap().tmp_cleanup;
     assert!(rep.removed.contains(&"recent.part".to_owned()), "{rep:?}");
@@ -258,8 +258,8 @@ fn absolute_paths_are_accepted_only_inside_the_root() {
         let err = layout.managed_from_absolute(&p).unwrap_err();
         assert_eq!(rejection(err), want, "{}", p.display());
     }
-    // Junction sotto la radice verso l'esterno: rifiutata anche se il prefisso
-    // testuale è dentro la radice.
+    // Junction under the root pointing outside: refused even though the
+    // textual prefix is inside the root.
     let link = dir.path().join("runs").join("jl");
     if common::make_junction(&link, outside.path()) {
         let err = layout

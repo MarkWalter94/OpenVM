@@ -1,4 +1,4 @@
-//! Budget storage applicativo e manifest versionati.
+//! Application storage budget and versioned manifests.
 
 mod common;
 
@@ -13,7 +13,7 @@ fn usage_is_accounted_per_category() {
     let dir = common::tempdir();
     let mut cat = Catalog::open(dir.path()).unwrap();
     let vm = common::new_vm(&mut cat, "vm");
-    let other = common::new_vm(&mut cat, "altra");
+    let other = common::new_vm(&mut cat, "other");
     let b = common::baseline(&mut cat, &vm, false);
     let run = common::run_from(&mut cat, &vm, &b);
     let media = MediaId::new_v7();
@@ -48,12 +48,12 @@ fn usage_is_accounted_per_category() {
     assert_eq!(u.artifacts, 1000);
     assert_eq!(u.logs, 300);
     assert!(u.baselines > 0 && u.overlays > 0 && u.run_firmware > 0);
-    assert_eq!(u.media, 0, "media solo nel totale del catalogo");
+    assert_eq!(u.media, 0, "media only in the catalog total");
     let all = cat.storage_usage(None).unwrap();
     assert_eq!(all.media, 5000);
-    assert!(all.metadata > 0, "database contabilizzato");
+    assert!(all.metadata > 0, "database accounted for");
     assert_eq!(cat.storage_usage(Some(&other)).unwrap().total(), 0);
-    // Misura dai file.
+    // Measured from the files.
     let ov = run.overlay_disk_id.unwrap();
     let managed = cat.read(|tx| tx.disk(&ov)).unwrap().managed_path;
     let p = cat.layout().resolve(&managed).unwrap();
@@ -71,7 +71,7 @@ fn new_run_is_refused_over_budget_or_reserve() {
     common::run_from(&mut cat, &vm, &b);
     let gib = 1u64 << 30;
 
-    // Nessun budget dichiarato: vale solo la riserva host (assente = 0).
+    // No budget declared: only the host reserve applies (absent = 0).
     cat.check_new_run(&vm, gib, 10 * gib, Enforcement::ApplicationBudget)
         .unwrap();
 
@@ -95,12 +95,12 @@ fn new_run_is_refused_over_budget_or_reserve() {
     let err = cat
         .check_new_run(&vm, 5 * gib, 100 * gib, Enforcement::ApplicationBudget)
         .unwrap_err();
-    assert!(matches!(&err, StorageError::ResourceLimit(m) if m.contains("catalogo")));
+    assert!(matches!(&err, StorageError::ResourceLimit(m) if m.contains("catalog")));
 
     let err = cat
         .check_new_run(&vm, gib, 2 * gib, Enforcement::ApplicationBudget)
         .unwrap_err();
-    assert!(matches!(&err, StorageError::ResourceLimit(m) if m.contains("riserva")));
+    assert!(matches!(&err, StorageError::ResourceLimit(m) if m.contains("reserve")));
 
     let err = cat
         .check_new_run(&vm, 1, 100 * gib, Enforcement::OsHardQuota)
@@ -122,10 +122,10 @@ fn vm_manifest_divergences_are_detected() {
     cat.write_vm_manifest(&vm).unwrap();
     assert!(cat.verify_vm_manifest(&vm).unwrap().is_empty());
     let b = common::baseline(&mut cat, &vm, false);
-    // `promote_baseline` riscrive il manifest della VM.
+    // `promote_baseline` rewrites the VM manifest.
     assert!(cat.verify_vm_manifest(&vm).unwrap().is_empty());
 
-    // Modifica nel DB non riportata nel manifest.
+    // Change in the DB not reflected in the manifest.
     cat.with_tx(|tx| tx.update_vm_config(&vm, 1, 1, &serde_json::json!({"cpus": 8})))
         .unwrap();
     let d = cat.verify_vm_manifest(&vm).unwrap();
@@ -134,11 +134,11 @@ fn vm_manifest_divergences_are_detected() {
     cat.write_vm_manifest(&vm).unwrap();
     assert!(cat.verify_vm_manifest(&vm).unwrap().is_empty());
 
-    // Modifica del file.
+    // Change to the file.
     let p = dir.path().join(CatalogLayout::vm_manifest(&vm).as_str());
     let text = std::fs::read_to_string(&p)
         .unwrap()
-        .replace("\"vm\"", "\"altro\"");
+        .replace("\"vm\"", "\"other\"");
     std::fs::write(&p, text).unwrap();
     let d = cat.verify_vm_manifest(&vm).unwrap();
     assert!(
@@ -170,19 +170,16 @@ fn baseline_manifest_detects_altered_base() {
     assert!(m.created_powered_off);
     assert!(m.vars.is_some());
 
-    // Alterazione della base (rimuovendo prima la sola lettura).
+    // Tampering with the base (removing the read-only attribute first).
     let p = dir
         .path()
         .join(CatalogLayout::baseline_disk(&vm, &b).as_str());
     let mut perm = std::fs::metadata(&p).unwrap().permissions();
     assert!(perm.readonly());
-    assert!(
-        std::fs::write(&p, b"scrittura").is_err(),
-        "base in sola lettura"
-    );
+    assert!(std::fs::write(&p, b"write").is_err(), "base is read-only");
     perm.set_readonly(false);
     std::fs::set_permissions(&p, perm).unwrap();
-    std::fs::write(&p, b"alterata").unwrap();
+    std::fs::write(&p, b"tampered").unwrap();
     assert!(cat.verify_baseline_manifest(&b, false).unwrap().is_empty());
     let d = cat.verify_baseline_manifest(&b, true).unwrap();
     assert!(
@@ -198,12 +195,12 @@ fn budget_manifest_reports_usage_per_vm_baseline_and_run() {
     let vm = common::new_vm(&mut cat, "vm");
     let b = common::baseline(&mut cat, &vm, false);
     let run = common::run_from(&mut cat, &vm, &b);
-    // Overlay cresciuto durante l'esecuzione, poi misurato.
+    // Overlay grown during the run, then measured.
     let ov = run.overlay_disk_id.unwrap();
     let managed = cat.read(|tx| tx.disk(&ov)).unwrap().managed_path;
     std::fs::write(cat.layout().resolve(&managed).unwrap(), vec![0u8; 8192]).unwrap();
     cat.refresh_disk_sizes().unwrap();
-    // Budget della VM dichiarato sotto il consumo attuale: superato.
+    // VM budget declared below current usage: exceeded.
     cat.set_vm_budget(&vm, 1000).unwrap();
     cat.set_global_budget(1 << 30, 4096).unwrap();
 
@@ -217,7 +214,7 @@ fn budget_manifest_reports_usage_per_vm_baseline_and_run() {
     let v = &m.vms[0];
     assert_eq!(v.vm_id, vm);
     assert_eq!(v.budget_bytes, Some(1000));
-    assert!(v.exceeded, "budget della VM superato: {v:?}");
+    assert!(v.exceeded, "VM budget exceeded: {v:?}");
     assert_eq!(v.total_bytes, v.usage.total());
     assert_eq!(v.baselines.len(), 1);
     assert_eq!(v.baselines[0].baseline_id, b);
@@ -232,11 +229,11 @@ fn budget_manifest_reports_usage_per_vm_baseline_and_run() {
         r.total_bytes,
         r.overlay_bytes + r.firmware_bytes + r.artifact_bytes + r.log_bytes
     );
-    // Somma per categoria coerente con le righe di dettaglio.
+    // Per-category sum consistent with the detail rows.
     assert_eq!(v.usage.overlays, r.overlay_bytes);
     assert_eq!(v.usage.baselines, v.baselines[0].total_bytes);
 
-    // File scritto in modo atomico, con hash registrato e contenuto rileggibile.
+    // File written atomically, with recorded hash and readable content.
     let path = dir.path().join(vm_storage::BUDGET_MANIFEST_FILE);
     let bytes = std::fs::read(&path).unwrap();
     let back: vm_storage::BudgetManifest = serde_json::from_slice(&bytes).unwrap();
@@ -277,7 +274,7 @@ fn run_over_budget_is_refused_before_any_file_or_intent() {
         matches!(&err, StorageError::ResourceLimit(m) if m.contains("VM")),
         "{err:?}"
     );
-    assert!(!called, "il produttore dell'overlay non è stato invocato");
+    assert!(!called, "the overlay producer was not invoked");
     assert!(cat.open_intents().unwrap().is_empty());
     let overlays = dir.path().join("vms").join(vm.to_string()).join("overlays");
     assert_eq!(
@@ -286,7 +283,7 @@ fn run_over_budget_is_refused_before_any_file_or_intent() {
     );
     assert!(cat.budget_manifest().unwrap().vms[0].runs.is_empty());
 
-    // Entro il budget l'esecuzione viene preparata e il controllo è restituito.
+    // Within budget the run is prepared and the check is returned.
     let (run, check) = cat
         .prepare_run_within_budget(&vm, &b, &req(50), |t, _| common::write_bytes(t, b"o"))
         .unwrap();

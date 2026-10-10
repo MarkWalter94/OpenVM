@@ -1,15 +1,15 @@
-//! Policy effettiva come intersezione (ROADMAP 6.3; `docs/ARCHITECTURE.md` 6).
+//! Effective policy as an intersection (ROADMAP 6.3; `docs/ARCHITECTURE.md` 6).
 //!
-//! `policy_effettiva = limiti_globali ∩ policy_VM ∩ grant_sessione ∩ capacità_host`.
-//! Funzioni pure: nessun livello può ampliare i precedenti, e l'assenza di una
-//! capacità host restringe invece di essere ignorata.
+//! `effective_policy = global_limits ∩ VM_policy ∩ session_grant ∩ host_capacity`.
+//! Pure functions: no layer can widen the previous ones, and a missing host
+//! capability restricts instead of being ignored.
 
 use lightvm_proto::{
     Capability, CapabilitySet, EffectivePolicy, HostCapacity, PolicyLayer, PolicyRevision,
     ResourceLimits,
 };
 
-/// Intersezione di due livelli.
+/// Intersection of two layers.
 #[must_use]
 pub fn intersect_layers(a: &PolicyLayer, b: &PolicyLayer) -> PolicyLayer {
     PolicyLayer {
@@ -22,7 +22,7 @@ pub fn intersect_layers(a: &PolicyLayer, b: &PolicyLayer) -> PolicyLayer {
     }
 }
 
-/// Policy effettiva di una sessione agente su una VM.
+/// Effective policy of an agent session on a VM.
 #[must_use]
 pub fn effective_policy(
     global: &PolicyLayer,
@@ -42,8 +42,8 @@ pub fn effective_policy(
     }
 }
 
-/// Policy effettiva per l'utente locale: come per l'agente, senza grant (la UI
-/// non è un livello fidato aggiuntivo, ma l'utente non ha bisogno di un grant).
+/// Effective policy for the local user: as for the agent, without a grant (the UI
+/// is not an additional trusted layer, but the user does not need a grant).
 #[must_use]
 pub fn effective_user_policy(
     global: &PolicyLayer,
@@ -54,17 +54,17 @@ pub fn effective_user_policy(
     effective_policy(global, vm, &PolicyLayer::permissive(), host, revision)
 }
 
-/// `true` se `inner` non amplia `outer` (capability ⊆ e quote ≤).
+/// `true` if `inner` does not widen `outer` (capabilities ⊆ and quotas ≤).
 #[must_use]
 pub fn is_within(inner: &PolicyLayer, outer: &PolicyLayer) -> bool {
     inner.capabilities.is_subset(&outer.capabilities) && inner.quotas.is_within(&outer.quotas)
 }
 
-/// Livello derivato dalla capacità host: le capability prive di supporto sono escluse.
+/// Layer derived from host capacity: capabilities without support are excluded.
 ///
-/// - senza acceleratore approvato: niente `vm.start` (nessun fallback TCG, ADR-0007);
-/// - senza cattura: niente `vm.screenshot`; senza input: niente `vm.input`;
-/// - senza baseline (prima di F3): niente `vm.snapshot` né `vm.restore`.
+/// - without an approved accelerator: no `vm.start` (no TCG fallback, ADR-0007);
+/// - without capture: no `vm.screenshot`; without input: no `vm.input`;
+/// - without baseline (before F3): neither `vm.snapshot` nor `vm.restore`.
 #[must_use]
 pub fn host_layer(host: &HostCapacity) -> PolicyLayer {
     let capabilities: CapabilitySet = Capability::ALL
@@ -87,7 +87,7 @@ pub fn host_layer(host: &HostCapacity) -> PolicyLayer {
     }
 }
 
-/// Limiti di risorse effettivi: limiti globali ∩ limiti VM (se presenti) ∩ capacità host.
+/// Effective resource limits: global limits ∩ VM limits (if any) ∩ host capacity.
 #[must_use]
 pub fn effective_resource_limits(
     global: &ResourceLimits,

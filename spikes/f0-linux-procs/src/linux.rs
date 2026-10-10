@@ -1,15 +1,15 @@
-//! Implementazione Linux dello spike. Vedi `main.rs` per la motivazione di `unsafe`.
+//! Linux implementation of the spike. See `main.rs` for the rationale for `unsafe`.
 //!
-//! Struttura dei processi usata dagli scenari (lo stesso eseguibile in ruoli diversi):
+//! Process structure used by the scenarios (the same executable in different roles):
 //!
 //! ```text
-//! misuratore ── role-supervisor <modo> ── figlio "VM" (sleep 1000, oppure albero sh)
-//! misuratore ── role-ui ── role-supervisor ui-monitor ── figlio "VM"
+//! measurer ── role-supervisor <mode> ── "VM" child (sleep 1000, or sh tree)
+//! measurer ── role-ui ── role-supervisor ui-monitor ── "VM" child
 //! ```
 //!
-//! Il misuratore tiene un pidfd su ogni processo osservato e considera terminato un
-//! processo quando il pidfd diventa leggibile (uscita del processo, `poll` su pidfd,
-//! Linux >= 5.3). I tempi sono misurati con `Instant` (CLOCK_MONOTONIC).
+//! The measurer holds a pidfd on every observed process and considers a process
+//! terminated when the pidfd becomes readable (process exit, `poll` on pidfd,
+//! Linux >= 5.3). Times are measured with `Instant` (CLOCK_MONOTONIC).
 
 use std::ffi::CString;
 use std::fs;
@@ -20,8 +20,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// Tempo massimo di attesa della fine dei processi dopo un segnale: oltre, il
-/// campione è registrato come timeout (e quindi come possibile orfano).
+/// Maximum time to wait for processes to end after a signal: beyond it, the
+/// sample is recorded as a timeout (and therefore as a possible orphan).
 const TIMEOUT: Duration = Duration::from_secs(5);
 const SLEEP_ARG: &str = "1000";
 
@@ -36,7 +36,7 @@ pub(crate) fn main() -> i32 {
     let cmd = args.get(1).map(String::as_str).unwrap_or("help");
     let samples = flag(&args, "--samples").unwrap_or(30);
     let r = match cmd {
-        // Ruoli interni.
+        // Internal roles.
         "role-supervisor" => role_supervisor(&args[2..]),
         "role-ui" => role_ui(),
         "hog-mem" => hog_mem(args.get(2).and_then(|s| s.parse().ok()).unwrap_or(512)),
@@ -44,13 +44,13 @@ pub(crate) fn main() -> i32 {
             args.get(2).and_then(|s| s.parse().ok()).unwrap_or(4),
             args.get(3).and_then(|s| s.parse().ok()).unwrap_or(3),
         ),
-        // Scenari.
-        "processi" => scenari_processi(samples),
-        "cgroup" => scenari_cgroup(samples),
+        // Scenarios.
+        "processes" => process_scenarios(samples),
+        "cgroup" => cgroup_scenarios(samples),
         _ => {
             println!(
-                "uso: f0-linux-procs processi [--samples N] | cgroup [--samples N]\n\
-                 `cgroup` richiede un cgroup delegato, per esempio:\n\
+                "usage: f0-linux-procs processes [--samples N] | cgroup [--samples N]\n\
+                 `cgroup` requires a delegated cgroup, for example:\n\
                  systemd-run --user --scope -p Delegate=yes -- f0-linux-procs cgroup"
             );
             Ok(())
@@ -59,7 +59,7 @@ pub(crate) fn main() -> i32 {
     match r {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("ERRORE {e}");
+            eprintln!("ERROR {e}");
             1
         }
     }
@@ -71,22 +71,22 @@ fn flag(args: &[String], name: &str) -> Option<usize> {
 }
 
 // ---------------------------------------------------------------------------
-// Primitive di sistema
+// System primitives
 // ---------------------------------------------------------------------------
 
 fn pidfd_open(pid: i32) -> io::Result<OwnedFd> {
-    // SAFETY: syscall con soli argomenti interi; nessun puntatore passato al kernel.
+    // SAFETY: syscall with integer arguments only; no pointer passed to the kernel.
     let r = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
     if r < 0 {
         return Err(io::Error::last_os_error());
     }
-    // SAFETY: `r` è un descrittore appena creato dal kernel e non posseduto da altri.
+    // SAFETY: `r` is a descriptor just created by the kernel and not owned by anyone else.
     Ok(unsafe { OwnedFd::from_raw_fd(r as RawFd) })
 }
 
 fn pidfd_send_signal(fd: &OwnedFd, sig: i32) -> io::Result<()> {
-    // SAFETY: `fd` è un pidfd valido per la durata della chiamata; `info` nullo è
-    // ammesso dalla syscall; flags = 0.
+    // SAFETY: `fd` is a valid pidfd for the duration of the call; a null `info` is
+    // allowed by the syscall; flags = 0.
     let r = unsafe {
         libc::syscall(
             libc::SYS_pidfd_send_signal,
@@ -103,13 +103,13 @@ fn pidfd_send_signal(fd: &OwnedFd, sig: i32) -> io::Result<()> {
     }
 }
 
-/// `waitid(P_PIDFD, fd, WEXITED)`: raccoglie un figlio diretto tramite pidfd.
-/// Restituisce (si_code, si_status).
+/// `waitid(P_PIDFD, fd, WEXITED)`: reaps a direct child through a pidfd.
+/// Returns (si_code, si_status).
 fn waitid_pidfd(fd: &OwnedFd) -> io::Result<(i32, i32)> {
-    // SAFETY: siginfo_t è un tipo C plain-old-data; l'azzeramento è un valore valido.
+    // SAFETY: siginfo_t is a plain-old-data C type; all zeroes is a valid value.
     let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
     loop {
-        // SAFETY: `info` è un buffer valido e scrivibile; `fd` è un pidfd valido.
+        // SAFETY: `info` is a valid, writable buffer; `fd` is a valid pidfd.
         let r = unsafe {
             libc::waitid(
                 libc::P_PIDFD,
@@ -126,23 +126,23 @@ fn waitid_pidfd(fd: &OwnedFd) -> io::Result<(i32, i32)> {
             return Err(e);
         }
     }
-    // SAFETY: dopo un waitid riuscito con WEXITED il campo si_status è valorizzato.
+    // SAFETY: after a successful waitid with WEXITED the si_status field is set.
     let status = unsafe { info.si_status() };
     Ok((info.si_code, status))
 }
 
-/// Attende che tutti i pidfd diventino leggibili (processi terminati) entro `deadline`.
+/// Waits for all pidfds to become readable (processes terminated) by `deadline`.
 fn wait_all_exit(fds: &[&OwnedFd], deadline: Instant) -> io::Result<bool> {
     let mut pending: Vec<RawFd> = fds.iter().map(|f| f.as_raw_fd()).collect();
-    // Almeno un `poll` viene sempre eseguito, anche con scadenza già passata
-    // (timeout 0): serve per il controllo istantaneo dei sopravvissuti.
-    let mut primo = true;
+    // At least one `poll` is always executed, even with a deadline already past
+    // (timeout 0): it is needed for the instant check of survivors.
+    let mut first = true;
     while !pending.is_empty() {
         let now = Instant::now();
-        if now >= deadline && !primo {
+        if now >= deadline && !first {
             return Ok(false);
         }
-        primo = false;
+        first = false;
         let ms = deadline
             .saturating_duration_since(now)
             .as_millis()
@@ -155,7 +155,7 @@ fn wait_all_exit(fds: &[&OwnedFd], deadline: Instant) -> io::Result<bool> {
                 revents: 0,
             })
             .collect();
-        // SAFETY: `pfds` è un buffer valido di `pfds.len()` elementi per tutta la chiamata.
+        // SAFETY: `pfds` is a valid buffer of `pfds.len()` elements for the whole call.
         let r = unsafe { libc::poll(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, ms) };
         if r < 0 {
             let e = io::Error::last_os_error();
@@ -174,7 +174,7 @@ fn wait_all_exit(fds: &[&OwnedFd], deadline: Instant) -> io::Result<bool> {
 }
 
 fn kill_raw(pid: i32, sig: i32) -> io::Result<()> {
-    // SAFETY: kill(2) con argomenti interi; pid negativo indica il gruppo di processi.
+    // SAFETY: kill(2) with integer arguments; a negative pid means the process group.
     if unsafe { libc::kill(pid, sig) } != 0 {
         Err(io::Error::last_os_error())
     } else {
@@ -182,13 +182,13 @@ fn kill_raw(pid: i32, sig: i32) -> io::Result<()> {
     }
 }
 
-/// Imposta nel figlio, tra fork ed exec, `PR_SET_PDEATHSIG(sig)` e verifica che il
-/// padre sia ancora quello atteso (altrimenti il segnale non arriverebbe mai).
+/// Sets `PR_SET_PDEATHSIG(sig)` in the child, between fork and exec, and checks that
+/// the parent is still the expected one (otherwise the signal would never arrive).
 fn with_pdeathsig(cmd: &mut Command, sig: i32) {
     let parent = std::process::id() as libc::pid_t;
-    // SAFETY: la closure viene eseguita nel figlio dopo fork e prima di exec; usa solo
-    // prctl(2) e getppid(2), async-signal-safe, senza allocazioni né lock.
-    // `io::Error::from_raw_os_error`/`last_os_error` non allocano.
+    // SAFETY: the closure runs in the child after fork and before exec; it uses only
+    // prctl(2) and getppid(2), async-signal-safe, with no allocations or locks.
+    // `io::Error::from_raw_os_error`/`last_os_error` do not allocate.
     unsafe {
         cmd.pre_exec(move || {
             if libc::prctl(libc::PR_SET_PDEATHSIG, sig as libc::c_ulong, 0, 0, 0) != 0 {
@@ -202,18 +202,18 @@ fn with_pdeathsig(cmd: &mut Command, sig: i32) {
     }
 }
 
-/// Sposta il figlio, tra fork ed exec, nel cgroup indicato scrivendo "0" in
-/// `cgroup.procs` (il kernel interpreta 0 come "il processo chiamante").
+/// Moves the child, between fork and exec, into the given cgroup by writing "0" to
+/// `cgroup.procs` (the kernel interprets 0 as "the calling process").
 fn into_cgroup(cmd: &mut Command, cg: &Path) -> Res<()> {
     let procs = CString::new(
         cg.join("cgroup.procs")
             .into_os_string()
             .into_encoded_bytes(),
     )
-    .map_err(err("percorso cgroup"))?;
-    // SAFETY: la closure viene eseguita nel figlio dopo fork e prima di exec; usa solo
-    // open(2), write(2), close(2), async-signal-safe. `procs` è allocato prima del
-    // fork e catturato per spostamento, quindi il puntatore resta valido.
+    .map_err(err("cgroup path"))?;
+    // SAFETY: the closure runs in the child after fork and before exec; it uses only
+    // open(2), write(2), close(2), async-signal-safe. `procs` is allocated before the
+    // fork and captured by move, so the pointer stays valid.
     unsafe {
         cmd.pre_exec(move || {
             let fd = libc::open(procs.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC);
@@ -236,18 +236,18 @@ fn read_tag(rd: &mut BufReader<ChildStdout>, tag: &str) -> Res<i32> {
     let mut line = String::new();
     loop {
         line.clear();
-        let n = rd.read_line(&mut line).map_err(err("lettura pipe"))?;
+        let n = rd.read_line(&mut line).map_err(err("pipe read"))?;
         if n == 0 {
-            return Err(format!("pipe chiusa prima di {tag}"));
+            return Err(format!("pipe closed before {tag}"));
         }
         if let Some(rest) = line.trim().strip_prefix(tag) {
-            return rest.trim().parse().map_err(err("pid non valido"));
+            return rest.trim().parse().map_err(err("invalid pid"));
         }
     }
 }
 
-/// Attende che `pid` abbia eseguito exec del programma `comm` (evita di misurare la
-/// finestra tra fork ed exec).
+/// Waits until `pid` has exec'd the program `comm` (avoids measuring the
+/// window between fork and exec).
 fn wait_comm(pid: i32, comm: &str) -> Res<()> {
     let deadline = Instant::now() + Duration::from_secs(3);
     let p = format!("/proc/{pid}/comm");
@@ -260,10 +260,10 @@ fn wait_comm(pid: i32, comm: &str) -> Res<()> {
         }
         std::thread::sleep(Duration::from_millis(1));
     }
-    Err(format!("pid {pid} non ha eseguito {comm} entro 3 s"))
+    Err(format!("pid {pid} did not exec {comm} within 3 s"))
 }
 
-/// Legge (pgrp, session) da /proc/<pid>/stat.
+/// Reads (pgrp, session) from /proc/<pid>/stat.
 fn pgrp_sid(pid: i32) -> Option<(i32, i32)> {
     let s = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let after = &s[s.rfind(')')? + 2..];
@@ -271,7 +271,7 @@ fn pgrp_sid(pid: i32) -> Option<(i32, i32)> {
     Some((f.get(2)?.parse().ok()?, f.get(3)?.parse().ok()?))
 }
 
-/// Processi "sleep 1000" dell'utente corrente ancora vivi (controllo orfani).
+/// "sleep 1000" processes of the current user still alive (orphan check).
 fn sleep_survivors() -> Vec<i32> {
     let me = fs::read_to_string("/proc/self/status")
         .ok()
@@ -315,19 +315,19 @@ fn sleep_survivors() -> Vec<i32> {
 }
 
 // ---------------------------------------------------------------------------
-// Statistiche
+// Statistics
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Default)]
-struct Serie {
+struct Series {
     ms: Vec<f64>,
     timeout: usize,
-    errori: Vec<String>,
-    orfani: usize,
+    errors: Vec<String>,
+    orphans: usize,
 }
 
-impl Serie {
-    fn report(&mut self, nome: &str) {
+impl Series {
+    fn report(&mut self, name: &str) {
         self.ms.sort_by(|a, b| a.total_cmp(b));
         let n = self.ms.len();
         let pick = |p: f64| -> f64 {
@@ -338,22 +338,22 @@ impl Serie {
             self.ms[k - 1]
         };
         println!(
-            "RISULTATO scenario={nome} campioni_ok={n} p50_ms={:.3} p95_ms={:.3} max_ms={:.3} timeout={} errori={} orfani={}",
+            "RESULT scenario={name} samples_ok={n} p50_ms={:.3} p95_ms={:.3} max_ms={:.3} timeout={} errors={} orphans={}",
             pick(0.50),
             pick(0.95),
             pick(1.0),
             self.timeout,
-            self.errori.len(),
-            self.orfani
+            self.errors.len(),
+            self.orphans
         );
-        for e in &self.errori {
-            println!("  errore: {e}");
+        for e in &self.errors {
+            println!("  error: {e}");
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Ruoli interni
+// Internal roles
 // ---------------------------------------------------------------------------
 
 fn park_forever() -> ! {
@@ -366,7 +366,7 @@ fn role_supervisor(args: &[String]) -> Res<()> {
     let mode = args.first().map(String::as_str).unwrap_or("single");
     let out = io::stdout();
     match mode {
-        // Figlio diretto con PDEATHSIG=SIGKILL.
+        // Direct child with PDEATHSIG=SIGKILL.
         "single" => {
             let mut c = Command::new("sleep");
             c.arg(SLEEP_ARG).stdout(Stdio::null());
@@ -375,7 +375,7 @@ fn role_supervisor(args: &[String]) -> Res<()> {
             writeln!(out.lock(), "CHILD {}", ch.id()).map_err(err("stdout"))?;
             park_forever();
         }
-        // Figlio con PDEATHSIG che a sua volta crea un nipote (non ereditano PDEATHSIG).
+        // Child with PDEATHSIG that in turn creates a grandchild (PDEATHSIG is not inherited).
         "tree" => {
             let mut c = Command::new("sh");
             c.args(["-c", "sleep 1000 & echo GC $!; exec sleep 1000"]);
@@ -384,12 +384,12 @@ fn role_supervisor(args: &[String]) -> Res<()> {
             writeln!(out.lock(), "CHILD {}", ch.id()).map_err(err("stdout"))?;
             park_forever();
         }
-        // Figlio capogruppo di un nuovo gruppo di processi, con due nipoti.
+        // Child that leads a new process group, with two grandchildren.
         "pgid" | "pgid-escape" => {
             let script = if mode == "pgid" {
                 "sleep 1000 & echo GC $!; sleep 1000 & echo GC $!; wait"
             } else {
-                // Il primo nipote esce dal gruppo e dalla sessione con setsid.
+                // The first grandchild leaves the group and the session with setsid.
                 "setsid sleep 1000 & echo GC $!; sleep 1000 & echo GC $!; wait"
             };
             let mut c = Command::new("sh");
@@ -399,17 +399,17 @@ fn role_supervisor(args: &[String]) -> Res<()> {
             writeln!(out.lock(), "CHILD {}", ch.id()).map_err(err("stdout"))?;
             park_forever();
         }
-        // Supervisor che sorveglia la UI con un pidfd e, alla sua morte, arresta la VM
-        // in modo controllato (SIGTERM, attesa 2 s, poi SIGKILL) ed esce.
+        // Supervisor that watches the UI with a pidfd and, when it dies, stops the VM
+        // in a controlled way (SIGTERM, 2 s wait, then SIGKILL) and exits.
         "ui-monitor" => {
             let ui_pid: i32 = args
                 .get(1)
                 .and_then(|s| s.parse().ok())
-                .ok_or("pid UI mancante")?;
+                .ok_or("UI pid missing")?;
             let ui_fd = pidfd_open(ui_pid).map_err(err("pidfd_open UI"))?;
-            // SAFETY: getppid(2) non ha precondizioni.
+            // SAFETY: getppid(2) has no preconditions.
             if unsafe { libc::getppid() } != ui_pid {
-                return Err("UI già terminata prima del pidfd".into());
+                return Err("UI already terminated before the pidfd".into());
             }
             let mut c = Command::new("sleep");
             c.arg(SLEEP_ARG).stdout(Stdio::null());
@@ -428,14 +428,14 @@ fn role_supervisor(args: &[String]) -> Res<()> {
             let _ = vm.wait();
             Ok(())
         }
-        other => Err(format!("modo supervisor sconosciuto: {other}")),
+        other => Err(format!("unknown supervisor mode: {other}")),
     }
 }
 
 fn role_ui() -> Res<()> {
     let exe = std::env::current_exe().map_err(err("current_exe"))?;
     let me = std::process::id().to_string();
-    // stdout ereditato: il supervisor scrive CHILD direttamente al misuratore.
+    // inherited stdout: the supervisor writes CHILD directly to the measurer.
     let sup = Command::new(exe)
         .args(["role-supervisor", "ui-monitor", &me])
         .spawn()
@@ -453,7 +453,7 @@ fn hog_mem(mb: usize) -> Res<()> {
         }
         v.push(std::hint::black_box(chunk));
     }
-    println!("HOG-MEM completato {mb} MiB senza essere terminato");
+    println!("HOG-MEM completed {mb} MiB without being killed");
     Ok(())
 }
 
@@ -481,7 +481,7 @@ fn hog_cpu(threads: usize, secs: u64) -> Res<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Scenari sui processi (non richiedono privilegi né cgroup)
+// Process scenarios (they require neither privileges nor cgroups)
 // ---------------------------------------------------------------------------
 
 fn spawn_role(args: &[&str]) -> Res<(Child, BufReader<ChildStdout>)> {
@@ -490,12 +490,12 @@ fn spawn_role(args: &[&str]) -> Res<(Child, BufReader<ChildStdout>)> {
         .args(args)
         .stdout(Stdio::piped())
         .spawn()
-        .map_err(err("spawn ruolo"))?;
-    let out = ch.stdout.take().ok_or("stdout mancante")?;
+        .map_err(err("spawn role"))?;
+    let out = ch.stdout.take().ok_or("stdout missing")?;
     Ok((ch, BufReader::new(out)))
 }
 
-fn scenari_processi(samples: usize) -> Res<()> {
+fn process_scenarios(samples: usize) -> Res<()> {
     println!(
         "INFO kernel={}",
         fs::read_to_string("/proc/sys/kernel/osrelease")
@@ -503,111 +503,111 @@ fn scenari_processi(samples: usize) -> Res<()> {
             .trim()
     );
     println!(
-        "INFO campioni_per_scenario={samples} timeout_s={}",
+        "INFO samples_per_scenario={samples} timeout_s={}",
         TIMEOUT.as_secs()
     );
-    let prima = sleep_survivors();
-    if !prima.is_empty() {
-        println!("AVVISO processi 'sleep 1000' già presenti prima della prova: {prima:?}");
+    let before = sleep_survivors();
+    if !before.is_empty() {
+        println!("WARNING 'sleep 1000' processes already present before the test: {before:?}");
     }
 
-    // (a) PDEATHSIG: SIGKILL al supervisor, misura fino alla fine del figlio diretto.
-    let mut s = Serie::default();
+    // (a) PDEATHSIG: SIGKILL to the supervisor, measured until the direct child ends.
+    let mut s = Series::default();
     for i in 0..samples {
-        match campione_pdeathsig() {
+        match sample_pdeathsig() {
             Ok(Some(d)) => s.ms.push(d),
             Ok(None) => {
                 s.timeout += 1;
-                s.orfani += 1;
+                s.orphans += 1;
             }
-            Err(e) => s.errori.push(format!("campione {i}: {e}")),
+            Err(e) => s.errors.push(format!("sample {i}: {e}")),
         }
     }
     s.report("a_pdeathsig_sigkill_supervisor");
 
-    // (a2) PDEATHSIG non si propaga ai nipoti.
-    match campione_pdeathsig_tree() {
-        Ok((figlio_ok, nipote_vivo)) => println!(
-            "RISULTATO scenario=a2_pdeathsig_albero figlio_diretto_terminato={figlio_ok} nipote_sopravvissuto={nipote_vivo}"
+    // (a2) PDEATHSIG does not propagate to grandchildren.
+    match sample_pdeathsig_tree() {
+        Ok((child_ok, grandchild_alive)) => println!(
+            "RESULT scenario=a2_pdeathsig_tree direct_child_terminated={child_ok} grandchild_survived={grandchild_alive}"
         ),
-        Err(e) => println!("RISULTATO scenario=a2_pdeathsig_albero errore={e}"),
+        Err(e) => println!("RESULT scenario=a2_pdeathsig_tree error={e}"),
     }
 
-    // (b) pidfd: segnale e raccolta tramite pidfd, poi ESRCH sul pidfd vecchio.
-    let mut s = Serie::default();
+    // (b) pidfd: signal and reap through pidfd, then ESRCH on the old pidfd.
+    let mut s = Series::default();
     let mut esrch = 0usize;
     let mut killed = 0usize;
     for i in 0..samples {
-        match campione_pidfd() {
+        match sample_pidfd() {
             Ok((d, k, e)) => {
                 s.ms.push(d);
                 killed += usize::from(k);
                 esrch += usize::from(e);
             }
-            Err(e) => s.errori.push(format!("campione {i}: {e}")),
+            Err(e) => s.errors.push(format!("sample {i}: {e}")),
         }
     }
     s.report("b_pidfd_send_signal_waitid");
     println!(
-        "RISULTATO scenario=b_pidfd_identita si_code_CLD_KILLED_SIGKILL={killed}/{samples} esrch_dopo_raccolta={esrch}/{samples} pidfd_open_su_pid_raccolto={}",
-        pidfd_open_dopo_raccolta()
+        "RESULT scenario=b_pidfd_identity si_code_CLD_KILLED_SIGKILL={killed}/{samples} esrch_after_reap={esrch}/{samples} pidfd_open_on_reaped_pid={}",
+        pidfd_open_after_reap()
     );
 
-    // (c) gruppo di processi: kill(-pgid, SIGKILL), misura fino alla fine di tutti i membri.
-    let mut s = Serie::default();
+    // (c) process group: kill(-pgid, SIGKILL), measured until all members end.
+    let mut s = Series::default();
     for i in 0..samples {
-        match campione_pgid("pgid") {
+        match sample_pgid("pgid") {
             Ok((Some(d), _)) => s.ms.push(d),
             Ok((None, _)) => {
                 s.timeout += 1;
-                s.orfani += 1;
+                s.orphans += 1;
             }
-            Err(e) => s.errori.push(format!("campione {i}: {e}")),
+            Err(e) => s.errors.push(format!("sample {i}: {e}")),
         }
     }
     s.report("c_kill_pgid");
 
-    // (c2) un nipote che chiama setsid esce dal gruppo e sopravvive a kill(-pgid).
-    match campione_pgid("pgid-escape") {
-        Ok((_, sopravvissuti)) => println!(
-            "RISULTATO scenario=c2_pgid_fuga_setsid sopravvissuti_a_kill_pgid={sopravvissuti}"
-        ),
-        Err(e) => println!("RISULTATO scenario=c2_pgid_fuga_setsid errore={e}"),
+    // (c2) a grandchild that calls setsid leaves the group and survives kill(-pgid).
+    match sample_pgid("pgid-escape") {
+        Ok((_, survivors)) => {
+            println!("RESULT scenario=c2_pgid_setsid_escape survivors_of_kill_pgid={survivors}")
+        }
+        Err(e) => println!("RESULT scenario=c2_pgid_setsid_escape error={e}"),
     }
 
-    // Crash della UI: il supervisor se ne accorge via pidfd e arresta la VM.
-    let mut s = Serie::default();
+    // UI crash: the supervisor notices via pidfd and stops the VM.
+    let mut s = Series::default();
     for i in 0..samples {
-        match campione_ui_crash() {
+        match sample_ui_crash() {
             Ok(Some(d)) => s.ms.push(d),
             Ok(None) => {
                 s.timeout += 1;
-                s.orfani += 1;
+                s.orphans += 1;
             }
-            Err(e) => s.errori.push(format!("campione {i}: {e}")),
+            Err(e) => s.errors.push(format!("sample {i}: {e}")),
         }
     }
-    s.report("ui_crash_arresto_controllato_vm");
+    s.report("ui_crash_controlled_vm_stop");
 
-    let dopo: Vec<i32> = sleep_survivors()
+    let after: Vec<i32> = sleep_survivors()
         .into_iter()
-        .filter(|p| !prima.contains(p))
+        .filter(|p| !before.contains(p))
         .collect();
     println!(
-        "RISULTATO scenario=controllo_orfani_finale sleep_1000_rimasti={}",
-        dopo.len()
+        "RESULT scenario=final_orphan_check sleep_1000_remaining={}",
+        after.len()
     );
-    for p in dopo {
+    for p in after {
         let _ = kill_raw(p, libc::SIGKILL);
     }
     Ok(())
 }
 
-fn campione_pdeathsig() -> Res<Option<f64>> {
+fn sample_pdeathsig() -> Res<Option<f64>> {
     let (mut sup, mut rd) = spawn_role(&["role-supervisor", "single"])?;
     let child = read_tag(&mut rd, "CHILD")?;
     wait_comm(child, "sleep")?;
-    let cfd = pidfd_open(child).map_err(err("pidfd figlio"))?;
+    let cfd = pidfd_open(child).map_err(err("pidfd child"))?;
     let sfd = pidfd_open(sup.id() as i32).map_err(err("pidfd supervisor"))?;
     let t0 = Instant::now();
     pidfd_send_signal(&sfd, libc::SIGKILL).map_err(err("SIGKILL supervisor"))?;
@@ -621,29 +621,29 @@ fn campione_pdeathsig() -> Res<Option<f64>> {
     Ok(Some(d))
 }
 
-fn campione_pdeathsig_tree() -> Res<(bool, bool)> {
+fn sample_pdeathsig_tree() -> Res<(bool, bool)> {
     let (mut sup, mut rd) = spawn_role(&["role-supervisor", "tree"])?;
     let child = read_tag(&mut rd, "CHILD")?;
     let gc = read_tag(&mut rd, "GC")?;
     wait_comm(child, "sleep")?;
     wait_comm(gc, "sleep")?;
-    let cfd = pidfd_open(child).map_err(err("pidfd figlio"))?;
-    let gfd = pidfd_open(gc).map_err(err("pidfd nipote"))?;
+    let cfd = pidfd_open(child).map_err(err("pidfd child"))?;
+    let gfd = pidfd_open(gc).map_err(err("pidfd grandchild"))?;
     pidfd_send_signal(
         &pidfd_open(sup.id() as i32).map_err(err("pidfd sup"))?,
         libc::SIGKILL,
     )
     .map_err(err("SIGKILL"))?;
     let _ = sup.wait();
-    let figlio_ok = wait_all_exit(&[&cfd], Instant::now() + TIMEOUT).map_err(err("poll"))?;
-    let nipote_morto =
+    let child_ok = wait_all_exit(&[&cfd], Instant::now() + TIMEOUT).map_err(err("poll"))?;
+    let grandchild_dead =
         wait_all_exit(&[&gfd], Instant::now() + Duration::from_secs(1)).map_err(err("poll"))?;
-    // Pulizia del nipote orfano.
+    // Cleanup of the orphaned grandchild.
     let _ = pidfd_send_signal(&gfd, libc::SIGKILL);
-    Ok((figlio_ok, !nipote_morto))
+    Ok((child_ok, !grandchild_dead))
 }
 
-fn campione_pidfd() -> Res<(f64, bool, bool)> {
+fn sample_pidfd() -> Res<(f64, bool, bool)> {
     let ch = Command::new("sleep")
         .arg(SLEEP_ARG)
         .spawn()
@@ -655,13 +655,13 @@ fn campione_pidfd() -> Res<(f64, bool, bool)> {
     pidfd_send_signal(&fd, libc::SIGKILL).map_err(err("pidfd_send_signal"))?;
     let (code, status) = waitid_pidfd(&fd).map_err(err("waitid P_PIDFD"))?;
     let d = t0.elapsed().as_secs_f64() * 1e3;
-    // Il processo è stato raccolto: il pidfd continua a riferirsi a quel processo e
-    // non a un eventuale nuovo processo con lo stesso PID.
+    // The process has been reaped: the pidfd keeps referring to that process and
+    // not to a possible new process with the same PID.
     let esrch = matches!(
         pidfd_send_signal(&fd, 0),
         Err(e) if e.raw_os_error() == Some(libc::ESRCH)
     );
-    // `ch` è già stato raccolto con waitid: non chiamare ch.wait().
+    // `ch` has already been reaped with waitid: do not call ch.wait().
     drop(ch);
     Ok((
         d,
@@ -670,22 +670,22 @@ fn campione_pidfd() -> Res<(f64, bool, bool)> {
     ))
 }
 
-fn pidfd_open_dopo_raccolta() -> String {
+fn pidfd_open_after_reap() -> String {
     let Ok(mut ch) = Command::new("true").spawn() else {
-        return "errore_spawn".into();
+        return "spawn_error".into();
     };
     let pid = ch.id() as i32;
     let _ = ch.wait();
     match pidfd_open(pid) {
-        Ok(_) => "aperto(PID_riusato?)".into(),
+        Ok(_) => "opened(PID_reused?)".into(),
         Err(e) if e.raw_os_error() == Some(libc::ESRCH) => "ESRCH".into(),
-        Err(e) => format!("errore:{e}"),
+        Err(e) => format!("error:{e}"),
     }
 }
 
-/// Restituisce (durata fino alla fine di tutti i membri del gruppo, numero di
-/// processi osservati sopravvissuti a kill(-pgid)).
-fn campione_pgid(mode: &str) -> Res<(Option<f64>, usize)> {
+/// Returns (duration until all group members end, number of observed
+/// processes that survived kill(-pgid)).
+fn sample_pgid(mode: &str) -> Res<(Option<f64>, usize)> {
     let (mut sup, mut rd) = spawn_role(&["role-supervisor", mode])?;
     let leader = read_tag(&mut rd, "CHILD")?;
     let g1 = read_tag(&mut rd, "GC")?;
@@ -697,7 +697,7 @@ fn campione_pgid(mode: &str) -> Res<(Option<f64>, usize)> {
         .iter()
         .map(|&p| pidfd_open(p))
         .collect::<io::Result<_>>()
-        .map_err(err("pidfd membri"))?;
+        .map_err(err("pidfd members"))?;
     let info: Vec<String> = pids
         .iter()
         .map(|&p| {
@@ -706,7 +706,7 @@ fn campione_pgid(mode: &str) -> Res<(Option<f64>, usize)> {
         })
         .collect();
     if mode == "pgid-escape" {
-        println!("INFO c2 membri {}", info.join(" "));
+        println!("INFO c2 members {}", info.join(" "));
     }
     let t0 = Instant::now();
     kill_raw(-leader, libc::SIGKILL).map_err(err("kill(-pgid)"))?;
@@ -721,10 +721,10 @@ fn campione_pgid(mode: &str) -> Res<(Option<f64>, usize)> {
     )
     .map_err(err("poll"))?;
     let d = t0.elapsed().as_secs_f64() * 1e3;
-    let mut sopravvissuti = 0;
+    let mut survivors = 0;
     for f in &fds {
         if !wait_all_exit(&[f], Instant::now()).unwrap_or(false) {
-            sopravvissuti += 1;
+            survivors += 1;
             let _ = pidfd_send_signal(f, libc::SIGKILL);
         }
     }
@@ -733,10 +733,10 @@ fn campione_pgid(mode: &str) -> Res<(Option<f64>, usize)> {
         libc::SIGKILL,
     );
     let _ = sup.wait();
-    Ok((ok.then_some(d), sopravvissuti))
+    Ok((ok.then_some(d), survivors))
 }
 
-fn campione_ui_crash() -> Res<Option<f64>> {
+fn sample_ui_crash() -> Res<Option<f64>> {
     let (mut ui, mut rd) = spawn_role(&["role-ui"])?;
     let sup = read_tag(&mut rd, "SUP")?;
     let vm = read_tag(&mut rd, "CHILD")?;
@@ -758,11 +758,11 @@ fn campione_ui_crash() -> Res<Option<f64>> {
 }
 
 // ---------------------------------------------------------------------------
-// Scenari cgroup v2
+// cgroup v2 scenarios
 // ---------------------------------------------------------------------------
 
 fn wr(p: &Path, v: &str) -> Res<()> {
-    fs::write(p, v).map_err(|e| format!("scrittura {} <- {v:?}: {e}", p.display()))
+    fs::write(p, v).map_err(|e| format!("write {} <- {v:?}: {e}", p.display()))
 }
 
 fn rd_kv(p: &Path, key: &str) -> Option<u64> {
@@ -772,18 +772,18 @@ fn rd_kv(p: &Path, key: &str) -> Option<u64> {
     })
 }
 
-fn scenari_cgroup(samples: usize) -> Res<()> {
+fn cgroup_scenarios(samples: usize) -> Res<()> {
     let self_cg = fs::read_to_string("/proc/self/cgroup").map_err(err("/proc/self/cgroup"))?;
     let rel = self_cg
         .lines()
         .find_map(|l| l.strip_prefix("0::"))
-        .ok_or("cgroup v2 non montato in modalità unificata")?
+        .ok_or("cgroup v2 not mounted in unified mode")?
         .trim()
         .to_owned();
     let base = PathBuf::from(format!("/sys/fs/cgroup{rel}"));
-    println!("INFO cgroup_corrente={rel}");
+    println!("INFO current_cgroup={rel}");
     println!(
-        "INFO controller_disponibili={:?}",
+        "INFO available_controllers={:?}",
         fs::read_to_string(base.join("cgroup.controllers"))
             .unwrap_or_default()
             .trim()
@@ -793,30 +793,30 @@ fn scenari_cgroup(samples: usize) -> Res<()> {
         && e.kind() != io::ErrorKind::AlreadyExists
     {
         println!(
-            "RISULTATO scenario=d_cgroup_delega disponibile=false motivo=\"mkdir {}: {e}\"",
+            "RESULT scenario=d_cgroup_delegation available=false reason=\"mkdir {}: {e}\"",
             leaf.display()
         );
         return Ok(());
     }
-    // Regola "nessun processo interno": il supervisor si sposta in una foglia prima di
-    // abilitare i controller per i sotto-cgroup.
+    // "No internal processes" rule: the supervisor moves into a leaf before
+    // enabling the controllers for the sub-cgroups.
     if let Err(e) = wr(&leaf.join("cgroup.procs"), &std::process::id().to_string()) {
-        println!("RISULTATO scenario=d_cgroup_delega disponibile=false motivo=\"{e}\"");
+        println!("RESULT scenario=d_cgroup_delegation available=false reason=\"{e}\"");
         let _ = fs::remove_dir(&leaf);
         return Ok(());
     }
     if let Err(e) = wr(&base.join("cgroup.subtree_control"), "+cpu +memory +pids") {
-        println!("RISULTATO scenario=d_cgroup_delega disponibile=false motivo=\"{e}\"");
+        println!("RESULT scenario=d_cgroup_delegation available=false reason=\"{e}\"");
         return Ok(());
     }
     println!(
-        "RISULTATO scenario=d_cgroup_delega disponibile=true base={}",
+        "RESULT scenario=d_cgroup_delegation available=true base={}",
         base.display()
     );
 
     let exe = std::env::current_exe().map_err(err("current_exe"))?;
 
-    // Memoria: memory.max 128 MiB, swap 0, processo che tenta di allocare 512 MiB.
+    // Memory: memory.max 128 MiB, swap 0, a process that tries to allocate 512 MiB.
     let cg = base.join("vm-mem");
     let _ = fs::create_dir(&cg);
     wr(&cg.join("memory.max"), "134217728")?;
@@ -827,7 +827,7 @@ fn scenari_cgroup(samples: usize) -> Res<()> {
     let st = c.status().map_err(err("hog-mem"))?;
     use std::os::unix::process::ExitStatusExt;
     println!(
-        "RISULTATO scenario=d_memory_max limite_mib=128 richiesta_mib=512 swap_max_0={swap} segnale_uscita={:?} codice={:?} oom_kill={:?} memory_peak={:?}",
+        "RESULT scenario=d_memory_max limit_mib=128 requested_mib=512 swap_max_0={swap} exit_signal={:?} code={:?} oom_kill={:?} memory_peak={:?}",
         st.signal(),
         st.code(),
         rd_kv(&cg.join("memory.events"), "oom_kill"),
@@ -837,12 +837,12 @@ fn scenari_cgroup(samples: usize) -> Res<()> {
     );
     let _ = fs::remove_dir(&cg);
 
-    // CPU: cpu.max 20 ms ogni 100 ms (0,2 CPU) contro controllo senza limite.
-    for (nome, max) in [
+    // CPU: cpu.max 20 ms every 100 ms (0.2 CPU) against an unlimited control.
+    for (name, max) in [
         ("d_cpu_max_20pct", "20000 100000"),
-        ("d_cpu_controllo_senza_limite", "max 100000"),
+        ("d_cpu_control_unlimited", "max 100000"),
     ] {
-        let cg = base.join(format!("vm-{nome}"));
+        let cg = base.join(format!("vm-{name}"));
         let _ = fs::create_dir(&cg);
         wr(&cg.join("cpu.max"), max)?;
         let stat = cg.join("cpu.stat");
@@ -855,7 +855,7 @@ fn scenari_cgroup(samples: usize) -> Res<()> {
         let wall = t0.elapsed().as_secs_f64();
         let used = (rd_kv(&stat, "usage_usec").unwrap_or(0) - u0) as f64 / 1e6;
         println!(
-            "RISULTATO scenario={nome} cpu_max=\"{max}\" thread=4 durata_s={wall:.3} cpu_usata_s={used:.3} core_medi={:.3} nr_throttled={:?} throttled_usec={:?}",
+            "RESULT scenario={name} cpu_max=\"{max}\" threads=4 duration_s={wall:.3} cpu_used_s={used:.3} mean_cores={:.3} nr_throttled={:?} throttled_usec={:?}",
             used / wall,
             rd_kv(&stat, "nr_throttled"),
             rd_kv(&stat, "throttled_usec"),
@@ -863,43 +863,43 @@ fn scenari_cgroup(samples: usize) -> Res<()> {
         let _ = fs::remove_dir(&cg);
     }
 
-    // pids.max: limita i processi del gruppo.
+    // pids.max: limits the processes of the group.
     let cg = base.join("vm-pids");
     let _ = fs::create_dir(&cg);
     wr(&cg.join("pids.max"), "4")?;
-    // La shell conta come un processo: con limite 4 al massimo 3 `sleep` partono.
+    // The shell counts as a process: with a limit of 4 at most 3 `sleep`s start.
     let mut c = Command::new("sh");
     c.args([
         "-c",
-        "for i in 1 2 3 4 5 6 7 8; do sleep 2 & echo avviato $i; done; wait",
+        "for i in 1 2 3 4 5 6 7 8; do sleep 2 & echo started $i; done; wait",
     ]);
     into_cgroup(&mut c, &cg)?;
     let out = c.output().map_err(err("pids"))?;
-    let avviati = String::from_utf8_lossy(&out.stdout)
+    let started = String::from_utf8_lossy(&out.stdout)
         .lines()
-        .filter(|l| l.starts_with("avviato"))
+        .filter(|l| l.starts_with("started"))
         .count();
     println!(
-        "RISULTATO scenario=d_pids_max limite=4 sleep_avviati={avviati}/8 uscita_shell={:?} stderr={:?} pids_events_max={:?}",
+        "RESULT scenario=d_pids_max limit=4 sleeps_started={started}/8 shell_exit={:?} stderr={:?} pids_events_max={:?}",
         out.status.code(),
         String::from_utf8_lossy(&out.stderr).trim(),
         rd_kv(&cg.join("pids.events"), "max"),
     );
     let _ = fs::remove_dir(&cg);
 
-    // cgroup.kill: termina tutto il sotto-albero, incluso un processo fuggito con setsid.
-    let mut s = Serie::default();
-    let mut s_pop = Serie::default();
-    let mut membri_min = usize::MAX;
+    // cgroup.kill: terminates the whole subtree, including a process that escaped with setsid.
+    let mut s = Series::default();
+    let mut s_pop = Series::default();
+    let mut min_members = usize::MAX;
     for i in 0..samples {
-        match campione_cgroup_kill(&base, i) {
+        match sample_cgroup_kill(&base, i) {
             Ok((m, p, n)) => {
-                membri_min = membri_min.min(n);
+                min_members = min_members.min(n);
                 match m {
                     Some(d) => s.ms.push(d),
                     None => {
                         s.timeout += 1;
-                        s.orfani += 1;
+                        s.orphans += 1;
                     }
                 }
                 match p {
@@ -907,18 +907,18 @@ fn scenari_cgroup(samples: usize) -> Res<()> {
                     None => s_pop.timeout += 1,
                 }
             }
-            Err(e) => s.errori.push(format!("campione {i}: {e}")),
+            Err(e) => s.errors.push(format!("sample {i}: {e}")),
         }
     }
-    println!("INFO cgroup_kill membri_per_campione_min={membri_min} (sh, sleep, setsid sleep)");
-    s.report("d_cgroup_kill_fine_membri_pidfd");
+    println!("INFO cgroup_kill min_members_per_sample={min_members} (sh, sleep, setsid sleep)");
+    s.report("d_cgroup_kill_members_end_pidfd");
     s_pop.report("d_cgroup_kill_populated_0");
     Ok(())
 }
 
-/// Restituisce (ms fino alla fine di tutti i membri, ms fino a `populated 0`,
-/// numero di membri osservati).
-fn campione_cgroup_kill(base: &Path, i: usize) -> Res<(Option<f64>, Option<f64>, usize)> {
+/// Returns (ms until all members end, ms until `populated 0`,
+/// number of observed members).
+fn sample_cgroup_kill(base: &Path, i: usize) -> Res<(Option<f64>, Option<f64>, usize)> {
     let cg = base.join(format!("vm-kill-{i}"));
     let _ = fs::create_dir(&cg);
     let mut c = Command::new("sh");
@@ -930,7 +930,7 @@ fn campione_cgroup_kill(base: &Path, i: usize) -> Res<(Option<f64>, Option<f64>,
     BufReader::new(ch.stdout.take().ok_or("stdout")?)
         .read_line(&mut line)
         .map_err(err("READY"))?;
-    // Attende che i tre processi siano nel cgroup e abbiano eseguito exec.
+    // Waits until the three processes are in the cgroup and have exec'd.
     let procs = cg.join("cgroup.procs");
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
@@ -948,7 +948,7 @@ fn campione_cgroup_kill(base: &Path, i: usize) -> Res<(Option<f64>, Option<f64>,
             break;
         }
         if Instant::now() > deadline {
-            return Err(format!("cgroup non popolato: {list:?}"));
+            return Err(format!("cgroup not populated: {list:?}"));
         }
         std::thread::sleep(Duration::from_millis(1));
     }
@@ -961,12 +961,12 @@ fn campione_cgroup_kill(base: &Path, i: usize) -> Res<(Option<f64>, Option<f64>,
     let mut ev = fs::File::open(cg.join("cgroup.events")).map_err(err("cgroup.events"))?;
     let t0 = Instant::now();
     wr(&cg.join("cgroup.kill"), "1")?;
-    // Prima misura: fine effettiva di tutti i membri (pidfd).
+    // First measurement: actual end of all members (pidfd).
     let refs: Vec<&OwnedFd> = members.iter().collect();
-    let morti = wait_all_exit(&refs, t0 + TIMEOUT).map_err(err("poll membri"))?;
-    let d_membri = t0.elapsed().as_secs_f64() * 1e3;
-    // Seconda misura: `populated 0` in cgroup.events (lettura ogni <= 1 ms; il kernel
-    // limita la frequenza delle notifiche di cgroup.events).
+    let all_dead = wait_all_exit(&refs, t0 + TIMEOUT).map_err(err("poll members"))?;
+    let d_members = t0.elapsed().as_secs_f64() * 1e3;
+    // Second measurement: `populated 0` in cgroup.events (read every <= 1 ms; the kernel
+    // rate-limits cgroup.events notifications).
     let mut ok = false;
     while Instant::now() < t0 + TIMEOUT {
         let mut s = String::new();
@@ -981,11 +981,15 @@ fn campione_cgroup_kill(base: &Path, i: usize) -> Res<(Option<f64>, Option<f64>,
             events: libc::POLLPRI,
             revents: 0,
         };
-        // SAFETY: `p` è un singolo pollfd valido per la durata della chiamata.
+        // SAFETY: `p` is a single pollfd valid for the duration of the call.
         unsafe { libc::poll(&mut p, 1, 1) };
     }
     let d = t0.elapsed().as_secs_f64() * 1e3;
     let _ = ch.wait();
     let _ = fs::remove_dir(&cg);
-    Ok((morti.then_some(d_membri), ok.then_some(d), members.len()))
+    Ok((
+        all_dead.then_some(d_members),
+        ok.then_some(d),
+        members.len(),
+    ))
 }

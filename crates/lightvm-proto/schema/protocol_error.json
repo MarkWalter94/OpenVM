@@ -1,15 +1,15 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "ProtocolError",
-  "description": "Errore di protocollo: distinto dagli errori operativi (ROADMAP 9).",
+  "description": "Protocol error: distinct from operational errors (ROADMAP 9).",
   "type": "object",
   "properties": {
     "code": {
-      "description": "Codice stabile.",
+      "description": "Stable code.",
       "$ref": "#/$defs/ProtocolErrorCode"
     },
     "message": {
-      "description": "Messaggio per persone, senza segreti.",
+      "description": "Message for humans, without secrets.",
       "type": "string"
     }
   },
@@ -19,30 +19,30 @@
   ],
   "$defs": {
     "ProtocolErrorCode": {
-      "description": "Codice di un errore di protocollo (richiesta non compresa, nessun effetto tentato).",
+      "description": "Code of a protocol error (request not understood, no effect attempted).",
       "oneOf": [
         {
-          "description": "Messaggio non decodificabile o non conforme allo schema.",
+          "description": "Message not decodable or not conforming to the schema.",
           "type": "string",
           "const": "malformed_message"
         },
         {
-          "description": "Versione di protocollo non supportata.",
+          "description": "Unsupported protocol version.",
           "type": "string",
           "const": "unsupported_version"
         },
         {
-          "description": "Metodo o tipo di richiesta sconosciuto.",
+          "description": "Unknown method or request type.",
           "type": "string",
           "const": "unknown_method"
         },
         {
-          "description": "Messaggio oltre la dimensione massima ammessa.",
+          "description": "Message exceeds the maximum allowed size.",
           "type": "string",
           "const": "message_too_large"
         },
         {
-          "description": "Mantenuto per compatibilità del contratto ma **non emesso**: una credenziale\nassente o non valida produce l'errore operativo [`ErrorCode::Unauthenticated`]\n(vedi la documentazione del modulo).",
+          "description": "Kept for contract compatibility but **not emitted**: a missing or invalid\ncredential produces the operational error [`ErrorCode::Unauthenticated`]\n(see the module documentation).",
           "type": "string",
           "const": "unauthenticated"
         }

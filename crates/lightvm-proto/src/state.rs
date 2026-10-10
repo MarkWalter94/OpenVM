@@ -1,37 +1,37 @@
-//! Macchina a stati della VM (ROADMAP 6.3; `docs/ARCHITECTURE.md` sezione 4).
+//! VM state machine (ROADMAP 6.3; `docs/ARCHITECTURE.md` section 4).
 //!
-//! La tabella delle transizioni è una funzione pura ([`VmState::can_transition_to`]):
-//! le guardie applicative (coda, sessioni, `run_id`) stanno in `vm-core`.
-//! Lo stato *persistito* nel database è un'indicazione; lo stato *osservato*
-//! ([`ObservedState`]) deriva da processo e QMP e prevale.
+//! The transition table is a pure function ([`VmState::can_transition_to`]):
+//! the application guards (queue, sessions, `run_id`) live in `vm-core`.
+//! The state *persisted* in the database is a hint; the *observed* state
+//! ([`ObservedState`]) derives from the process and QMP and takes precedence.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{RunId, UtcTimestamp};
 
-/// Stato del ciclo di vita di una VM.
+/// Lifecycle state of a VM.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum VmState {
-    /// Processo assente e file rilasciati. Unico stato per operazioni su dischi, NVRAM e media.
+    /// Process absent and files released. The only state for operations on disks, NVRAM and media.
     Stopped,
-    /// Spawn avviato, nuovo `run_id` assegnato, QMP non ancora pronto.
+    /// Spawn started, new `run_id` assigned, QMP not ready yet.
     Starting,
-    /// Processo vivo e QMP pronto.
+    /// Process alive and QMP ready.
     Running,
-    /// Arresto richiesto; completo solo a fine processo osservata.
+    /// Stop requested; complete only once the process end is observed.
     Stopping,
-    /// Errore di avvio o uscita inattesa. Nessuna promozione automatica a baseline.
+    /// Start error or unexpected exit. No automatic promotion to baseline.
     Failed,
-    /// Riconciliazione dopo crash (journal, file, processi): nessuna mutazione esterna.
+    /// Reconciliation after a crash (journal, files, processes): no external mutation.
     Recovering,
 }
 
 impl VmState {
-    /// Tutti gli stati, in ordine di dichiarazione.
+    /// All states, in declaration order.
     pub const ALL: [VmState; 6] = [
         VmState::Stopped,
         VmState::Starting,
@@ -41,20 +41,20 @@ impl VmState {
         VmState::Recovering,
     ];
 
-    /// Stati raggiungibili direttamente da `self`. Funzione pura, tabella congelata:
+    /// States directly reachable from `self`. Pure function, frozen table:
     ///
-    /// | Da | A |
+    /// | From | To |
     /// | --- | --- |
     /// | `stopped` | `starting` |
     /// | `starting` | `running`, `stopping` (force-stop, Emergency Stop), `failed`, `recovering` |
-    /// | `running` | `stopping`, `failed` (uscita inattesa), `recovering` |
+    /// | `running` | `stopping`, `failed` (unexpected exit), `recovering` |
     /// | `stopping` | `stopped`, `failed`, `recovering` |
     /// | `failed` | `recovering` |
     /// | `recovering` | `stopped`, `failed` |
     ///
-    /// L'ingresso in `recovering` da `starting`/`running`/`stopping` copre la
-    /// riconciliazione dopo un crash del supervisor, quando lo stato persistito
-    /// non è più confermato da processo e QMP. Nessuna transizione riflessiva.
+    /// Entering `recovering` from `starting`/`running`/`stopping` covers
+    /// reconciliation after a supervisor crash, when the persisted state
+    /// is no longer confirmed by the process and QMP. No reflexive transitions.
     #[must_use]
     pub const fn allowed_transitions(self) -> &'static [VmState] {
         match self {
@@ -72,13 +72,13 @@ impl VmState {
         }
     }
 
-    /// `true` se la transizione `self → to` è ammessa dalla tabella.
+    /// `true` if the transition `self → to` is allowed by the table.
     #[must_use]
     pub fn can_transition_to(self, to: VmState) -> bool {
         self.allowed_transitions().contains(&to)
     }
 
-    /// `true` se esiste (o può esistere) un processo QEMU di questa VM.
+    /// `true` if a QEMU process of this VM exists (or may exist).
     #[must_use]
     pub const fn has_process(self) -> bool {
         matches!(
@@ -87,7 +87,7 @@ impl VmState {
         )
     }
 
-    /// Nome stabile in `snake_case` (uguale alla serializzazione).
+    /// Stable `snake_case` name (same as the serialization).
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -107,72 +107,72 @@ impl std::fmt::Display for VmState {
     }
 }
 
-/// Origine di un'osservazione di stato.
+/// Source of a state observation.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum ObservationSource {
-    /// Handle del processo QEMU (vivo, terminato, codice d'uscita).
+    /// QEMU process handle (alive, terminated, exit code).
     Process,
-    /// Risposta o evento QMP (`query-status`, `SHUTDOWN`, ...).
+    /// QMP reply or event (`query-status`, `SHUTDOWN`, ...).
     Qmp,
-    /// Valore persistito nel catalogo: indicativo, mai sufficiente da solo.
+    /// Value persisted in the catalog: a hint, never sufficient on its own.
     Database,
 }
 
-/// Stato osservato di una VM, con origine e istante.
+/// Observed state of a VM, with source and instant.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ObservedState {
-    /// Stato osservato.
+    /// Observed state.
     pub state: VmState,
-    /// Origine dell'osservazione.
+    /// Source of the observation.
     pub source: ObservationSource,
-    /// Esecuzione a cui l'osservazione si riferisce, se esiste un processo.
+    /// Run the observation refers to, if a process exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<RunId>,
-    /// Istante dell'osservazione.
+    /// Instant of the observation.
     pub observed_at: UtcTimestamp,
 }
 
 impl ObservedState {
-    /// `true` se l'osservazione proviene da processo o QMP, cioè può confermare lo stato.
+    /// `true` if the observation comes from the process or QMP, i.e. it can confirm the state.
     #[must_use]
     pub fn is_authoritative(&self) -> bool {
         !matches!(self.source, ObservationSource::Database)
     }
 }
 
-/// Evento elementare osservato dal backend, usato dal core per derivare lo stato.
+/// Elementary event observed by the backend, used by the core to derive the state.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BackendObservation {
-    /// Processo creato e associato all'esecuzione.
+    /// Process created and associated with the run.
     ProcessSpawned {
-        /// Esecuzione.
+        /// Run.
         run_id: RunId,
     },
-    /// QMP pronto (capabilities negoziate) e processo vivo.
+    /// QMP ready (capabilities negotiated) and process alive.
     QmpReady {
-        /// Esecuzione.
+        /// Run.
         run_id: RunId,
     },
-    /// Fine processo osservata tramite handle (non tramite PID).
+    /// Process end observed through the handle (not through the PID).
     ProcessExited {
-        /// Esecuzione.
+        /// Run.
         run_id: RunId,
-        /// `true` se l'uscita era stata richiesta (stop ordinario, force-stop, Emergency Stop).
+        /// `true` if the exit had been requested (ordinary stop, force-stop, Emergency Stop).
         expected: bool,
     },
-    /// Avvio fallito prima che il processo fosse pronto.
+    /// Start failed before the process was ready.
     StartFailed {
-        /// Esecuzione.
+        /// Run.
         run_id: RunId,
     },
 }
 
 impl BackendObservation {
-    /// Esecuzione a cui l'osservazione si riferisce.
+    /// Run the observation refers to.
     #[must_use]
     pub fn run_id(&self) -> RunId {
         match self {

@@ -1,15 +1,15 @@
-//! Driver dello spike F0-06/F0-08. Ogni sottocomando è una prova ripetibile;
-//! i log vanno in `lab/logs/f0-06-*` e `lab/logs/f0-08-*`.
+//! Driver of the F0-06/F0-08 spike. Every subcommand is a repeatable test;
+//! logs go to `lab/logs/f0-06-*` and `lab/logs/f0-08-*`.
 
 #[cfg(not(windows))]
 fn main() {
-    eprintln!("f0-supervisor: spike solo Windows");
+    eprintln!("f0-supervisor: Windows-only spike");
 }
 
 #[cfg(windows)]
 fn main() {
     if let Err(e) = imp::run() {
-        eprintln!("errore: {e}");
+        eprintln!("error: {e}");
         std::process::exit(2);
     }
 }
@@ -78,7 +78,7 @@ mod imp {
             "exclusion" => exclusion(&a),
             _ => {
                 eprintln!(
-                    "uso: f0-supervisor <env-probe|limits-probe|scenario-a|scenario-b|scenario-c|scenario-d|pid-reuse|mem-limit|cpu-cap|exclusion> [--opzione valore]"
+                    "usage: f0-supervisor <env-probe|limits-probe|scenario-a|scenario-b|scenario-c|scenario-d|pid-reuse|mem-limit|cpu-cap|exclusion> [--option value]"
                 );
                 Ok(())
             }
@@ -113,11 +113,11 @@ mod imp {
     }
 
     fn residual_line(log: &mut Log, ctx: &str) -> usize {
-        // Breve attesa perché la lista processi rifletta l'uscita.
+        // Short wait so that the process list reflects the exit.
         std::thread::sleep(Duration::from_millis(200));
         let (total, mine) = qemu_residuals(MARKER);
         log.line(&format!(
-            "{ctx}: residui_spike={} qemu_totali_host={total}",
+            "{ctx}: spike_residuals={} host_qemu_total={total}",
             mine.map(|m| m.to_string()).unwrap_or_else(|| "?".into())
         ));
         mine.unwrap_or(usize::MAX)
@@ -131,12 +131,12 @@ mod imp {
     }
 
     // -----------------------------------------------------------------------
-    // env-probe: ambiente minimo, console, appartenenza al job, figli.
+    // env-probe: minimal environment, console, job membership, children.
     // -----------------------------------------------------------------------
     fn env_probe() -> io::Result<()> {
         let mut log = Log::create(&Path::new(LOGS).join("f0-06-env-probe.log"))?;
         log.line(&format!(
-            "supervisor (questo processo) già in un job: {:?}",
+            "supervisor (this process) already in a job: {:?}",
             win::current_in_job()
         ));
         for env in [EnvProfile::Empty, EnvProfile::SystemRootOnly] {
@@ -161,13 +161,13 @@ mod imp {
                         let st = q.execute("query-status", None);
                         log.line(&format!("[{tag}] QMP ok accel={acc:?} status={st:?}"));
                     }
-                    Err(e) => log.line(&format!("[{tag}] QMP fallito: {e}")),
+                    Err(e) => log.line(&format!("[{tag}] QMP failed: {e}")),
                 }
                 let exited = vm.wait(Duration::from_millis(0))?;
-                log.line(&format!("[{tag}] uscito_prima_dello_stop={exited:?}"));
+                log.line(&format!("[{tag}] exited_before_stop={exited:?}"));
                 let inj = win::is_in_job(&vm.proc.process, Some(&vm.job))?;
                 log.line(&format!(
-                    "[{tag}] qemu_nel_job={inj} pid_nel_job={:?} figli={:?}",
+                    "[{tag}] qemu_in_job={inj} pids_in_job={:?} children={:?}",
                     vm.job.pids()?,
                     vm.children()?
                 ));
@@ -179,12 +179,12 @@ mod imp {
                 if exited.is_none() {
                     let (tp, tj) = vm.emergency_stop(Duration::from_secs(10))?;
                     log.line(&format!(
-                        "[{tag}] stop ms_processo={tp:.1} ms_job_vuoto={tj:.1}"
+                        "[{tag}] stop process_ms={tp:.1} job_empty_ms={tj:.1}"
                     ));
                 }
                 let msgs = vm.job.drain_messages(100);
                 log.line(&format!(
-                    "[{tag}] messaggi_job={:?}",
+                    "[{tag}] job_messages={:?}",
                     msgs.iter().map(|m| (m.name(), m.value)).collect::<Vec<_>>()
                 ));
                 let stderr = std::fs::read_to_string(&vm.stderr).unwrap_or_default();
@@ -210,7 +210,7 @@ mod imp {
             job_memory: Some(2 << 30),
         })?;
         log.line(&format!(
-            "PROCESS_MEMORY+JOB_MEMORY impostati: {:?}",
+            "PROCESS_MEMORY+JOB_MEMORY set: {:?}",
             j2.extended()
         ));
         log.line(&format!(
@@ -221,14 +221,14 @@ mod imp {
     }
 
     // -----------------------------------------------------------------------
-    // supervise: processo supervisor figlio per lo scenario (a).
+    // supervise: child supervisor process for scenario (a).
     // -----------------------------------------------------------------------
     fn supervise(a: &Args) -> io::Result<()> {
         let tag = a.s("tag", "f0-06-a");
         let after = a.get("abort-after-ms", 0u64);
         let c = cfg(&tag, true)?;
         let vm = Vm::start(&c, new_job()?, Path::new(LOGS))?;
-        // conhost.exe viene creato poco dopo il processo: attesa fino a 3 s.
+        // conhost.exe is created shortly after the process: wait up to 3 s.
         let mut conhost = None;
         for _ in 0..60 {
             conhost = vm
@@ -255,7 +255,7 @@ mod imp {
             io::stdout().flush()?;
             std::process::abort();
         }
-        // Modalità "kill esterno": resta in attesa finché non viene ucciso.
+        // "External kill" mode: keeps waiting until it is killed.
         loop {
             std::thread::sleep(Duration::from_secs(1));
         }
@@ -296,7 +296,7 @@ mod imp {
                 None
             };
             log.line(&format!(
-                "[{tag}] supervisor pid={} {} identita_qemu_coincide={}",
+                "[{tag}] supervisor pid={} {} qemu_identity_matches={}",
                 child.id(),
                 line.trim(),
                 cre == qcre
@@ -304,7 +304,7 @@ mod imp {
             if mode == "kill" {
                 std::thread::sleep(Duration::from_millis(delay));
                 log.line(&format!(
-                    "[{tag}] TerminateProcess(supervisor) dall'esterno"
+                    "[{tag}] TerminateProcess(supervisor) from outside"
                 ));
                 win::terminate_process(&sup, 1)?;
             }
@@ -316,7 +316,7 @@ mod imp {
             let ch_dt = t0.elapsed().as_secs_f64() * 1000.0;
             let _ = child.wait();
             log.line(&format!(
-                "[{tag}] supervisor_uscita={sup_code:?} qemu_uscita={q_code:?} ms_da_morte_supervisor_a_uscita_qemu={dt:.2} conhost_uscita={ch_code:?} ms_conhost={ch_dt:.2}"
+                "[{tag}] supervisor_exit={sup_code:?} qemu_exit={q_code:?} ms_from_supervisor_death_to_qemu_exit={dt:.2} conhost_exit={ch_code:?} conhost_ms={ch_dt:.2}"
             ));
             if q_code.is_some() {
                 samples.push(dt);
@@ -328,14 +328,14 @@ mod imp {
             residual_line(&mut log, &tag);
         }
         log.line(&format!(
-            "RIEPILOGO scenario a ({mode}): {} fallimenti={failures}",
+            "SUMMARY scenario a ({mode}): {} failures={failures}",
             stats(&samples).map(|s| s.to_string()).unwrap_or_default()
         ));
         Ok(())
     }
 
     // -----------------------------------------------------------------------
-    // (b) QEMU ucciso dall'esterno: il supervisor lo rileva.
+    // (b) QEMU killed from outside: the supervisor detects it.
     // -----------------------------------------------------------------------
     fn scenario_b(a: &Args) -> io::Result<()> {
         let cycles = a.get("cycles", 5u32);
@@ -346,7 +346,7 @@ mod imp {
             let c = cfg(&tag, true)?;
             let vm = Vm::start(&c, new_job()?, Path::new(LOGS))?;
             std::thread::sleep(Duration::from_secs(10));
-            // Kill esterno: processo separato, come farebbe un utente o un altro programma.
+            // External kill: separate process, as a user or another program would do.
             let killer = if i % 2 == 1 {
                 vec![
                     "taskkill.exe".to_string(),
@@ -369,7 +369,7 @@ mod imp {
             let t_detect = tk.elapsed().as_secs_f64() * 1000.0;
             let msgs = vm.job.drain_messages(200);
             log.line(&format!(
-                "[{tag}] killer={:?} esito_killer={:?} ms_killer={t_killer:.1} rilevato_dal_supervisor={code:?} (0x{:X}) ms_dall_avvio_kill={t_detect:.1} messaggi_job={:?} identita={:?}",
+                "[{tag}] killer={:?} killer_outcome={:?} killer_ms={t_killer:.1} detected_by_supervisor={code:?} (0x{:X}) ms_since_kill_start={t_detect:.1} job_messages={:?} identity={:?}",
                 killer[0],
                 String::from_utf8_lossy(&out.stdout).trim(),
                 code.unwrap_or(0),
@@ -377,10 +377,10 @@ mod imp {
                 vm.identity.check_pid()
             ));
             det.push(t_detect);
-            // Il job deve risultare vuoto (conhost incluso).
+            // The job must turn out empty (conhost included).
             let acc = vm.job.accounting()?;
             log.line(&format!(
-                "[{tag}] job attivi={} totali={} terminati={}",
+                "[{tag}] job active={} total={} terminated={}",
                 acc.active_processes, acc.total_processes, acc.terminated_processes
             ));
             drop(vm);
@@ -388,14 +388,14 @@ mod imp {
             residual_line(&mut log, &tag);
         }
         log.line(&format!(
-            "RIEPILOGO scenario b (ms dall'avvio del killer alla rilevazione): {}",
+            "SUMMARY scenario b (ms from killer start to detection): {}",
             stats(&det).map(|s| s.to_string()).unwrap_or_default()
         ));
         Ok(())
     }
 
     // -----------------------------------------------------------------------
-    // (c) Emergency Stop con guest in esecuzione.
+    // (c) Emergency Stop with a running guest.
     // -----------------------------------------------------------------------
     fn scenario_c(a: &Args) -> io::Result<()> {
         let samples = a.get("samples", 30u32);
@@ -435,7 +435,7 @@ mod imp {
                     tp.push(p);
                     tj.push(j);
                     log.line(&format!(
-                        "[{tag}] attesa_s={wait} stato={} schermo={pct:?} cpu_job_s={:.1} ms_uscita_qemu={p:.2} ms_job_vuoto={j:.2} uscita={:?}",
+                        "[{tag}] wait_s={wait} status={} screen={pct:?} job_cpu_s={:.1} qemu_exit_ms={p:.2} job_empty_ms={j:.2} exit={:?}",
                         st["status"],
                         (cpu_before.user_100ns + cpu_before.kernel_100ns) as f64 / 1e7,
                         vm.wait(Duration::ZERO)?
@@ -443,7 +443,7 @@ mod imp {
                 }
                 Err(e) => {
                     errors += 1;
-                    log.line(&format!("[{tag}] ERRORE stop: {e}"));
+                    log.line(&format!("[{tag}] ERROR stop: {e}"));
                 }
             }
             drop(q);
@@ -454,18 +454,18 @@ mod imp {
             }
         }
         log.line(&format!(
-            "RIEPILOGO scenario c [{label}] uscita QEMU (ms): {}",
+            "SUMMARY scenario c [{label}] QEMU exit (ms): {}",
             stats(&tp).map(|s| s.to_string()).unwrap_or_default()
         ));
         log.line(&format!(
-            "RIEPILOGO scenario c [{label}] job vuoto (ms): {} errori={errors} cicli_con_residui={residual_bad}",
+            "SUMMARY scenario c [{label}] job empty (ms): {} errors={errors} cycles_with_residuals={residual_bad}",
             stats(&tj).map(|s| s.to_string()).unwrap_or_default()
         ));
         Ok(())
     }
 
     // -----------------------------------------------------------------------
-    // (d) Arresto gentile: system_powerdown → quit → TerminateJobObject.
+    // (d) Graceful shutdown: system_powerdown → quit → TerminateJobObject.
     // -----------------------------------------------------------------------
     fn scenario_d(a: &Args) -> io::Result<()> {
         let cycles = a.get("cycles", 5u32);
@@ -507,7 +507,7 @@ mod imp {
                 let r = q.execute("quit", None);
                 exited = vm.wait(Duration::from_secs(quit_t))?;
                 t_quit = tq.elapsed().as_secs_f64() * 1000.0;
-                log.line(&format!("[{tag}] quit risposta={r:?}"));
+                log.line(&format!("[{tag}] quit response={r:?}"));
                 if exited.is_none() {
                     phase = "terminate-job";
                     let tk = Instant::now();
@@ -530,7 +530,7 @@ mod imp {
                 })
                 .collect();
             log.line(&format!(
-                "[{tag}] schermo_prima={pct:?} fase_conclusiva={phase} ms_powerdown={t_pd:.0} ms_quit={t_quit:.1} ms_terminate={t_kill:.1} ms_totale={tt:.0} uscita={exited:?} eventi={evs:?}"
+                "[{tag}] screen_before={pct:?} final_phase={phase} powerdown_ms={t_pd:.0} quit_ms={t_quit:.1} terminate_ms={t_kill:.1} total_ms={tt:.0} exit={exited:?} events={evs:?}"
             ));
             drop(q);
             drop(vm);
@@ -538,14 +538,14 @@ mod imp {
             residual_line(&mut log, &tag);
         }
         log.line(&format!(
-            "RIEPILOGO scenario d (ms totali dal comando all'uscita): {}",
+            "SUMMARY scenario d (total ms from the command to the exit): {}",
             stats(&total).map(|s| s.to_string()).unwrap_or_default()
         ));
         Ok(())
     }
 
     // -----------------------------------------------------------------------
-    // Identità: un PID riusato non viene scambiato per il QEMU precedente.
+    // Identity: a reused PID is not mistaken for the previous QEMU.
     // -----------------------------------------------------------------------
     fn pid_reuse(a: &Args) -> io::Result<()> {
         let max = a.get("max-spawn", 20000u32);
@@ -560,10 +560,10 @@ mod imp {
         log.line(&format!("QEMU pid={} creation={}", old.pid, old.creation));
         vm.emergency_stop(Duration::from_secs(10))?;
         log.line(&format!(
-            "dopo la morte, handle ancora aperto: check_pid={:?}",
+            "after death, handle still open: check_pid={:?}",
             old.check_pid()
         ));
-        // Fase 1: con l'handle aperto il PID non può essere riassegnato.
+        // Phase 1: with the handle open the PID cannot be reassigned.
         let probe = |n: u32, log: &mut Log| -> io::Result<Option<(u32, std::process::Child)>> {
             let whoami = Path::new(&std::env::var("SystemRoot").unwrap_or(r"C:\Windows".into()))
                 .join(r"System32\whoami.exe");
@@ -577,7 +577,7 @@ mod imp {
                 }
                 let _ = ch.wait();
                 if k.is_multiple_of(5000) {
-                    log.line(&format!("  ... {k} processi creati senza riuso"));
+                    log.line(&format!("  ... {k} processes created without reuse"));
                 }
             }
             Ok(None)
@@ -585,26 +585,26 @@ mod imp {
         let n1 = 2000;
         let r1 = probe(n1, &mut log)?;
         log.line(&format!(
-            "fase 1 (handle QEMU aperto): {n1} processi creati, riuso del PID {} = {}",
+            "phase 1 (QEMU handle open): {n1} processes created, reuse of PID {} = {}",
             old.pid,
             r1.is_some()
         ));
-        // Fase 2: chiuso l'handle (e il job), il PID torna disponibile.
+        // Phase 2: once the handle (and the job) is closed, the PID becomes available again.
         drop(vm);
         cleanup_sock(&c);
-        log.line(&format!("handle chiuso: check_pid={:?}", old.check_pid()));
+        log.line(&format!("handle closed: check_pid={:?}", old.check_pid()));
         match probe(max, &mut log)? {
             Some((k, mut ch)) => {
                 let chk = old.check_pid();
                 log.line(&format!(
-                    "fase 2: PID {} riusato dopo {k} processi; check_pid={chk:?} → scambio evitato={}",
+                    "phase 2: PID {} reused after {k} processes; check_pid={chk:?} → mix-up avoided={}",
                     old.pid,
                     matches!(chk, IdentityCheck::Reused { .. } | IdentityCheck::Absent)
                 ));
                 let _ = ch.wait();
             }
             None => log.line(&format!(
-                "fase 2: PID {} non riusato entro {max} processi (test del riuso non eseguito)",
+                "phase 2: PID {} not reused within {max} processes (reuse test not run)",
                 old.pid
             )),
         }
@@ -613,7 +613,7 @@ mod imp {
     }
 
     // -----------------------------------------------------------------------
-    // Limiti di memoria.
+    // Memory limits.
     // -----------------------------------------------------------------------
     fn mem_limit(a: &Args) -> io::Result<()> {
         let limit_mb = a.get("limit-mb", 1024usize);
@@ -638,7 +638,7 @@ mod imp {
         let c = cfg(&tag, true)?;
         let vm = Vm::start(&c, job, Path::new(LOGS))?;
         log.line(&format!(
-            "limite {kind}={limit_mb} MiB, guest -m {} pid={}",
+            "limit {kind}={limit_mb} MiB, guest -m {} pid={}",
             c.mem_mb, vm.proc.pid
         ));
         let t0 = Instant::now();
@@ -651,7 +651,7 @@ mod imp {
             let (ws, _, pv) = win::process_memory(&vm.proc.process).unwrap_or((0, 0, 0));
             let ext = vm.job.extended()?;
             log.line(&format!(
-                "t={:.0}s ws={} MiB private={} MiB picco_job={} MiB picco_proc={} MiB",
+                "t={:.0}s ws={} MiB private={} MiB job_peak={} MiB proc_peak={} MiB",
                 t0.elapsed().as_secs_f64(),
                 ws >> 20,
                 pv >> 20,
@@ -661,14 +661,14 @@ mod imp {
         }
         let msgs = vm.job.drain_messages(200);
         log.line(&format!(
-            "uscita={exit:?} dopo {:.1}s messaggi_job={:?}",
+            "exit={exit:?} after {:.1}s job_messages={:?}",
             t0.elapsed().as_secs_f64(),
             msgs.iter().map(|m| (m.name(), m.value)).collect::<Vec<_>>()
         ));
         if exit.is_none() {
             let (p, _) = vm.emergency_stop(Duration::from_secs(10))?;
             log.line(&format!(
-                "ancora vivo al termine: Emergency Stop in {p:.1} ms"
+                "still alive at the end: Emergency Stop in {p:.1} ms"
             ));
         }
         let stderr = std::fs::read_to_string(&vm.stderr).unwrap_or_default();
@@ -680,10 +680,10 @@ mod imp {
     }
 
     // -----------------------------------------------------------------------
-    // Cap CPU e misure di consumo.
+    // CPU cap and consumption measurements.
     // -----------------------------------------------------------------------
     fn cpu_cap(a: &Args) -> io::Result<()> {
-        let rate = a.get("rate", 0u32); // centesimi di %; 0 = nessun cap
+        let rate = a.get("rate", 0u32); // hundredths of %; 0 = no cap
         let secs = a.get("seconds", 150u64);
         let set_at = a.get("cap-at-s", 0u64);
         let label = a.s("label", &format!("rate{rate}"));
@@ -700,7 +700,7 @@ mod imp {
         let vm = Vm::start(&c, job, Path::new(LOGS))?;
         let mut q = f0_supervisor::qmp::Qmp::connect(&c.qmp_sock, Duration::from_secs(10))?;
         log.line(&format!(
-            "cap={} (centesimi di % dei cicli di sistema) da t={set_at}s, processori logici={ncpu}",
+            "cap={} (hundredths of % of system cycles) from t={set_at}s, logical processors={ncpu}",
             rate
         ));
         let t0 = Instant::now();
@@ -714,7 +714,7 @@ mod imp {
             if !capped && rate > 0 && sec >= set_at {
                 vm.job.set_cpu_hard_cap(Some(rate))?;
                 capped = true;
-                log.line(&format!("t={sec}s cap applicato"));
+                log.line(&format!("t={sec}s cap applied"));
             }
             let acc = vm.job.accounting()?;
             let (_, k, u) = win::process_times(&vm.proc.process)?;
@@ -728,7 +728,7 @@ mod imp {
             let (ws, _, pv) = win::process_memory(&vm.proc.process)?;
             if sec.is_multiple_of(5) || sec <= 3 {
                 log.line(&format!(
-                    "t={sec}s cpu_job={core_pct:.1}% di un core ({sys_pct:.2}% del sistema) cpu_cumulata_job={job_cpu:.1}s cpu_cumulata_qemu={proc_cpu:.1}s ws={} MiB private={} MiB",
+                    "t={sec}s job_cpu={core_pct:.1}% of one core ({sys_pct:.2}% of the system) job_cumulative_cpu={job_cpu:.1}s qemu_cumulative_cpu={proc_cpu:.1}s ws={} MiB private={} MiB",
                     ws >> 20,
                     pv >> 20
                 ));
@@ -748,7 +748,7 @@ mod imp {
         let capped_core: Vec<f64> = series.iter().filter(|s| s.1).map(|s| s.3).collect();
         let free_core: Vec<f64> = series.iter().filter(|s| !s.1).map(|s| s.3).collect();
         log.line(&format!(
-            "RIEPILOGO [{label}] % sistema con cap: {} | senza cap: {}",
+            "SUMMARY [{label}] % system with cap: {} | without cap: {}",
             stats(&capped_sys)
                 .map(|s| s.to_string())
                 .unwrap_or("-".into()),
@@ -757,7 +757,7 @@ mod imp {
                 .unwrap_or("-".into())
         ));
         log.line(&format!(
-            "RIEPILOGO [{label}] % di un core con cap: {} | senza cap: {}",
+            "SUMMARY [{label}] % of one core with cap: {} | without cap: {}",
             stats(&capped_core)
                 .map(|s| s.to_string())
                 .unwrap_or("-".into()),
@@ -766,11 +766,11 @@ mod imp {
                 .unwrap_or("-".into())
         ));
         log.line(&format!(
-            "schermo finale non nero={pct:?} dimensione_screendump={shot_size} byte"
+            "final screen non-black={pct:?} screendump_size={shot_size} bytes"
         ));
         let (_, pk, pv) = win::process_memory(&vm.proc.process)?;
         log.line(&format!(
-            "picco_ws={} MiB private_finale={} MiB",
+            "peak_ws={} MiB final_private={} MiB",
             pk >> 20,
             pv >> 20
         ));
@@ -783,7 +783,7 @@ mod imp {
     }
 
     // -----------------------------------------------------------------------
-    // Esclusione dei dischi tramite share mode (F0-05, punto 7).
+    // Disk exclusion through share modes (F0-05, item 7).
     // -----------------------------------------------------------------------
     fn exclusion(_a: &Args) -> io::Result<()> {
         crate::excl::run(Path::new(LOGS))

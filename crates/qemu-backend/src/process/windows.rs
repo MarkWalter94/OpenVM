@@ -1,4 +1,4 @@
-//! Contenitore Windows: Job Object per esecuzione (F0-06).
+//! Windows container: one Job Object per run (F0-06).
 
 use crate::error::{BackendError, Result};
 use crate::sys::windows::{self as sys, ConsoleMode, Job};
@@ -8,8 +8,8 @@ use super::{
     ProcessIdentity, SpawnRequest,
 };
 
-/// Job Object anonimo con `KILL_ON_JOB_CLOSE`; QEMU senza console
-/// (`DETACHED_PROCESS`, nessun `conhost.exe`: decisione proposta in F0-06).
+/// Anonymous Job Object with `KILL_ON_JOB_CLOSE`; QEMU without a console
+/// (`DETACHED_PROCESS`, no `conhost.exe`: decision proposed in F0-06).
 #[derive(Debug)]
 pub(crate) struct JobContainer {
     job: Job,
@@ -43,7 +43,7 @@ impl ProcessContainer for JobContainer {
         let creation_time = match sys::creation_time(&spawned.process) {
             Ok(t) => t,
             Err(e) => {
-                // Senza identità il processo non è gestibile: lo si termina.
+                // Without an identity the process cannot be managed: terminate it.
                 let _ = self.job.terminate(1);
                 return Err(BackendError::Spawn(e));
             }
@@ -73,19 +73,19 @@ impl ProcessContainer for JobContainer {
     fn verify_membership(&self, child: &ChildProcess) -> Result<()> {
         if !self.job.contains(&child.handle)? {
             return Err(BackendError::StateConflict(
-                "il processo QEMU non appartiene al Job Object".into(),
+                "the QEMU process does not belong to the Job Object".into(),
             ));
         }
         let flags = self.job.limit_flags()?;
         if flags & sys::KILL_ON_JOB_CLOSE == 0 {
             return Err(BackendError::StateConflict(
-                "Job Object senza KILL_ON_JOB_CLOSE".into(),
+                "Job Object without KILL_ON_JOB_CLOSE".into(),
             ));
         }
         let acc = self.job.accounting()?;
         if acc.total_processes == 0 {
             return Err(BackendError::StateConflict(
-                "Job Object senza processi".into(),
+                "Job Object without processes".into(),
             ));
         }
         Ok(())

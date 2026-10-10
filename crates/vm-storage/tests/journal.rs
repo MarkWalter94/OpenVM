@@ -1,8 +1,8 @@
-//! Journal a intenti: crash simulato in ogni punto e riconciliazione.
+//! Intent journal: simulated crash at every point, and reconciliation.
 //!
-//! "Crash" = il `Catalog` viene rilasciato senza completare l'operazione (come
-//! un processo ucciso: nessun codice di pulizia viene eseguito) e il catalogo
-//! viene riaperto, cosa che esegue `recover()`.
+//! "Crash" = the `Catalog` is released without completing the operation (like
+//! a killed process: no cleanup code runs) and the catalog is reopened, which
+//! runs `recover()`.
 
 mod common;
 
@@ -52,19 +52,16 @@ impl Fixture {
         (cat, rep)
     }
 
-    /// Proprietà comuni a ogni esito della riconciliazione (7.4, riga "Crash").
+    /// Properties common to every reconciliation outcome (7.4, "Crash" row).
     fn assert_safe(&self, cat: &mut Catalog) {
-        assert!(
-            cat.open_intents().unwrap().is_empty(),
-            "nessun intento aperto"
-        );
+        assert!(cat.open_intents().unwrap().is_empty(), "no open intents");
         assert_eq!(
             common::base_hash(cat, &self.baseline),
             self.base_hash,
-            "hash della base invariato"
+            "base hash unchanged"
         );
         let b = cat.read(|tx| tx.baseline(&self.baseline)).unwrap();
-        assert_eq!(b.base_disk_id, self.base_disk, "baseline intatta nel DB");
+        assert_eq!(b.base_disk_id, self.base_disk, "baseline intact in the DB");
         assert!(
             cat.verify_baseline_manifest(&self.baseline, true)
                 .unwrap()
@@ -73,7 +70,7 @@ impl Fixture {
         let tmp_entries = std::fs::read_dir(self.dir.path().join("tmp"))
             .unwrap()
             .count();
-        assert_eq!(tmp_entries, 0, "tmp/ vuota");
+        assert_eq!(tmp_entries, 0, "tmp/ empty");
     }
 
     fn overlay_intent(&self, cat: &mut Catalog) -> (Intent, DiskId, RunId) {
@@ -118,7 +115,7 @@ fn write(p: &Path) {
     common::write_bytes(p, b"QFI\xfb overlay").unwrap();
 }
 
-// ------------------------------------------------------------ creazione
+// ------------------------------------------------------------ creation
 
 #[test]
 fn crash_after_begin_nothing_to_undo() {
@@ -149,7 +146,7 @@ fn crash_between_rename_and_journal_update_removes_orphan() {
     let (fx, mut cat) = fixture();
     let (i, _, _) = fx.overlay_intent(&mut cat);
     write(&i.temp_path);
-    // Rinomina avvenuta, aggiornamento del journal (applied) non registrato.
+    // Rename done, journal update (applied) not recorded.
     std::fs::rename(&i.temp_path, i.final_path.as_ref().unwrap()).unwrap();
     let (mut cat, rep) = fx.crash_and_reopen(cat);
     assert_eq!(
@@ -160,7 +157,7 @@ fn crash_between_rename_and_journal_update_removes_orphan() {
     fx.assert_safe(&mut cat);
 }
 
-/// 7.4 "Crash", primo caso: file presente e DB assente → il file viene rimosso.
+/// 7.4 "Crash", first case: file present and DB absent → the file is removed.
 #[test]
 fn crash_after_apply_file_present_db_absent() {
     let (fx, mut cat) = fixture();
@@ -179,8 +176,8 @@ fn crash_after_apply_file_present_db_absent() {
     fx.assert_safe(&mut cat);
 }
 
-/// Aggiornamento del DB fallito a metà (transazione annullata): l'intento
-/// resta `applied` e la riconciliazione lo annulla.
+/// DB update failed halfway (transaction rolled back): the intent stays
+/// `applied` and reconciliation rolls it back.
 #[test]
 fn failed_db_update_is_rolled_back() {
     let (fx, mut cat) = fixture();
@@ -191,21 +188,21 @@ fn failed_db_update_is_rolled_back() {
     let err = cat
         .commit(&i, |tx| {
             tx.insert_disk(&row)?;
-            Err(StorageError::Constraint("interruzione simulata".into()))
+            Err(StorageError::Constraint("simulated interruption".into()))
         })
         .unwrap_err();
     assert!(matches!(err, StorageError::Constraint(_)));
     assert_eq!(cat.intent_state(i.id).unwrap(), IntentState::Applied);
     assert!(
         cat.read(|tx| tx.disk(&disk)).is_err(),
-        "transazione annullata"
+        "transaction rolled back"
     );
     let (mut cat, rep) = fx.crash_and_reopen(cat);
     assert_eq!(single(&rep).0, RecoveryOutcome::RolledBack);
     fx.assert_safe(&mut cat);
 }
 
-/// Un `commit` la cui closure non registra la riga di destinazione è rifiutato.
+/// A `commit` whose closure does not record the target row is refused.
 #[test]
 fn commit_without_target_row_is_refused() {
     let (fx, mut cat) = fixture();
@@ -240,7 +237,7 @@ fn crash_after_commit_keeps_everything() {
     fx.assert_safe(&mut cat);
 }
 
-/// Riga e file entrambi presenti con intento non concluso: completamento.
+/// Row and file both present with an unfinished intent: roll forward.
 #[test]
 fn row_and_file_present_is_rolled_forward() {
     let (fx, mut cat) = fixture();
@@ -258,8 +255,8 @@ fn row_and_file_present_is_rolled_forward() {
     fx.assert_safe(&mut cat);
 }
 
-/// 7.4 "Crash", secondo caso: DB presente e file assente → VM `recovering`,
-/// overlay `missing`, esecuzione `failed`; baseline non toccata.
+/// 7.4 "Crash", second case: DB present and file absent → VM `recovering`,
+/// overlay `missing`, run `failed`; baseline untouched.
 #[test]
 fn db_present_file_absent_marks_recovering_and_keeps_baseline() {
     let (fx, mut cat) = fixture();
@@ -301,8 +298,8 @@ fn db_present_file_absent_marks_recovering_and_keeps_baseline() {
     fx.assert_safe(&mut cat);
 }
 
-/// Stesso caso fuori dal journal (file di un overlay registrato sparito):
-/// rilevato dalla verifica di integrità all'apertura.
+/// Same case outside the journal (file of a registered overlay vanished):
+/// detected by the integrity check at open.
 #[test]
 fn integrity_scan_detects_missing_overlay() {
     let (fx, mut cat) = fixture();
@@ -324,7 +321,7 @@ fn integrity_scan_detects_missing_overlay() {
     fx.assert_safe(&mut cat);
 }
 
-/// Base mancante: solo segnalata, nessuna modifica a righe di baseline.
+/// Missing base: only reported, no changes to baseline rows.
 #[test]
 #[allow(clippy::permissions_set_readonly_false)]
 fn missing_base_is_reported_not_modified() {
@@ -332,7 +329,7 @@ fn missing_base_is_reported_not_modified() {
     let rel = CatalogLayout::baseline_disk(&fx.vm, &fx.baseline);
     let p = cat.layout().resolve(&rel).unwrap();
     let mut perm = std::fs::metadata(&p).unwrap().permissions();
-    assert!(perm.readonly(), "base resa di sola lettura");
+    assert!(perm.readonly(), "base made read-only");
     perm.set_readonly(false);
     std::fs::set_permissions(&p, perm).unwrap();
     std::fs::remove_file(&p).unwrap();
@@ -346,16 +343,16 @@ fn missing_base_is_reported_not_modified() {
     assert_eq!(
         cat.read(|tx| tx.disk(&fx.base_disk)).unwrap().status,
         DiskStatus::Ready,
-        "riga della base non modificata"
+        "base row not modified"
     );
 }
 
-// -------------------------------------------------- ripristino (overlay + vars)
+// ----------------------------------------------------- restore (overlay + vars)
 
 #[test]
 fn crash_during_restore_after_vars_copy() {
     let (fx, mut cat) = fixture();
-    // Prima esecuzione regolare, poi "ripristino" interrotto.
+    // A regular first run, then an interrupted "restore".
     common::run_from(&mut cat, &fx.vm, &fx.baseline);
     let op = OperationId::new_v7();
     let run = RunId::new_v7();
@@ -394,7 +391,7 @@ fn crash_during_restore_after_vars_copy() {
     );
     assert!(!oi.final_path.as_ref().unwrap().exists());
     fx.assert_safe(&mut cat);
-    // Dopo la riconciliazione un nuovo ripristino riesce.
+    // After reconciliation a new restore succeeds.
     common::run_from(&mut cat, &fx.vm, &fx.baseline);
 }
 
@@ -409,7 +406,7 @@ fn concurrent_operations_on_same_vm_are_refused() {
     assert_eq!(err.public_code(), Some("vm_busy"));
 }
 
-// ------------------------------------------------------- promozione baseline
+// -------------------------------------------------------- baseline promotion
 
 #[test]
 fn crash_during_baseline_promotion_removes_partial_baseline() {
@@ -426,7 +423,7 @@ fn crash_during_baseline_promotion_removes_partial_baseline() {
             read_only: true,
         })
         .unwrap();
-    common::write_bytes(&i.temp_path, b"nuova base").unwrap();
+    common::write_bytes(&i.temp_path, b"new base").unwrap();
     cat.mark_applied(&i).unwrap();
     let final_path = i.final_path.clone().unwrap();
     assert!(
@@ -435,7 +432,7 @@ fn crash_during_baseline_promotion_removes_partial_baseline() {
             .permissions()
             .readonly()
     );
-    // Manifest scritto accanto, prima del commit.
+    // Manifest written alongside, before the commit.
     let manifest = final_path.with_file_name("manifest.json");
     common::write_bytes(&manifest, b"{}").unwrap();
     let (mut cat, rep) = fx.crash_and_reopen(cat);
@@ -444,22 +441,22 @@ fn crash_during_baseline_promotion_removes_partial_baseline() {
     assert!(!manifest.exists());
     assert!(
         !final_path.parent().unwrap().exists(),
-        "directory vuota rimossa"
+        "empty directory removed"
     );
     fx.assert_safe(&mut cat);
 }
 
-// ----------------------------------------------------------- cancellazione
+// ---------------------------------------------------------------- deletion
 
 fn delete_overlay_intent(fx: &Fixture, cat: &mut Catalog) -> (Intent, DiskId) {
     let run = common::run_from(cat, &fx.vm, &fx.baseline);
-    // L'esecuzione referenzia l'overlay: per cancellarlo si usa un disco
-    // overlay non referenziato da esecuzioni.
+    // The run references its overlay: to delete one we use an overlay disk
+    // not referenced by any run.
     let disk = DiskId::new_v7();
     let rid = RunId::new_v7();
     let rel = CatalogLayout::overlay(&fx.vm, &rid);
     let p = cat.layout().resolve(&rel).unwrap();
-    common::write_bytes(&p, b"overlay conservato").unwrap();
+    common::write_bytes(&p, b"retained overlay").unwrap();
     let row = fx.overlay_row(disk, &rid);
     cat.with_tx(|tx| tx.insert_disk(&row)).unwrap();
     let _ = run;
@@ -527,7 +524,7 @@ fn delete_refused_by_new_reference_restores_file() {
     let (fx, mut cat) = fixture();
     let (i, disk) = delete_overlay_intent(&fx, &mut cat);
     cat.mark_applied(&i).unwrap();
-    // Un riferimento comparso dopo il controllo iniziale.
+    // A reference that appeared after the initial check.
     let run = RunRecord {
         run_id: RunId::new_v7(),
         vm_id: fx.vm,
@@ -560,8 +557,8 @@ fn leftover_temp_after_committed_delete_is_removed() {
     cat.mark_applied(&i).unwrap();
     cat.commit(&i, |tx| tx.delete_disk(&disk)).unwrap();
     assert!(!i.temp_path.exists());
-    // Simula un crash tra la conferma e la rimozione del temporaneo.
-    common::write_bytes(&i.temp_path, b"residuo").unwrap();
+    // Simulates a crash between the commit and the removal of the temporary.
+    common::write_bytes(&i.temp_path, b"leftover").unwrap();
     let dbp = fx.dir.path().join(vm_storage::DB_FILE);
     drop(cat);
     let conn = vm_storage::migrate::open_connection(&dbp).unwrap();

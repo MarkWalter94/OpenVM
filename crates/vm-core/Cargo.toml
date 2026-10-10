@@ -1,6 +1,6 @@
 [package]
 name = "vm-core"
-description = "LightVM: casi d'uso, macchina a stati, coda per VM, policy e sessioni senza I/O (F1)"
+description = "LightVM: use cases, state machine, per-VM queue, policy and sessions without I/O (F1)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,7 +8,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-# Senza `system-clock`: il core riceve istanti e identificativi dalle porte `Clock` e `IdGenerator`.
+# Without `system-clock`: the core receives instants and identifiers from the `Clock` and `IdGenerator` ports.
 lightvm-proto = { path = "../lightvm-proto", default-features = false }
 
 [dev-dependencies]

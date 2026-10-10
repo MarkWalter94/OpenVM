@@ -1,33 +1,33 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "BaselineRecord",
-  "description": "Baseline a VM spenta: disco autonomo più stato firmware, immutabile.",
+  "description": "Baseline with the VM off: standalone disk plus firmware state, immutable.",
   "type": "object",
   "properties": {
     "config_revision": {
-      "description": "Revisione della configurazione VM registrata con la baseline.",
+      "description": "VM configuration revision recorded with the baseline.",
       "type": "integer",
       "format": "uint64",
       "minimum": 0
     },
     "created_at": {
-      "description": "Istante di creazione.",
+      "description": "Creation instant.",
       "$ref": "#/$defs/UtcTimestamp"
     },
     "disk_sha256": {
-      "description": "SHA-256 dell'immagine disco della baseline.",
+      "description": "SHA-256 of the baseline's disk image.",
       "$ref": "#/$defs/Sha256Digest"
     },
     "firmware_sha256": {
-      "description": "SHA-256 dello stato firmware (NVRAM) della baseline.",
+      "description": "SHA-256 of the baseline's firmware state (NVRAM).",
       "$ref": "#/$defs/Sha256Digest"
     },
     "id": {
-      "description": "Identificativo.",
+      "description": "Identifier.",
       "$ref": "#/$defs/BaselineId"
     },
     "label": {
-      "description": "Etichetta opzionale.",
+      "description": "Optional label.",
       "anyOf": [
         {
           "$ref": "#/$defs/Label"
@@ -38,15 +38,15 @@
       ]
     },
     "origin": {
-      "description": "Origine.",
+      "description": "Origin.",
       "$ref": "#/$defs/BaselineOrigin"
     },
     "protected": {
-      "description": "Baseline iniziale protetta: non cancellabile né sostituibile dai tool agente.",
+      "description": "Protected initial baseline: cannot be deleted or replaced by agent tools.",
       "type": "boolean"
     },
     "vm_id": {
-      "description": "VM di appartenenza.",
+      "description": "Owning VM.",
       "$ref": "#/$defs/VmId"
     }
   },
@@ -62,44 +62,44 @@
   ],
   "$defs": {
     "BaselineId": {
-      "description": "BaselineId: UUID versione 7 in minuscolo con trattini.",
+      "description": "BaselineId: version 7 UUID, lowercase with hyphens.",
       "type": "string",
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     },
     "BaselineOrigin": {
-      "description": "Origine di una baseline (ROADMAP 8).",
+      "description": "Origin of a baseline (ROADMAP 8).",
       "oneOf": [
         {
-          "description": "Registrata dopo arresto corretto osservato.",
+          "description": "Recorded after an observed clean shutdown.",
           "type": "string",
           "const": "clean_shutdown"
         },
         {
-          "description": "Checkpoint materializzato da un overlay a VM spenta.",
+          "description": "Checkpoint materialized from an overlay with the VM off.",
           "type": "string",
           "const": "checkpoint"
         }
       ]
     },
     "Label": {
-      "description": "Testo dichiarato dall'utente, senza caratteri di controllo; mai interpretato.",
+      "description": "Text declared by the user, without control characters; never interpreted.",
       "type": "string",
       "maxLength": 256,
       "minLength": 1
     },
     "Sha256Digest": {
-      "description": "SHA-256 in esadecimale minuscolo.",
+      "description": "SHA-256 in lowercase hexadecimal.",
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
     },
     "UtcTimestamp": {
-      "description": "Istante UTC RFC 3339 con suffisso Z, precisione al millisecondo.",
+      "description": "RFC 3339 UTC instant with Z suffix, millisecond precision.",
       "type": "string",
       "format": "date-time"
     },
     "VmId": {
-      "description": "VmId: UUID versione 7 in minuscolo con trattini.",
+      "description": "VmId: version 7 UUID, lowercase with hyphens.",
       "type": "string",
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
