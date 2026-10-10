@@ -38,9 +38,9 @@ La decisione diventa efficace con la conferma dell'utente (U-5) e con la chiusur
 | P-1 | Conferma che in F0 non è disponibile un host Linux fisico con KVM | **chiuso il 2026-10-10**: confermato (U-5); server Linux fisico reperito dopo, per R2a; ADR-0016 accettata |
 | P-2 | Crash della UI su Windows (UI che avvia il supervisor come processo separato); decisione ADR-0015 parte B | **chiuso il 2026-10-10**: ADR-0015 B accettata (impostazione, predefinito terminare le VM); prova `F1-09` verificata con entrambe le politiche |
 | P-4 | Tastiera fisica → winit → egui → QMP, inclusi AltGr, Ctrl+C/V, tastierino | utente con sviluppo: il responsabile lo esegue a fine sviluppo F1 |
-| P-5 | Test con secondo utente locale sui socket privati, oppure decisione di registrarlo come limite | indicazione del responsabile: eseguirlo dentro una VM. Parte Linux (socket Unix, `SO_PEERCRED`) in una VM Ubuntu con due utenti, valida solo **[processi]**; parte Windows (named pipe con ACL) richiede un guest Windows o un secondo account sull'host: da definire |
+| P-5 | Test con secondo utente locale sui socket privati, oppure decisione di registrarlo come limite | **parte Linux verificata il 2026-10-10** in una VM Ubuntu (`F1-11`, validità [processi]): altro utente → `Permission denied`; con permessi allentati → rifiutato per UID. **Parte Windows non eseguita**: serve un secondo account Windows (creato dal responsabile) o registrarla come limite |
 | P-6 | Disponibilità di firma del codice e revisione indipendente (ADR-0020) | **chiuso il 2026-10-10**: non disponibili (U-7); pubblicazione F6 bloccata finché manca, ADR-0020 accettata |
-| P-7 | Dettagli del supporto dati approvato (ADR-0008) | **chiuso il 2026-10-10**: formato ISO 9660/UDF verificato, limiti 16/8 GiB, CD-ROM IDE in sola lettura, hash riverificato a ogni avvio (ADR-0008); prova di scrittura dal guest in F3 |
+| P-7 | Dettagli del supporto dati approvato (ADR-0008) | **chiuso il 2026-10-10**: formato ISO 9660/UDF verificato, limiti 16/8 GiB, CD-ROM IDE in sola lettura, hash riverificato a ogni avvio (ADR-0008); scrittura dal guest verificata impossibile (`F1-11`) |
 
 ## Lavoro F1 avviato in parallelo
 

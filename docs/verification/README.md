@@ -48,6 +48,7 @@ Esempi: `F0-01-toolchain-eframe.md`, `F0-02-qemu-whpx-qmp.md`, `F1-04-cicli-star
 | `F1-03-qemu-backend-reale.md` | F1 (backlog F1-03, F1-05…F1-08, F1-12) | parziale: probe, rifiuti, NIC, 20 cicli start/stop senza orfani e disco del servizio verificati su hardware (Windows, WHPX); VM nel firmware; non vale come criterio di uscita finché F0 è aperta | completo |
 | `F1-09-ui-supervisore-crash-ui.md` | F1 (backlog F1-11); pendente F0 P-2 | parziale: UI → supervisor figlio → IPC verificato; crash della UI senza orfani verificato, arresto ordinato della VM fallito (timeout del supervisor); Linux non eseguito | completo |
 | `F1-10-limiti-vm-impostazioni.md` | F1 (ADR-0017; backlog F1-04, F1-05) | parziale: limiti CPU e memoria applicati a QEMU e verificati; modifica delle VM via IPC, UI e riga di comando; budget storage solo all'avvio; correzioni della chiusura normale e della riconciliazione al riavvio | completo |
+| `F1-11-secondo-utente-e-supporto-dati.md` | F0 P-5 (parte Linux), P-7 | parziale: secondo utente respinto (permessi e UID) in VM Ubuntu [processi]; scrittura del CD dati dal guest impossibile; parte Windows non eseguita | completo |
 | `F1-05-desktop-egui.md` | F1 (backlog F1-13, F1-16, F1-18, F1-19) | parziale: appunti senza testo nella UI (headless) ma lettura in egui-winit non bloccata; ripiego di rendering verificato; misure UI + supervisor (wgpu oltre l'obiettivo di memoria); RDP, avvio a freddo e prova manuale non eseguiti | completo |
 
 ## Template

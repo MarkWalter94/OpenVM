@@ -119,6 +119,8 @@ struct LabPaths {
     iso_id: MediaId,
     iso: PathBuf,
     base: PathBuf,
+    /// Supporto dati opzionale (ISO in sola lettura sul secondo CD-ROM).
+    data: Option<(MediaId, PathBuf)>,
 }
 
 impl LabPaths {
@@ -176,6 +178,10 @@ impl ManagedPaths for LabPaths {
     fn media(&self, media: &MediaId) -> qemu_backend::error::Result<ManagedPath> {
         if *media == self.iso_id {
             ManagedPath::verify(&self.iso)
+        } else if let Some((id, path)) = &self.data
+            && id == media
+        {
+            ManagedPath::verify(path)
         } else {
             Err(BackendError::invalid("media", "supporto non registrato"))
         }
@@ -196,6 +202,7 @@ fn lab_paths(lab: &Lab, log: &mut Log) -> LabPaths {
         iso_id: MediaId::new_v7(),
         iso: lab.iso.clone(),
         base: base.clone(),
+        data: None,
     };
     // Creazione del disco principale (criterio F1 "creazione disco").
     let t0 = Instant::now();
@@ -505,6 +512,7 @@ fn reale_rifiuto_percorsi_e_risorse() {
         work: paths.work.clone(),
         iso_id: paths.iso_id,
         base: paths.base.clone(),
+        data: None,
     };
     let run_id = RunId::new_v7();
     paths.prepare_run(&run_id);
@@ -1047,4 +1055,114 @@ fn reale_limiti_job_cpu_e_memoria() {
             assert_no_orphan(&id);
         }
     }
+}
+
+/// Qcode (layout US) e Shift per un carattere del comando digitato nel guest.
+fn qcode_us(c: char) -> (&'static str, bool) {
+    const LETTERE: [&str; 26] = [
+        "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r",
+        "s", "t", "u", "v", "w", "x", "y", "z",
+    ];
+    const CIFRE: [&str; 10] = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
+    match c {
+        'a'..='z' => (LETTERE[(c as u8 - b'a') as usize], false),
+        '0'..='9' => (CIFRE[(c as u8 - b'0') as usize], false),
+        ' ' => ("spc", false),
+        '-' => ("minus", false),
+        '/' => ("slash", false),
+        '.' => ("dot", false),
+        '&' => ("7", true),
+        '\n' => ("ret", false),
+        _ => panic!("carattere non previsto: {c:?}"),
+    }
+}
+
+fn tasto(qcode: &str, down: bool) -> InputEvent {
+    InputEvent::Key(KeyAction {
+        qcode: QCode::parse(qcode).unwrap(),
+        down,
+    })
+}
+
+/// P-5, parte Linux (docs/STATUS.md): nel guest Ubuntu live, con l'ISO dati
+/// `lab/media/p5-dati.iso` (script `crates/lightvm-service/scripts/
+/// p5-prova-guest.sh` e `lightvm-peer-check` per Linux) sul secondo CD-ROM,
+/// apre un terminale e lancia la prova; salva gli screenshot in
+/// `lab/logs/f1-03/` per la lettura dell'esito. `LIGHTVM_P5_ISO` sostituisce
+/// il percorso dell'ISO dati.
+#[test]
+#[ignore = "richiede QEMU reale: impostare LIGHTVM_QEMU_DIR"]
+fn reale_p5_secondo_utente_linux_in_vm() {
+    let _g = SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let lab = require_lab!();
+    let dati = std::env::var_os("LIGHTVM_P5_ISO")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| lab.iso.with_file_name("p5-dati.iso"));
+    assert!(dati.is_file(), "ISO dati assente: {}", dati.display());
+    let mut log = Log::new(&lab, "p5");
+    let mut paths = lab_paths(&lab, &mut log);
+    let data_id = MediaId::new_v7();
+    paths.data = Some((data_id, dati));
+    let caps = probe_caps(&lab, &paths, &mut log);
+    let run_id = RunId::new_v7();
+    paths.prepare_run(&run_id);
+    let mut s = spec(&caps, &paths, run_id);
+    s.cpu = caps.cpu_model("Skylake-Client-v4").unwrap();
+    s.memory_mib = 4096;
+    s.data_media = Some(data_id);
+    let rt = rt();
+    let run = rt
+        .block_on(QemuRun::start(&caps, &s, &paths, RunConfig::default()))
+        .expect("avvio");
+    let t0 = Instant::now();
+    let salva = |nome: &str, log: &mut Log| {
+        let (shot, img) = rt.block_on(run.screenshot_rgb()).unwrap();
+        let png = lab.logs.join(format!("{}-p5-{nome}.png", lab.session));
+        std::fs::write(&png, &shot.png).unwrap();
+        log.line(format!(
+            "t={:>4}s {nome}: non nero {:.2}% -> {}",
+            t0.elapsed().as_secs(),
+            img.non_black_percent(),
+            png.display()
+        ));
+        shot.geometry
+    };
+    // Desktop live: circa 100 s con Skylake-Client-v4 (F1-03).
+    std::thread::sleep(Duration::from_secs(130));
+    let g = salva("desktop", &mut log);
+    // Terminale: Ctrl+Alt+T.
+    let combo = [
+        tasto("ctrl", true),
+        tasto("alt", true),
+        tasto("t", true),
+        tasto("t", false),
+        tasto("alt", false),
+        tasto("ctrl", false),
+    ];
+    rt.block_on(run.send_input(run_id, g, &combo)).unwrap();
+    std::thread::sleep(Duration::from_secs(8));
+    salva("terminale", &mut log);
+    let comando = "sudo mount -o ro /dev/sr1 /mnt && bash /mnt/prova.sh\n";
+    for c in comando.chars() {
+        let (q, shift) = qcode_us(c);
+        let mut ev = Vec::new();
+        if shift {
+            ev.push(tasto("shift", true));
+        }
+        ev.push(tasto(q, true));
+        ev.push(tasto(q, false));
+        if shift {
+            ev.push(tasto("shift", false));
+        }
+        rt.block_on(run.send_input(run_id, g, &ev)).unwrap();
+        std::thread::sleep(Duration::from_millis(40));
+    }
+    std::thread::sleep(Duration::from_secs(20));
+    salva("esito", &mut log);
+    let id = run.identity();
+    let _ = rt.block_on(run.emergency_stop(Duration::from_secs(10)));
+    let _ = rt.block_on(run.close());
+    assert_no_orphan(&id);
 }
