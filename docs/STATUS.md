@@ -57,13 +57,13 @@ Avviato prima della chiusura di F0 e quindi **non utilizzabile per il criterio d
 | Probe, processi, QMP, input, screenshot, profilo offline, 20 cicli reali (anche via servizio), disco del servizio, installazione su disco e boot dal disco (F1-17) | `qemu-backend`, `lightvm-service` | `F1-03` | verificato su hardware (Windows, WHPX) |
 | UI che avvia il supervisor e usa l'IPC; crash della UI con VM reale | `apps/desktop`, `lightvm-service` | `F1-09` | verificato su hardware; politica alla perdita della UI come impostazione (ADR-0015 B) |
 | Limiti per VM (CPU, memoria, budget storage), impostazioni della VM, `--apri-vm` | `lightvm-proto`, `vm-core`, `qemu-backend`, `lightvm-service`, `apps/desktop` | `F1-10` | verificato su hardware (Windows); storage completo in F3 |
-| UI: appunti, backend di rendering, istantanee, misure | `apps/desktop` | `F1-05` | verificato su hardware (ripiego di rendering, misure, **lettura degli appunti host bloccata** con egui-winit patchato) e headless (istantanee); memoria con wgpu oltre l'obiettivo (D-12) |
+| UI: appunti, backend di rendering, istantanee, misure | `apps/desktop` | `F1-05` | verificato su hardware (ripiego di rendering, misure, **lettura degli appunti host bloccata** con egui-winit patchato) e headless (istantanee); memoria con wgpu entro l'obiettivo dopo la correzione di D-12 (189 MiB) |
 
 Situazione a fine giornata (2026-10-10):
 
 - **Criterio di uscita F1 (F1-12)**: tutte le voci eseguite con esito positivo sul primo host (`F1-03`: creazione disco, 20 cicli reali anche attraverso il servizio, acceleratore assente, nessuna NIC, rifiuti), ma per la sezione 10 **non valgono finché F0 non è chiusa**. Per chiudere F0 restano **P-4** (tastiera fisica, script pronto) e la **parte Windows di P-5** (secondo account Windows o registrazione come limite).
 - Risolti nella giornata: arresto alla perdita della UI (ADR-0015 B), lettura degli appunti host (F1-13, egui-winit patchato), installazione su disco e boot dal disco (F1-17), limiti per VM (ADR-0017 in parte), dettagli del supporto dati (P-7), riconciliazione al riavvio.
-- Aperti in F1: memoria con wgpu oltre l'obiettivo (D-12; il predefinito è glow), avvio a freddo e RDP (F1-18, F1-16), CI mai eseguita su GitHub (F1-02), contenimento dei processi su Linux (F1-15, R2a).
+- Aperti in F1: avvio a freddo e RDP (F1-18, F1-16), CI mai eseguita su GitHub (F1-02), contenimento dei processi su Linux (F1-15, R2a).
 - **La console dello spike apre ancora direttamente il socket QMP**: il percorso di prodotto della console passa dal supervisor in F2 (ADR-0012, ADR-0013).
 
 ## Esito del laboratorio Linux

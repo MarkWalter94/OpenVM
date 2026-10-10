@@ -144,3 +144,18 @@ Script nella scratchpad della sessione: imposta negli appunti di Windows un test
 | Combinazione inoltrata al guest come tasti | non eseguito con tastiera di sistema | `eventi_input=0` in entrambe le prove: la console non aveva il focus della tastiera (serve un clic sull'immagine); coperto da P-4 (prova manuale) e dai test headless |
 
 Limite: la patch va riapplicata a ogni aggiornamento di egui/eframe (ADR-0014, ADR-0023). Nota: la prova ha sovrascritto il contenuto degli appunti di Windows dell'host.
+
+
+## Aggiornamento del 2026-10-10 (circa 12:15 UTC): memoria con wgpu (D-12)
+
+Sezione aggiunta in coda (regola 8). Causa individuata: egui-wgpu crea il dispositivo con `wgpu::MemoryHints::Performance` (predefinito di wgpu), che prealloca blocchi di memoria grandi. `apps/desktop/src/main.rs` ora avvolge il descrittore di egui-wgpu impostando `memory_hints: MemoryHints::MemoryUsage` (limiti e funzionalità invariati).
+
+Misura: binario release, `lightvm-desktop --renderer <wgpu|warp> --smoke 45 --static --senza-supervisor`, `PrivateMemorySize64` ogni 5 s per 30 s (6 campioni, valori costanti), stesso host e sessione, prima e dopo la modifica a pochi minuti di distanza.
+
+| Configurazione | Private bytes UI | Esito |
+| --- | --- | --- |
+| wgpu DX12, `Performance` (prima) | 488,6 MiB | oltre l'obiettivo di 250 MiB (D-12, come le misure F1-18 sopra) |
+| **wgpu DX12, `MemoryUsage`** | **187,6 / 189,4 MiB** (due esecuzioni) | **entro l'obiettivo** |
+| **wgpu WARP, `MemoryUsage`** | **188,2 MiB** | entro l'obiettivo (in F0: 376,3 MiB) |
+
+Test della UI verdi (53), smoke `esito=ok`. Non misurati in questa sezione: CPU in idle su 5 minuti e frame rate della console sotto carico con il nuovo suggerimento.
