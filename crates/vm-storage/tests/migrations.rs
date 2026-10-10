@@ -1,4 +1,4 @@
-//! Migrazioni: da zero, da versione precedente con backup, rifiuto del downgrade.
+//! Migrations: from scratch, from a previous version with backup, downgrade refusal.
 
 mod common;
 
@@ -20,7 +20,7 @@ fn fresh_catalog_reaches_latest_without_backup() {
     }
     drop(cat);
 
-    // Pragmi richiesti su una connessione nuova.
+    // Required pragmas on a new connection.
     let conn = migrate::open_connection(&dir.path().join(DB_FILE)).unwrap();
     let mode: String = conn
         .query_row("PRAGMA journal_mode", [], |r| r.get(0))
@@ -35,7 +35,7 @@ fn fresh_catalog_reaches_latest_without_backup() {
         .unwrap();
     assert_eq!(n, i64::from(LATEST_VERSION));
 
-    // Riapertura: nessuna migrazione, nessun backup.
+    // Reopen: no migration, no backup.
     let cat = Catalog::open(dir.path()).unwrap();
     let rep = cat.open_report().unwrap();
     assert_eq!(rep.migration.from_version, LATEST_VERSION);
@@ -57,7 +57,7 @@ fn upgrade_from_v1_creates_dated_backup_and_keeps_data() {
             [],
         )
         .unwrap();
-        // Il disco v1 non ha `allocated_bytes`.
+        // The v1 disk has no `allocated_bytes`.
         conn.execute(
             "INSERT INTO disks(disk_id, vm_id, role, virtual_size_bytes, managed_path, created_at)
              VALUES ('0190f7a4-0000-7000-8000-000000000002', '0190f7a4-0000-7000-8000-000000000001',
@@ -70,14 +70,14 @@ fn upgrade_from_v1_creates_dated_backup_and_keeps_data() {
     let rep = cat.open_report().unwrap().clone();
     assert_eq!(rep.migration.from_version, 1);
     assert_eq!(rep.migration.to_version, LATEST_VERSION);
-    let backup = rep.migration.backup.expect("backup prima della migrazione");
+    let backup = rep.migration.backup.expect("backup before the migration");
     assert_eq!(backup.parent(), Some(dir.path()));
     let name = backup.file_name().unwrap().to_string_lossy().into_owned();
     assert!(name.starts_with("catalog.sqlite3.backup-v1-"), "{name}");
-    assert!(name.ends_with('Z'), "nome datato UTC: {name}");
+    assert!(name.ends_with('Z'), "UTC-dated name: {name}");
     drop(cat);
 
-    // Il backup è un database coerente alla versione 1, con i dati.
+    // The backup is a consistent version 1 database, with the data.
     let b = rusqlite::Connection::open(&backup).unwrap();
     let v: i64 = b
         .query_row("SELECT max(version) FROM schema_version", [], |r| r.get(0))
@@ -90,7 +90,7 @@ fn upgrade_from_v1_creates_dated_backup_and_keeps_data() {
         .unwrap();
     assert_eq!(n, 1);
 
-    // Dati conservati e nuova colonna con valore predefinito.
+    // Data preserved and new column with its default value.
     let conn = migrate::open_connection(&db).unwrap();
     let alloc: i64 = conn
         .query_row("SELECT allocated_bytes FROM disks", [], |r| r.get(0))
@@ -106,7 +106,7 @@ fn newer_schema_is_refused_without_changes() {
     {
         let conn = migrate::open_connection(&db).unwrap();
         conn.execute(
-            "INSERT INTO schema_version(version, name, sql_sha256, applied_at) VALUES (?1, 'futura', 'x', 'x')",
+            "INSERT INTO schema_version(version, name, sql_sha256, applied_at) VALUES (?1, 'future', 'x', 'x')",
             params![LATEST_VERSION + 7],
         )
         .unwrap();
@@ -116,7 +116,7 @@ fn newer_schema_is_refused_without_changes() {
             assert_eq!(found, LATEST_VERSION + 7);
             assert_eq!(supported, LATEST_VERSION);
         }
-        other => panic!("downgrade accettato: {other:?}"),
+        other => panic!("downgrade accepted: {other:?}"),
     }
     let backups = std::fs::read_dir(dir.path())
         .unwrap()
@@ -128,10 +128,7 @@ fn newer_schema_is_refused_without_changes() {
                 .contains("backup")
         })
         .count();
-    assert_eq!(
-        backups, 0,
-        "nessun backup né migrazione su schema più nuovo"
-    );
+    assert_eq!(backups, 0, "no backup or migration on a newer schema");
 }
 
 #[test]
@@ -140,7 +137,7 @@ fn tampered_migration_is_detected() {
     drop(Catalog::open(dir.path()).unwrap());
     let conn = migrate::open_connection(&dir.path().join(DB_FILE)).unwrap();
     conn.execute(
-        "UPDATE schema_version SET sql_sha256 = 'diverso' WHERE version = 1",
+        "UPDATE schema_version SET sql_sha256 = 'different' WHERE version = 1",
         [],
     )
     .unwrap();
@@ -151,8 +148,8 @@ fn tampered_migration_is_detected() {
     ));
 }
 
-/// Schema (tabelle, indici, trigger) come testo SQL normalizzato, per
-/// confrontare un catalogo migrato con uno creato da zero.
+/// Schema (tables, indexes, triggers) as normalized SQL text, to compare a
+/// migrated catalog with one created from scratch.
 fn schema_of(conn: &rusqlite::Connection) -> Vec<(String, String, String)> {
     let mut st = conn
         .prepare(
@@ -164,7 +161,7 @@ fn schema_of(conn: &rusqlite::Connection) -> Vec<(String, String, String)> {
         .unwrap()
         .map(|r| {
             let (t, n, s): (String, String, String) = r.unwrap();
-            // `ALTER TABLE ... RENAME` cita il nome tra virgolette: irrilevante.
+            // `ALTER TABLE ... RENAME` quotes the name: irrelevant.
             (
                 t,
                 n,
@@ -196,8 +193,8 @@ fn upgrade_from_every_previous_version_matches_a_fresh_schema() {
                 [],
             )
             .unwrap();
-            // Intenti già conclusi e uno aperto senza effetti su disco: devono
-            // sopravvivere alla migrazione e l'aperto va riconciliato.
+            // Already concluded intents and an open one with no effects on disk:
+            // they must survive the migration and the open one must be reconciled.
             for (id, state) in [(5, "committed"), (9, "pending")] {
                 conn.execute(
                     "INSERT INTO journal(intent_id, kind, state, vm_id, target_kind, target_id,
@@ -212,25 +209,25 @@ fn upgrade_from_every_previous_version_matches_a_fresh_schema() {
         }
         let mut cat = Catalog::open(dir.path()).unwrap();
         let rep = cat.open_report().unwrap().clone();
-        assert_eq!(rep.migration.from_version, from, "da v{from}");
+        assert_eq!(rep.migration.from_version, from, "from v{from}");
         assert_eq!(rep.migration.to_version, LATEST_VERSION);
-        let backup = rep.migration.backup.expect("backup prima della migrazione");
+        let backup = rep.migration.backup.expect("backup before the migration");
         let name = backup.file_name().unwrap().to_string_lossy().into_owned();
         assert!(
             name.starts_with(&format!("catalog.sqlite3.backup-v{from}-")),
             "{name}"
         );
-        // Intento aperto riconciliato dopo la migrazione.
+        // Open intent reconciled after the migration.
         assert_eq!(rep.recovery.intents.len(), 1, "v{from}: {:?}", rep.recovery);
         assert_eq!(rep.recovery.intents[0].intent_id, 9);
         assert_eq!(
             cat.intent_state(5).unwrap(),
             vm_storage::IntentState::Committed
         );
-        // Dati conservati.
+        // Data preserved.
         let vms = cat.read(|tx| tx.vm_ids()).unwrap();
         assert_eq!(vms.len(), 1);
-        // La sequenza degli intenti prosegue oltre gli identificativi migrati.
+        // The intent sequence continues past the migrated identifiers.
         let i = cat
             .begin_intent(vm_storage::IntentSpec {
                 kind: vm_storage::IntentKind::CreateDisk,
@@ -242,20 +239,20 @@ fn upgrade_from_every_previous_version_matches_a_fresh_schema() {
                 read_only: false,
             })
             .unwrap();
-        assert!(i.id > 9, "v{from}: nuovo intento {}", i.id);
+        assert!(i.id > 9, "v{from}: new intent {}", i.id);
         cat.abort(&i).unwrap();
         drop(cat);
         let upgraded = schema_of(&migrate::open_connection(&db).unwrap());
         assert_eq!(
             upgraded, fresh,
-            "schema migrato da v{from} diverso da quello nuovo"
+            "schema migrated from v{from} differs from the fresh one"
         );
     }
 }
 
 #[test]
 fn needs_review_state_requires_the_latest_schema() {
-    // Lo stato `needs_review` non esiste prima della v3: il CHECK lo rifiuta.
+    // The `needs_review` state does not exist before v3: the CHECK rejects it.
     let dir = common::tempdir();
     let db = dir.path().join(DB_FILE);
     let mut conn = migrate::open_connection(&db).unwrap();

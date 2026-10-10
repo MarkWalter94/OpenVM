@@ -1,10 +1,10 @@
-//! Protezione dei dischi durante l'esecuzione (ADR-0025, backlog F1-09):
-//! baseline aperta con il solo `FILE_SHARE_READ`, rilevatore di scrittori,
-//! verifica dell'hash prima dell'avvio, overlay senza `FILE_SHARE_DELETE`.
+//! Disk protection during a run (ADR-0025, backlog F1-09): baseline opened
+//! with `FILE_SHARE_READ` only, writer detector, hash verification before
+//! start, overlay without `FILE_SHARE_DELETE`.
 //!
-//! I test usano file sintetici (nessun QEMU): un "altro processo" è simulato
-//! da un handle aperto nello stesso processo, che per le share mode di Windows
-//! è equivalente (la condivisione è una proprietà dell'apertura).
+//! The tests use synthetic files (no QEMU): "another process" is simulated
+//! by a handle opened in the same process, which is equivalent for Windows
+//! share modes (sharing is a property of the open).
 
 mod common;
 
@@ -63,17 +63,13 @@ fn clear_readonly(p: &std::path::Path) {
 fn guard_verifies_baseline_hash_through_the_handle() {
     let mut fx = fixture();
     let g = fx.cat.guard_run(&fx.run).unwrap();
-    let b = g.baseline().expect("guardia della baseline");
+    let b = g.baseline().expect("baseline guard");
     assert_eq!(b.baseline_id(), fx.baseline);
-    assert_eq!(b.report().hash_verified.len(), 2, "disco base e vars");
+    assert_eq!(b.report().hash_verified.len(), 2, "base disk and vars");
     assert!(b.report().readonly_restored.is_empty());
-    assert_eq!(
-        g.no_delete_paths().count(),
-        2,
-        "overlay e vars dell'esecuzione"
-    );
+    assert_eq!(g.no_delete_paths().count(), 2, "the run's overlay and vars");
     drop(g);
-    // Una seconda guardia dopo il rilascio riesce (nessun handle residuo).
+    // A second guard after release succeeds (no leftover handle).
     fx.cat.guard_run(&fx.run).unwrap();
 }
 
@@ -81,17 +77,17 @@ fn guard_verifies_baseline_hash_through_the_handle() {
 fn altered_baseline_is_refused_before_start() {
     let mut fx = fixture();
     clear_readonly(&fx.base);
-    std::fs::write(&fx.base, b"QFI\xfb base alterata fuori dal catalogo").unwrap();
+    std::fs::write(&fx.base, b"QFI\xfb base altered outside the catalog").unwrap();
     let err = fx.cat.guard_run(&fx.run).unwrap_err();
     assert!(
         matches!(&err, StorageError::IntegrityMismatch { path, .. } if path.ends_with("disk.qcow2")),
         "{err:?}"
     );
     assert_eq!(err.public_code(), Some("state_conflict"));
-    // Anche il vars della baseline è verificato.
+    // The baseline's vars are verified too.
     let mut fx = fixture();
     clear_readonly(&fx.base_vars);
-    std::fs::write(&fx.base_vars, b"OVMF_VARS alterato").unwrap();
+    std::fs::write(&fx.base_vars, b"altered OVMF_VARS").unwrap();
     let err = fx.cat.guard_baseline(&fx.baseline).unwrap_err();
     assert!(
         matches!(&err, StorageError::IntegrityMismatch { path, .. } if path.ends_with("vars.fd")),
@@ -152,18 +148,18 @@ mod windows {
         let mut fx = fixture();
         let before = vm_storage::sha256_file(&fx.base).unwrap();
         let _g = fx.cat.guard_run(&fx.run).unwrap();
-        // Scrittura (anche togliendo prima l'attributo di sola lettura).
+        // Writing (even after first clearing the read-only attribute).
         clear_readonly(&fx.base);
         let e = open_rw_share_all(&fx.base).unwrap_err();
         assert_eq!(e.raw_os_error(), Some(SHARING_VIOLATION), "{e:?}");
         let e = open_rw_share_all(&fx.base_vars).unwrap_err();
         assert!(e.raw_os_error().is_some(), "{e:?}");
-        // Rinomina e cancellazione.
+        // Rename and delete.
         let e = std::fs::rename(&fx.base, fx.base.with_extension("moved")).unwrap_err();
         assert_eq!(e.raw_os_error(), Some(SHARING_VIOLATION), "{e:?}");
         let e = std::fs::remove_file(&fx.base).unwrap_err();
         assert_eq!(e.raw_os_error(), Some(SHARING_VIOLATION), "{e:?}");
-        // La lettura condivisa (come fa QEMU con la base) resta possibile.
+        // Shared reading (as QEMU does with the base) remains possible.
         assert_eq!(vm_storage::sha256_file(&fx.base).unwrap(), before);
     }
 
@@ -181,13 +177,13 @@ mod windows {
                 assert_eq!(paths.len(), 1);
                 assert!(paths[0].as_str().ends_with("disk.qcow2"));
             }
-            other => panic!("scrittore non rilevato: {other:?}"),
+            other => panic!("writer not detected: {other:?}"),
         }
         let err = fx.cat.guard_run(&fx.run).unwrap_err();
         assert!(matches!(err, StorageError::VmBusy(_)), "{err:?}");
         assert_eq!(err.public_code(), Some("vm_busy"));
-        // Anche la preparazione di una nuova esecuzione è rifiutata, senza
-        // lasciare intenti aperti.
+        // Preparing a new run is refused too, without leaving open
+        // intents.
         let err = fx
             .cat
             .prepare_run_from_baseline(&fx.vm, &fx.baseline, |t, _| {
@@ -211,28 +207,28 @@ mod windows {
         assert_eq!(e.raw_os_error(), Some(SHARING_VIOLATION), "{e:?}");
         let e = std::fs::remove_file(&fx.overlay).unwrap_err();
         assert_eq!(e.raw_os_error(), Some(SHARING_VIOLATION), "{e:?}");
-        // Limite dichiarato (ADR-0025 punto 4, decisione aperta): QEMU deve
-        // scrivere l'overlay, quindi anche un altro processo dello stesso
-        // utente può farlo mentre la guardia è attiva.
+        // Declared limitation (ADR-0025 point 4, open decision): QEMU must
+        // write the overlay, so another process of the same user can do so
+        // too while the guard is active.
         let mut other = OpenOptions::new()
             .write(true)
             .share_mode(0x1 | 0x2)
             .open(&fx.overlay)
-            .expect("scrittura di terzi sull'overlay in uso: limite dichiarato");
-        std::io::Write::write_all(&mut other, b"scrittura di terzi").unwrap();
+            .expect("third-party write to the in-use overlay: declared limitation");
+        std::io::Write::write_all(&mut other, b"third-party write").unwrap();
     }
 
     #[test]
     fn guarded_baseline_cannot_be_deleted_through_the_journal() {
         let mut fx = fixture();
         let _g = fx.cat.guard_baseline(&fx.baseline).unwrap();
-        // Tentativo di spostare la base nel temporaneo di una cancellazione:
-        // la rinomina fallisce e il file resta al suo posto.
+        // Attempt to move the base into a deletion's temporary: the rename
+        // fails and the file stays in place.
         let rel = fx
             .cat
             .layout()
             .managed_from_absolute(&fx.base)
-            .expect("percorso gestito della base");
+            .expect("managed path of the base");
         let i = fx
             .cat
             .begin_intent(vm_storage::IntentSpec {

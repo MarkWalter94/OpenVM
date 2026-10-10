@@ -1,5 +1,5 @@
-//! Servizio: endpoint IPC, handshake, registro delle connessioni con revoca,
-//! dispatcher delle richieste, arresto controllato.
+//! Service: IPC endpoint, handshake, connection registry with revocation,
+//! request dispatcher, controlled shutdown.
 
 use std::collections::HashMap;
 use std::io;
@@ -31,33 +31,33 @@ use crate::supervisor::{
 };
 use crate::transport::{Accepted, BoxedStream, EndpointOptions, Listener, PeerInfo};
 
-/// Configurazione del servizio.
+/// Service configuration.
 #[derive(Debug, Clone)]
 pub struct ServiceConfig {
-    /// Directory del catalogo (contiene il lock di istanza singola).
+    /// Catalog directory (contains the single-instance lock).
     pub catalog_dir: PathBuf,
-    /// Directory privata per il socket (solo Unix).
+    /// Private directory for the socket (Unix only).
     pub runtime_dir: Option<PathBuf>,
-    /// Limite di byte per frame.
+    /// Byte limit per frame.
     pub max_frame: u32,
-    /// Rate limit per connessione.
+    /// Per-connection rate limit.
     pub rate_limit: RateLimit,
-    /// Posti nella coda verso il supervisor (condivisa tra le connessioni).
+    /// Slots in the queue towards the supervisor (shared between connections).
     pub queue_capacity: usize,
-    /// Connessioni simultanee massime (incluse quelle in handshake).
+    /// Maximum simultaneous connections (including those in handshake).
     pub max_connections: usize,
-    /// Tempo massimo per completare l'handshake.
+    /// Maximum time to complete the handshake.
     pub handshake_timeout: Duration,
-    /// Durata delle credenziali di pairing.
+    /// Lifetime of pairing credentials.
     pub pairing_ttl: Duration,
-    /// Attesa massima del supervisor durante l'arresto.
+    /// Maximum wait for the supervisor during shutdown.
     pub shutdown_timeout: Duration,
-    /// Sorte delle VM alla perdita della UI (modificabile via IPC).
+    /// Fate of the VMs when the UI is lost (changeable via IPC).
     pub parent_loss_policy: ParentLossPolicy,
 }
 
 impl ServiceConfig {
-    /// Valori predefiniti per un catalogo.
+    /// Default values for a catalog.
     pub fn new(catalog_dir: impl Into<PathBuf>) -> Self {
         Self {
             catalog_dir: catalog_dir.into(),
@@ -74,14 +74,14 @@ impl ServiceConfig {
     }
 }
 
-/// Errore di avvio.
+/// Startup error.
 #[derive(Debug)]
 pub enum StartError {
-    /// Lock del catalogo non acquisito.
+    /// Catalog lock not acquired.
     Lock(LockError),
-    /// Endpoint IPC non creato.
+    /// IPC endpoint not created.
     Endpoint(io::Error),
-    /// Altro errore di I/O (generazione credenziale, thread).
+    /// Other I/O error (credential generation, thread).
     Io(io::Error),
 }
 
@@ -89,8 +89,8 @@ impl std::fmt::Display for StartError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Lock(e) => write!(f, "{e}"),
-            Self::Endpoint(e) => write!(f, "impossibile creare l'endpoint IPC: {e}"),
-            Self::Io(e) => write!(f, "errore di avvio: {e}"),
+            Self::Endpoint(e) => write!(f, "cannot create the IPC endpoint: {e}"),
+            Self::Io(e) => write!(f, "startup error: {e}"),
         }
     }
 }
@@ -118,12 +118,12 @@ struct Shared {
     shutdown_trigger: watch::Sender<bool>,
     closing: watch::Sender<bool>,
     stopping: AtomicBool,
-    /// Generazione dell'Emergency Stop: le mutazioni accodate prima di un
-    /// Emergency Stop vengono scartate dal supervisor.
+    /// Emergency Stop generation: mutations queued before an Emergency Stop are
+    /// discarded by the supervisor.
     emergency_epoch: Arc<AtomicU64>,
-    /// Politica alla perdita della UI in vigore (condivisa col supervisor).
+    /// Parent-loss policy in force (shared with the supervisor).
     parent_loss_policy: Arc<Mutex<ParentLossPolicy>>,
-    /// VM con processo secondo il supervisor (budget dell'arresto).
+    /// VMs with a process according to the supervisor (shutdown budget).
     vms_with_process: Arc<AtomicUsize>,
 }
 
@@ -131,12 +131,12 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Errore operativo pubblico con codice stabile.
+/// Public operational error with a stable code.
 fn op_error(code: ErrorCode, message: impl Into<String>) -> ReplyError {
     ReplyError::Operational(PublicError::new(code, message))
 }
 
-/// Errore di protocollo: nessun effetto tentato.
+/// Protocol error: no effect attempted.
 fn protocol_error(code: ProtocolErrorCode, message: impl Into<String>) -> ReplyError {
     ReplyError::Protocol(ProtocolError {
         code,
@@ -152,8 +152,8 @@ impl Shared {
         }
     }
 
-    /// Revoca una connessione; per i ruoli diversi da `Ui` revoca anche la
-    /// credenziale (la sessione non è riutilizzabile).
+    /// Revokes a connection; for roles other than `Ui` it also revokes the
+    /// credential (the session is not reusable).
     fn revoke_connection(&self, id: u64) -> bool {
         let entry = lock(&self.conns).remove(&id);
         match entry {
@@ -171,7 +171,7 @@ impl Shared {
         }
     }
 
-    /// Revoca tutte le connessioni e credenziali non UI (sessioni agente e pairing).
+    /// Revokes all non-UI connections and credentials (agent sessions and pairing).
     fn revoke_non_ui(&self) -> u32 {
         lock(&self.creds).revoke_all_except(Role::Ui);
         let ids: Vec<u64> = lock(&self.conns)
@@ -203,26 +203,26 @@ impl Shared {
     }
 
     fn trigger_shutdown(&self) {
-        // Subito, non solo quando il conduttore dell'arresto parte: un EOF
-        // della pipe di vita che segue la richiesta di arresto della UI non è
-        // una perdita del genitore (niente Emergency Stop).
+        // Immediately, not only when the shutdown driver starts: an EOF on the
+        // lifeline pipe that follows the UI's shutdown request is not a parent
+        // loss (no Emergency Stop).
         self.stopping.store(true, Ordering::SeqCst);
         let _ = self.shutdown_trigger.send(true);
     }
 
     async fn emergency_stop(&self, actor: Actor) -> EmergencyStopReport {
-        // Revoca prima: dopo questo punto nessuna nuova mutazione dell'agente
-        // viene accettata. Poi terminazione tramite il gestore del backend,
-        // fuori dalla coda e fuori dal thread del supervisor.
+        // Revoke first: after this point no new agent mutation is accepted.
+        // Then termination through the backend handler, outside the queue and
+        // outside the supervisor thread.
         let revoked = self.revoke_non_ui();
-        // Le mutazioni già accodate verso il supervisor non vengono eseguite.
+        // Mutations already queued towards the supervisor are not executed.
         self.emergency_epoch.fetch_add(1, Ordering::SeqCst);
         let handle = self.emergency.clone();
         let outcome = tokio::task::spawn_blocking(move || handle.emergency_stop_all())
             .await
             .unwrap_or_default();
-        // Registrazione nel core (audit, stato delle VM) senza attenderla: il
-        // supervisor può essere occupato e il percorso prioritario non aspetta.
+        // Recording in the core (audit, VM state) without waiting for it: the
+        // supervisor may be busy and the priority path does not wait.
         self.send_cmd(Command::EmergencyReconcile(actor));
         let _ = self.events.send(ServiceEvent::AgentSessionsStopped {
             reason: StopReason::EmergencyStop,
@@ -249,11 +249,11 @@ impl Shared {
         }
         match policy {
             ParentLossPolicy::KillVms => {
-                // Percorso prioritario: le VM terminano subito con primitive OS
-                // e il core registra l'Emergency Stop; poi arresto del servizio.
+                // Priority path: the VMs terminate immediately with OS primitives
+                // and the core records the Emergency Stop; then the service shuts down.
                 let r = self.emergency_stop(Actor::System).await;
                 crate::diag!(
-                    "lightvm-service: UI persa, Emergency Stop: {} processi terminati, completato {}",
+                    "lightvm-service: UI lost, Emergency Stop: {} processes terminated, completed {}",
                     r.processes_terminated,
                     r.completed
                 );
@@ -264,10 +264,10 @@ impl Shared {
         }
     }
 
-    /// Attesa del supervisor durante l'arresto. Le VM si arrestano una dopo
-    /// l'altra, quindi il budget vale per ciascuna VM con processo: il
-    /// timeout del servizio, o con `shutdown_vms` almeno l'attesa ACPI più
-    /// `quit` e terminazione (20 s).
+    /// Wait for the supervisor during shutdown. The VMs stop one after the
+    /// other, so the budget applies to each VM with a process: the service
+    /// timeout, or with `shutdown_vms` at least the ACPI wait plus `quit` and
+    /// termination (20 s).
     fn shutdown_budget(&self) -> Duration {
         let per_vm = match *lock(&self.parent_loss_policy) {
             ParentLossPolicy::ShutdownVms { powerdown_s } => self
@@ -281,7 +281,7 @@ impl Shared {
     }
 }
 
-/// Handle del servizio in esecuzione.
+/// Handle of the running service.
 pub struct ServiceHandle {
     shared: Arc<Shared>,
     endpoint: String,
@@ -297,12 +297,12 @@ impl std::fmt::Debug for ServiceHandle {
 }
 
 impl ServiceHandle {
-    /// Endpoint IPC (non segreto).
+    /// IPC endpoint (not secret).
     pub fn endpoint(&self) -> &str {
         &self.endpoint
     }
 
-    /// Emette una credenziale di pairing (nessun permesso VM).
+    /// Issues a pairing credential (no VM permissions).
     pub fn issue_pairing_credential(&self) -> io::Result<Credential> {
         let ttl = self.shared.cfg.pairing_ttl;
         lock(&self.shared.creds)
@@ -310,48 +310,48 @@ impl ServiceHandle {
             .map(|(_, c)| c)
     }
 
-    /// Connessioni attive.
+    /// Active connections.
     pub fn connections(&self) -> Vec<ConnectionInfo> {
         self.shared.connections()
     }
 
-    /// Revoca una connessione.
+    /// Revokes a connection.
     pub fn revoke_connection(&self, id: u64) -> bool {
         self.shared.revoke_connection(id)
     }
 
-    /// Processo genitore perso: arresto delle sessioni agente, hook del backend
-    /// e poi [`ParentLossPolicy`].
+    /// Parent process lost: stop of the agent sessions, backend hook and then
+    /// [`ParentLossPolicy`].
     pub async fn parent_lost(&self) {
         self.shared.parent_lost().await;
     }
 
-    /// Emergency Stop dal processo locale (percorso prioritario).
+    /// Emergency Stop from the local process (priority path).
     pub async fn emergency_stop(&self) -> EmergencyStopReport {
         self.shared.emergency_stop(Actor::User).await
     }
 
-    /// Avvia l'arresto controllato senza attenderne la fine.
+    /// Starts the controlled shutdown without waiting for it to finish.
     pub fn trigger_shutdown(&self) {
         self.shared.trigger_shutdown();
     }
 
-    /// Attende la fine del servizio (per richiesta, genitore perso o shutdown).
+    /// Waits for the service to end (by request, parent lost or shutdown).
     pub async fn wait(&self) {
         let mut rx = self.stopped.clone();
         flag_set(&mut rx).await;
     }
 
-    /// Arresto controllato: chiude le connessioni, attende l'operazione in
-    /// corso, rifiuta la coda, arresta il backend e rilascia il lock.
+    /// Controlled shutdown: closes the connections, waits for the operation in
+    /// progress, rejects the queue, stops the backend and releases the lock.
     pub async fn shutdown(self) {
         self.shared.trigger_shutdown();
         self.wait().await;
     }
 }
 
-/// Avvia il servizio. Restituisce l'handle e la credenziale iniziale della UI,
-/// da consegnare al genitore su un canale privato (mai negli argomenti).
+/// Starts the service. Returns the handle and the initial UI credential, to be
+/// handed to the parent over a private channel (never in the arguments).
 pub async fn start(
     cfg: ServiceConfig,
     engine: Box<dyn VmEngine>,
@@ -383,8 +383,8 @@ pub async fn start(
         parent_loss_policy: parent_loss_policy.clone(),
         vms_with_process: vms_with_process.clone(),
     };
-    // Pubblicato prima di qualunque iscrizione possibile: nessun client lo
-    // riceve in ritardo, dopo eventi successivi (corsa con `subscribe`).
+    // Published before any possible subscription: no client receives it late,
+    // after later events (race with `subscribe`).
     let _ = events.send(ServiceEvent::ServiceState {
         state: ServiceState::Running,
     });
@@ -415,7 +415,7 @@ pub async fn start(
         vms_with_process,
     });
 
-    // Ciclo di accettazione.
+    // Accept loop.
     let accept_shared = shared.clone();
     let mut accept_closing = shared.closing.subscribe();
     let accept_task = tokio::spawn(async move {
@@ -438,28 +438,28 @@ pub async fn start(
                         }
                     }
                     Ok(Accepted::Rejected(reason)) => {
-                        crate::diag!("lightvm-service: peer rifiutato dal trasporto: {reason}");
+                        crate::diag!("lightvm-service: peer rejected by the transport: {reason}");
                     }
                     Err(e) => {
-                        crate::diag!("lightvm-service: errore di accettazione: {e}");
+                        crate::diag!("lightvm-service: accept error: {e}");
                         tokio::time::sleep(Duration::from_millis(50)).await;
                     }
                 },
             }
         }
-        // `listener` viene rilasciato qui: su Unix il socket viene rimosso.
+        // `listener` is dropped here: on Unix the socket is removed.
     });
 
-    // Conduttore dell'arresto.
+    // Shutdown driver.
     let drv = shared.clone();
     tokio::spawn(async move {
         flag_set(&mut shutdown_rx).await;
         drv.stopping.store(true, Ordering::SeqCst);
-        // 1. Nessuna nuova connessione; le connessioni ricevono `closing`.
+        // 1. No new connections; the connections receive `closing`.
         let _ = drv.closing.send(true);
         let _ = accept_task.await;
-        // 2. Il supervisor termina l'operazione corrente, rifiuta la coda e
-        //    arresta il backend.
+        // 2. The supervisor finishes the current operation, rejects the queue and
+        //    stops the backend.
         let (done_tx, done_rx) = oneshot::channel();
         let finished = drv.send_cmd(Command::Shutdown { done: done_tx })
             && tokio::time::timeout(drv.shutdown_budget(), done_rx)
@@ -469,27 +469,27 @@ pub async fn start(
         if finished {
             let _ = tokio::task::spawn_blocking(move || sup_thread.join()).await;
         } else {
-            // Supervisor bloccato: non si attende il thread; le VM ancora vive
-            // terminano con il percorso prioritario (non con la sola chiusura
-            // del Job Object all'uscita), poi il lock viene rilasciato.
-            crate::diag!("lightvm-service: timeout nell'arresto del supervisor");
+            // Supervisor stuck: the thread is not awaited; the VMs still alive
+            // terminate through the priority path (not only through the Job
+            // Object closing at exit), then the lock is released.
+            crate::diag!("lightvm-service: timeout while stopping the supervisor");
             let handle = drv.emergency.clone();
             let outcome = tokio::task::spawn_blocking(move || handle.emergency_stop_all())
                 .await
                 .unwrap_or_default();
             crate::diag!(
-                "lightvm-service: Emergency Stop dopo il timeout: {} processi terminati",
+                "lightvm-service: Emergency Stop after the timeout: {} processes terminated",
                 outcome.processes_terminated
             );
         }
-        // 3. Attesa breve della chiusura delle connessioni.
+        // 3. Short wait for the connections to close.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         while drv.conn_slots.available_permits() < drv.cfg.max_connections
             && tokio::time::Instant::now() < deadline
         {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        // 4. Rilascio del lock del catalogo.
+        // 4. Release of the catalog lock.
         drop(instance_lock);
         let _ = stopped_tx.send(true);
     });
@@ -510,7 +510,7 @@ async fn reject_busy(stream: BoxedStream, max: u32) {
         &mut wr,
         &ServerMessage::Error {
             request_id: None,
-            error: op_error(ErrorCode::ResourceLimit, "troppe connessioni"),
+            error: op_error(ErrorCode::ResourceLimit, "too many connections"),
         },
         max,
     )
@@ -519,16 +519,16 @@ async fn reject_busy(stream: BoxedStream, max: u32) {
 
 async fn send<W: AsyncWrite + Unpin>(w: &mut W, m: &ServerMessage, max: u32) -> io::Result<()> {
     let payload = serde_json::to_vec(m).map_err(io::Error::other)?;
-    // Una risposta troppo grande (per esempio un catalogo con molte VM)
-    // diventa un errore per quella richiesta, non una chiusura silenziosa
-    // della connessione.
+    // A response that is too large (for example a catalog with many VMs)
+    // becomes an error for that request, not a silent close of the
+    // connection.
     if payload.len() > max as usize
         && let ServerMessage::Response { request_id, .. } = m
     {
         let e = err(
             Some(*request_id),
             ErrorCode::ResourceLimit,
-            "risposta oltre la dimensione massima del frame",
+            "response over the maximum frame size",
         );
         return frame::write_frame(w, &e, max).await;
     }
@@ -542,9 +542,9 @@ fn err(request_id: Option<RequestId>, e: ErrorCode, msg: &str) -> ServerMessage 
     }
 }
 
-/// Lettore dedicato: la lettura di un frame non è cancellabile a metà senza
-/// corrompere il flusso, quindi avviene in un task separato che consegna frame
-/// completi su un canale limitato (contropressione per connessione).
+/// Dedicated reader: reading a frame cannot be cancelled halfway without
+/// corrupting the stream, so it happens in a separate task that delivers
+/// complete frames over a bounded channel (per-connection backpressure).
 fn spawn_reader(
     mut rd: ReadHalf<BoxedStream>,
     max: u32,
@@ -571,8 +571,8 @@ fn spawn_reader(
     (rx, AbortOnDrop(task))
 }
 
-/// Interrompe il lettore quando la connessione termina: la metà di lettura
-/// viene rilasciata e il trasporto si chiude davvero.
+/// Aborts the reader when the connection ends: the read half is dropped and
+/// the transport really closes.
 struct AbortOnDrop(tokio::task::JoinHandle<()>);
 
 impl Drop for AbortOnDrop {
@@ -587,16 +587,16 @@ fn frame_error_message(e: &FrameError) -> Option<ServerMessage> {
             request_id: None,
             error: protocol_error(
                 ProtocolErrorCode::MessageTooLarge,
-                format!("frame di {declared} byte oltre il limite di {max}"),
+                format!("frame of {declared} bytes over the limit of {max}"),
             ),
         }),
         FrameError::Empty => Some(ServerMessage::Error {
             request_id: None,
-            error: protocol_error(ProtocolErrorCode::MalformedMessage, "frame vuoto"),
+            error: protocol_error(ProtocolErrorCode::MalformedMessage, "empty frame"),
         }),
         FrameError::Malformed(_) => Some(ServerMessage::Error {
             request_id: None,
-            error: protocol_error(ProtocolErrorCode::MalformedMessage, "messaggio non valido"),
+            error: protocol_error(ProtocolErrorCode::MalformedMessage, "invalid message"),
         }),
         FrameError::Closed | FrameError::Io(_) => None,
     }
@@ -608,8 +608,8 @@ struct Authenticated {
     revoke_rx: watch::Receiver<bool>,
 }
 
-/// Handshake: versione, poi credenziale. Ogni rifiuto chiude la connessione
-/// senza effetti e senza distinguere verso il client i motivi del diniego.
+/// Handshake: version, then credential. Every rejection closes the connection
+/// without effects and without telling the client the reason for the denial.
 async fn handshake(
     shared: &Arc<Shared>,
     frames: &mut tokio::sync::mpsc::Receiver<Result<ClientMessage, FrameError>>,
@@ -633,7 +633,7 @@ async fn handshake(
                 wr,
                 &ServerMessage::Error {
                     request_id: Some(request_id),
-                    error: unauthenticated("handshake con credenziale richiesto"),
+                    error: unauthenticated("handshake with credential required"),
                 },
                 max,
             )
@@ -659,7 +659,7 @@ async fn handshake(
                 error: protocol_error(
                     ProtocolErrorCode::UnsupportedVersion,
                     format!(
-                        "nessuna versione di protocollo comune; supportate: {SUPPORTED_PROTOCOL_VERSIONS:?}"
+                        "no common protocol version; supported: {SUPPORTED_PROTOCOL_VERSIONS:?}"
                     ),
                 ),
             },
@@ -677,7 +677,7 @@ async fn handshake(
             wr,
             &ServerMessage::Error {
                 request_id: Some(request_id),
-                error: unauthenticated("credenziale assente o non valida"),
+                error: unauthenticated("credential missing or invalid"),
             },
             max,
         )
@@ -690,7 +690,7 @@ async fn handshake(
             &err(
                 Some(request_id),
                 ErrorCode::StateConflict,
-                "servizio in arresto",
+                "service shutting down",
             ),
             max,
         )
@@ -777,14 +777,14 @@ async fn handle_connection(shared: Arc<Shared>, stream: BoxedStream, peer: PeerI
                 Some(Ok(ClientMessage::Hello { request_id, .. })) => {
                     let m = ServerMessage::Error {
                         request_id: Some(request_id),
-                        error: protocol_error(ProtocolErrorCode::MalformedMessage, "handshake già completato"),
+                        error: protocol_error(ProtocolErrorCode::MalformedMessage, "handshake already completed"),
                     };
                     if send(&mut wr, &m, max).await.is_err() { Flow::Close(None) } else { Flow::Continue }
                 }
                 Some(Ok(ClientMessage::Request { request_id, body })) => {
                     if !bucket.try_acquire() {
                         let m = err(Some(request_id), ErrorCode::ResourceLimit, &format!(
-                            "frequenza delle richieste oltre il limite; riprovare tra {} ms",
+                            "request rate over the limit; retry in {} ms",
                             bucket.retry_after().as_millis()
                         ));
                         if send(&mut wr, &m, max).await.is_err() { Flow::Close(None) } else { Flow::Continue }
@@ -814,8 +814,8 @@ async fn handle_connection(shared: Arc<Shared>, stream: BoxedStream, peer: PeerI
             Flow::Close(reason) => break reason,
         }
     };
-    // Eventi già pubblicati (per esempio l'arresto delle sessioni agente)
-    // vengono consegnati prima della notifica di chiusura.
+    // Events already published (for example the stop of the agent sessions)
+    // are delivered before the closing notification.
     if let Some(rx) = events.as_mut() {
         while let Ok(event) = rx.try_recv() {
             if send(&mut wr, &ServerMessage::Event { event }, max)
@@ -858,8 +858,8 @@ fn requires_ui(req: &Request) -> bool {
     !matches!(req, Request::Ping | Request::GetCapabilities)
 }
 
-/// Chiamante verso il core: la UI è l'utente locale; il pairing non ha
-/// alcun permesso sulle VM (il grant di sessione agente arriva in F4).
+/// Caller towards the core: the UI is the local user; pairing has no VM
+/// permissions at all (the agent session grant arrives in F4).
 fn caller_for(role: Role) -> Option<Caller> {
     match role {
         Role::Ui => Some(Caller::User),
@@ -873,11 +873,11 @@ async fn dispatch(
     req: Request,
 ) -> Dispatch {
     let shared = ctx.shared;
-    // Primo controllo: al ricevimento.
+    // First check: on receipt.
     if requires_ui(&req) && ctx.role != Role::Ui {
         return Dispatch::Reply(Err(op_error(
             ErrorCode::PermissionDenied,
-            format!("operazione {} non consentita al ruolo", req.name()),
+            format!("operation {} not allowed for the role", req.name()),
         )));
     }
     let sup_req = match req {
@@ -911,10 +911,7 @@ async fn dispatch(
             return Dispatch::Reply(if shared.revoke_connection(connection_id) {
                 Ok(ResponseBody::Revoked { connection_id })
             } else {
-                Err(op_error(
-                    ErrorCode::StateConflict,
-                    "connessione inesistente",
-                ))
+                Err(op_error(ErrorCode::StateConflict, "no such connection"))
             });
         }
         Request::CreatePairingCredential => {
@@ -927,13 +924,13 @@ async fn dispatch(
                 }),
                 Err(_) => Err(op_error(
                     ErrorCode::ResourceLimit,
-                    "generatore casuale non disponibile",
+                    "random generator not available",
                 )),
             });
         }
         Request::EmergencyStop => {
-            // Percorso prioritario: nessun posto in coda, nessun passaggio dal
-            // thread del supervisor.
+            // Priority path: no queue slot, no passage through the supervisor
+            // thread.
             let report = shared.emergency_stop(Actor::User).await;
             return Dispatch::Reply(Ok(ResponseBody::EmergencyStop(report)));
         }
@@ -951,7 +948,7 @@ async fn dispatch(
     let Ok(permit) = shared.queue.clone().try_acquire_owned() else {
         return Dispatch::Reply(Err(op_error(
             ErrorCode::ResourceLimit,
-            "coda del supervisor piena",
+            "supervisor queue full",
         )));
     };
     let (reply_tx, reply_rx) = oneshot::channel();
@@ -966,7 +963,7 @@ async fn dispatch(
     if !sent {
         return Dispatch::Reply(Err(op_error(
             ErrorCode::StateConflict,
-            "servizio in arresto",
+            "service shutting down",
         )));
     }
     tokio::select! {
@@ -974,13 +971,13 @@ async fn dispatch(
         _ = flag_set(ctx.revoke_rx) => Dispatch::Interrupted(CloseReason::Revoked),
         r = reply_rx => Dispatch::Reply(r.unwrap_or_else(|_| Err(op_error(
             ErrorCode::StateConflict,
-            "servizio in arresto",
+            "service shutting down",
         )))),
     }
 }
 
-/// Attende che il flag diventi vero (o che il mittente sparisca) senza
-/// trattenere il riferimento al valore oltre l'attesa.
+/// Waits for the flag to become true (or for the sender to go away) without
+/// holding the reference to the value beyond the wait.
 async fn flag_set(rx: &mut watch::Receiver<bool>) {
     let _ = rx.wait_for(|v| *v).await;
 }

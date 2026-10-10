@@ -1,31 +1,31 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "MediaRecord",
-  "description": "Supporto approvato, come visto dai client: nessun percorso host.",
+  "description": "Approved media, as seen by clients: no host path.",
   "type": "object",
   "properties": {
     "approved_at": {
-      "description": "Istante dell'approvazione.",
+      "description": "Instant of the approval.",
       "$ref": "#/$defs/UtcTimestamp"
     },
     "declared_origin": {
-      "description": "Origine dichiarata dall'utente (testo, mai interpretato).",
+      "description": "Origin declared by the user (text, never interpreted).",
       "$ref": "#/$defs/Label"
     },
     "id": {
-      "description": "Identificativo.",
+      "description": "Identifier.",
       "$ref": "#/$defs/MediaId"
     },
     "kind": {
-      "description": "Tipo di supporto.",
+      "description": "Kind of media.",
       "$ref": "#/$defs/MediaKind"
     },
     "sha256": {
-      "description": "SHA-256 della copia gestita, calcolato all'approvazione.",
+      "description": "SHA-256 of the managed copy, computed at approval.",
       "$ref": "#/$defs/Sha256Digest"
     },
     "size_bytes": {
-      "description": "Dimensione in byte della copia gestita.",
+      "description": "Size in bytes of the managed copy.",
       "type": "integer",
       "format": "uint64",
       "minimum": 0
@@ -41,39 +41,39 @@
   ],
   "$defs": {
     "Label": {
-      "description": "Testo dichiarato dall'utente, senza caratteri di controllo; mai interpretato.",
+      "description": "Text declared by the user, without control characters; never interpreted.",
       "type": "string",
       "maxLength": 256,
       "minLength": 1
     },
     "MediaId": {
-      "description": "MediaId: UUID versione 7 in minuscolo con trattini.",
+      "description": "MediaId: version 7 UUID, lowercase with hyphens.",
       "type": "string",
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     },
     "MediaKind": {
-      "description": "Tipo di supporto nel registro media.",
+      "description": "Kind of media in the media registry.",
       "oneOf": [
         {
-          "description": "ISO di installazione del guest.",
+          "description": "Guest installation ISO.",
           "type": "string",
           "const": "install_iso"
         },
         {
-          "description": "ISO dati in sola lettura per portare nel guest il software da testare (ADR-0008).",
+          "description": "Read-only data ISO to bring the software under test into the guest (ADR-0008).",
           "type": "string",
           "const": "data_iso"
         }
       ]
     },
     "Sha256Digest": {
-      "description": "SHA-256 in esadecimale minuscolo.",
+      "description": "SHA-256 in lowercase hexadecimal.",
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
     },
     "UtcTimestamp": {
-      "description": "Istante UTC RFC 3339 con suffisso Z, precisione al millisecondo.",
+      "description": "RFC 3339 UTC instant with Z suffix, millisecond precision.",
       "type": "string",
       "format": "date-time"
     }

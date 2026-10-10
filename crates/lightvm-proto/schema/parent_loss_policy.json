@@ -1,10 +1,10 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "ParentLossPolicy",
-  "description": "Sorte delle VM quando la UI che ha avviato il servizio termina senza\narresto controllato (crash, terminazione forzata). ADR-0015 parte B.",
+  "description": "Fate of the VMs when the UI that started the service ends without a\ncontrolled shutdown (crash, forced termination). ADR-0015 part B.",
   "oneOf": [
     {
-      "description": "Emergency Stop di tutte le VM, poi arresto del servizio (predefinita).",
+      "description": "Emergency Stop of all VMs, then shutdown of the service (default).",
       "type": "object",
       "properties": {
         "kind": {
@@ -17,7 +17,7 @@
       ]
     },
     {
-      "description": "Spegnimento ordinato (ACPI) con attesa limitata, poi `quit` e\nterminazione; infine arresto del servizio.",
+      "description": "Orderly (ACPI) shutdown with a bounded wait, then `quit` and\ntermination; finally shutdown of the service.",
       "type": "object",
       "properties": {
         "kind": {
@@ -25,7 +25,7 @@
           "const": "shutdown_vms"
         },
         "powerdown_s": {
-          "description": "Attesa dello spegnimento ACPI per VM, in secondi\n([`MIN_PARENT_LOSS_POWERDOWN_S`]..=[`MAX_PARENT_LOSS_POWERDOWN_S`]).",
+          "description": "Wait for the ACPI shutdown per VM, in seconds\n([`MIN_PARENT_LOSS_POWERDOWN_S`]..=[`MAX_PARENT_LOSS_POWERDOWN_S`]).",
           "type": "integer",
           "format": "uint32",
           "minimum": 0
@@ -37,7 +37,7 @@
       ]
     },
     {
-      "description": "Le VM restano accese e il servizio resta attivo senza UI.",
+      "description": "The VMs stay on and the service stays active without a UI.",
       "type": "object",
       "properties": {
         "kind": {

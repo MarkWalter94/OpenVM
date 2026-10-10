@@ -1,6 +1,6 @@
-//! Registro dei media approvati (ADR-0008; ROADMAP 7.4, righe "File" e "Host"):
-//! copia gestita in sola lettura, SHA-256 dei byte copiati, `CREATE_NEW`,
-//! nessuna sovrascrittura, sorgente sostituita dopo l'approvazione.
+//! Approved media registry (ADR-0008; ROADMAP 7.4, "File" and "Host" rows):
+//! read-only managed copy, SHA-256 of the copied bytes, `CREATE_NEW`,
+//! no overwriting, source replaced after approval.
 
 mod common;
 
@@ -22,12 +22,16 @@ fn approved_media_is_a_readonly_managed_copy_with_hash() {
     let dir = common::tempdir();
     let src_dir = common::tempdir();
     let src = src_dir.path().join("ubuntu.iso");
-    let content = b"CD001 iso finta per il registro".repeat(5000);
+    let content = b"CD001 fake iso for the registry".repeat(5000);
     std::fs::write(&src, &content).unwrap();
     let mut cat = Catalog::open(dir.path()).unwrap();
 
     let m = cat
-        .approve_media(&src, MediaKind::Iso, "ubuntu-24.04.3 dal sito ufficiale")
+        .approve_media(
+            &src,
+            MediaKind::Iso,
+            "ubuntu-24.04.3 from the official site",
+        )
         .unwrap();
     assert_eq!(m.sha256, sha_hex(&content));
     assert_eq!(m.size_bytes, content.len() as u64);
@@ -44,16 +48,16 @@ fn approved_media_is_a_readonly_managed_copy_with_hash() {
     assert_eq!(
         std::fs::read_dir(dir.path().join("tmp")).unwrap().count(),
         0,
-        "nessun temporaneo residuo"
+        "no leftover temporary"
     );
 
-    // ISO sostituita dopo l'approvazione: la copia gestita non cambia.
-    std::fs::write(&src, b"contenuto sostituito").unwrap();
+    // ISO replaced after approval: the managed copy does not change.
+    std::fs::write(&src, b"replaced content").unwrap();
     let check = cat.verify_media(&m.media_id).unwrap();
     assert_eq!(check.record.sha256, sha_hex(&content));
     assert!(!check.readonly_restored);
 
-    // Collegabile a una VM come supporto di installazione.
+    // Can be attached to a VM as installation media.
     let vm = common::new_vm(&mut cat, "vm");
     cat.with_tx(|tx| tx.attach_media(&vm, MediaSlot::Install, &m.media_id))
         .unwrap();
@@ -64,7 +68,7 @@ fn altered_managed_copy_is_detected() {
     let dir = common::tempdir();
     let src_dir = common::tempdir();
     let src = src_dir.path().join("data.iso");
-    std::fs::write(&src, b"dati originali").unwrap();
+    std::fs::write(&src, b"original data").unwrap();
     let mut cat = Catalog::open(dir.path()).unwrap();
     let m = cat.approve_media(&src, MediaKind::Data, "fixture").unwrap();
     let copy = cat.layout().resolve(&m.managed_path).unwrap();
@@ -74,14 +78,14 @@ fn altered_managed_copy_is_detected() {
         p.set_readonly(false);
         std::fs::set_permissions(&copy, p).unwrap();
     }
-    std::fs::write(&copy, b"dati alterati").unwrap();
+    std::fs::write(&copy, b"altered data").unwrap();
     let err = cat.verify_media(&m.media_id).unwrap_err();
     assert!(
         matches!(err, StorageError::IntegrityMismatch { .. }),
         "{err:?}"
     );
 
-    // Copia rimossa: media `missing`.
+    // Copy removed: media `missing`.
     std::fs::remove_file(&copy).unwrap();
     let err = cat.verify_media(&m.media_id).unwrap_err();
     assert!(matches!(err, StorageError::NotFound { .. }), "{err:?}");
@@ -96,7 +100,7 @@ fn source_that_is_a_directory_or_link_is_refused() {
     let dir = common::tempdir();
     let src_dir = common::tempdir();
     let mut cat = Catalog::open(dir.path()).unwrap();
-    // Directory al posto del file.
+    // A directory instead of a file.
     let err = cat
         .approve_media(src_dir.path(), MediaKind::Iso, "x")
         .unwrap_err();
@@ -110,7 +114,7 @@ fn source_that_is_a_directory_or_link_is_refused() {
         ),
         "{err:?}"
     );
-    // Collegamento simbolico verso un file (se consentito senza privilegi).
+    // Symbolic link to a file (if allowed without privileges).
     let target = src_dir.path().join("real.iso");
     std::fs::write(&target, b"iso").unwrap();
     let link = src_dir.path().join("link.iso");
@@ -131,14 +135,14 @@ fn source_that_is_a_directory_or_link_is_refused() {
             "{err:?}"
         );
     } else {
-        eprintln!("symlink non consentito (privilegio assente): parte saltata");
+        eprintln!("symlink not allowed (missing privilege): part skipped");
     }
-    // Origine dichiarata con caratteri di controllo.
+    // Declared origin with control characters.
     let err = cat
-        .approve_media(&target, MediaKind::Iso, "riga1\nriga2")
+        .approve_media(&target, MediaKind::Iso, "line1\nline2")
         .unwrap_err();
     assert!(matches!(err, StorageError::Constraint(_)), "{err:?}");
-    // Nessun file né intento lasciato dai rifiuti.
+    // No file or intent left behind by the refusals.
     assert_eq!(
         std::fs::read_dir(dir.path().join("media")).unwrap().count(),
         0
@@ -163,20 +167,20 @@ fn destination_appearing_before_publication_is_never_overwritten() {
             read_only: true,
         })
         .unwrap();
-    common::write_bytes(&i.temp_path, b"copia gestita").unwrap();
-    // Un altro attore crea la destinazione tra `begin_intent` e la pubblicazione.
+    common::write_bytes(&i.temp_path, b"managed copy").unwrap();
+    // Another actor creates the destination between `begin_intent` and publication.
     let dest = cat.layout().resolve(&rel).unwrap();
-    std::fs::write(&dest, b"file estraneo").unwrap();
+    std::fs::write(&dest, b"foreign file").unwrap();
     let err = cat.mark_applied(&i).unwrap_err();
     assert!(matches!(err, StorageError::StateConflict(_)), "{err:?}");
-    assert_eq!(std::fs::read(&dest).unwrap(), b"file estraneo");
+    assert_eq!(std::fs::read(&dest).unwrap(), b"foreign file");
     assert_eq!(cat.intent_state(i.id).unwrap(), IntentState::Pending);
     cat.abort(&i).unwrap();
     assert!(!i.temp_path.exists());
     assert_eq!(
         std::fs::read(&dest).unwrap(),
-        b"file estraneo",
-        "l'annullamento non tocca un file senza riga che non ha creato"
+        b"foreign file",
+        "the rollback does not touch a row-less file it did not create"
     );
 }
 
@@ -186,8 +190,8 @@ fn source_open_by_a_writer_is_refused() {
     use std::os::windows::fs::OpenOptionsExt;
     let dir = common::tempdir();
     let src_dir = common::tempdir();
-    let src = src_dir.path().join("in-scrittura.iso");
-    std::fs::write(&src, b"iso in scrittura").unwrap();
+    let src = src_dir.path().join("being-written.iso");
+    std::fs::write(&src, b"iso being written").unwrap();
     let _writer = std::fs::OpenOptions::new()
         .write(true)
         .share_mode(0x1 | 0x2 | 0x4)

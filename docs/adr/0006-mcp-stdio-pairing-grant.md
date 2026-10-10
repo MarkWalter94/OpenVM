@@ -1,42 +1,42 @@
-# ADR-0006 — MCP stdio con pairing e grant limitato, nessun QMP generico
+# ADR-0006 — MCP over stdio with pairing and a limited grant, no generic QMP
 
-- Stato: Accettata
-- Data: 2026-10-09
-- Responsabile: da assegnare
+- Status: Accepted
+- Date: 2026-10-09
+- Owner: to be assigned
 
-## Contesto
+## Context
 
-Con il trasporto stdio il client MCP avvia il server come sottoprocesso; LightVM non può governare quel processo, ma può governare ciò che l'adapter ottiene dal supervisor. QMP è un'interfaccia privilegiata capace di accedere al filesystem host (roadmap, sezioni 3 e 9).
+With the stdio transport the MCP client launches the server as a subprocess; LightVM cannot govern that process, but it can govern what the adapter obtains from the supervisor. QMP is a privileged interface capable of accessing the host filesystem (roadmap, sections 3 and 9).
 
-## Decisione
+## Decision
 
-- Baseline di protocollo MCP 2025-11-25; adapter `lightvm-mcp` su stdio, nessun trasporto HTTP nell'MVP.
-- L'adapter non apre dischi né esegue QEMU: inoltra al supervisor via named pipe con ACL (Windows) o socket con permessi restrittivi (Unix).
-- MCP disabilitato per difetto a ogni avvio; nessuna autorizzazione sopravvive al riavvio.
-- La prima connessione crea solo una richiesta di pairing con identità e codice verificabili nell'app; il grant limitato (VM, strumenti, durata, quote) è emesso dal supervisor dopo approvazione dell'utente. Il pairing da solo non dà permessi.
-- Scadenza e lease verificati dal supervisor; lease senza rinnovo valido non superiore a 10 secondi (sezione 7.3).
-- Nessun tool `qmp.execute`, nessun passthrough host, nessun percorso host, nessuna gestione dei media, nessuna modifica della policy.
-- Catalogo v0.2 come da sezione 9; `vm.create`, `vm.delete` e tool guest rinviati a R4.
-- Credenziali nell'archivio credenziali OS; mai negli argomenti di processo, nei report o negli esempi; mai propagate a QEMU.
-- `stdout` solo MCP; diagnostica su `stderr` senza segreti.
+- MCP protocol baseline 2025-11-25; `lightvm-mcp` adapter over stdio, no HTTP transport in the MVP.
+- The adapter does not open disks or run QEMU: it forwards to the supervisor via a named pipe with ACLs (Windows) or a socket with restrictive permissions (Unix).
+- MCP disabled by default at every startup; no authorization survives a restart.
+- The first connection only creates a pairing request with an identity and a code that can be verified in the app; the limited grant (VM, tools, duration, quotas) is issued by the supervisor after user approval. Pairing alone grants no permissions.
+- Expiry and lease checked by the supervisor; a lease without a valid renewal lasts no more than 10 seconds (section 7.3).
+- No `qmp.execute` tool, no host passthrough, no host paths, no media management, no policy changes.
+- v0.2 catalog as per section 9; `vm.create`, `vm.delete` and guest tools deferred to R4.
+- Credentials in the OS credential store; never in process arguments, reports or examples; never propagated to QEMU.
+- `stdout` for MCP only; diagnostics on `stderr` without secrets.
 
-## Alternative considerate
+## Alternatives considered
 
-- Streamable HTTP con OAuth: non adottato per l'MVP; MCP tratta i due trasporti diversamente (sezione 9).
-- Inoltro QMP generico: escluso (sezioni 3 e 9).
-- Adapter con accesso diretto ai file VM: escluso (sezione 6.1).
+- Streamable HTTP with OAuth: not adopted for the MVP; MCP treats the two transports differently (section 9).
+- Generic QMP forwarding: excluded (sections 3 and 9).
+- Adapter with direct access to VM files: excluded (section 6.1).
 
-## Conseguenze
+## Consequences
 
-- SDK e client di riferimento da selezionare (ADR-0021).
-- Rate limit, code limitate, timeout senza retry ciechi, limiti di byte sugli screenshot.
-- LightVM non limita ciò che il client possiede già fuori da LightVM (sezione 7.1): va dichiarato all'utente.
+- SDK and reference clients to be selected (ADR-0021).
+- Rate limits, bounded queues, timeouts without blind retries, byte limits on screenshots.
+- LightVM does not limit what the client already has outside LightVM (section 7.1): this must be declared to the user.
 
-## Prove richieste
+## Required evidence
 
-- Test negativi "Sessioni", "VM", "Host", "Policy", "Lifecycle" della sezione 7.4: F4/F5.
-- Criterio di uscita F5 con due client reali documentati.
+- "Sessions", "VM", "Host", "Policy", "Lifecycle" negative tests from section 7.4: F4/F5.
+- F5 exit criterion with two documented real clients.
 
-## Riferimenti
+## References
 
-Roadmap, sezioni 3, 4, 6.1, 7.1, 7.3, 7.4, 9, 10 (F4, F5).
+Roadmap, sections 3, 4, 6.1, 7.1, 7.3, 7.4, 9, 10 (F4, F5).

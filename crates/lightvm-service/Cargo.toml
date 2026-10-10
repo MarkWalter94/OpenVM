@@ -1,6 +1,6 @@
 [package]
 name = "lightvm-service"
-description = "LightVM: supervisor, IPC locale autenticato e composition root (F1)"
+description = "LightVM: supervisor, authenticated local IPC and composition root (F1)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,31 +10,31 @@ publish.workspace = true
 [lib]
 path = "src/lib.rs"
 
-# Binario del supervisor, avviato dalla UI come processo figlio (ROADMAP 6.1).
+# Supervisor binary, started by the UI as a child process (ROADMAP 6.1).
 [[bin]]
 name = "lightvm-service"
 path = "src/main.rs"
-required-features = ["supervisore"]
+required-features = ["supervisor"]
 
-# Client minimo di prova: usato dai test e dalla prova a integrità bassa
-# (docs/verification/F1-04-service-ipc-ci.md). Non è un artefatto di prodotto.
+# Minimal test client: used by the tests and by the low-integrity check
+# (docs/verification/F1-04-service-ipc-ci.md). Not a product artifact.
 [[bin]]
 name = "lightvm-ipc-probe"
 path = "src/bin/lightvm-ipc-probe.rs"
 
-# `supervisore` (predefinita): composition root, server IPC e adattatori reali.
-# Senza, il crate espone solo il lato client (`client`, `credential`, `frame`,
-# `transport`): la UI lo usa con `default-features = false`, così `qemu-backend`
-# resta nel solo supervisor (ADR-0024).
+# `supervisor` (default): composition root, IPC server and real adapters.
+# Without it the crate exposes only the client side (`client`, `credential`,
+# `frame`, `transport`): the UI uses it with `default-features = false`, so
+# `qemu-backend` stays in the supervisor only (ADR-0024).
 [features]
-default = ["supervisore"]
-supervisore = ["dep:qemu-backend", "dep:vm-core", "dep:vm-storage"]
+default = ["supervisor"]
+supervisor = ["dep:qemu-backend", "dep:vm-core", "dep:vm-storage"]
 
-# Versioni esatte e lockfile (ROADMAP 6.3); nessuna dipendenza git.
+# Exact versions and lockfile (ROADMAP 6.3); no git dependencies.
 [dependencies]
 getrandom = { version = "=0.4.3", features = ["std"] }
 lightvm-proto = { path = "../lightvm-proto" }
-# Composition root (ROADMAP 6.1): core, catalogo SQLite e backend QEMU reali.
+# Composition root (ROADMAP 6.1): real core, SQLite catalog and QEMU backend.
 qemu-backend = { path = "../qemu-backend", optional = true }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
@@ -42,9 +42,9 @@ tokio = { version = "=1.53.2", features = ["io-util", "macros", "net", "rt-multi
 vm-core = { path = "../vm-core", optional = true }
 vm-storage = { path = "../vm-storage", optional = true }
 
-# Named pipe con descrittore di sicurezza tramite API sicure (nessun `unsafe`
-# nel crate): `interprocess` incapsula CreateNamedPipeW e la conversione SDDL;
-# `sysinfo` legge il SID dell'utente di un processo (proprio e del peer).
+# Named pipe with a security descriptor through safe APIs (no `unsafe` in the
+# crate): `interprocess` wraps CreateNamedPipeW and the SDDL conversion;
+# `sysinfo` reads the user SID of a process (our own and the peer's).
 [target.'cfg(windows)'.dependencies]
 interprocess = { version = "=2.4.4", features = ["tokio"] }
 sysinfo = { version = "=0.39.6", default-features = false, features = ["system"] }
@@ -62,11 +62,11 @@ tokio = { version = "=1.53.2", features = ["io-util", "macros", "net", "process"
 [lints]
 workspace = true
 
-# I test d'integrazione avviano il servizio: richiedono il supervisor.
+# The integration tests start the service: they require the supervisor.
 [[test]]
 name = "ipc"
-required-features = ["supervisore"]
+required-features = ["supervisor"]
 
 [[test]]
 name = "core_path"
-required-features = ["supervisore"]
+required-features = ["supervisor"]

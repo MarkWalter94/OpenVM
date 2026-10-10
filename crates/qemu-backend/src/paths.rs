@@ -1,11 +1,11 @@
-//! Percorsi gestiti: l'unica fonte di percorsi per il comando QEMU.
+//! Managed paths: the only source of paths for the QEMU command.
 //!
-//! Il backend non accetta stringhe di percorso dal chiamante. Ogni percorso
-//! arriva come [`ManagedPath`], costruibile soltanto tramite
-//! [`ManagedPath::verify`], e i percorsi di un'esecuzione sono restituiti da un
-//! oggetto che implementa [`ManagedPaths`] (in produzione il registro di
-//! `vm-storage`/`lightvm-service`, che crea directory e copie gestite e
-//! protegge creazione/apertura da symlink, junction e sostituzioni: ROADMAP 6.3).
+//! The backend does not accept path strings from the caller. Every path
+//! arrives as a [`ManagedPath`], which can only be built through
+//! [`ManagedPath::verify`], and the paths of a run are returned by an
+//! object implementing [`ManagedPaths`] (in production the registry of
+//! `vm-storage`/`lightvm-service`, which creates managed directories and copies
+//! and protects creation/opening against symlinks, junctions and substitutions: ROADMAP 6.3).
 
 use std::path::{Path, PathBuf};
 
@@ -13,8 +13,8 @@ use crate::error::{BackendError, Result};
 use crate::validate::{UNIX_SOCKET_PATH_MAX, check_token, qemu_path_value};
 use lightvm_proto::{MediaId, RunId};
 
-/// Percorso assoluto verificato e rappresentabile senza ambiguità nelle
-/// opzioni QEMU.
+/// Verified absolute path that can be represented unambiguously in the
+/// QEMU options.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ManagedPath {
     path: PathBuf,
@@ -22,57 +22,57 @@ pub struct ManagedPath {
 }
 
 impl ManagedPath {
-    /// Verifica un percorso:
-    /// - UTF-8, assoluto, senza componenti `.`/`..`, senza prefissi UNC,
-    ///   `\\?\` o `\\.\` (vedi [`crate::validate::qemu_path_value`]);
-    /// - nessun carattere che QEMU interpreterebbe (`,`, `=`, `:` oltre l'unità,
-    ///   controllo, virgolette, metacaratteri);
-    /// - se esiste, non è un collegamento simbolico né una junction.
+    /// Verifies a path:
+    /// - UTF-8, absolute, without `.`/`..` components, without UNC,
+    ///   `\\?\` or `\\.\` prefixes (see [`crate::validate::qemu_path_value`]);
+    /// - no character QEMU would interpret (`,`, `=`, `:` beyond the drive,
+    ///   control characters, quotes, metacharacters);
+    /// - if it exists, it is neither a symbolic link nor a junction.
     ///
-    /// Le verifiche contro sostituzioni tra controllo e uso spettano al
-    /// proprietario della directory (registro storage); qui si verifica la
-    /// forma e l'ultimo componente.
+    /// Checks against substitutions between check and use are the
+    /// responsibility of the directory owner (storage registry); here only the
+    /// form and the last component are verified.
     pub fn verify(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
         let s = path
             .to_str()
-            .ok_or_else(|| BackendError::invalid("path", "percorso non UTF-8"))?;
+            .ok_or_else(|| BackendError::invalid("path", "path is not UTF-8"))?;
         let qemu = qemu_path_value("path", s)?;
         if let Ok(meta) = std::fs::symlink_metadata(&path)
             && meta.file_type().is_symlink()
         {
             return Err(BackendError::invalid(
                 "path",
-                "collegamento simbolico o junction non ammesso",
+                "symbolic link or junction not allowed",
             ));
         }
         Ok(Self { path, qemu })
     }
 
-    /// Aggiunge un nome di file (token) e verifica il risultato.
+    /// Appends a file name (token) and verifies the result.
     pub fn join_file(&self, name: &str) -> Result<Self> {
         check_token("file_name", name)?;
         Self::verify(self.path.join(name))
     }
 
-    /// Percorso per le API del sistema operativo.
+    /// Path for operating-system APIs.
     pub fn as_path(&self) -> &Path {
         &self.path
     }
 
-    /// Forma usata nelle opzioni QEMU (separatori `/`).
+    /// Form used in the QEMU options (`/` separators).
     pub fn qemu_value(&self) -> &str {
         &self.qemu
     }
 
-    /// Verifica che il percorso sia utilizzabile come socket Unix (lunghezza
-    /// di `sun_path`).
+    /// Verifies that the path can be used as a Unix socket (length of
+    /// `sun_path`).
     pub(crate) fn check_socket_len(&self, field: &'static str) -> Result<()> {
         if self.qemu.len() > UNIX_SOCKET_PATH_MAX {
             return Err(BackendError::invalid(
                 field,
                 format!(
-                    "percorso del socket di {} byte (massimo {UNIX_SOCKET_PATH_MAX})",
+                    "socket path of {} bytes (maximum {UNIX_SOCKET_PATH_MAX})",
                     self.qemu.len()
                 ),
             ));
@@ -81,40 +81,40 @@ impl ManagedPath {
     }
 }
 
-/// Percorsi di un'esecuzione, già verificati dal proprietario dello storage.
+/// Paths of a run, already verified by the storage owner.
 ///
-/// Ogni metodo restituisce percorsi assoluti in directory controllate dal
-/// supervisor; il backend non compone percorsi a partire da testo del
-/// chiamante, salvo nomi di file fissi dentro le directory restituite.
+/// Every method returns absolute paths in directories controlled by the
+/// supervisor; the backend does not build paths from caller text, except for
+/// fixed file names inside the returned directories.
 pub trait ManagedPaths: Send + Sync {
-    /// Eseguibile `qemu-system-x86_64` approvato.
+    /// Approved `qemu-system-x86_64` executable.
     fn qemu_system(&self) -> Result<ManagedPath>;
 
-    /// Codice del firmware UEFI (aperto in sola lettura come pflash0).
+    /// UEFI firmware code (opened read-only as pflash0).
     fn firmware_code(&self) -> Result<ManagedPath>;
 
-    /// Copia per esecuzione delle variabili UEFI (pflash1, scrivibile).
+    /// Per-run copy of the UEFI variables (pflash1, writable).
     fn firmware_vars(&self, run: &RunId) -> Result<ManagedPath>;
 
-    /// Disco della VM per questa esecuzione (overlay), se presente.
+    /// VM disk for this run (overlay), if any.
     fn disk(&self, run: &RunId) -> Result<Option<ManagedPath>>;
 
-    /// File da tenere aperti in sola lettura con esclusione della scrittura
-    /// per tutta l'esecuzione (base dell'overlay, variabili della baseline).
+    /// Files to keep open read-only with write exclusion for the whole run
+    /// (overlay base, baseline variables).
     fn protected_readonly(&self, run: &RunId) -> Result<Vec<ManagedPath>>;
 
-    /// Supporto approvato del registro media (copia gestita in sola lettura).
+    /// Approved medium from the media registry (read-only managed copy).
     fn media(&self, media: &MediaId) -> Result<ManagedPath>;
 
-    /// Directory dell'esecuzione (log di stdout/stderr).
+    /// Run directory (stdout/stderr logs).
     fn run_dir(&self, run: &RunId) -> Result<ManagedPath>;
 
-    /// Directory privata dell'esecuzione (ACL limitata all'utente del
-    /// supervisor): socket QMP e VNC, file temporanei di `screendump`.
+    /// Private run directory (ACL limited to the supervisor user): QMP and
+    /// VNC sockets, temporary `screendump` files.
     fn private_dir(&self, run: &RunId) -> Result<ManagedPath>;
 }
 
-/// Nomi fissi dei file creati dal backend nelle directory gestite.
+/// Fixed names of the files created by the backend in the managed directories.
 pub(crate) mod names {
     pub(crate) const QMP_SOCKET: &str = "qmp.sock";
     pub(crate) const VNC_SOCKET: &str = "vnc.sock";
@@ -128,7 +128,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn verifica_e_join() {
+    fn verify_and_join() {
         let p = ManagedPath::verify(r"C:\Windows\Temp\lightvm-test-dir").unwrap();
         assert_eq!(p.qemu_value(), "C:/Windows/Temp/lightvm-test-dir");
         assert!(p.join_file("qmp.sock").is_ok());

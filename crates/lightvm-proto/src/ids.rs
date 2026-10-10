@@ -1,14 +1,14 @@
-//! Identificativi tipizzati (ROADMAP 6.3, 9).
+//! Typed identifiers (ROADMAP 6.3, 9).
 //!
-//! Ogni identificativo è un newtype su un UUID versione 7 (RFC 9562): 128 bit,
-//! ordinabile per istante di creazione, rappresentato in JSON come stringa
-//! esadecimale con trattini in minuscolo. Tipi distinti impediscono di passare un
-//! `RunId` dove serve un `OperationId`.
+//! Every identifier is a newtype over a version 7 UUID (RFC 9562): 128 bits,
+//! sortable by creation instant, represented in JSON as a lowercase hyphenated
+//! hexadecimal string. Distinct types prevent passing a `RunId` where an
+//! `OperationId` is needed.
 //!
-//! Gli identificativi **non sono credenziali**: un `SessionId` può comparire in
-//! log e report; il segreto di sessione è [`crate::SessionToken`]. Un UUID v7
-//! contiene l'istante di creazione in millisecondi: non va usato per dati che
-//! debbano restare riservati.
+//! Identifiers **are not credentials**: a `SessionId` may appear in
+//! logs and reports; the session secret is [`crate::SessionToken`]. A v7 UUID
+//! contains the creation instant in milliseconds: it must not be used for data
+//! that must stay confidential.
 
 use std::borrow::Cow;
 use std::fmt;
@@ -18,20 +18,20 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
 
-/// Errore di analisi di un identificativo.
+/// Error parsing an identifier.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IdParseError {
-    /// La stringa non è un UUID in forma testuale valida.
+    /// The string is not a UUID in valid textual form.
     Malformed,
-    /// L'UUID è valido ma non è della versione 7 con variante RFC 9562.
+    /// The UUID is valid but is not version 7 with the RFC 9562 variant.
     NotVersion7,
 }
 
 impl fmt::Display for IdParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Malformed => f.write_str("identificativo non valido"),
-            Self::NotVersion7 => f.write_str("identificativo non UUID v7"),
+            Self::Malformed => f.write_str("invalid identifier"),
+            Self::NotVersion7 => f.write_str("identifier is not a UUID v7"),
         }
     }
 }
@@ -53,40 +53,40 @@ macro_rules! define_id {
         pub struct $name(Uuid);
 
         impl $name {
-            /// Nuovo identificativo dall'orologio di sistema e dal generatore
-            /// casuale dell'OS. Riservato al supervisor: il core usa la porta
-            /// `IdGenerator`.
+            /// New identifier from the system clock and the OS random
+            /// generator. Reserved for the supervisor: the core uses the
+            /// `IdGenerator` port.
             #[cfg(feature = "system-clock")]
             #[must_use]
             pub fn new_v7() -> Self {
                 Self(Uuid::now_v7())
             }
 
-            /// Costruzione deterministica da millisecondi Unix e 10 byte di
-            /// contatore/casualità (per generatori iniettati e test).
+            /// Deterministic construction from Unix milliseconds and 10 bytes of
+            /// counter/randomness (for injected generators and tests).
             #[must_use]
             pub const fn from_unix_millis(millis: u64, counter_random: [u8; 10]) -> Self {
                 Self(uuid::Builder::from_unix_timestamp_millis(millis, &counter_random).into_uuid())
             }
 
-            /// Converte un UUID esistente; rifiuta UUID che non siano v7.
+            /// Converts an existing UUID; rejects UUIDs that are not v7.
             pub fn from_uuid(uuid: Uuid) -> Result<Self, IdParseError> {
                 check_v7(uuid).map(Self)
             }
 
-            /// UUID sottostante.
+            /// Underlying UUID.
             #[must_use]
             pub const fn as_uuid(&self) -> Uuid {
                 self.0
             }
 
-            /// Byte in ordine di rete (per colonne BLOB di 16 byte).
+            /// Bytes in network order (for 16-byte BLOB columns).
             #[must_use]
             pub const fn to_bytes(&self) -> [u8; 16] {
                 *self.0.as_bytes()
             }
 
-            /// Ricostruzione dai 16 byte; rifiuta UUID che non siano v7.
+            /// Reconstruction from the 16 bytes; rejects UUIDs that are not v7.
             pub fn from_bytes(bytes: [u8; 16]) -> Result<Self, IdParseError> {
                 Self::from_uuid(Uuid::from_bytes(bytes))
             }
@@ -101,7 +101,7 @@ macro_rules! define_id {
         impl FromStr for $name {
             type Err = IdParseError;
             fn from_str(s: &str) -> Result<Self, Self::Err> {
-                // Solo la forma con trattini (36 caratteri): niente graffe, URN o forma compatta.
+                // Hyphenated form only (36 characters): no braces, URN or compact form.
                 if s.len() != 36 {
                     return Err(IdParseError::Malformed);
                 }
@@ -132,7 +132,7 @@ macro_rules! define_id {
                     "type": "string",
                     "format": "uuid",
                     "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
-                    "description": concat!(stringify!($name), ": UUID versione 7 in minuscolo con trattini.")
+                    "description": concat!(stringify!($name), ": version 7 UUID, lowercase with hyphens.")
                 })
             }
         }
@@ -140,31 +140,31 @@ macro_rules! define_id {
 }
 
 define_id!(
-    /// Identificativo stabile di una VM del catalogo.
+    /// Stable identifier of a catalog VM.
     VmId
 );
 define_id!(
-    /// Identificativo di una singola esecuzione (un processo QEMU). Le richieste
-    /// riferite a un `RunId` precedente sono rifiutate (ROADMAP 6.3).
+    /// Identifier of a single run (one QEMU process). Requests
+    /// referring to a previous `RunId` are rejected (ROADMAP 6.3).
     RunId
 );
 define_id!(
-    /// Identificativo di un effetto richiesto: chiave di idempotenza della coda per VM.
+    /// Identifier of a requested effect: idempotency key of the per-VM queue.
     OperationId
 );
 define_id!(
-    /// Identificativo di una sessione agente. Non è un segreto.
+    /// Identifier of an agent session. It is not a secret.
     SessionId
 );
 define_id!(
-    /// Identificativo di una baseline a VM spenta (ROADMAP 8).
+    /// Identifier of a baseline taken with the VM off (ROADMAP 8).
     BaselineId
 );
 define_id!(
-    /// Identificativo di un supporto del registro media approvato (ADR-0008).
+    /// Identifier of a media item in the approved media registry (ADR-0008).
     MediaId
 );
 define_id!(
-    /// Identificativo di un grant emesso dal supervisor (ROADMAP 9).
+    /// Identifier of a grant issued by the supervisor (ROADMAP 9).
     GrantId
 );

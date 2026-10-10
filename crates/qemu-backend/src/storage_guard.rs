@@ -1,32 +1,32 @@
-//! Esclusione dei file della VM indipendente dal lock di QEMU.
+//! Exclusion of the VM files independent of the QEMU lock.
 //!
-//! Su Windows il lock delle immagini di QEMU 11.1.0 non protegge: QEMU apre
-//! base e overlay con `FILE_SHARE_WRITE` (F0-02 8.3, F0-05 7.1). Il backend
-//! tiene quindi aperti per tutta l'esecuzione:
+//! On Windows the image lock of QEMU 11.1.0 does not protect: QEMU opens
+//! base and overlay with `FILE_SHARE_WRITE` (F0-02 8.3, F0-05 7.1). The backend
+//! therefore keeps open for the whole run:
 //!
-//! - i file da proteggere in sola lettura (base dell'overlay, variabili UEFI
-//!   della baseline) con accesso in lettura e share mode `FILE_SHARE_READ`:
-//!   nessun altro processo può aprirli in scrittura, rinominarli o
-//!   cancellarli; se un altro processo li ha già aperti in scrittura,
-//!   l'apertura fallisce (errore 32) e l'avvio è rifiutato con `vm_busy`
+//! - the files to protect read-only (overlay base, baseline UEFI
+//!   variables) with read access and share mode `FILE_SHARE_READ`:
+//!   no other process can open them for writing, rename them or
+//!   delete them; if another process already has them open for writing,
+//!   the open fails (error 32) and the launch is refused with `vm_busy`
 //!   (F0-05 7.2, 7.4);
-//! - l'overlay e le variabili dell'esecuzione con share
-//!   `FILE_SHARE_READ | FILE_SHARE_WRITE` e senza `FILE_SHARE_DELETE`: impedisce
-//!   rinomina e cancellazione durante l'uso. Non impedisce la scrittura di un
-//!   terzo processo dello stesso utente (F0-05 7.3, limite dichiarato).
+//! - the overlay and the run's variables with share
+//!   `FILE_SHARE_READ | FILE_SHARE_WRITE` and without `FILE_SHARE_DELETE`: this prevents
+//!   rename and deletion during use. It does not prevent writes by a
+//!   third process of the same user (F0-05 7.3, declared limit).
 //!
-//! Limiti: protezione contro errori e strumenti concorrenti, non un confine di
-//! sicurezza; cessa con la chiusura degli handle (fine esecuzione o morte del
-//! supervisor, nel qual caso il Job Object termina anche QEMU).
-//! Su sistemi non Windows i file sono aperti senza esclusione (TODO(F1/R2a):
-//! lock consultivo e permessi, da verificare su Linux).
+//! Limits: protection against mistakes and concurrent tools, not a security
+//! boundary; it ends when the handles are closed (end of run or death of the
+//! supervisor, in which case the Job Object also terminates QEMU).
+//! On non-Windows systems the files are opened without exclusion (TODO(F1/R2a):
+//! advisory lock and permissions, to be verified on Linux).
 
 use std::fs::{File, OpenOptions};
 
 use crate::error::{BackendError, Result};
 use crate::paths::ManagedPath;
 
-/// Handle tenuti aperti per la durata di un'esecuzione.
+/// Handles kept open for the duration of a run.
 #[derive(Debug, Default)]
 pub struct StorageGuards {
     readonly: Vec<(ManagedPath, File)>,
@@ -34,7 +34,7 @@ pub struct StorageGuards {
 }
 
 impl StorageGuards {
-    /// Apre i file da proteggere. In caso di errore nessun handle resta aperto.
+    /// Opens the files to protect. On error no handle stays open.
     pub fn acquire(readonly: &[ManagedPath], no_delete: &[ManagedPath]) -> Result<Self> {
         let mut g = Self::default();
         for p in readonly {
@@ -46,12 +46,12 @@ impl StorageGuards {
         Ok(g)
     }
 
-    /// File protetti in sola lettura.
+    /// Files protected read-only.
     pub fn readonly_paths(&self) -> impl Iterator<Item = &ManagedPath> {
         self.readonly.iter().map(|(p, _)| p)
     }
 
-    /// File protetti da rinomina/cancellazione.
+    /// Files protected from rename/deletion.
     pub fn no_delete_paths(&self) -> impl Iterator<Item = &ManagedPath> {
         self.no_delete.iter().map(|(p, _)| p)
     }
@@ -61,17 +61,17 @@ fn map_open_error(p: &ManagedPath, e: std::io::Error) -> BackendError {
     #[cfg(windows)]
     if e.raw_os_error() == Some(crate::sys::windows::ERROR_SHARING_VIOLATION) {
         return BackendError::VmBusy(format!(
-            "`{}` è aperto da un altro processo in modo incompatibile",
+            "`{}` is open by another process in an incompatible mode",
             p.as_path().display()
         ));
     }
     BackendError::Io(std::io::Error::new(
         e.kind(),
-        format!("apertura di `{}`: {e}", p.as_path().display()),
+        format!("opening `{}`: {e}", p.as_path().display()),
     ))
 }
 
-/// Apre in lettura con share mode `FILE_SHARE_READ`.
+/// Opens for reading with share mode `FILE_SHARE_READ`.
 pub fn open_readonly_exclusive(p: &ManagedPath) -> Result<File> {
     let mut o = OpenOptions::new();
     o.read(true);
@@ -83,8 +83,8 @@ pub fn open_readonly_exclusive(p: &ManagedPath) -> Result<File> {
     o.open(p.as_path()).map_err(|e| map_open_error(p, e))
 }
 
-/// Apre in lettura con share mode `FILE_SHARE_READ | FILE_SHARE_WRITE`
-/// (senza `FILE_SHARE_DELETE`).
+/// Opens for reading with share mode `FILE_SHARE_READ | FILE_SHARE_WRITE`
+/// (without `FILE_SHARE_DELETE`).
 pub fn open_no_delete(p: &ManagedPath) -> Result<File> {
     let mut o = OpenOptions::new();
     o.read(true);
@@ -109,12 +109,12 @@ mod tests {
     }
 
     #[test]
-    fn base_protetta_da_scrittura_e_cancellazione() {
+    fn base_protected_from_write_and_delete() {
         let p = tmp("guard-base.bin");
         let g = StorageGuards::acquire(std::slice::from_ref(&p), &[]).unwrap();
-        // lettura consentita
+        // reading allowed
         assert_eq!(std::fs::read(p.as_path()).unwrap(), b"base");
-        // scrittura, cancellazione e rinomina rifiutate
+        // write, delete and rename refused
         assert!(OpenOptions::new().write(true).open(p.as_path()).is_err());
         assert!(std::fs::remove_file(p.as_path()).is_err());
         assert!(std::fs::rename(p.as_path(), p.as_path().with_extension("x")).is_err());
@@ -123,7 +123,7 @@ mod tests {
     }
 
     #[test]
-    fn scrittore_preesistente_rilevato() {
+    fn pre_existing_writer_detected() {
         let p = tmp("guard-writer.bin");
         let w = OpenOptions::new().write(true).open(p.as_path()).unwrap();
         let r = StorageGuards::acquire(std::slice::from_ref(&p), &[]);
@@ -133,7 +133,7 @@ mod tests {
     }
 
     #[test]
-    fn overlay_non_cancellabile_ma_scrivibile() {
+    fn overlay_not_deletable_but_writable() {
         let p = tmp("guard-overlay.bin");
         let g = StorageGuards::acquire(&[], std::slice::from_ref(&p)).unwrap();
         assert!(OpenOptions::new().write(true).open(p.as_path()).is_ok());

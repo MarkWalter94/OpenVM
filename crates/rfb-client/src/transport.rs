@@ -1,6 +1,6 @@
-//! Trasporti del client RFB: socket Unix privato (due implementazioni su
-//! Windows) e TCP loopback con VeNCrypt X.509 + certificato client (rustls).
-//! Non esiste un trasporto TCP in chiaro con sicurezza `None`.
+//! RFB client transports: private Unix socket (two implementations on
+//! Windows) and loopback TCP with VeNCrypt X.509 + client certificate (rustls).
+//! There is no cleartext TCP transport with security `None`.
 
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpStream};
@@ -10,69 +10,69 @@ use std::time::Duration;
 
 use crate::Error;
 
-/// Implementazione del socket AF_UNIX da usare.
+/// AF_UNIX socket implementation to use.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum UnixImpl {
-    /// Crate `socket2` (`Domain::UNIX` + `SockAddr::unix`).
+    /// `socket2` crate (`Domain::UNIX` + `SockAddr::unix`).
     #[default]
     Socket2,
-    /// Crate `uds_windows` (solo Windows).
+    /// `uds_windows` crate (Windows only).
     UdsWindows,
 }
 
-/// Certificati per VeNCrypt X.509 (file PEM).
+/// Certificates for VeNCrypt X.509 (PEM files).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TlsConfig {
-    /// Certificato della CA che firma il certificato del server.
+    /// Certificate of the CA that signs the server certificate.
     pub ca_cert: PathBuf,
-    /// Certificato del client (catena PEM).
+    /// Client certificate (PEM chain).
     pub client_cert: PathBuf,
-    /// Chiave privata del client (PEM, PKCS#8 / PKCS#1 / SEC1).
+    /// Client private key (PEM, PKCS#8 / PKCS#1 / SEC1).
     pub client_key: PathBuf,
-    /// Nome atteso nel certificato del server (DNS o IP).
+    /// Name expected in the server certificate (DNS or IP).
     pub server_name: String,
 }
 
-/// Trasporto verso il server VNC di QEMU.
+/// Transport to the QEMU VNC server.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Transport {
-    /// Socket Unix in una directory privata (`-vnc unix:<percorso>`).
+    /// Unix socket in a private directory (`-vnc unix:<path>`).
     Unix {
-        /// Percorso del socket.
+        /// Socket path.
         path: PathBuf,
-        /// Implementazione.
+        /// Implementation.
         imp: UnixImpl,
     },
-    /// TCP (solo loopback) con VeNCrypt X509None e certificato client.
+    /// TCP (loopback only) with VeNCrypt X509None and a client certificate.
     VencryptTls {
-        /// Indirizzo del server (deve essere di loopback).
+        /// Server address (must be loopback).
         addr: SocketAddr,
-        /// Certificati.
+        /// Certificates.
         tls: TlsConfig,
     },
 }
 
-/// Natura del canale su cui si svolge l'handshake di sicurezza.
+/// Nature of the channel on which the security handshake takes place.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChannelKind {
-    /// Socket Unix: protezione affidata all'ACL della directory privata.
+    /// Unix socket: protection relies on the ACL of the private directory.
     PrivateUnixSocket,
-    /// TCP prima dell'upgrade TLS: `None` non è mai accettato.
+    /// TCP before the TLS upgrade: `None` is never accepted.
     PlainTcp,
 }
 
 pub(crate) trait Stream: Read + Write + Send {}
 impl<T: Read + Write + Send> Stream for T {}
 
-/// Socket condiviso tra il thread che legge e chi chiude la connessione.
+/// Socket shared between the reading thread and whoever closes the connection.
 ///
-/// Su Windows (F0-04) `shutdown` applicato a un duplicato ottenuto con
-/// `try_clone` (WSADuplicateSocket) non sblocca una `recv` in corso sul socket
-/// originale, e un timeout di `recv` (`SO_RCVTIMEO`) su AF_UNIX lascia il
-/// flusso in uno stato in cui i dati successivi non arrivano più. Per questo
-/// lettura, scrittura e chiusura usano lo **stesso** handle, condiviso con
-/// `Arc`, e il timeout di lettura è attivo solo durante l'handshake (scadenza
-/// che, se scatta, chiude comunque la connessione).
+/// On Windows (F0-04) `shutdown` applied to a duplicate obtained with
+/// `try_clone` (WSADuplicateSocket) does not unblock an in-progress `recv` on the original
+/// socket, and a `recv` timeout (`SO_RCVTIMEO`) on AF_UNIX leaves the
+/// stream in a state where subsequent data no longer arrives. That is why
+/// reading, writing and closing use the **same** handle, shared with
+/// `Arc`, and the read timeout is active only during the handshake (a deadline
+/// that, if it fires, closes the connection anyway).
 pub(crate) trait RawSock: Send + Sync + 'static {
     fn read_s(&self, b: &mut [u8]) -> io::Result<usize>;
     fn write_s(&self, b: &[u8]) -> io::Result<usize>;
@@ -94,8 +94,8 @@ macro_rules! raw_sock {
                 (&*self).flush()
             }
             fn shutdown_both(&self) -> io::Result<()> {
-                // Semichiusura: il server riceve EOF e chiude, e la `recv` in
-                // corso termina. Su Windows `Shutdown::Both` non la sblocca (F0-04).
+                // Half-close: the server receives EOF and closes, and the in-progress
+                // `recv` ends. On Windows `Shutdown::Both` does not unblock it (F0-04).
                 self.shutdown(Shutdown::Write)
             }
             fn set_timeout(&self, d: Option<Duration>) -> io::Result<()> {
@@ -110,7 +110,7 @@ raw_sock!(TcpStream);
 #[cfg(windows)]
 raw_sock!(uds_windows::UnixStream);
 
-/// Flusso di lettura/scrittura sul socket condiviso.
+/// Read/write stream on the shared socket.
 struct Shared(Arc<dyn RawSock>);
 
 impl Read for Shared {
@@ -128,7 +128,7 @@ impl Write for Shared {
     }
 }
 
-/// Controllo del socket da un altro thread (chiusura, timeout).
+/// Control of the socket from another thread (close, timeout).
 #[derive(Clone)]
 pub(crate) struct SocketControl(Arc<dyn RawSock>);
 
@@ -145,10 +145,10 @@ impl SocketControl {
     pub(crate) fn set_read_timeout(&self, d: Option<Duration>) -> io::Result<()> {
         self.0.set_timeout(d)
     }
-    /// Sveglia un thread bloccato in lettura chiedendo al server un
-    /// aggiornamento non incrementale di 1x1 pixel (messaggio di tipo 3, lo
-    /// stesso del ciclo normale). Su TLS i byte in chiaro non sono validi e il
-    /// server chiude la connessione: anche questo sblocca la lettura.
+    /// Wakes a thread blocked on a read by asking the server for a
+    /// non-incremental 1x1 pixel update (type 3 message, the
+    /// same as the normal loop). On TLS cleartext bytes are invalid and the
+    /// server closes the connection: this unblocks the read too.
     pub(crate) fn wake(&self) {
         let m = crate::ClientMessage::FramebufferUpdateRequest {
             incremental: false,
@@ -170,7 +170,7 @@ pub(crate) struct Opened {
     pub(crate) tls: Option<TlsConfig>,
 }
 
-/// Apre un socket AF_UNIX con l'implementazione indicata.
+/// Opens an AF_UNIX socket with the given implementation.
 pub(crate) fn open_unix(
     path: &std::path::Path,
     imp: UnixImpl,
@@ -186,7 +186,7 @@ pub(crate) fn open_unix(
         #[cfg(not(windows))]
         UnixImpl::UdsWindows => Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "uds_windows è disponibile solo su Windows",
+            "uds_windows is available only on Windows",
         )),
     }
 }
@@ -205,7 +205,7 @@ pub(crate) fn open(t: &Transport) -> Result<Opened, Error> {
         Transport::VencryptTls { addr, tls } => {
             if !addr.ip().is_loopback() {
                 return Err(Error::Config(format!(
-                    "indirizzo {addr} non di loopback: rifiutato"
+                    "address {addr} is not loopback: refused"
                 )));
             }
             let s = TcpStream::connect_timeout(addr, Duration::from_secs(5))?;
@@ -221,8 +221,8 @@ pub(crate) fn open(t: &Transport) -> Result<Opened, Error> {
     }
 }
 
-/// Esegue l'handshake TLS (rustls, provider ring) sul flusso indicato e
-/// restituisce il flusso cifrato con una descrizione della sessione.
+/// Performs the TLS handshake (rustls, ring provider) on the given stream and
+/// returns the encrypted stream with a description of the session.
 pub(crate) fn tls_upgrade(
     mut stream: Box<dyn Stream>,
     cfg: &TlsConfig,
@@ -239,18 +239,18 @@ pub(crate) fn tls_upgrade(
             .map_err(|e| Error::Config(format!("CA: {e}")))?;
     }
     let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(&cfg.client_cert)
-        .map_err(|e| pem_err("certificato client", e))?
+        .map_err(|e| pem_err("client certificate", e))?
         .collect::<Result<_, _>>()
-        .map_err(|e| pem_err("certificato client", e))?;
+        .map_err(|e| pem_err("client certificate", e))?;
     let key =
-        PrivateKeyDer::from_pem_file(&cfg.client_key).map_err(|e| pem_err("chiave client", e))?;
+        PrivateKeyDer::from_pem_file(&cfg.client_key).map_err(|e| pem_err("client key", e))?;
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let config = rustls::ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()?
         .with_root_certificates(roots)
         .with_client_auth_cert(certs, key)?;
     let name = ServerName::try_from(cfg.server_name.clone())
-        .map_err(|e| Error::Config(format!("nome server: {e}")))?;
+        .map_err(|e| Error::Config(format!("server name: {e}")))?;
     let mut conn = rustls::ClientConnection::new(Arc::new(config), name)?;
     while conn.is_handshaking() {
         conn.complete_io(&mut stream)

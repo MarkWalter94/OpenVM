@@ -1,31 +1,30 @@
-//! Registro dei media approvati (ROADMAP 6.3, 7.4 riga "File"; ADR-0008).
+//! Registry of approved media (ROADMAP 6.3, 7.4 row "File"; ADR-0008).
 //!
-//! Un percorso scelto dall'utente non autorizza qualunque file lo sostituisca
-//! in seguito: all'approvazione il catalogo produce una **copia gestita in sola
-//! lettura** in `media/<media_id>.iso` e ne registra SHA-256 e dimensione.
-//! QEMU riceve soltanto la copia gestita.
+//! A path chosen by the user does not authorize whatever file later replaces
+//! it: on approval the catalog produces a **read-only managed copy** in
+//! `media/<media_id>.iso` and records its SHA-256 and size. QEMU only ever
+//! receives the managed copy.
 //!
-//! Procedura di [`Catalog::approve_media`]:
+//! Procedure of [`Catalog::approve_media`]:
 //!
-//! 1. la sorgente è aperta una sola volta in lettura senza seguire un reparse
-//!    point sull'ultimo componente (Windows: `FILE_FLAG_OPEN_REPARSE_POINT`) e
-//!    con il solo `FILE_SHARE_READ`, così nessuno può modificarla durante la
-//!    copia; il tipo (file regolare, non collegamento) è verificato sui
-//!    metadati dell'handle;
-//! 2. un intento `import_media` del journal riserva il temporaneo in `tmp/`,
-//!    creato con `CREATE_NEW` e share mode esclusiva;
-//! 3. copia e SHA-256 sono calcolati in un'unica lettura dallo stesso handle:
-//!    l'hash registrato è quello dei byte copiati, non di un file riaperto;
-//! 4. pubblicazione senza sovrascrittura (collegamento fisico) e attributo di
-//!    sola lettura; riga `media` e conferma dell'intento nella stessa
-//!    transazione.
+//! 1. the source is opened once for reading without following a reparse
+//!    point on the last component (Windows: `FILE_FLAG_OPEN_REPARSE_POINT`)
+//!    and with `FILE_SHARE_READ` only, so nobody can modify it during the
+//!    copy; the type (regular file, not a link) is checked on the handle's
+//!    metadata;
+//! 2. an `import_media` journal intent reserves the temporary file in `tmp/`,
+//!    created with `CREATE_NEW` and an exclusive share mode;
+//! 3. copy and SHA-256 are computed in a single read from the same handle:
+//!    the recorded hash is that of the bytes copied, not of a reopened file;
+//! 4. publication without overwrite (hard link) and read-only attribute;
+//!    the `media` row and the intent confirmation in the same transaction.
 //!
-//! Limiti: l'identità OS del file (numero di serie del volume e indice del
-//! file, `FileIdentity` di `lightvm-proto`) non è leggibile con le API stabili
-//! di `std` su Windows senza codice `unsafe`: non è registrata. L'attributo di
-//! sola lettura è rimovibile dallo stesso utente; [`Catalog::verify_media`]
-//! ricalcola l'hash attraverso un handle con il solo `FILE_SHARE_READ` prima
-//! dell'uso.
+//! Limits: the file's OS identity (volume serial number and file index,
+//! `FileIdentity` from `lightvm-proto`) cannot be read with the stable `std`
+//! APIs on Windows without `unsafe` code: it is not recorded. The read-only
+//! attribute can be removed by the same user; [`Catalog::verify_media`]
+//! recomputes the hash through a handle with `FILE_SHARE_READ` only before
+//! use.
 
 use std::io::{Read, Write};
 use std::path::Path;
@@ -41,24 +40,24 @@ use crate::layout::CatalogLayout;
 use crate::records::MediaRecord;
 use crate::time::now_rfc3339;
 
-/// Lunghezza massima dell'origine dichiarata (testo libero, mai un percorso da aprire).
+/// Maximum length of the declared origin (free text, never a path to open).
 pub const MAX_DECLARED_ORIGIN: usize = 512;
 
-/// Esito di [`Catalog::verify_media`].
+/// Result of [`Catalog::verify_media`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaCheck {
-    /// Voce del registro verificata.
+    /// Verified registry entry.
     pub record: MediaRecord,
-    /// L'attributo di sola lettura mancava ed è stato ripristinato.
+    /// The read-only attribute was missing and has been restored.
     pub readonly_restored: bool,
 }
 
 impl Catalog {
-    /// Approva un supporto: copia gestita in sola lettura, hash e riga del
-    /// registro. `source` è il file scelto dall'utente con il selettore nativo
-    /// (mai un percorso ricevuto da un client). Nessuna sovrascrittura: la
-    /// copia nasce con `CREATE_NEW` e viene pubblicata con un collegamento
-    /// fisico che fallisce se la destinazione esiste.
+    /// Approves a medium: read-only managed copy, hash and registry row.
+    /// `source` is the file chosen by the user with the native picker (never
+    /// a path received from a client). No overwrite: the copy is created with
+    /// `CREATE_NEW` and published with a hard link that fails if the
+    /// destination exists.
     pub fn approve_media(
         &mut self,
         source: &Path,
@@ -69,10 +68,10 @@ impl Catalog {
             || declared_origin.chars().any(char::is_control)
         {
             return Err(StorageError::Constraint(
-                "origine dichiarata troppo lunga o con caratteri di controllo".into(),
+                "declared origin too long or contains control characters".into(),
             ));
         }
-        let label = "sorgente del media";
+        let label = "media source";
         let mut src = fsx::open_regular(source, Share::ReadOnly, label)?;
         let expected_len = src
             .metadata()
@@ -114,7 +113,7 @@ impl Catalog {
             if size != expected_len {
                 return Err(StorageError::IntegrityMismatch {
                     path: label.into(),
-                    detail: format!("letti {size} byte, attesi {expected_len}"),
+                    detail: format!("read {size} bytes, expected {expected_len}"),
                 });
             }
             drop(src);
@@ -133,22 +132,22 @@ impl Catalog {
             Ok(record)
         })();
         if result.is_err() {
-            // Un annullamento non riuscito lascia l'intento aperto: lo risolve
-            // la riconciliazione al prossimo avvio.
+            // A failed abort leaves the intent open: reconciliation resolves
+            // it at the next startup.
             let _ = self.abort(&intent);
         }
         result
     }
 
-    /// Verifica una copia gestita prima dell'uso: apertura con il solo
-    /// `FILE_SHARE_READ` senza seguire collegamenti, SHA-256 e dimensione
-    /// ricalcolati attraverso l'handle, attributo di sola lettura ripristinato
-    /// se manca. Copia assente: media `missing` e [`StorageError::NotFound`].
+    /// Verifies a managed copy before use: opened with `FILE_SHARE_READ` only
+    /// without following links, SHA-256 and size recomputed through the
+    /// handle, read-only attribute restored if missing. Missing copy: media
+    /// marked `missing` and [`StorageError::NotFound`].
     pub fn verify_media(&mut self, id: &MediaId) -> Result<MediaCheck> {
         let record = self.read(|tx| tx.media(id))?;
         if record.status != MediaStatus::Approved {
             return Err(StorageError::StateConflict(format!(
-                "media {id} non approvato ({})",
+                "media {id} not approved ({})",
                 record.status
             )));
         }
@@ -165,7 +164,7 @@ impl Catalog {
                 Ok(())
             })?;
             return Err(StorageError::NotFound {
-                kind: "copia gestita del media",
+                kind: "managed media copy",
                 id: record.managed_path.to_string(),
             });
         }
@@ -175,7 +174,7 @@ impl Catalog {
             return Err(StorageError::IntegrityMismatch {
                 path: record.managed_path.to_string(),
                 detail: format!(
-                    "atteso {} ({} byte), trovato {sha} ({size} byte)",
+                    "expected {} ({} bytes), found {sha} ({size} bytes)",
                     record.sha256, record.size_bytes
                 ),
             });

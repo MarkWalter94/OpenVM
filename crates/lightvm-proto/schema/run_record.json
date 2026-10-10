@@ -1,11 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "RunRecord",
-  "description": "Esecuzione: un processo QEMU dall'avvio alla fine osservata.",
+  "description": "Run: one QEMU process from start to observed end.",
   "type": "object",
   "properties": {
     "baseline_id": {
-      "description": "Baseline di partenza (da F3).",
+      "description": "Starting baseline (from F3).",
       "anyOf": [
         {
           "$ref": "#/$defs/BaselineId"
@@ -16,13 +16,13 @@
       ]
     },
     "config_revision": {
-      "description": "Revisione della configurazione usata per l'avvio.",
+      "description": "Configuration revision used for the start.",
       "type": "integer",
       "format": "uint64",
       "minimum": 0
     },
     "end_reason": {
-      "description": "Motivo della fine.",
+      "description": "Reason for the end.",
       "anyOf": [
         {
           "$ref": "#/$defs/RunEndReason"
@@ -33,7 +33,7 @@
       ]
     },
     "ended_at": {
-      "description": "Istante di fine osservata.",
+      "description": "Instant of the observed end.",
       "anyOf": [
         {
           "$ref": "#/$defs/UtcTimestamp"
@@ -44,11 +44,11 @@
       ]
     },
     "id": {
-      "description": "Identificativo.",
+      "description": "Identifier.",
       "$ref": "#/$defs/RunId"
     },
     "started_at": {
-      "description": "Istante di avvio.",
+      "description": "Start instant.",
       "$ref": "#/$defs/UtcTimestamp"
     },
     "vm_id": {
@@ -64,21 +64,21 @@
   ],
   "$defs": {
     "BaselineId": {
-      "description": "BaselineId: UUID versione 7 in minuscolo con trattini.",
+      "description": "BaselineId: version 7 UUID, lowercase with hyphens.",
       "type": "string",
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     },
     "RunEndReason": {
-      "description": "Motivo della fine di un'esecuzione.",
+      "description": "Reason a run ended.",
       "oneOf": [
         {
-          "description": "Arresto ordinario completato (fine processo osservata).",
+          "description": "Ordinary stop completed (process end observed).",
           "type": "string",
           "const": "stopped"
         },
         {
-          "description": "Arresto forzato richiesto (stato non pulito).",
+          "description": "Forced stop requested (unclean state).",
           "type": "string",
           "const": "force_stopped"
         },
@@ -88,35 +88,35 @@
           "const": "emergency_stop"
         },
         {
-          "description": "Avvio fallito.",
+          "description": "Start failed.",
           "type": "string",
           "const": "start_failed"
         },
         {
-          "description": "Uscita inattesa del processo.",
+          "description": "Unexpected process exit.",
           "type": "string",
           "const": "unexpected_exit"
         },
         {
-          "description": "Esecuzione chiusa dalla riconciliazione dopo crash del supervisor.",
+          "description": "Run closed by reconciliation after a supervisor crash.",
           "type": "string",
           "const": "reconciled"
         }
       ]
     },
     "RunId": {
-      "description": "RunId: UUID versione 7 in minuscolo con trattini.",
+      "description": "RunId: version 7 UUID, lowercase with hyphens.",
       "type": "string",
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     },
     "UtcTimestamp": {
-      "description": "Istante UTC RFC 3339 con suffisso Z, precisione al millisecondo.",
+      "description": "RFC 3339 UTC instant with Z suffix, millisecond precision.",
       "type": "string",
       "format": "date-time"
     },
     "VmId": {
-      "description": "VmId: UUID versione 7 in minuscolo con trattini.",
+      "description": "VmId: version 7 UUID, lowercase with hyphens.",
       "type": "string",
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"

@@ -1,7 +1,7 @@
-//! Digitazione di testo ASCII per il layout guest **US** (spike): carattere →
-//! qcode più eventuale Shift. Le combinazioni (`ctrl-alt-t`) usano i nomi qcode.
+//! ASCII text typing for the **US** guest layout (spike): character →
+//! qcode plus optional Shift. Combinations (`ctrl-alt-t`) use the qcode names.
 
-/// Qcode e necessità di Shift per un carattere ASCII stampabile nel layout US.
+/// qcode and whether Shift is needed for a printable ASCII character in the US layout.
 pub fn us_char(c: char) -> Option<(&'static str, bool)> {
     const LOWER: [&str; 26] = [
         "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r",
@@ -51,8 +51,8 @@ pub fn us_char(c: char) -> Option<(&'static str, bool)> {
     })
 }
 
-/// Converte un nome di tasto della riga di comando in qcode (`ctrl`, `alt`,
-/// `shift`, `meta`, `ret`, `esc`, lettere, cifre, `f1`..`f12`, ...).
+/// Converts a command-line key name to a qcode (`ctrl`, `alt`,
+/// `shift`, `meta`, `ret`, `esc`, letters, digits, `f1`..`f12`, ...).
 pub fn combo_key(name: &str) -> Option<&'static str> {
     const NAMED: [&str; 37] = [
         "ctrl",
@@ -108,7 +108,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn caratteri_us() {
+    fn us_characters() {
         assert_eq!(us_char('a'), Some(("a", false)));
         assert_eq!(us_char('Q'), Some(("q", true)));
         assert_eq!(us_char('_'), Some(("minus", true)));

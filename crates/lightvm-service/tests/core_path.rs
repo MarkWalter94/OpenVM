@@ -1,7 +1,7 @@
-//! Test headless del percorso reale del supervisor, senza UI e senza QEMU:
-//! IPC reale → `vm_core::Core` → catalogo SQLite di `vm-storage` in una
-//! directory temporanea → audit su file JSON Lines; backend delle VM finto
-//! (dichiarato: nessun processo, nessun boot).
+//! Headless tests of the real supervisor path, without UI and without QEMU:
+//! real IPC → `vm_core::Core` → `vm-storage` SQLite catalog in a temporary
+//! directory → audit on a JSON Lines file; fake VM backend (declared: no
+//! process, no boot).
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -31,7 +31,7 @@ struct Svc {
     handle: ServiceHandle,
     ui: Credential,
     calls: Calls,
-    /// Osservazioni del backend finto (uscite simulate dei processi).
+    /// Observations of the fake backend (simulated process exits).
     observations: Observations,
 }
 
@@ -47,7 +47,7 @@ fn config(dir: &Path) -> ServiceConfig {
     cfg
 }
 
-/// Servizio con catalogo SQLite e audit su file reali, backend delle VM finto.
+/// Service with real SQLite catalog and file audit, fake VM backend.
 async fn start_sqlite(dir: &Path) -> Svc {
     for _ in 0..40 {
         let store = match SqliteStore::open(dir) {
@@ -56,9 +56,9 @@ async fn start_sqlite(dir: &Path) -> Svc {
                 tokio::time::sleep(Duration::from_millis(50)).await;
                 continue;
             }
-            Err(e) => panic!("apertura del catalogo: {e}"),
+            Err(e) => panic!("opening the catalog: {e}"),
         };
-        let audit = FileAuditSink::open(&audit_path(dir)).expect("audit su file");
+        let audit = FileAuditSink::open(&audit_path(dir)).expect("file audit");
         let calls = Calls::default();
         let observations = Observations::default();
         let backend = FakeVmBackend {
@@ -90,17 +90,17 @@ async fn start_sqlite(dir: &Path) -> Svc {
             Err(StartError::Lock(LockError::AlreadyRunning { .. })) => {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
-            Err(e) => panic!("avvio: {e}"),
+            Err(e) => panic!("start: {e}"),
         }
     }
-    panic!("catalogo non rilasciato");
+    panic!("catalog not released");
 }
 
 async fn connect_ui(svc: &Svc) -> Client {
     let mut c = tokio::time::timeout(T, Client::connect(svc.handle.endpoint()))
         .await
         .expect("timeout")
-        .expect("connessione");
+        .expect("connection");
     match c.hello(&svc.ui).await.expect("hello") {
         ServerMessage::HelloOk { role: Role::Ui, .. } => c,
         other => panic!("{other:?}"),
@@ -156,9 +156,9 @@ async fn state_of(c: &mut Client, vm_id: VmId) -> VmState {
 
 fn read_audit(dir: &Path) -> Vec<AuditEvent> {
     std::fs::read_to_string(audit_path(dir))
-        .expect("file di audit")
+        .expect("audit file")
         .lines()
-        .map(|l| serde_json::from_str(l).expect("riga di audit = AuditEvent"))
+        .map(|l| serde_json::from_str(l).expect("audit line = AuditEvent"))
         .collect()
 }
 
@@ -181,7 +181,7 @@ async fn create_start_stop_emergency_and_denials_are_persisted_and_audited() {
         }
     ));
 
-    // Creazione valida.
+    // Valid creation.
     let vm_id = match ui
         .request(Request::CreateVm {
             config: sample_config("prova-f1"),
@@ -198,24 +198,24 @@ async fn create_start_stop_emergency_and_denials_are_persisted_and_audited() {
         }
         other => panic!("{other:?}"),
     };
-    // Diniego del core: configurazione non valida (nessun effetto).
-    let mut bad = sample_config("non-valida");
+    // Core denial: invalid configuration (no effect).
+    let mut bad = sample_config("invalid");
     bad.vcpus = 0;
     let m = ui.request(Request::CreateVm { config: bad }).await.unwrap();
     assert_eq!(error_code(&m), Some(ErrorCode::InvalidArgument));
 
-    // Avvio → running; arresto → stopped.
+    // Start → running; stop → stopped.
     expect_succeeded(&submit(&mut ui, vm_id, VmAction::Start).await);
     assert_eq!(state_of(&mut ui, vm_id).await, VmState::Running);
     expect_succeeded(&submit(&mut ui, vm_id, VmAction::Stop).await);
     assert_eq!(state_of(&mut ui, vm_id).await, VmState::Stopped);
 
-    // Diniego del core: arresto di una VM spenta.
+    // Core denial: stopping a powered-off VM.
     let m = submit(&mut ui, vm_id, VmAction::Stop).await;
     assert_eq!(error_code(&m), Some(ErrorCode::StateConflict));
 
-    // Emergency Stop con la VM in esecuzione: percorso prioritario, poi il
-    // core registra l'arresto (asincrono rispetto alla risposta).
+    // Emergency Stop with the VM running: priority path, then the core
+    // records the stop (asynchronous with respect to the response).
     expect_succeeded(&submit(&mut ui, vm_id, VmAction::Start).await);
     match ui.request(Request::EmergencyStop).await.unwrap() {
         ServerMessage::Response {
@@ -232,7 +232,7 @@ async fn create_start_stop_emergency_and_denials_are_persisted_and_audited() {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert!(stopped, "VM non arrestata dopo l'Emergency Stop");
+    assert!(stopped, "VM not stopped after the Emergency Stop");
 
     let calls = svc.calls.lock().unwrap().clone();
     assert_eq!(
@@ -246,7 +246,7 @@ async fn create_start_stop_emergency_and_denials_are_persisted_and_audited() {
         ]
     );
 
-    // Eventi di stato pubblicati sul canale.
+    // State events published on the channel.
     let mut states = Vec::new();
     while let Ok(Ok(Ok(ev))) =
         tokio::time::timeout(Duration::from_millis(200), ui.next_event()).await
@@ -261,10 +261,10 @@ async fn create_start_stop_emergency_and_denials_are_persisted_and_audited() {
 
     svc.handle.shutdown().await;
 
-    // Audit su file: una riga JSON per evento, `seq` strettamente crescente.
+    // File audit: one JSON line per event, `seq` strictly increasing.
     let events = read_audit(&dir);
     for w in events.windows(2) {
-        assert!(w[1].seq > w[0].seq, "seq non crescente: {w:?}");
+        assert!(w[1].seq > w[0].seq, "seq not increasing: {w:?}");
     }
     assert!(
         events
@@ -274,12 +274,12 @@ async fn create_start_stop_emergency_and_denials_are_persisted_and_audited() {
     let create_ok = events
         .iter()
         .find(|e| e.action == AuditAction::VmCreate && e.outcome == AuditOutcome::Succeeded)
-        .expect("creazione registrata");
+        .expect("creation recorded");
     assert_eq!(create_ok.vm_id, Some(vm_id));
     let create_denied = events
         .iter()
         .find(|e| e.action == AuditAction::VmCreate && e.outcome == AuditOutcome::Denied)
-        .expect("diniego di creazione registrato");
+        .expect("creation denial recorded");
     assert_eq!(create_denied.error, Some(ErrorCode::InvalidArgument));
     for outcome in [
         AuditOutcome::Accepted,
@@ -298,7 +298,7 @@ async fn create_start_stop_emergency_and_denials_are_persisted_and_audited() {
     let stop_denied = events
         .iter()
         .find(|e| e.action == AuditAction::VmStop && e.outcome == AuditOutcome::Denied)
-        .expect("diniego di arresto registrato");
+        .expect("stop denial recorded");
     assert_eq!(stop_denied.error, Some(ErrorCode::StateConflict));
     assert!(has(
         &events,
@@ -310,12 +310,12 @@ async fn create_start_stop_emergency_and_denials_are_persisted_and_audited() {
         AuditAction::EmergencyStop,
         AuditOutcome::Succeeded
     ));
-    // Nessun segreto nel file: la credenziale UI non compare.
+    // No secret in the file: the UI credential does not appear.
     let raw = std::fs::read_to_string(audit_path(&dir)).unwrap();
     assert!(!raw.contains(&svc.ui.to_hex()));
 
-    // Riavvio sullo stesso catalogo: la VM è persistita in SQLite, spenta;
-    // l'audit prosegue in aggiunta nello stesso file.
+    // Restart on the same catalog: the VM is persisted in SQLite, powered off;
+    // the audit continues appending to the same file.
     let before = events.len();
     let svc2 = start_sqlite(&dir).await;
     let mut ui2 = connect_ui(&svc2).await;
@@ -332,8 +332,8 @@ async fn create_start_stop_emergency_and_denials_are_persisted_and_audited() {
         other => panic!("{other:?}"),
     }
     expect_succeeded(&submit(&mut ui2, vm_id, VmAction::Start).await);
-    // Arresto controllato del servizio: le VM in esecuzione vengono arrestate
-    // tramite il core (audit dell'arresto).
+    // Controlled service shutdown: the running VMs are stopped through the
+    // core (stop audit).
     svc2.handle.shutdown().await;
     let after = read_audit(&dir);
     assert!(after.len() > before);
@@ -341,7 +341,7 @@ async fn create_start_stop_emergency_and_denials_are_persisted_and_audited() {
         after[before..]
             .iter()
             .any(|e| e.action == AuditAction::VmStop && e.outcome == AuditOutcome::Succeeded),
-        "arresto all'uscita non registrato"
+        "stop at exit not recorded"
     );
 }
 
@@ -371,7 +371,7 @@ async fn without_qemu_start_is_unsupported_and_audited() {
     let mut c = connect_ui(&svc).await;
     let vm_id = match c
         .request(Request::CreateVm {
-            config: sample_config("senza-qemu"),
+            config: sample_config("without-qemu"),
         })
         .await
         .unwrap()
@@ -390,7 +390,7 @@ async fn without_qemu_start_is_unsupported_and_audited() {
     let denied = events
         .iter()
         .find(|e| e.action == AuditAction::VmStart && e.outcome == AuditOutcome::Denied)
-        .expect("diniego registrato");
+        .expect("denial recorded");
     assert_eq!(denied.error, Some(ErrorCode::Unsupported));
 }
 
@@ -409,7 +409,7 @@ async fn pairing_role_cannot_touch_vms() {
     ));
     for req in [
         Request::CreateVm {
-            config: sample_config("vietata"),
+            config: sample_config("forbidden"),
         },
         Request::VmStatus {
             vm_id: VmId::new_v7(),
@@ -428,40 +428,38 @@ async fn pairing_role_cannot_touch_vms() {
     );
 }
 
-/// End-to-end reale e senza UI: handshake → crea VM → avvia (QEMU reale con
-/// acceleratore, nessun ripiego TCG) → stato → arresta → Emergency Stop.
-/// Richiede `LIGHTVM_E2E_QEMU_DIR` con la distribuzione QEMU approvata
-/// (hash in `qemu_backend::probe`); la VM ha il disco principale qcow2 creato
-/// dal servizio al primo avvio (vuoto), nessuna ISO, e resta nel firmware UEFI. Eseguire con `cargo test -p lightvm-service --test core_path
+/// Real end-to-end without UI: handshake → create VM → start (real QEMU with
+/// an accelerator, no TCG fallback) → status → stop → Emergency Stop.
+/// Requires `LIGHTVM_E2E_QEMU_DIR` with the approved QEMU distribution
+/// (hashes in `qemu_backend::probe`); the VM has the primary qcow2 disk created
+/// by the service on first start (empty), no ISO, and stays in the UEFI
+/// firmware. Run with `cargo test -p lightvm-service --test core_path
 /// -- --ignored --nocapture`.
 #[test]
-#[ignore = "richiede QEMU approvato e un acceleratore (LIGHTVM_E2E_QEMU_DIR)"]
+#[ignore = "requires approved QEMU and an accelerator (LIGHTVM_E2E_QEMU_DIR)"]
 fn e2e_real_qemu_create_start_status_stop() {
     use lightvm_service::adapters::backend::{QemuSetup, probe};
     use qemu_backend::ShutdownPolicy;
 
     let qemu_dir = PathBuf::from(
-        std::env::var_os("LIGHTVM_E2E_QEMU_DIR").expect("LIGHTVM_E2E_QEMU_DIR non impostata"),
+        std::env::var_os("LIGHTVM_E2E_QEMU_DIR").expect("LIGHTVM_E2E_QEMU_DIR not set"),
     );
     let dir = temp_dir("e2e-qemu");
-    // Radice corta per i socket QMP/VNC (limite di 107 byte).
+    // Short root for the QMP/VNC sockets (107-byte limit).
     let private_root = std::env::temp_dir().join(format!("lvm-e2e-{}", std::process::id()));
     let store = SqliteStore::open(&dir).unwrap();
     let mut setup = QemuSetup::new(qemu_dir, store.root(), private_root);
-    // Il firmware UEFI senza sistema operativo non risponde a ACPI powerdown:
-    // attesa breve, poi `quit`.
+    // The UEFI firmware without an operating system does not respond to ACPI
+    // powerdown: short wait, then `quit`.
     setup.stop_policy = ShutdownPolicy {
         powerdown_timeout: Duration::from_secs(3),
         quit_timeout: Duration::from_secs(10),
         kill_timeout: Duration::from_secs(10),
     };
     let t0 = std::time::Instant::now();
-    let (host, vm_backend, capacity) = probe(setup).expect("probe di QEMU");
-    eprintln!("probe completato in {:?}: {capacity:?}", t0.elapsed());
-    assert!(
-        capacity.accelerator_available,
-        "acceleratore non disponibile"
-    );
+    let (host, vm_backend, capacity) = probe(setup).expect("QEMU probe");
+    eprintln!("probe completed in {:?}: {capacity:?}", t0.elapsed());
+    assert!(capacity.accelerator_available, "accelerator not available");
     let audit = FileAuditSink::open(&audit_path(&dir)).unwrap();
     let inspector = ManagedMediaInspector::new(store.root());
     let engine =
@@ -487,7 +485,7 @@ fn e2e_real_qemu_create_start_status_stop() {
             ServerMessage::Response {
                 result: ResponseBody::Capabilities(caps),
                 ..
-            } => eprintln!("capacità: {caps:?}"),
+            } => eprintln!("capabilities: {caps:?}"),
             other => panic!("{other:?}"),
         }
         let mut cfg = sample_config("e2e-qemu");
@@ -502,14 +500,14 @@ fn e2e_real_qemu_create_start_status_stop() {
         };
         let t = std::time::Instant::now();
         let m = submit(&mut c, vm_id, VmAction::Start).await;
-        eprintln!("avvio: {:?} → {m:?}", t.elapsed());
+        eprintln!("start: {:?} → {m:?}", t.elapsed());
         expect_succeeded(&m);
         assert_eq!(state_of(&mut c, vm_id).await, VmState::Running);
         tokio::time::sleep(Duration::from_secs(2)).await;
         assert_eq!(state_of(&mut c, vm_id).await, VmState::Running);
         let t = std::time::Instant::now();
         let m = submit(&mut c, vm_id, VmAction::Stop).await;
-        eprintln!("arresto: {:?} → {m:?}", t.elapsed());
+        eprintln!("stop: {:?} → {m:?}", t.elapsed());
         expect_succeeded(&m);
         assert_eq!(state_of(&mut c, vm_id).await, VmState::Stopped);
         let disk = dir
@@ -517,11 +515,11 @@ fn e2e_real_qemu_create_start_status_stop() {
             .join(vm_id.to_string())
             .join("primary.qcow2");
         let size = std::fs::metadata(&disk)
-            .unwrap_or_else(|e| panic!("disco principale assente {}: {e}", disk.display()))
+            .unwrap_or_else(|e| panic!("primary disk missing {}: {e}", disk.display()))
             .len();
-        eprintln!("disco principale: {} ({size} byte)", disk.display());
+        eprintln!("primary disk: {} ({size} bytes)", disk.display());
 
-        // Secondo avvio (stesso disco) ed Emergency Stop sul processo reale.
+        // Second start (same disk) and Emergency Stop on the real process.
         expect_succeeded(&submit(&mut c, vm_id, VmAction::Start).await);
         let t = std::time::Instant::now();
         match c.request(Request::EmergencyStop).await.unwrap() {
@@ -543,7 +541,7 @@ fn e2e_real_qemu_create_start_status_stop() {
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        assert!(stopped, "VM non arrestata dopo l'Emergency Stop");
+        assert!(stopped, "VM not stopped after the Emergency Stop");
         svc.handle.shutdown().await;
         let events = read_audit(&dir);
         assert!(has(&events, AuditAction::VmStart, AuditOutcome::Succeeded));
@@ -553,13 +551,13 @@ fn e2e_real_qemu_create_start_status_stop() {
             AuditAction::EmergencyStop,
             AuditOutcome::Succeeded
         ));
-        eprintln!("righe di audit: {}", events.len());
+        eprintln!("audit lines: {}", events.len());
     });
 }
 
-/// Impostazioni della VM via IPC (ADR-0017): risorse e limiti di una VM spenta,
-/// revisione attesa, persistenza in SQLite dopo il riavvio, audit
-/// `vm_configure`; ruolo di pairing senza permesso.
+/// VM settings via IPC (ADR-0017): resources and limits of a powered-off VM,
+/// expected revision, persistence in SQLite after restart, `vm_configure`
+/// audit; pairing role without permission.
 #[tokio::test(flavor = "multi_thread")]
 async fn update_vm_via_ipc_is_persisted_and_audited() {
     use lightvm_proto::VmLimits;
@@ -568,7 +566,7 @@ async fn update_vm_via_ipc_is_persisted_and_audited() {
     let mut ui = connect_ui(&svc).await;
     let vm = match ui
         .request(Request::CreateVm {
-            config: sample_config("impostazioni"),
+            config: sample_config("settings"),
         })
         .await
         .unwrap()
@@ -602,7 +600,7 @@ async fn update_vm_via_ipc_is_persisted_and_audited() {
         } => assert_eq!((vm.config_revision, &vm.config), (2, &cfg)),
         other => panic!("{other:?}"),
     }
-    // Stessa revisione una seconda volta: conflitto, nessun effetto.
+    // Same revision a second time: conflict, no effect.
     let m = ui
         .request(Request::UpdateVm {
             vm_id: vm.id,
@@ -612,7 +610,7 @@ async fn update_vm_via_ipc_is_persisted_and_audited() {
         .await
         .unwrap();
     assert_eq!(error_code(&m), Some(ErrorCode::StateConflict));
-    // Il ruolo di pairing non modifica le VM.
+    // The pairing role does not modify VMs.
     let pairing = svc.handle.issue_pairing_credential().unwrap();
     let mut p = Client::connect(svc.handle.endpoint()).await.unwrap();
     p.hello(&pairing).await.unwrap();
@@ -629,7 +627,7 @@ async fn update_vm_via_ipc_is_persisted_and_audited() {
     drop(ui);
     svc.handle.shutdown().await;
 
-    // Dopo il riavvio la configurazione viene da SQLite.
+    // After the restart the configuration comes from SQLite.
     let svc = start_sqlite(&dir).await;
     let mut ui = connect_ui(&svc).await;
     match ui
@@ -653,8 +651,8 @@ async fn update_vm_via_ipc_is_persisted_and_audited() {
     assert!(has(&events, AuditAction::VmConfigure, AuditOutcome::Denied));
 }
 
-/// Processi `qemu-system-x86_64.exe` figli di questo processo (il backend
-/// gira nel servizio in-process): PID.
+/// `qemu-system-x86_64.exe` processes that are children of this process (the
+/// backend runs in the in-process service): PIDs.
 #[cfg(windows)]
 fn qemu_children() -> Vec<u32> {
     let cmd = format!(
@@ -670,41 +668,38 @@ fn qemu_children() -> Vec<u32> {
     out.lines().filter_map(|l| l.trim().parse().ok()).collect()
 }
 
-/// Criterio di uscita F1 attraverso il servizio (non solo le API del
-/// backend): IPC → core → SQLite → `qemu-backend` → QEMU reale, almeno 20
-/// cicli start/stop sulla stessa VM (disco principale creato al primo avvio),
-/// arresto ordinario alternato con `quit` diretto, Emergency Stop nell'ultimo
-/// ciclo, nessun processo QEMU residuo dopo ogni ciclo, audit completo.
-/// `LIGHTVM_E2E_QEMU_DIR` obbligatoria; `LIGHTVM_F1_CYCLES` facoltativa (20).
+/// F1 exit criterion through the service (not just the backend APIs):
+/// IPC → core → SQLite → `qemu-backend` → real QEMU, at least 20 start/stop
+/// cycles on the same VM (primary disk created on first start), ordinary stop
+/// alternated with a direct `quit`, Emergency Stop in the last cycle, no QEMU
+/// process left after each cycle, complete audit.
+/// `LIGHTVM_E2E_QEMU_DIR` required; `LIGHTVM_F1_CYCLES` optional (20).
 #[cfg(windows)]
 #[test]
-#[ignore = "richiede QEMU approvato e un acceleratore (LIGHTVM_E2E_QEMU_DIR)"]
-fn e2e_real_qemu_cicli_attraverso_il_servizio() {
+#[ignore = "requires approved QEMU and an accelerator (LIGHTVM_E2E_QEMU_DIR)"]
+fn e2e_real_qemu_cycles_through_the_service() {
     use lightvm_service::adapters::backend::{QemuSetup, probe};
     use qemu_backend::ShutdownPolicy;
 
     let qemu_dir = PathBuf::from(
-        std::env::var_os("LIGHTVM_E2E_QEMU_DIR").expect("LIGHTVM_E2E_QEMU_DIR non impostata"),
+        std::env::var_os("LIGHTVM_E2E_QEMU_DIR").expect("LIGHTVM_E2E_QEMU_DIR not set"),
     );
     let cycles: usize = std::env::var("LIGHTVM_F1_CYCLES")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(20);
-    let dir = temp_dir("e2e-cicli");
-    let private_root = std::env::temp_dir().join(format!("lvm-cic-{}", std::process::id()));
+    let dir = temp_dir("e2e-cycles");
+    let private_root = std::env::temp_dir().join(format!("lvm-cyc-{}", std::process::id()));
     let store = SqliteStore::open(&dir).unwrap();
     let mut setup = QemuSetup::new(qemu_dir, store.root(), private_root);
-    // Il firmware non risponde all'ACPI: attesa breve, poi `quit`.
+    // The firmware does not respond to ACPI: short wait, then `quit`.
     setup.stop_policy = ShutdownPolicy {
         powerdown_timeout: Duration::from_secs(1),
         quit_timeout: Duration::from_secs(10),
         kill_timeout: Duration::from_secs(10),
     };
-    let (host, vm_backend, capacity) = probe(setup).expect("probe di QEMU");
-    assert!(
-        capacity.accelerator_available,
-        "acceleratore non disponibile"
-    );
+    let (host, vm_backend, capacity) = probe(setup).expect("QEMU probe");
+    assert!(capacity.accelerator_available, "accelerator not available");
     let audit = FileAuditSink::open(&audit_path(&dir)).unwrap();
     let inspector = ManagedMediaInspector::new(store.root());
     let engine =
@@ -726,7 +721,7 @@ fn e2e_real_qemu_cicli_attraverso_il_servizio() {
             observations: Observations::default(),
         };
         let mut c = connect_ui(&svc).await;
-        let mut cfg = sample_config("e2e-cicli");
+        let mut cfg = sample_config("e2e-cycles");
         cfg.vcpus = 1;
         cfg.memory_mib = 1024;
         cfg.disk_gib = 8;
@@ -737,25 +732,25 @@ fn e2e_real_qemu_cicli_attraverso_il_servizio() {
             } => vm.id,
             other => panic!("{other:?}"),
         };
-        let mut avvii = Vec::new();
-        let mut arresti = Vec::new();
+        let mut starts = Vec::new();
+        let mut stops = Vec::new();
         for i in 1..=cycles {
             let t = std::time::Instant::now();
             expect_succeeded(&submit(&mut c, vm_id, VmAction::Start).await);
-            let t_avvio = t.elapsed();
-            assert_eq!(state_of(&mut c, vm_id).await, VmState::Running, "ciclo {i}");
-            let figli = qemu_children();
-            assert_eq!(figli.len(), 1, "ciclo {i}: processi QEMU {figli:?}");
+            let t_start = t.elapsed();
+            assert_eq!(state_of(&mut c, vm_id).await, VmState::Running, "cycle {i}");
+            let children = qemu_children();
+            assert_eq!(children.len(), 1, "cycle {i}: QEMU processes {children:?}");
             tokio::time::sleep(Duration::from_millis(500)).await;
             let t = std::time::Instant::now();
-            let modo = if i == cycles {
+            let mode = if i == cycles {
                 match c.request(Request::EmergencyStop).await.unwrap() {
                     ServerMessage::Response {
                         result: ResponseBody::EmergencyStop(r),
                         ..
                     } => {
-                        assert!(r.completed, "ciclo {i}: {r:?}");
-                        assert_eq!(r.processes_terminated, 1, "ciclo {i}");
+                        assert!(r.completed, "cycle {i}: {r:?}");
+                        assert_eq!(r.processes_terminated, 1, "cycle {i}");
                     }
                     other => panic!("{other:?}"),
                 }
@@ -767,29 +762,29 @@ fn e2e_real_qemu_cicli_attraverso_il_servizio() {
                 expect_succeeded(&submit(&mut c, vm_id, VmAction::ForceStop).await);
                 "force_stop"
             };
-            let mut fermo = false;
+            let mut halted = false;
             for _ in 0..200 {
                 if state_of(&mut c, vm_id).await == VmState::Stopped {
-                    fermo = true;
+                    halted = true;
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }
-            let t_arresto = t.elapsed();
-            assert!(fermo, "ciclo {i}: VM non arrestata ({modo})");
-            let residui = qemu_children();
-            assert!(residui.is_empty(), "ciclo {i}: QEMU residui {residui:?}");
+            let t_stop = t.elapsed();
+            assert!(halted, "cycle {i}: VM not stopped ({mode})");
+            let leftover = qemu_children();
+            assert!(leftover.is_empty(), "cycle {i}: leftover QEMU {leftover:?}");
             eprintln!(
-                "ciclo {i}: avvio {:.1} ms, {modo} {:.1} ms, pid {:?}, residui 0",
-                t_avvio.as_secs_f64() * 1000.0,
-                t_arresto.as_secs_f64() * 1000.0,
-                figli
+                "cycle {i}: start {:.1} ms, {mode} {:.1} ms, pid {:?}, leftover 0",
+                t_start.as_secs_f64() * 1000.0,
+                t_stop.as_secs_f64() * 1000.0,
+                children
             );
-            avvii.push(t_avvio.as_secs_f64() * 1000.0);
-            arresti.push((modo, t_arresto.as_secs_f64() * 1000.0));
+            starts.push(t_start.as_secs_f64() * 1000.0);
+            stops.push((mode, t_stop.as_secs_f64() * 1000.0));
         }
         let disk = dir2.join("vms").join(vm_id.to_string()).join("primary.qcow2");
-        assert!(disk.exists(), "disco principale assente");
+        assert!(disk.exists(), "primary disk missing");
         svc.handle.shutdown().await;
         let events = read_audit(&dir2);
         let n = |a: AuditAction| {
@@ -798,13 +793,13 @@ fn e2e_real_qemu_cicli_attraverso_il_servizio() {
                 .filter(|e| e.action == a && e.outcome == AuditOutcome::Succeeded)
                 .count()
         };
-        avvii.sort_by(f64::total_cmp);
+        starts.sort_by(f64::total_cmp);
         eprintln!(
-            "RIEPILOGO {cycles} cicli attraverso il servizio: avvio ms min {:.1} mediana {:.1} max {:.1}; \
-             audit succeeded: vm_start {}, vm_stop (anche force_stop) {}, emergency_stop {}; arresti {arresti:?}",
-            avvii[0],
-            avvii[avvii.len() / 2],
-            avvii[avvii.len() - 1],
+            "SUMMARY {cycles} cycles through the service: start ms min {:.1} median {:.1} max {:.1}; \
+             audit succeeded: vm_start {}, vm_stop (including force_stop) {}, emergency_stop {}; stops {stops:?}",
+            starts[0],
+            starts[starts.len() / 2],
+            starts[starts.len() - 1],
             n(AuditAction::VmStart),
             n(AuditAction::VmStop),
             n(AuditAction::EmergencyStop),
@@ -815,28 +810,28 @@ fn e2e_real_qemu_cicli_attraverso_il_servizio() {
     });
     assert!(
         qemu_children().is_empty(),
-        "QEMU residui dopo l'arresto del servizio"
+        "leftover QEMU after the service shutdown"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// ADR-0017 attraverso il servizio con QEMU reale: modifica via IPC di una VM
-/// spenta (disco 8 → 10 GiB, tetto CPU, margine di memoria), riavvio con il
-/// disco ingrandito da `qemu-img resize`; budget di storage superato → avvio
-/// rifiutato con `resource_limit` senza processi QEMU.
+/// ADR-0017 through the service with real QEMU: change via IPC of a powered-off
+/// VM (disk 8 → 10 GiB, CPU cap, memory margin), restart with the disk grown
+/// by `qemu-img resize`; storage budget exceeded → start rejected with
+/// `resource_limit` without QEMU processes.
 #[cfg(windows)]
 #[test]
-#[ignore = "richiede QEMU approvato e un acceleratore (LIGHTVM_E2E_QEMU_DIR)"]
-fn e2e_real_qemu_impostazioni_vm() {
+#[ignore = "requires approved QEMU and an accelerator (LIGHTVM_E2E_QEMU_DIR)"]
+fn e2e_real_qemu_vm_settings() {
     use lightvm_proto::VmLimits;
     use lightvm_service::adapters::backend::{QemuSetup, probe};
     use qemu_backend::ShutdownPolicy;
 
     let qemu_dir = PathBuf::from(
-        std::env::var_os("LIGHTVM_E2E_QEMU_DIR").expect("LIGHTVM_E2E_QEMU_DIR non impostata"),
+        std::env::var_os("LIGHTVM_E2E_QEMU_DIR").expect("LIGHTVM_E2E_QEMU_DIR not set"),
     );
-    let dir = temp_dir("e2e-impostazioni");
-    let private_root = std::env::temp_dir().join(format!("lvm-imp-{}", std::process::id()));
+    let dir = temp_dir("e2e-settings");
+    let private_root = std::env::temp_dir().join(format!("lvm-set-{}", std::process::id()));
     let store = SqliteStore::open(&dir).unwrap();
     let mut setup = QemuSetup::new(qemu_dir.clone(), store.root(), private_root);
     setup.stop_policy = ShutdownPolicy {
@@ -844,7 +839,7 @@ fn e2e_real_qemu_impostazioni_vm() {
         quit_timeout: Duration::from_secs(10),
         kill_timeout: Duration::from_secs(10),
     };
-    let (host, vm_backend, capacity) = probe(setup).expect("probe di QEMU");
+    let (host, vm_backend, capacity) = probe(setup).expect("QEMU probe");
     let audit = FileAuditSink::open(&audit_path(&dir)).unwrap();
     let inspector = ManagedMediaInspector::new(store.root());
     let engine =
@@ -866,7 +861,7 @@ fn e2e_real_qemu_impostazioni_vm() {
             observations: Observations::default(),
         };
         let mut c = connect_ui(&svc).await;
-        let mut cfg = sample_config("e2e-impostazioni");
+        let mut cfg = sample_config("e2e-settings");
         cfg.vcpus = 2;
         cfg.memory_mib = 1024;
         cfg.disk_gib = 8;
@@ -877,7 +872,7 @@ fn e2e_real_qemu_impostazioni_vm() {
             } => vm,
             other => panic!("{other:?}"),
         };
-        // Primo avvio: disco creato a 8 GiB.
+        // First start: disk created at 8 GiB.
         expect_succeeded(&submit(&mut c, vm.id, VmAction::Start).await);
         expect_succeeded(&submit(&mut c, vm.id, VmAction::ForceStop).await);
         let disk = dir2
@@ -897,10 +892,10 @@ fn e2e_real_qemu_impostazioni_vm() {
         };
         assert_eq!(size(&disk_mp), 8 << 30);
 
-        // Impostazioni: disco 10 GiB, tetto CPU 25 %, margine 768 MiB.
-        let mut nuova = vm.config.clone();
-        nuova.disk_gib = 10;
-        nuova.limits = VmLimits {
+        // Settings: disk 10 GiB, CPU cap 25 %, margin 768 MiB.
+        let mut updated = vm.config.clone();
+        updated.disk_gib = 10;
+        updated.limits = VmLimits {
             cpu_max_percent: 25,
             memory_margin_mib: 768,
             storage_budget_gib: None,
@@ -909,7 +904,7 @@ fn e2e_real_qemu_impostazioni_vm() {
             .request(Request::UpdateVm {
                 vm_id: vm.id,
                 expected_revision: 1,
-                config: nuova.clone(),
+                config: updated.clone(),
             })
             .await
             .unwrap()
@@ -923,19 +918,19 @@ fn e2e_real_qemu_impostazioni_vm() {
         expect_succeeded(&submit(&mut c, vm.id, VmAction::Start).await);
         assert_eq!(state_of(&mut c, vm.id).await, VmState::Running);
         assert_eq!(qemu_children().len(), 1);
-        eprintln!("avvio con limiti {:?}: in esecuzione", nuova.limits);
+        eprintln!("start with limits {:?}: running", updated.limits);
         expect_succeeded(&submit(&mut c, vm.id, VmAction::ForceStop).await);
         assert_eq!(size(&disk_mp), 10 << 30);
-        eprintln!("disco ingrandito: {} byte", size(&disk_mp));
+        eprintln!("disk grown: {} bytes", size(&disk_mp));
 
-        // Budget di storage di 1 GiB superato da un file di 2 GiB nella VM.
-        let mut con_budget = nuova.clone();
-        con_budget.limits.storage_budget_gib = Some(1);
+        // 1 GiB storage budget exceeded by a 2 GiB file in the VM.
+        let mut with_budget = updated.clone();
+        with_budget.limits.storage_budget_gib = Some(1);
         match c
             .request(Request::UpdateVm {
                 vm_id: vm.id,
                 expected_revision: vm2.config_revision,
-                config: con_budget,
+                config: with_budget,
             })
             .await
             .unwrap()
@@ -948,12 +943,12 @@ fn e2e_real_qemu_impostazioni_vm() {
         }
         let extra = dir2.join("vms").join(vm.id.to_string()).join("overlays");
         std::fs::create_dir_all(&extra).unwrap();
-        let f = std::fs::File::create(extra.join("riempimento.bin")).unwrap();
+        let f = std::fs::File::create(extra.join("filler.bin")).unwrap();
         f.set_len(2 << 30).unwrap();
         drop(f);
         let m = submit(&mut c, vm.id, VmAction::Start).await;
-        eprintln!("avvio con budget superato: {m:?}");
-        let rifiutato = match &m {
+        eprintln!("start with budget exceeded: {m:?}");
+        let rejected = match &m {
             ServerMessage::Response {
                 result:
                     ResponseBody::Operation {
@@ -964,9 +959,9 @@ fn e2e_real_qemu_impostazioni_vm() {
             } => op.status == OperationStatus::Failed && op.error == Some(ErrorCode::ResourceLimit),
             other => error_code(other) == Some(ErrorCode::ResourceLimit),
         };
-        assert!(rifiutato, "{m:?}");
+        assert!(rejected, "{m:?}");
         assert!(qemu_children().is_empty());
-        std::fs::remove_file(extra.join("riempimento.bin")).unwrap();
+        std::fs::remove_file(extra.join("filler.bin")).unwrap();
         svc.handle.shutdown().await;
         let events = read_audit(&dir2);
         assert!(has(
@@ -978,17 +973,17 @@ fn e2e_real_qemu_impostazioni_vm() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Riavvio dopo un supervisor terminato con una VM in esecuzione: nel catalogo
-/// la VM risulta `running` con un'esecuzione aperta. Il nuovo servizio (nessun
-/// processo superstite) la riporta a `stopped` e chiude l'esecuzione.
+/// Restart after a supervisor terminated with a running VM: in the catalog the
+/// VM is `running` with an open run. The new service (no surviving process)
+/// brings it back to `stopped` and closes the run.
 #[tokio::test(flavor = "multi_thread")]
 async fn restart_reconciles_running_vm_and_closes_open_run() {
-    let dir = temp_dir("core-riavvio");
+    let dir = temp_dir("core-restart");
     let svc = start_sqlite(&dir).await;
     let mut ui = connect_ui(&svc).await;
     let vm_id = match ui
         .request(Request::CreateVm {
-            config: sample_config("riavvio"),
+            config: sample_config("restart"),
         })
         .await
         .unwrap()
@@ -1002,7 +997,7 @@ async fn restart_reconciles_running_vm_and_closes_open_run() {
     drop(ui);
     svc.handle.shutdown().await;
 
-    // "Crash": VM running con esecuzione aperta, scritti direttamente nel catalogo.
+    // "Crash": VM running with an open run, written directly into the catalog.
     {
         let mut cat = vm_storage::Catalog::open(&dir).unwrap();
         cat.with_tx(|tx| {
@@ -1029,17 +1024,17 @@ async fn restart_reconciles_running_vm_and_closes_open_run() {
     drop(ui);
     svc.handle.shutdown().await;
     let mut cat = vm_storage::Catalog::open(&dir).unwrap();
-    let aperte = cat
+    let open = cat
         .read(|tx| {
             let sid = tx.vm_ids()?[0];
             tx.open_runs(&sid)
         })
         .unwrap();
-    assert!(aperte.is_empty(), "esecuzioni ancora aperte: {aperte:?}");
+    assert!(open.is_empty(), "runs still open: {open:?}");
 }
 
-/// Un processo che esce da solo (spegnimento dal guest, crash) produce
-/// l'evento `vm_state` senza che alcun client faccia richieste.
+/// A process that exits on its own (shutdown from the guest, crash) produces
+/// the `vm_state` event without any client making requests.
 #[tokio::test(flavor = "multi_thread")]
 async fn unrequested_exit_is_published_without_requests() {
     let dir = temp_dir("core-exit");
@@ -1047,7 +1042,7 @@ async fn unrequested_exit_is_published_without_requests() {
     let mut ui = connect_ui(&svc).await;
     let vm_id = match ui
         .request(Request::CreateVm {
-            config: sample_config("esce-da-sola"),
+            config: sample_config("exits-on-its-own"),
         })
         .await
         .unwrap()
@@ -1063,7 +1058,7 @@ async fn unrequested_exit_is_published_without_requests() {
         ServerMessage::Response {
             result: ResponseBody::Vm { vm },
             ..
-        } => vm.run_id.expect("esecuzione attiva"),
+        } => vm.run_id.expect("active run"),
         other => panic!("{other:?}"),
     };
     assert!(matches!(
@@ -1091,6 +1086,6 @@ async fn unrequested_exit_is_published_without_requests() {
             seen = Some(state);
         }
     }
-    assert!(seen.is_some(), "nessun evento dopo l'uscita del processo");
+    assert!(seen.is_some(), "no event after the process exit");
     svc.handle.shutdown().await;
 }

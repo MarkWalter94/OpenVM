@@ -1,14 +1,14 @@
-//! Rate limit per connessione: token bucket (ROADMAP 9, "rate limit per
-//! identità/sessione, code limitate").
+//! Per-connection rate limit: token bucket (ROADMAP 9, "rate limit per
+//! identity/session, bounded queues").
 
 use std::time::{Duration, Instant};
 
-/// Parametri del token bucket.
+/// Token bucket parameters.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RateLimit {
-    /// Richieste ammesse in raffica.
+    /// Requests admitted in a burst.
     pub burst: u32,
-    /// Richieste ricaricate al secondo.
+    /// Requests refilled per second.
     pub per_second: f64,
 }
 
@@ -21,7 +21,7 @@ impl Default for RateLimit {
     }
 }
 
-/// Stato del bucket di una connessione.
+/// Bucket state of a connection.
 #[derive(Debug)]
 pub struct TokenBucket {
     limit: RateLimit,
@@ -30,7 +30,7 @@ pub struct TokenBucket {
 }
 
 impl TokenBucket {
-    /// Bucket pieno.
+    /// Full bucket.
     pub fn new(limit: RateLimit) -> Self {
         Self {
             limit,
@@ -39,7 +39,7 @@ impl TokenBucket {
         }
     }
 
-    /// Consuma un gettone se disponibile.
+    /// Consumes a token if available.
     pub fn try_acquire(&mut self) -> bool {
         self.try_acquire_at(Instant::now())
     }
@@ -57,7 +57,7 @@ impl TokenBucket {
         }
     }
 
-    /// Tempo stimato per il prossimo gettone (solo diagnostico).
+    /// Estimated time until the next token (diagnostic only).
     pub fn retry_after(&self) -> Duration {
         if self.limit.per_second <= 0.0 {
             return Duration::MAX;

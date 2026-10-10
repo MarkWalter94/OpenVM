@@ -1,8 +1,8 @@
-//! Stringhe validate: nomi, etichette, percorsi gestiti, digest.
+//! Validated strings: names, labels, managed paths, digests.
 //!
-//! Nessun campo ricevuto da un client è interpretato come percorso o opzione host
-//! (ROADMAP 6.3, 7.2 punto 5): i nomi sono etichette, i percorsi gestiti sono
-//! relativi alla directory controllata dal supervisor e mai esposti ai client.
+//! No field received from a client is interpreted as a host path or option
+//! (ROADMAP 6.3, 7.2 item 5): names are labels, managed paths are
+//! relative to the directory controlled by the supervisor and never exposed to clients.
 
 use std::borrow::Cow;
 use std::fmt;
@@ -10,19 +10,19 @@ use std::fmt;
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-/// Errore di validazione di una stringa tipizzata. Il valore rifiutato non è
-/// incluso: potrebbe contenere dati sensibili.
+/// Validation error of a typed string. The rejected value is not
+/// included: it might contain sensitive data.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TextError {
-    /// Tipo atteso.
+    /// Expected type.
     pub kind: &'static str,
-    /// Motivo stabile del rifiuto.
+    /// Stable reason for the rejection.
     pub reason: &'static str,
 }
 
 impl fmt::Display for TextError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} non valido: {}", self.kind, self.reason)
+        write!(f, "invalid {}: {}", self.kind, self.reason)
     }
 }
 
@@ -35,14 +35,14 @@ macro_rules! validated_string {
         pub struct $name(String);
 
         impl $name {
-            /// Valida e costruisce.
+            /// Validates and constructs.
             pub fn parse(value: impl Into<String>) -> Result<Self, TextError> {
                 let value = value.into();
                 $validate(&value).map_err(|reason| TextError { kind: stringify!($name), reason })?;
                 Ok(Self(value))
             }
 
-            /// Valore testuale.
+            /// Textual value.
             #[must_use]
             pub fn as_str(&self) -> &str {
                 &self.0
@@ -82,23 +82,23 @@ macro_rules! validated_string {
 fn validate_vm_name(s: &str) -> Result<(), &'static str> {
     let len = s.chars().count();
     if len == 0 || len > 64 {
-        return Err("lunghezza fuori da 1..=64");
+        return Err("length outside 1..=64");
     }
     if !s
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.'))
     {
-        return Err("caratteri ammessi: lettere e cifre ASCII, spazio, '-', '_', '.'");
+        return Err("allowed characters: ASCII letters and digits, space, '-', '_', '.'");
     }
     if s.starts_with([' ', '.', '-']) || s.ends_with([' ', '.']) {
-        return Err("non può iniziare con spazio, '.' o '-' né finire con spazio o '.'");
+        return Err("cannot start with a space, '.' or '-' nor end with a space or '.'");
     }
     Ok(())
 }
 
 validated_string!(
-    /// Nome visibile di una VM: etichetta, mai percorso. 1–64 caratteri ASCII
-    /// `[A-Za-z0-9 ._-]`, senza spazio/punto iniziale o finale né `-` iniziale.
+    /// Visible name of a VM: a label, never a path. 1–64 ASCII characters
+    /// `[A-Za-z0-9 ._-]`, without a leading or trailing space/dot nor a leading `-`.
     VmName,
     validate_vm_name,
     {
@@ -106,60 +106,60 @@ validated_string!(
         "minLength": 1,
         "maxLength": 64,
         "pattern": "^[A-Za-z0-9_][A-Za-z0-9 ._-]*$",
-        "description": "Nome VM: etichetta ASCII, non un percorso."
+        "description": "VM name: ASCII label, not a path."
     }
 );
 
 fn validate_label(s: &str) -> Result<(), &'static str> {
     let len = s.chars().count();
     if len == 0 || len > 256 {
-        return Err("lunghezza fuori da 1..=256");
+        return Err("length outside 1..=256");
     }
     if s.chars().any(|c| c.is_control()) {
-        return Err("caratteri di controllo non ammessi");
+        return Err("control characters not allowed");
     }
     if s.trim() != s {
-        return Err("spazi iniziali o finali non ammessi");
+        return Err("leading or trailing spaces not allowed");
     }
     Ok(())
 }
 
 validated_string!(
-    /// Etichetta di testo libero dichiarata dall'utente (per esempio l'origine di
-    /// un supporto). Solo testo: mai interpretata come percorso, URL o markup.
+    /// Free-text label declared by the user (for example the origin of
+    /// a media item). Text only: never interpreted as a path, URL or markup.
     Label,
     validate_label,
     {
         "type": "string",
         "minLength": 1,
         "maxLength": 256,
-        "description": "Testo dichiarato dall'utente, senza caratteri di controllo; mai interpretato."
+        "description": "Text declared by the user, without control characters; never interpreted."
     }
 );
 
 fn validate_qcode(s: &str) -> Result<(), &'static str> {
     if s.is_empty() || s.len() > 32 {
-        return Err("lunghezza fuori da 1..=32");
+        return Err("length outside 1..=32");
     }
     if !s
         .bytes()
         .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
     {
-        return Err("caratteri ammessi: [a-z0-9_]");
+        return Err("allowed characters: [a-z0-9_]");
     }
     Ok(())
 }
 
 validated_string!(
-    /// Nome di tasto QEMU (`QKeyCode`, per esempio `a`, `ret`, `shift`,
-    /// `bracket_left`). Solo grammatica `[a-z0-9_]{1,32}`: il backend rifiuta i
-    /// nomi non presenti nella propria tabella.
+    /// QEMU key name (`QKeyCode`, for example `a`, `ret`, `shift`,
+    /// `bracket_left`). Grammar `[a-z0-9_]{1,32}` only: the backend rejects
+    /// names not present in its own table.
     QCode,
     validate_qcode,
     {
         "type": "string",
         "pattern": "^[a-z0-9_]{1,32}$",
-        "description": "QKeyCode QEMU."
+        "description": "QEMU QKeyCode."
     }
 );
 
@@ -179,78 +179,78 @@ fn is_windows_reserved(component: &str) -> bool {
 
 fn validate_managed_path(s: &str) -> Result<(), &'static str> {
     if s.is_empty() || s.len() > 255 {
-        return Err("lunghezza fuori da 1..=255");
+        return Err("length outside 1..=255");
     }
     if s.contains('\\') {
-        return Err("separatore '\\' non ammesso (UNC, device path)");
+        return Err("separator '\\' not allowed (UNC, device path)");
     }
     if s.contains(':') {
-        return Err("':' non ammesso (unità, flussi alternativi)");
+        return Err("':' not allowed (drives, alternate data streams)");
     }
     let components: Vec<&str> = s.split('/').collect();
     if components.len() > 4 {
-        return Err("al massimo 4 componenti");
+        return Err("at most 4 components");
     }
     for c in components {
         if c.is_empty() {
-            return Err("percorso assoluto o componente vuoto");
+            return Err("absolute path or empty component");
         }
         if c == "." || c == ".." {
-            return Err("componenti '.' e '..' non ammessi");
+            return Err("components '.' and '..' not allowed");
         }
         if c.len() > 64 {
-            return Err("componente oltre 64 byte");
+            return Err("component longer than 64 bytes");
         }
         if !c
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
         {
-            return Err("caratteri ammessi: [A-Za-z0-9._-]");
+            return Err("allowed characters: [A-Za-z0-9._-]");
         }
         if c.starts_with('.') || c.ends_with('.') {
-            return Err("componente con '.' iniziale o finale");
+            return Err("component with a leading or trailing '.'");
         }
         if is_windows_reserved(c) {
-            return Err("nome di dispositivo riservato");
+            return Err("reserved device name");
         }
     }
     Ok(())
 }
 
 validated_string!(
-    /// Percorso **relativo** alla directory gestita dal supervisor, con separatore
-    /// `/`. Rifiuta percorsi assoluti, unità, UNC, device path (`\\?\`, `\\.\`),
-    /// `..`, flussi alternativi e nomi riservati Windows.
+    /// Path **relative** to the directory managed by the supervisor, with `/`
+    /// as separator. Rejects absolute paths, drives, UNC, device paths (`\\?\`, `\\.\`),
+    /// `..`, alternate data streams and Windows reserved names.
     ///
-    /// Solo interno al supervisor e allo storage: non compare in alcun tipo
-    /// esposto ai client né negli schemi pubblici. La validazione grammaticale non
-    /// sostituisce l'apertura protetta contro symlink e junction (ROADMAP 6.3).
+    /// Internal to the supervisor and storage only: it does not appear in any type
+    /// exposed to clients nor in the public schemas. Grammar validation does not
+    /// replace the protected open against symlinks and junctions (ROADMAP 6.3).
     ManagedRelPath,
     validate_managed_path,
     {
         "type": "string",
-        "description": "Percorso relativo gestito, solo interno."
+        "description": "Managed relative path, internal only."
     }
 );
 
-/// Digest SHA-256 (32 byte). In JSON: 64 cifre esadecimali minuscole.
+/// SHA-256 digest (32 bytes). In JSON: 64 lowercase hexadecimal digits.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Sha256Digest([u8; 32]);
 
 impl Sha256Digest {
-    /// Digest dai 32 byte.
+    /// Digest from the 32 bytes.
     #[must_use]
     pub const fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
 
-    /// Byte del digest.
+    /// Bytes of the digest.
     #[must_use]
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 
-    /// Analizza 64 cifre esadecimali minuscole.
+    /// Parses 64 lowercase hexadecimal digits.
     pub fn parse_hex(s: &str) -> Result<Self, TextError> {
         let err = |reason| TextError {
             kind: "Sha256Digest",
@@ -258,12 +258,12 @@ impl Sha256Digest {
         };
         let b = s.as_bytes();
         if b.len() != 64 {
-            return Err(err("servono 64 cifre esadecimali"));
+            return Err(err("64 hexadecimal digits required"));
         }
         let nibble = |c: u8| match c {
             b'0'..=b'9' => Ok(c - b'0'),
             b'a'..=b'f' => Ok(c - b'a' + 10),
-            _ => Err(err("cifre ammesse: [0-9a-f]")),
+            _ => Err(err("allowed digits: [0-9a-f]")),
         };
         let mut out = [0u8; 32];
         for (i, pair) in b.as_chunks::<2>().0.iter().enumerate() {
@@ -272,7 +272,7 @@ impl Sha256Digest {
         Ok(Self(out))
     }
 
-    /// Forma esadecimale minuscola.
+    /// Lowercase hexadecimal form.
     #[must_use]
     pub fn to_hex(&self) -> String {
         const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -318,7 +318,7 @@ impl JsonSchema for Sha256Digest {
         json_schema!({
             "type": "string",
             "pattern": "^[0-9a-f]{64}$",
-            "description": "SHA-256 in esadecimale minuscolo."
+            "description": "SHA-256 in lowercase hexadecimal."
         })
     }
 }

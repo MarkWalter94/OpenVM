@@ -1,35 +1,35 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Quotas",
-  "description": "Quote di una sessione o di un livello di policy. Ogni campo è un massimo\ninclusivo; l'intersezione prende il minimo.",
+  "description": "Quotas of a session or of a policy layer. Each field is an inclusive\nmaximum; the intersection takes the minimum.",
   "type": "object",
   "properties": {
     "max_input_events": {
-      "description": "Eventi di input totali ammessi nella sessione.",
+      "description": "Total input events allowed in the session.",
       "type": "integer",
       "format": "uint32",
       "minimum": 0
     },
     "max_operations": {
-      "description": "Operazioni totali ammesse nella sessione.",
+      "description": "Total operations allowed in the session.",
       "type": "integer",
       "format": "uint32",
       "minimum": 0
     },
     "max_queued_operations": {
-      "description": "Operazioni in coda per VM non ancora inoltrate.",
+      "description": "Operations queued per VM and not yet forwarded.",
       "type": "integer",
       "format": "uint32",
       "minimum": 0
     },
     "max_screenshot_bytes": {
-      "description": "Dimensione massima di un singolo screenshot in byte.",
+      "description": "Maximum size of a single screenshot in bytes.",
       "type": "integer",
       "format": "uint64",
       "minimum": 0
     },
     "max_screenshots": {
-      "description": "Screenshot totali ammessi nella sessione.",
+      "description": "Total screenshots allowed in the session.",
       "type": "integer",
       "format": "uint32",
       "minimum": 0

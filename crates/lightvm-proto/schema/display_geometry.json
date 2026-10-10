@@ -1,18 +1,18 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "DisplayGeometry",
-  "description": "Geometria del display guest in pixel.",
+  "description": "Guest display geometry in pixels.",
   "type": "object",
   "properties": {
     "height": {
-      "description": "Altezza (1..=8192).",
+      "description": "Height (1..=8192).",
       "type": "integer",
       "format": "uint32",
       "maximum": 8192,
       "minimum": 1
     },
     "width": {
-      "description": "Larghezza (1..=8192).",
+      "description": "Width (1..=8192).",
       "type": "integer",
       "format": "uint32",
       "maximum": 8192,

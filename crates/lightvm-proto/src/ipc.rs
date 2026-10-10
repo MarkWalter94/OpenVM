@@ -1,24 +1,24 @@
-//! Involucro del protocollo IPC locale tra i client (UI, adapter MCP) e
+//! Envelope of the local IPC protocol between clients (UI, MCP adapter) and
 //! `lightvm-service` (ROADMAP 6.1, 6.3, 7.3, 9; ADR-0002).
 //!
-//! Il trasporto (named pipe con ACL su Windows, socket Unix su Linux), il
-//! framing (4 byte big-endian di lunghezza più JSON) e l'autenticazione del
-//! canale appartengono al servizio; qui stanno soltanto i messaggi, con schema
-//! JSON generato dalla stessa fonte ([`schemas`], file `schema/ipc_*.json`).
+//! The transport (named pipe with ACL on Windows, Unix socket on Linux), the
+//! framing (4-byte big-endian length plus JSON) and the channel authentication
+//! belong to the service; only the messages live here, with a JSON schema
+//! generated from the same source ([`schemas`], files `schema/ipc_*.json`).
 //!
-//! Regole:
-//! - il primo messaggio del client è [`ClientMessage::Hello`] con le versioni
-//!   offerte e la credenziale del canale; il servizio sceglie la prima versione
-//!   supportata in ordine di preferenza ([`SUPPORTED_PROTOCOL_VERSIONS`]);
-//! - ogni richiesta porta un [`RequestId`] scelto dal client e restituito nella
-//!   risposta; operazioni sconosciute non sono deserializzabili
-//!   (`malformed_message`, nessun effetto);
-//! - nessun campo è interpretato come percorso o opzione host: le VM sono
-//!   riferite per [`VmId`], i media per [`crate::MediaId`] del registro;
-//! - gli errori sono [`ReplyError`]: operativi ([`crate::PublicError`]) oppure
-//!   di protocollo ([`crate::ProtocolError`]), mai confusi. Credenziale assente,
-//!   malformata, sconosciuta o revocata → `unauthenticated`; ruolo insufficiente
-//!   → `permission_denied` (vedi [`crate::ErrorCode`]).
+//! Rules:
+//! - the client's first message is [`ClientMessage::Hello`] with the offered
+//!   versions and the channel credential; the service picks the first
+//!   supported version in order of preference ([`SUPPORTED_PROTOCOL_VERSIONS`]);
+//! - every request carries a [`RequestId`] chosen by the client and returned in the
+//!   response; unknown operations cannot be deserialized
+//!   (`malformed_message`, no effect);
+//! - no field is interpreted as a host path or option: VMs are
+//!   referenced by [`VmId`], media by registry [`crate::MediaId`];
+//! - errors are [`ReplyError`]: operational ([`crate::PublicError`]) or
+//!   protocol ([`crate::ProtocolError`]), never mixed up. Missing, malformed,
+//!   unknown or revoked credential → `unauthenticated`; insufficient role
+//!   → `permission_denied` (see [`crate::ErrorCode`]).
 
 use schemars::{JsonSchema, Schema, generate::SchemaSettings};
 use serde::{Deserialize, Serialize};
@@ -28,122 +28,122 @@ use crate::{
     VmRecord, VmRequest, VmState,
 };
 
-/// Versioni del protocollo IPC supportate dal servizio, in ordine di preferenza.
+/// IPC protocol versions supported by the service, in order of preference.
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[PROTOCOL_VERSION];
 
-/// Identificativo di una richiesta scelto dal client e restituito nella risposta.
+/// Identifier of a request chosen by the client and returned in the response.
 pub type RequestId = u64;
 
-/// Identificativo di una connessione assegnato dal servizio all'handshake.
+/// Identifier of a connection assigned by the service at handshake.
 pub type ConnectionId = u64;
 
-/// Ruolo associato alla credenziale del canale.
+/// Role associated with the channel credential.
 ///
-/// `ui` corrisponde a [`crate::Caller::User`] verso il core; `pairing` non
-/// conferisce permessi sulle VM (ADR-0006): il grant di sessione agente arriva
+/// `ui` corresponds to [`crate::Caller::User`] towards the core; `pairing` does not
+/// grant permissions on VMs (ADR-0006): the agent session grant arrives
 /// in F4 ([`crate::Grant`], [`crate::SessionToken`]).
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
-    /// Interfaccia desktop che ha avviato il servizio.
+    /// Desktop interface that started the service.
     Ui,
-    /// Client in attesa di pairing (adapter MCP): nessun permesso VM.
+    /// Client waiting for pairing (MCP adapter): no VM permissions.
     Pairing,
 }
 
-/// Messaggi dal client al servizio.
+/// Messages from the client to the service.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
-    /// Primo messaggio obbligatorio.
+    /// Mandatory first message.
     Hello {
-        /// Identificativo della richiesta.
+        /// Request identifier.
         request_id: RequestId,
-        /// Versioni del protocollo offerte dal client.
+        /// Protocol versions offered by the client.
         protocol_versions: Vec<u32>,
-        /// Credenziale del canale: 32 byte in 64 cifre esadecimali minuscole.
-        /// Resta testo libero nello schema perché una credenziale malformata
-        /// dia lo stesso esito (`unauthenticated`) di una assente o errata,
-        /// senza distinguere i motivi. Segreto: mai in log o report.
+        /// Channel credential: 32 bytes as 64 lowercase hexadecimal digits.
+        /// It stays free text in the schema so that a malformed credential
+        /// gives the same outcome (`unauthenticated`) as a missing or wrong one,
+        /// without distinguishing the reasons. Secret: never in logs or reports.
         #[serde(default)]
         #[schemars(extend("writeOnly" = true))]
         credential: Option<String>,
-        /// Nome del client, solo diagnostico (troncato a 64 caratteri).
+        /// Client name, diagnostic only (truncated to 64 characters).
         #[serde(default)]
         client_name: Option<String>,
     },
-    /// Richiesta tipizzata dopo l'handshake.
+    /// Typed request after the handshake.
     Request {
-        /// Identificativo della richiesta.
+        /// Request identifier.
         request_id: RequestId,
-        /// Operazione richiesta.
+        /// Requested operation.
         body: Request,
     },
 }
 
-/// Operazioni tipizzate.
+/// Typed operations.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
-    /// Verifica di vivacità.
+    /// Liveness check.
     Ping,
-    /// Capacità del servizio e del backend.
+    /// Capabilities of the service and the backend.
     GetCapabilities,
-    /// Elenco delle VM del catalogo (solo UI).
+    /// List of the catalog VMs (UI only).
     ListVms,
-    /// Stato di una VM (solo UI).
+    /// Status of a VM (UI only).
     VmStatus {
         /// VM.
         vm_id: VmId,
     },
-    /// Creazione di una VM nel catalogo (solo UI; mai da sessioni agente).
+    /// Creation of a VM in the catalog (UI only; never from agent sessions).
     CreateVm {
-        /// Configurazione richiesta.
+        /// Requested configuration.
         config: VmConfig,
     },
-    /// Modifica della configurazione di una VM spenta: risorse e limiti
-    /// (solo UI; il disco si può solo ingrandire).
+    /// Change to the configuration of a stopped VM: resources and limits
+    /// (UI only; the disk can only grow).
     UpdateVm {
         /// VM.
         vm_id: VmId,
-        /// Revisione attesa: una modifica concorrente è rifiutata.
+        /// Expected revision: a concurrent change is rejected.
         expected_revision: u64,
-        /// Nuova configurazione completa.
+        /// New full configuration.
         config: VmConfig,
     },
-    /// Azione su una VM esistente tramite la coda del core (solo UI in F1).
-    /// La risposta arriva dopo l'esito del backend.
+    /// Action on an existing VM through the core's queue (UI only in F1).
+    /// The response arrives after the backend outcome.
     SubmitVm {
-        /// Richiesta con chiave di idempotenza.
+        /// Request with idempotency key.
         request: VmRequest,
     },
-    /// Iscrizione agli eventi di stato (solo UI).
+    /// Subscription to state events (UI only).
     Subscribe,
-    /// Elenco delle connessioni attive (solo UI).
+    /// List of active connections (UI only).
     ListConnections,
-    /// Revoca di una connessione e della sua credenziale (solo UI).
+    /// Revocation of a connection and its credential (UI only).
     RevokeConnection {
-        /// Connessione da revocare.
+        /// Connection to revoke.
         connection_id: ConnectionId,
     },
-    /// Emissione di una credenziale di pairing da consegnare fuori banda (solo UI).
+    /// Issuing of a pairing credential to be delivered out of band (UI only).
     CreatePairingCredential,
-    /// Emergency Stop: percorso prioritario, non passa dalla coda (solo UI).
+    /// Emergency Stop: priority path, does not go through the queue (UI only).
     EmergencyStop,
-    /// Sorte delle VM se la UI termina senza arresto controllato (solo UI).
-    /// Vale subito; la UI la ripassa a ogni avvio del servizio.
+    /// Fate of the VMs if the UI ends without a controlled shutdown (UI only).
+    /// Takes effect immediately; the UI sends it again at every service start.
     SetParentLossPolicy {
-        /// Nuova politica.
+        /// New policy.
         policy: ParentLossPolicy,
     },
-    /// Arresto controllato del servizio (solo UI).
+    /// Controlled shutdown of the service (UI only).
     Shutdown,
 }
 
 impl Request {
-    /// Nome stabile dell'operazione, per audit e diagnostica.
+    /// Stable name of the operation, for audit and diagnostics.
     #[must_use]
     pub const fn name(&self) -> &'static str {
         match self {
@@ -165,66 +165,66 @@ impl Request {
     }
 }
 
-/// Riepilogo di una VM per elenco e stato.
+/// Summary of a VM for list and status.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct VmSummary {
     /// VM.
     pub vm_id: VmId,
-    /// Nome mostrato.
+    /// Displayed name.
     pub name: VmName,
-    /// Stato corrente come visto dal core (derivato da processo e QMP).
+    /// Current state as seen by the core (derived from the process and QMP).
     pub state: VmState,
-    /// Esecuzione corrente, se esiste un processo o l'ultima conclusa.
+    /// Current run, if a process exists, or the last finished one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<RunId>,
-    /// Configurazione corrente (risorse e limiti), per le impostazioni della VM.
+    /// Current configuration (resources and limits), for the VM settings.
     pub config: VmConfig,
-    /// Revisione della configurazione, da indicare in `update_vm`.
+    /// Configuration revision, to be given in `update_vm`.
     pub config_revision: u64,
 }
 
-/// Capacità riportate da `get_capabilities`.
+/// Capabilities reported by `get_capabilities`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Capabilities {
-    /// Versioni del protocollo supportate.
+    /// Supported protocol versions.
     pub protocol_versions: Vec<u32>,
-    /// Nome del backend.
+    /// Backend name.
     pub backend: String,
-    /// Acceleratore disponibile, se rilevato.
+    /// Available accelerator, if detected.
     pub accelerator: Option<String>,
-    /// Limite di byte per frame.
+    /// Byte limit per frame.
     pub max_frame_bytes: u32,
-    /// Politica attiva alla perdita della UI.
+    /// Active policy on UI loss.
     #[serde(default)]
     pub parent_loss_policy: ParentLossPolicy,
 }
 
-/// Attesa minima ammessa per lo spegnimento ordinato alla perdita della UI.
+/// Minimum allowed wait for the orderly shutdown on UI loss.
 pub const MIN_PARENT_LOSS_POWERDOWN_S: u32 = 1;
-/// Attesa massima ammessa per lo spegnimento ordinato alla perdita della UI.
+/// Maximum allowed wait for the orderly shutdown on UI loss.
 pub const MAX_PARENT_LOSS_POWERDOWN_S: u32 = 300;
 
-/// Sorte delle VM quando la UI che ha avviato il servizio termina senza
-/// arresto controllato (crash, terminazione forzata). ADR-0015 parte B.
+/// Fate of the VMs when the UI that started the service ends without a
+/// controlled shutdown (crash, forced termination). ADR-0015 part B.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ParentLossPolicy {
-    /// Emergency Stop di tutte le VM, poi arresto del servizio (predefinita).
+    /// Emergency Stop of all VMs, then shutdown of the service (default).
     #[default]
     KillVms,
-    /// Spegnimento ordinato (ACPI) con attesa limitata, poi `quit` e
-    /// terminazione; infine arresto del servizio.
+    /// Orderly (ACPI) shutdown with a bounded wait, then `quit` and
+    /// termination; finally shutdown of the service.
     ShutdownVms {
-        /// Attesa dello spegnimento ACPI per VM, in secondi
+        /// Wait for the ACPI shutdown per VM, in seconds
         /// ([`MIN_PARENT_LOSS_POWERDOWN_S`]..=[`MAX_PARENT_LOSS_POWERDOWN_S`]).
         powerdown_s: u32,
     },
-    /// Le VM restano accese e il servizio resta attivo senza UI.
+    /// The VMs stay on and the service stays active without a UI.
     KeepVms,
 }
 
 impl ParentLossPolicy {
-    /// Validazione dei limiti.
+    /// Validation of the limits.
     pub fn validate(self) -> Result<Self, crate::PublicError> {
         match self {
             Self::ShutdownVms { powerdown_s }
@@ -232,7 +232,7 @@ impl ParentLossPolicy {
                     .contains(&powerdown_s) =>
             {
                 Err(crate::PublicError::invalid_argument(format!(
-                    "powerdown_s fuori dall'intervallo {MIN_PARENT_LOSS_POWERDOWN_S}..={MAX_PARENT_LOSS_POWERDOWN_S}"
+                    "powerdown_s outside the range {MIN_PARENT_LOSS_POWERDOWN_S}..={MAX_PARENT_LOSS_POWERDOWN_S}"
                 )))
             }
             p => Ok(p),
@@ -240,205 +240,205 @@ impl ParentLossPolicy {
     }
 }
 
-/// Connessione attiva, per `list_connections`.
+/// Active connection, for `list_connections`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ConnectionInfo {
-    /// Identificativo della connessione.
+    /// Connection identifier.
     pub connection_id: ConnectionId,
-    /// Ruolo della credenziale.
+    /// Role of the credential.
     pub role: Role,
-    /// PID del peer riportato dal sistema operativo, solo diagnostico.
+    /// Peer PID reported by the operating system, diagnostic only.
     pub peer_pid: Option<u32>,
-    /// Nome dichiarato dal client, solo diagnostico.
+    /// Name declared by the client, diagnostic only.
     pub client_name: Option<String>,
 }
 
-/// Esito dell'Emergency Stop riportato al client.
+/// Outcome of the Emergency Stop reported to the client.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct EmergencyStopReport {
-    /// Connessioni non UI revocate.
+    /// Non-UI connections revoked.
     pub revoked_connections: u32,
-    /// Processi di cui il backend ha osservato la fine.
+    /// Processes whose end the backend observed.
     pub processes_terminated: u32,
-    /// Vero solo se la fine di tutti i processi è stata osservata.
+    /// True only if the end of all processes was observed.
     pub completed: bool,
 }
 
-/// Risultati delle operazioni.
+/// Results of the operations.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ResponseBody {
-    /// Risposta a `ping`.
+    /// Response to `ping`.
     Pong,
-    /// Risposta a `get_capabilities`.
+    /// Response to `get_capabilities`.
     Capabilities(Capabilities),
-    /// Risposta a `list_vms`.
+    /// Response to `list_vms`.
     VmList {
-        /// VM visibili.
+        /// Visible VMs.
         vms: Vec<VmSummary>,
     },
-    /// Risposta a `vm_status`.
+    /// Response to `vm_status`.
     Vm {
-        /// Stato della VM.
+        /// Status of the VM.
         vm: VmSummary,
     },
-    /// Risposta a `create_vm`.
+    /// Response to `create_vm`.
     VmCreated {
-        /// VM creata, con identificativo assegnato dal core.
+        /// Created VM, with identifier assigned by the core.
         vm: VmRecord,
     },
-    /// Risposta a `update_vm`: VM con la nuova revisione.
+    /// Response to `update_vm`: VM with the new revision.
     VmUpdated {
-        /// VM aggiornata.
+        /// Updated VM.
         vm: VmRecord,
     },
-    /// Risposta a `submit_vm`: accettazione ed esito registrato.
+    /// Response to `submit_vm`: acceptance and recorded outcome.
     Operation {
-        /// Accettazione (o duplicato idempotente).
+        /// Acceptance (or idempotent duplicate).
         admission: Admission,
-        /// Registro dell'operazione dopo l'esecuzione, se disponibile.
+        /// Record of the operation after execution, if available.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         operation: Option<OperationRecord>,
     },
-    /// Iscrizione accettata.
+    /// Subscription accepted.
     Subscribed,
-    /// Risposta a `list_connections`.
+    /// Response to `list_connections`.
     Connections {
-        /// Connessioni attive.
+        /// Active connections.
         connections: Vec<ConnectionInfo>,
     },
-    /// Connessione revocata.
+    /// Connection revoked.
     Revoked {
-        /// Connessione revocata.
+        /// Revoked connection.
         connection_id: ConnectionId,
     },
-    /// Credenziale di pairing emessa: va consegnata fuori banda, mai registrata.
+    /// Pairing credential issued: it must be delivered out of band, never recorded.
     PairingCredential {
-        /// Credenziale in esadecimale.
+        /// Credential in hexadecimal.
         #[schemars(extend("writeOnly" = true))]
         credential: String,
-        /// Scadenza in secondi.
+        /// Expiry in seconds.
         expires_in_s: u64,
     },
-    /// Esito dell'Emergency Stop.
+    /// Outcome of the Emergency Stop.
     EmergencyStop(EmergencyStopReport),
-    /// Politica alla perdita della UI in vigore dopo `set_parent_loss_policy`.
+    /// UI loss policy in force after `set_parent_loss_policy`.
     ParentLossPolicy {
-        /// Politica attiva.
+        /// Active policy.
         policy: ParentLossPolicy,
     },
-    /// Arresto accettato.
+    /// Shutdown accepted.
     ShuttingDown,
 }
 
-/// Stato del servizio.
+/// State of the service.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum ServiceState {
-    /// In servizio.
+    /// In service.
     Running,
-    /// Arresto controllato in corso.
+    /// Controlled shutdown in progress.
     Stopping,
 }
 
-/// Motivo dell'arresto delle sessioni agente.
+/// Reason the agent sessions were stopped.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum StopReason {
-    /// Processo genitore (UI) terminato.
+    /// Parent process (UI) terminated.
     ParentLost,
     /// Emergency Stop.
     EmergencyStop,
-    /// Arresto controllato del servizio.
+    /// Controlled shutdown of the service.
     Shutdown,
 }
 
-/// Eventi pubblicati sul canale di stato.
+/// Events published on the state channel.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ServiceEvent {
-    /// Cambio di stato del servizio.
+    /// Change of the service state.
     ServiceState {
-        /// Nuovo stato.
+        /// New state.
         state: ServiceState,
     },
-    /// Cambio di stato di una VM.
+    /// Change of a VM's state.
     VmState {
         /// VM.
         vm_id: VmId,
-        /// Nuovo stato.
+        /// New state.
         state: VmState,
     },
-    /// Una connessione è stata revocata.
+    /// A connection was revoked.
     ConnectionRevoked {
-        /// Connessione revocata.
+        /// Revoked connection.
         connection_id: ConnectionId,
     },
-    /// Le sessioni agente sono state arrestate.
+    /// The agent sessions were stopped.
     AgentSessionsStopped {
-        /// Motivo.
+        /// Reason.
         reason: StopReason,
     },
-    /// Eventi persi per lentezza del client.
+    /// Events lost because the client was too slow.
     EventsLost {
-        /// Numero di eventi persi.
+        /// Number of lost events.
         count: u64,
     },
 }
 
-/// Motivo di chiusura della connessione da parte del servizio.
+/// Reason the service closed the connection.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum CloseReason {
-    /// Connessione o credenziale revocata.
+    /// Connection or credential revoked.
     Revoked,
-    /// Arresto del servizio.
+    /// Service shutting down.
     ServiceStopping,
 }
 
-/// Messaggi dal servizio al client.
+/// Messages from the service to the client.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
-    /// Handshake accettato.
+    /// Handshake accepted.
     HelloOk {
-        /// Richiesta di `hello`.
+        /// Request of `hello`.
         request_id: RequestId,
-        /// Versione negoziata.
+        /// Negotiated version.
         protocol_version: u32,
-        /// Identificativo assegnato alla connessione.
+        /// Identifier assigned to the connection.
         connection_id: ConnectionId,
-        /// Ruolo della credenziale.
+        /// Role of the credential.
         role: Role,
     },
-    /// Risposta positiva.
+    /// Positive response.
     Response {
-        /// Richiesta.
+        /// Request.
         request_id: RequestId,
-        /// Risultato.
+        /// Result.
         result: ResponseBody,
     },
-    /// Errore; `request_id` assente se il frame non era decodificabile.
+    /// Error; `request_id` absent if the frame was not decodable.
     Error {
-        /// Richiesta, se nota.
+        /// Request, if known.
         request_id: Option<RequestId>,
-        /// Errore.
+        /// Error.
         error: ReplyError,
     },
-    /// Evento di stato (dopo `subscribe`).
+    /// State event (after `subscribe`).
     Event {
-        /// Evento.
+        /// Event.
         event: ServiceEvent,
     },
-    /// Chiusura avviata dal servizio; segue la chiusura del trasporto.
+    /// Close initiated by the service; the transport close follows.
     Closing {
-        /// Motivo.
+        /// Reason.
         reason: CloseReason,
     },
 }
@@ -449,8 +449,8 @@ fn generate<T: JsonSchema>() -> Schema {
         .into_root_schema_for::<T>()
 }
 
-/// Schemi dell'involucro IPC (nome file senza estensione, schema), in ordine
-/// stabile. I due messaggi radice includono in `$defs` tutti i tipi annidati.
+/// Schemas of the IPC envelope (file name without extension, schema), in stable
+/// order. The two root messages include all nested types in `$defs`.
 #[must_use]
 pub fn schemas() -> Vec<(&'static str, Schema)> {
     vec![
@@ -493,7 +493,7 @@ mod tests {
                 .unwrap_err();
             assert_eq!(e.code, ErrorCode::InvalidArgument);
         }
-        // Capacità di un servizio precedente senza il campo: politica predefinita.
+        // Capabilities of an older service without the field: default policy.
         let c: Capabilities = serde_json::from_str(
             r#"{"protocol_versions":[1],"backend":"x","accelerator":null,"max_frame_bytes":1}"#,
         )

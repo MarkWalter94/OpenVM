@@ -1,27 +1,27 @@
-//! Binario `lightvm-service`: avviato dalla UI come processo figlio.
+//! `lightvm-service` binary: started by the UI as a child process.
 //!
-//! Contratto con il genitore (nessun segreto negli argomenti, ROADMAP 9):
-//! - argomenti strutturati: `--catalog <dir>` (obbligatorio),
-//!   `--qemu-dir <dir>` (distribuzione QEMU approvata; senza, l'avvio delle VM
-//!   è rifiutato con `unsupported`), `--audit-log <file>` (predefinito nel
-//!   profilo utente), `--runtime-dir <dir>` (socket IPC su Unix e directory
-//!   private dei socket QEMU), `--parent-watch stdin|none`,
-//!   `--parent-loss-policy kill-vms|shutdown-vms|keep-vms` (predefinita
-//!   `kill-vms`) e `--parent-loss-powerdown-s N` (attesa ACPI per
-//!   `shutdown-vms`, predefinita 10);
-//! - stdout: una sola riga JSON `{"event":"ready",...}` con endpoint e
-//!   credenziale iniziale della UI; stdout è una pipe anonima posseduta dal
-//!   genitore, quindi un canale privato;
-//! - stdin: pipe di vita; EOF = genitore terminato, riga `shutdown` = arresto
-//!   controllato;
-//! - stderr: diagnostica, senza segreti.
+//! Contract with the parent (no secrets in the arguments, ROADMAP 9):
+//! - structured arguments: `--catalog <dir>` (required),
+//!   `--qemu-dir <dir>` (approved QEMU distribution; without it, starting VMs
+//!   is rejected with `unsupported`), `--audit-log <file>` (default in the
+//!   user profile), `--runtime-dir <dir>` (IPC socket on Unix and private
+//!   directories of the QEMU sockets), `--parent-watch stdin|none`,
+//!   `--parent-loss-policy kill-vms|shutdown-vms|keep-vms` (default
+//!   `kill-vms`) and `--parent-loss-powerdown-s N` (ACPI wait for
+//!   `shutdown-vms`, default 10);
+//! - stdout: a single JSON line `{"event":"ready",...}` with the endpoint and
+//!   the initial UI credential; stdout is an anonymous pipe owned by the
+//!   parent, hence a private channel;
+//! - stdin: lifeline pipe; EOF = parent terminated, `shutdown` line =
+//!   controlled shutdown;
+//! - stderr: diagnostics, without secrets.
 //!
-//! Composition root (ROADMAP 6.1): `vm_core::Core` con catalogo SQLite di
-//! `vm-storage`, backend `qemu-backend`, audit su file, orologio e
-//! identificativi di sistema (vedi `lightvm_service::adapters`).
+//! Composition root (ROADMAP 6.1): `vm_core::Core` with the SQLite catalog of
+//! `vm-storage`, the `qemu-backend` backend, file audit, system clock and
+//! identifiers (see `lightvm_service::adapters`).
 //!
-//! Codici di uscita: 0 arresto regolare, 2 uso errato, 3 catalogo già in uso da
-//! un'altra istanza, 4 altri errori di avvio.
+//! Exit codes: 0 regular shutdown, 2 wrong usage, 3 catalog already in use by
+//! another instance, 4 other startup errors.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -39,12 +39,12 @@ use lightvm_service::server::StartError;
 use lightvm_service::supervisor::{Backend, ParentLossPolicy};
 use lightvm_service::{ServiceConfig, start};
 
-const USAGE: &str = "uso: lightvm-service --catalog <dir> [--qemu-dir <dir>] \
+const USAGE: &str = "usage: lightvm-service --catalog <dir> [--qemu-dir <dir>] \
 [--audit-log <file>] [--runtime-dir <dir>] [--parent-watch stdin|none] \
 [--parent-loss-policy kill-vms|shutdown-vms|keep-vms] [--parent-loss-powerdown-s N]";
 
-/// Messaggio per un catalogo già in uso (stesso testo del lock del servizio).
-const ALREADY_RUNNING: &str = "un'altra istanza di lightvm-service sta già usando questo catalogo";
+/// Message for a catalog already in use (same text as the service lock).
+const ALREADY_RUNNING: &str = "another instance of lightvm-service is already using this catalog";
 
 #[derive(Debug)]
 struct Args {
@@ -68,8 +68,8 @@ fn parse_args() -> Result<Args, String> {
     while let Some(a) = it.next() {
         let a = a
             .into_string()
-            .map_err(|_| "argomento non UTF-8".to_string())?;
-        let mut value = || it.next().ok_or_else(|| format!("{a}: valore mancante"));
+            .map_err(|_| "non-UTF-8 argument".to_string())?;
+        let mut value = || it.next().ok_or_else(|| format!("{a}: missing value"));
         match a.as_str() {
             "--catalog" => catalog = Some(PathBuf::from(value()?)),
             "--qemu-dir" => qemu_dir = Some(PathBuf::from(value()?)),
@@ -79,21 +79,21 @@ fn parse_args() -> Result<Args, String> {
                 parent_watch = match value()?.to_str() {
                     Some("stdin") => true,
                     Some("none") => false,
-                    _ => return Err("--parent-watch: atteso stdin o none".into()),
+                    _ => return Err("--parent-watch: expected stdin or none".into()),
                 }
             }
             "--parent-loss-policy" => {
                 parent_loss = Some(
                     value()?
                         .into_string()
-                        .map_err(|_| "--parent-loss-policy: valore non UTF-8".to_string())?,
+                        .map_err(|_| "--parent-loss-policy: non-UTF-8 value".to_string())?,
                 );
             }
             "--parent-loss-powerdown-s" => {
                 powerdown_s = value()?
                     .to_str()
                     .and_then(|v| v.parse().ok())
-                    .ok_or("--parent-loss-powerdown-s: atteso un numero di secondi")?;
+                    .ok_or("--parent-loss-powerdown-s: expected a number of seconds")?;
             }
             "--version" => {
                 println!("lightvm-service {}", env!("CARGO_PKG_VERSION"));
@@ -103,16 +103,16 @@ fn parse_args() -> Result<Args, String> {
                 println!("{USAGE}");
                 std::process::exit(0);
             }
-            other => return Err(format!("argomento sconosciuto: {other}")),
+            other => return Err(format!("unknown argument: {other}")),
         }
     }
-    let catalog = catalog.ok_or("--catalog obbligatorio")?;
+    let catalog = catalog.ok_or("--catalog is required")?;
     let parent_loss_policy = match parent_loss.as_deref() {
         None | Some("kill-vms") => ParentLossPolicy::KillVms,
         Some("shutdown-vms") => ParentLossPolicy::ShutdownVms { powerdown_s },
         Some("keep-vms") => ParentLossPolicy::KeepVms,
         Some(_) => {
-            return Err("--parent-loss-policy: atteso kill-vms, shutdown-vms o keep-vms".into());
+            return Err("--parent-loss-policy: expected kill-vms, shutdown-vms or keep-vms".into());
         }
     }
     .validate()
@@ -127,43 +127,42 @@ fn parse_args() -> Result<Args, String> {
     })
 }
 
-/// Motore e host composti dagli adattatori reali.
+/// Engine and host composed from the real adapters.
 type Composed = (Box<dyn VmEngine>, Box<dyn Backend>);
 
-/// Composizione sincrona, fuori dal runtime tokio del servizio: il probe di
-/// QEMU usa il runtime proprio del backend.
-/// Spazio riservato sotto la radice privata per i socket di QEMU:
-/// separatore, sottodirectory per esecuzione (12 caratteri), separatore e
-/// `qmp.sock`/`vnc.sock`.
-const RISERVA_SOCKET: usize = 22;
+/// Synchronous composition, outside the service tokio runtime: the QEMU probe
+/// uses the backend's own runtime.
+/// Space reserved under the private root for the QEMU sockets: separator,
+/// per-run subdirectory (12 characters), separator and `qmp.sock`/`vnc.sock`.
+const SOCKET_RESERVE: usize = 22;
 
-/// Radice delle directory private dei socket QEMU: `--runtime-dir` oppure
-/// `<catalogo>/p`. Se il percorso è troppo lungo per i socket (107 byte,
-/// `UNIX_SOCKET_PATH_MAX`) si usa una directory corta nella cartella
-/// temporanea dell'utente, segnalandolo, invece di un probe che fallisce.
+/// Root of the private directories of the QEMU sockets: `--runtime-dir` or
+/// `<catalog>/p`. If the path is too long for the sockets (107 bytes,
+/// `UNIX_SOCKET_PATH_MAX`) a short directory in the user's temporary folder
+/// is used, with a notice, instead of a probe that fails.
 fn private_root(
     runtime_dir: Option<&std::path::Path>,
     root: &std::path::Path,
 ) -> Result<PathBuf, (u8, String)> {
     let max = qemu_backend::validate::UNIX_SOCKET_PATH_MAX;
-    let entra = |p: &std::path::Path| p.as_os_str().len() + RISERVA_SOCKET <= max;
-    let candidato = runtime_dir.map_or_else(|| root.join("p"), std::path::Path::to_path_buf);
-    if entra(&candidato) {
-        return Ok(candidato);
+    let fits = |p: &std::path::Path| p.as_os_str().len() + SOCKET_RESERVE <= max;
+    let candidate = runtime_dir.map_or_else(|| root.join("p"), std::path::Path::to_path_buf);
+    if fits(&candidate) {
+        return Ok(candidate);
     }
-    let corta = std::env::temp_dir().join(format!("lightvm-p-{}", std::process::id()));
-    if !entra(&corta) {
+    let short = std::env::temp_dir().join(format!("lightvm-p-{}", std::process::id()));
+    if !fits(&short) {
         return Err((
             4,
-            "percorsi del catalogo e della cartella temporanea troppo lunghi per i socket di QEMU: scegliere un catalogo con un percorso più corto".into(),
+            "catalog and temporary folder paths too long for the QEMU sockets: choose a catalog with a shorter path".into(),
         ));
     }
     lightvm_service::diag!(
-        "lightvm-service: percorso {} troppo lungo per i socket di QEMU, directory privata {}",
-        candidato.display(),
-        corta.display()
+        "lightvm-service: path {} too long for the QEMU sockets, private directory {}",
+        candidate.display(),
+        short.display()
     );
-    Ok(corta)
+    Ok(short)
 }
 
 fn compose(args: &Args) -> Result<Composed, (u8, String)> {
@@ -172,7 +171,7 @@ fn compose(args: &Args) -> Result<Composed, (u8, String)> {
         Err(vm_storage::StorageError::CatalogLocked(p)) => {
             return Err((3, format!("{ALREADY_RUNNING} (lock: {})", p.display())));
         }
-        Err(e) => return Err((4, format!("catalogo: {e}"))),
+        Err(e) => return Err((4, format!("catalog: {e}"))),
     };
     let root = store.root();
     let audit_path = match &args.audit_log {
@@ -180,7 +179,7 @@ fn compose(args: &Args) -> Result<Composed, (u8, String)> {
         None => default_state_dir()
             .ok_or((
                 4,
-                "directory di stato del profilo utente non determinabile".to_string(),
+                "user profile state directory cannot be determined".to_string(),
             ))?
             .join(AUDIT_FILE),
     };
@@ -200,7 +199,7 @@ fn compose(args: &Args) -> Result<Composed, (u8, String)> {
         }
         None => {
             lightvm_service::diag!(
-                "lightvm-service: --qemu-dir assente: avvio delle VM non disponibile"
+                "lightvm-service: --qemu-dir missing: starting VMs not available"
             );
             let capacity = unavailable_capacity(256);
             let engine = CoreEngine::new(
@@ -272,7 +271,7 @@ async fn run(args: Args, engine: Box<dyn VmEngine>, host: Box<dyn Backend>) -> E
     {
         let mut out = std::io::stdout().lock();
         if writeln!(out, "{ready}").and_then(|_| out.flush()).is_err() {
-            lightvm_service::diag!("lightvm-service: stdout non disponibile, arresto");
+            lightvm_service::diag!("lightvm-service: stdout not available, shutting down");
             handle.shutdown().await;
             return ExitCode::from(4);
         }
@@ -285,7 +284,7 @@ async fn run(args: Args, engine: Box<dyn VmEngine>, host: Box<dyn Backend>) -> E
         if let Err(e) = parent::watch_stdin(move |s| {
             let _ = tx.send(s);
         }) {
-            lightvm_service::diag!("lightvm-service: sorveglianza stdin non avviata: {e}");
+            lightvm_service::diag!("lightvm-service: stdin watch not started: {e}");
             handle.shutdown().await;
             return ExitCode::from(4);
         }
@@ -294,7 +293,7 @@ async fn run(args: Args, engine: Box<dyn VmEngine>, host: Box<dyn Backend>) -> E
             let _ = tx2.send(s);
         }) {
             lightvm_service::diag!(
-                "lightvm-service: pidfd del genitore non disponibile ({e}); resta la pipe di vita"
+                "lightvm-service: parent pidfd not available ({e}); the lifeline pipe remains"
             );
         }
         #[cfg(not(target_os = "linux"))]
@@ -305,15 +304,15 @@ async fn run(args: Args, engine: Box<dyn VmEngine>, host: Box<dyn Backend>) -> E
                 _ = handle.wait() => break,
                 s = rx.recv() => match s {
                     Some(ParentSignal::Shutdown) => {
-                        // L'EOF che segue la richiesta di arresto non è una
-                        // perdita della UI.
+                        // The EOF that follows the shutdown request is not a
+                        // loss of the UI.
                         lost_handled = true;
                         handle.trigger_shutdown();
                     }
                     Some(ParentSignal::Lost) if lost_handled => {}
                     Some(ParentSignal::Lost) => {
                         lost_handled = true;
-                        lightvm_service::diag!("lightvm-service: processo genitore terminato");
+                        lightvm_service::diag!("lightvm-service: parent process terminated");
                         handle.parent_lost().await;
                     }
                     None => {
@@ -326,6 +325,6 @@ async fn run(args: Args, engine: Box<dyn VmEngine>, host: Box<dyn Backend>) -> E
     } else {
         handle.wait().await;
     }
-    lightvm_service::diag!("lightvm-service: arresto completato");
+    lightvm_service::diag!("lightvm-service: shutdown completed");
     ExitCode::SUCCESS
 }

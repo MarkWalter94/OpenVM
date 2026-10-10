@@ -1,5 +1,5 @@
-//! Sessione su thread dedicato: consegna gli aggiornamenti tramite callback e
-//! mantiene una copia condivisa del framebuffer per la UI.
+//! Session on a dedicated thread: delivers updates through a callback and
+//! keeps a shared copy of the framebuffer for the UI.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -9,52 +9,52 @@ use std::time::{Duration, Instant};
 use crate::transport::SocketControl;
 use crate::{ChannelKind, Connection, Framebuffer, Rect, ServerInit, Transport};
 
-/// Configurazione della sessione.
+/// Session configuration.
 #[derive(Clone, Debug)]
 pub struct SessionConfig {
-    /// Trasporto.
+    /// Transport.
     pub transport: Transport,
-    /// Massimo numero di FramebufferUpdateRequest al secondo (>= 1).
+    /// Maximum number of FramebufferUpdateRequests per second (>= 1).
     pub max_updates_per_second: u32,
 }
 
-/// Aggiornamento consegnato alla UI.
+/// Update delivered to the UI.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UpdateInfo {
-    /// Numero progressivo dell'aggiornamento.
+    /// Sequence number of the update.
     pub seq: u64,
-    /// Rettangoli modificati (già copiati nel framebuffer condiviso).
+    /// Modified rectangles (already copied into the shared framebuffer).
     pub rects: Vec<Rect>,
-    /// Ridimensionamento avvenuto.
+    /// A resize happened.
     pub resized: bool,
-    /// Larghezza corrente.
+    /// Current width.
     pub width: u16,
-    /// Altezza corrente.
+    /// Current height.
     pub height: u16,
 }
 
-/// Eventi della sessione.
+/// Session events.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionEvent {
-    /// Handshake completato.
+    /// Handshake completed.
     Connected {
         /// ServerInit.
         init: ServerInit,
-        /// Canale.
+        /// Channel.
         channel: ChannelKind,
-        /// Sicurezza negoziata.
+        /// Negotiated security.
         security: String,
     },
-    /// Nuovo aggiornamento.
+    /// New update.
     Update(UpdateInfo),
-    /// Fine della sessione, con l'errore se non è stata chiusa localmente.
+    /// End of the session, with the error if it was not closed locally.
     Disconnected {
-        /// Errore, se presente.
+        /// Error, if any.
         error: Option<String>,
     },
 }
 
-/// Sessione RFB su un thread dedicato.
+/// RFB session on a dedicated thread.
 pub struct Session {
     fb: Arc<Mutex<Framebuffer>>,
     control: Arc<Mutex<Option<SocketControl>>>,
@@ -69,7 +69,7 @@ impl std::fmt::Debug for Session {
 }
 
 impl Session {
-    /// Avvia la sessione. `on_event` è chiamata sul thread della sessione.
+    /// Starts the session. `on_event` is called on the session thread.
     pub fn spawn<F>(config: SessionConfig, mut on_event: F) -> Self
     where
         F: FnMut(SessionEvent) + Send + 'static,
@@ -98,20 +98,20 @@ impl Session {
         }
     }
 
-    /// Framebuffer condiviso, aggiornato prima di ogni [`SessionEvent::Update`].
+    /// Shared framebuffer, updated before every [`SessionEvent::Update`].
     pub fn framebuffer(&self) -> Arc<Mutex<Framebuffer>> {
         self.fb.clone()
     }
 
-    /// Chiude la connessione e attende la fine del thread (al massimo circa
-    /// 2 s; oltre, il thread viene lasciato terminare da solo).
+    /// Closes the connection and waits for the thread to end (at most about
+    /// 2 s; beyond that, the thread is left to finish on its own).
     pub fn stop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
         if let Ok(c) = self.control.lock()
             && let Some(c) = c.as_ref()
         {
-            // Su Windows `shutdown` non sblocca una `recv` AF_UNIX in corso (F0-04):
-            // si provoca una risposta del server, poi si chiude.
+            // On Windows `shutdown` does not unblock an in-progress AF_UNIX `recv` (F0-04):
+            // a server response is provoked, then the socket is closed.
             c.wake();
             c.shutdown();
         }

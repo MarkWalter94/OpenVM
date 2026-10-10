@@ -1,8 +1,8 @@
-//! Operazioni composte che attraversano DB e filesystem tramite il journal.
+//! Composite operations spanning DB and filesystem through the journal.
 //!
-//! I file dei dischi sono prodotti dal chiamante (in prodotto: `qemu-backend`
-//! con `qemu-img`) dentro il percorso temporaneo indicato; lo storage gestisce
-//! journal, spostamenti, hash, righe del DB e manifest.
+//! Disk files are produced by the caller (in the product: `qemu-backend`
+//! with `qemu-img`) inside the given temporary path; storage handles the
+//! journal, moves, hashes, DB rows and manifests.
 
 use std::path::Path;
 
@@ -18,28 +18,29 @@ use crate::manifest::{self, BaselineManifest, MANIFEST_FORMAT_VERSION, ManifestF
 use crate::records::{BaselineRecord, DiskRecord, FirmwareRecord, RunRecord};
 use crate::time::now_rfc3339;
 
-/// Richiesta di promozione di una baseline a VM spenta.
+/// Request to promote a baseline while the VM is powered off.
 #[derive(Debug, Clone)]
 pub struct PromoteBaseline {
-    /// VM (deve risultare `stopped`).
+    /// VM (must be `stopped`).
     pub vm_id: VmId,
-    /// Etichetta.
+    /// Label.
     pub label: String,
-    /// Arresto pulito osservato prima della promozione.
+    /// Clean shutdown observed before the promotion.
     pub clean_shutdown: bool,
-    /// Baseline protetta (non cancellabile).
+    /// Protected baseline (cannot be deleted).
     pub protected: bool,
-    /// Dimensione virtuale del disco base.
+    /// Virtual size of the base disk.
     pub virtual_size_bytes: u64,
 }
 
 type Producer<'a> = Box<dyn FnOnce(&Path) -> Result<()> + 'a>;
 
 impl Catalog {
-    /// Materializza una nuova baseline: il chiamante scrive il disco base
-    /// autonomo (e, se presenti, le vars) nei temporanei; lo storage li rende di
-    /// sola lettura, li sposta in `vms/<vm>/base/<baseline>/`, scrive il
-    /// manifest e registra disco, firmware e baseline in un'unica transazione.
+    /// Materializes a new baseline: the caller writes the standalone base disk
+    /// (and the vars, if any) into the temporaries; storage makes them
+    /// read-only, moves them into `vms/<vm>/base/<baseline>/`, writes the
+    /// manifest and registers disk, firmware and baseline in a single
+    /// transaction.
     pub fn promote_baseline(
         &mut self,
         req: &PromoteBaseline,
@@ -49,7 +50,7 @@ impl Catalog {
         let vm = self.read(|tx| tx.vm(&req.vm_id))?;
         if vm.lifecycle != Lifecycle::Stopped {
             return Err(StorageError::StateConflict(format!(
-                "baseline richiesta con VM in stato {}",
+                "baseline requested with VM in state {}",
                 vm.lifecycle
             )));
         }
@@ -185,15 +186,15 @@ impl Catalog {
         }
     }
 
-    /// Prepara un'esecuzione da una baseline (avvio o ripristino): il chiamante
-    /// crea l'overlay nel temporaneo (riceve anche il percorso assoluto della
-    /// base); le vars della baseline sono copiate dallo storage. Overlay, vars
-    /// ed esecuzione sono registrati in un'unica transazione.
+    /// Prepares a run from a baseline (start or restore): the caller creates
+    /// the overlay in the temporary (it also receives the absolute path of the
+    /// base); the baseline vars are copied by storage. Overlay, vars and run
+    /// are registered in a single transaction.
     ///
-    /// Nota per `qemu-backend`: il riferimento al backing scritto nell'overlay
-    /// deve restare valido dopo lo spostamento da `tmp/` a
-    /// `vms/<vm>/overlays/` (percorso assoluto validato o relativo calcolato
-    /// rispetto alla destinazione finale).
+    /// Note for `qemu-backend`: the backing reference written into the overlay
+    /// must stay valid after the move from `tmp/` to `vms/<vm>/overlays/`
+    /// (validated absolute path, or relative path computed against the final
+    /// destination).
     pub fn prepare_run_from_baseline(
         &mut self,
         vm_id: &VmId,
@@ -209,19 +210,18 @@ impl Catalog {
         })?;
         if vm.lifecycle != Lifecycle::Stopped {
             return Err(StorageError::StateConflict(format!(
-                "esecuzione richiesta con VM in stato {}",
+                "run requested with VM in state {}",
                 vm.lifecycle
             )));
         }
         if baseline.vm_id != *vm_id || base_disk.status != DiskStatus::Ready {
             return Err(StorageError::StateConflict(
-                "baseline non utilizzabile per questa VM".into(),
+                "baseline not usable for this VM".into(),
             ));
         }
-        // Rilevatore di scrittori e protezione della baseline per tutta la
-        // preparazione (ADR-0025 punto 2): base e vars aperti con il solo
-        // `FILE_SHARE_READ`. La verifica completa dell'hash avviene in
-        // `guard_run`, prima dell'avvio.
+        // Writer detection and baseline protection for the whole preparation
+        // (ADR-0025 point 2): base and vars opened with `FILE_SHARE_READ`
+        // only. The full hash check happens in `guard_run`, before start.
         let _baseline_guard = self.baseline_guard(baseline_id, false)?;
         let op = OperationId::new_v7();
         let run_id = RunId::new_v7();
@@ -325,10 +325,10 @@ impl Catalog {
         }
     }
 
-    /// Come [`Self::prepare_run_from_baseline`], preceduta dal controllo del
-    /// budget ([`Self::check_new_run`]): se il budget della VM o del catalogo o
-    /// la riserva host non lo consentono, l'esecuzione è rifiutata con
-    /// [`StorageError::ResourceLimit`] prima di qualunque intento o file.
+    /// Like [`Self::prepare_run_from_baseline`], preceded by the budget check
+    /// ([`Self::check_new_run`]): if the VM or catalog budget or the host
+    /// reserve does not allow it, the run is refused with
+    /// [`StorageError::ResourceLimit`] before any intent or file.
     pub fn prepare_run_within_budget(
         &mut self,
         vm_id: &VmId,
@@ -346,9 +346,9 @@ impl Catalog {
         Ok((run, check))
     }
 
-    /// Annulla, in ordine inverso, gli intenti ancora aperti. Gli errori sono
-    /// ignorati qui: un intento non annullato resta aperto e sarà risolto da
-    /// [`Catalog::recover`] al prossimo avvio.
+    /// Aborts, in reverse order, the intents still open. Errors are ignored
+    /// here: an intent that was not aborted stays open and will be resolved
+    /// by [`Catalog::recover`] at the next start.
     fn abort_all(&mut self, intents: &[Intent]) {
         for i in intents.iter().rev() {
             let _ = self.abort(i);
@@ -359,8 +359,8 @@ impl Catalog {
 #[allow(clippy::permissions_set_readonly_false)]
 fn copy_writable(src: &Path, dst: &Path) -> Result<()> {
     std::fs::copy(src, dst).map_err(|e| StorageError::io(dst, e))?;
-    // `fs::copy` preserva l'attributo di sola lettura della sorgente (vars
-    // della baseline): la copia di un'esecuzione deve essere scrivibile.
+    // `fs::copy` preserves the source's read-only attribute (baseline vars):
+    // a run's copy must be writable.
     let mut p = std::fs::metadata(dst)
         .map_err(|e| StorageError::io(dst, e))?
         .permissions();

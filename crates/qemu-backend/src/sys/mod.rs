@@ -1,4 +1,4 @@
-//! Primitive specifiche del sistema operativo.
+//! Operating-system-specific primitives.
 
 #[cfg(windows)]
 pub(crate) mod windows;

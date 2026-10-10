@@ -1,19 +1,19 @@
-//! Prove con QEMU reale e WHPX (criterio di uscita F1, voce F1-12 di
-//! `docs/RELEASE_PLAN.md`). Ignorate per default: richiedono il laboratorio
-//! locale e si abilitano con la variabile d'ambiente `LIGHTVM_QEMU_DIR`
-//! (cartella di QEMU 11.1.0 portabile con `share/edk2-*`).
+//! Tests with real QEMU and WHPX (F1 exit criterion, item F1-12 of
+//! `docs/RELEASE_PLAN.md`). Ignored by default: they need the local
+//! lab and are enabled with the `LIGHTVM_QEMU_DIR` environment variable
+//! (folder of portable QEMU 11.1.0 with `share/edk2-*`).
 //!
 //! ```text
 //! LIGHTVM_QEMU_DIR=E:/OpenVM/lab/qemu/qemu-11.1.0 \
 //!   cargo test -p qemu-backend --test real_qemu -- --ignored --nocapture --test-threads=1
 //! ```
 //!
-//! Variabili facoltative: `LIGHTVM_LAB_DIR` (predefinita `<workspace>/lab`),
-//! `LIGHTVM_ISO` (predefinita `lab/media/ubuntu-26.04.1-desktop-amd64.iso`),
-//! `LIGHTVM_F1_CYCLES` (predefinito 20).
+//! Optional variables: `LIGHTVM_LAB_DIR` (default `<workspace>/lab`),
+//! `LIGHTVM_ISO` (default `lab/media/ubuntu-26.04.1-desktop-amd64.iso`),
+//! `LIGHTVM_F1_CYCLES` (default 20).
 //!
-//! Nessuna prova usa TCG. I tempi registrati in `lab/logs/f1-03/` provengono
-//! da un host condiviso e non sono misure di release.
+//! No test uses TCG. The times recorded in `lab/logs/f1-03/` come
+//! from a shared host and are not release measurements.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -35,7 +35,7 @@ use qemu_backend::{
     QemuRun, RunConfig, ShutdownPolicy, prepare,
 };
 
-/// Le prove reali non devono sovrapporsi (host condiviso, tempi misurati).
+/// Real tests must not overlap (shared host, measured times).
 static SERIAL: Mutex<()> = Mutex::new(());
 
 const ISO_NAME: &str = "ubuntu-26.04.1-desktop-amd64.iso";
@@ -43,9 +43,9 @@ const ISO_NAME: &str = "ubuntu-26.04.1-desktop-amd64.iso";
 struct Lab {
     qemu_dir: PathBuf,
     iso: PathBuf,
-    /// Radice di lavoro della sessione (`lab/vms/f1-03/<sessione>`).
+    /// Working root of the session (`lab/vms/f1-03/<session>`).
     work: PathBuf,
-    /// Directory dei log (`lab/logs/f1-03`).
+    /// Log directory (`lab/logs/f1-03`).
     logs: PathBuf,
     session: String,
 }
@@ -55,7 +55,7 @@ fn lab() -> Option<Lab> {
     let lab_dir = std::env::var_os("LIGHTVM_LAB_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../lab"));
-    let lab_dir = std::fs::canonicalize(&lab_dir).expect("cartella lab");
+    let lab_dir = std::fs::canonicalize(&lab_dir).expect("lab folder");
     let lab_dir = strip_verbatim(&lab_dir);
     let iso = std::env::var_os("LIGHTVM_ISO")
         .map(PathBuf::from)
@@ -74,8 +74,8 @@ fn lab() -> Option<Lab> {
     })
 }
 
-/// `canonicalize` su Windows restituisce `\\?\E:\...`, rifiutato (giustamente)
-/// da `ManagedPath`.
+/// `canonicalize` on Windows returns `\\?\E:\...`, (rightly) rejected
+/// by `ManagedPath`.
 fn strip_verbatim(p: &Path) -> PathBuf {
     let s = p.to_string_lossy();
     PathBuf::from(s.strip_prefix(r"\\?\").unwrap_or(&s).to_string())
@@ -86,7 +86,7 @@ macro_rules! require_lab {
         match lab() {
             Some(l) => l,
             None => {
-                eprintln!("LIGHTVM_QEMU_DIR non impostata: prova reale saltata");
+                eprintln!("LIGHTVM_QEMU_DIR not set: real test skipped");
                 return;
             }
         }
@@ -112,14 +112,14 @@ impl Log {
     }
 }
 
-/// Percorsi del laboratorio per le esecuzioni della prova.
+/// Lab paths for the test runs.
 struct LabPaths {
     qemu_dir: PathBuf,
     work: PathBuf,
     iso_id: MediaId,
     iso: PathBuf,
     base: PathBuf,
-    /// Supporto dati opzionale (ISO in sola lettura sul secondo CD-ROM).
+    /// Optional data medium (read-only ISO on the second CD-ROM).
     data: Option<(MediaId, PathBuf)>,
 }
 
@@ -133,14 +133,14 @@ impl LabPaths {
     fn qemu_img(&self) -> PathBuf {
         self.qemu_dir.join("qemu-img.exe")
     }
-    /// Prepara le directory dell'esecuzione, la copia delle variabili UEFI e
-    /// l'overlay qcow2 creato con `qemu-img` sulla base condivisa.
+    /// Prepares the run directories, the copy of the UEFI variables and
+    /// the qcow2 overlay created with `qemu-img` on the shared base.
     fn prepare_run(&self, run: &RunId) -> Duration {
         let t0 = Instant::now();
         let mp = |p: PathBuf| ManagedPath::verify(p).unwrap();
         let rd = self.run_dir_path(run);
         let dirs = prepare::prepare_run_dirs(&mp(rd.clone()), &mp(self.private_dir_path(run)))
-            .expect("directory dell'esecuzione");
+            .expect("run directories");
         assert_eq!(dirs.private_acl_entries, 1);
         prepare::copy_firmware_vars(
             &mp(self.qemu_dir.join("share").join("edk2-i386-vars.fd")),
@@ -183,7 +183,7 @@ impl ManagedPaths for LabPaths {
         {
             ManagedPath::verify(path)
         } else {
-            Err(BackendError::invalid("media", "supporto non registrato"))
+            Err(BackendError::invalid("media", "medium not registered"))
         }
     }
     fn run_dir(&self, run: &RunId) -> qemu_backend::error::Result<ManagedPath> {
@@ -204,7 +204,7 @@ fn lab_paths(lab: &Lab, log: &mut Log) -> LabPaths {
         base: base.clone(),
         data: None,
     };
-    // Creazione del disco principale (criterio F1 "creazione disco").
+    // Creation of the main disk (F1 criterion "disk creation").
     let t0 = Instant::now();
     let base_mp = ManagedPath::verify(&base).unwrap();
     prepare::create_disk(
@@ -216,7 +216,7 @@ fn lab_paths(lab: &Lab, log: &mut Log) -> LabPaths {
     )
     .expect("qemu-img create base");
     log.line(format!(
-        "disco qcow2 da 1024 MiB creato con prepare::create_disk in {:?}: {} ({} byte)",
+        "1024 MiB qcow2 disk created with prepare::create_disk in {:?}: {} ({} bytes)",
         t0.elapsed(),
         base.display(),
         std::fs::metadata(&base).unwrap().len()
@@ -230,11 +230,11 @@ fn lab_paths(lab: &Lab, log: &mut Log) -> LabPaths {
     );
     assert!(
         again.is_err(),
-        "il backend non sovrascrive un disco esistente"
+        "the backend does not overwrite an existing disk"
     );
     let res = prepare::host_resources(&ManagedPath::verify(&lab.work).unwrap()).unwrap();
     log.line(format!(
-        "risorse misurate: memoria totale {} MiB, disponibile {} MiB, spazio libero {} MiB",
+        "measured resources: total memory {} MiB, available {} MiB, free space {} MiB",
         res.total_memory_bytes >> 20,
         res.available_memory_bytes >> 20,
         res.free_disk_bytes >> 20
@@ -253,7 +253,7 @@ fn probe_caps(lab: &Lab, paths: &LabPaths, log: &mut Log) -> HostCapabilities {
     )
     .expect("probe_host");
     log.line(format!(
-        "probe_host: {:?}; QEMU {} sha256 {}; qemu-img sha256 {}; acceleratori {:?}; macchina consigliata {:?}; diagnostica {:?}",
+        "probe_host: {:?}; QEMU {} sha256 {}; qemu-img sha256 {}; accelerators {:?}; recommended machine {:?}; diagnostics {:?}",
         t0.elapsed(),
         caps.version,
         caps.qemu_system_sha256,
@@ -281,7 +281,7 @@ fn probe_caps(lab: &Lab, paths: &LabPaths, log: &mut Log) -> HostCapabilities {
         status,
         t0.elapsed()
     ));
-    assert!(status.is_available(), "WHPX non disponibile: {status}");
+    assert!(status.is_available(), "WHPX not available: {status}");
     caps.accelerator = status;
     caps
 }
@@ -310,8 +310,8 @@ fn spec(caps: &HostCapabilities, paths: &LabPaths, run_id: RunId) -> VmLaunchSpe
     }
 }
 
-/// PID dei processi `qemu-system-x86_64.exe` presenti (tutti gli utenti e
-/// tutti i proprietari: l'host è condiviso, si usa solo per confronto).
+/// PIDs of the existing `qemu-system-x86_64.exe` processes (all users and
+/// all owners: the host is shared, used only for comparison).
 fn qemu_pids() -> Vec<u32> {
     let out = Command::new("tasklist")
         .args([
@@ -330,15 +330,15 @@ fn qemu_pids() -> Vec<u32> {
         .collect()
 }
 
-/// Nessun processo in esecuzione con l'identità registrata (PID + tempo di
-/// creazione). `Exited` indica un oggetto processo già terminato ma ancora
-/// referenziato da un handle di terzi (per esempio antivirus o strumenti di
-/// monitoraggio dell'host): non è un orfano. Si attende fino a 2 s che sparisca
-/// e si restituisce lo stato finale.
+/// No running process with the recorded identity (PID + creation
+/// time). `Exited` denotes a process object already exited but still
+/// referenced by a third-party handle (for example antivirus or host
+/// monitoring tools): it is not an orphan. Waits up to 2 s for it to disappear
+/// and returns the final state.
 fn assert_no_orphan(id: &ProcessIdentity) -> IdentityStatus {
     let t0 = Instant::now();
     let st = loop {
-        let st = id.status().expect("stato dell'identità");
+        let st = id.status().expect("identity status");
         if st != IdentityStatus::Exited || t0.elapsed() > Duration::from_secs(2) {
             break st;
         }
@@ -346,12 +346,12 @@ fn assert_no_orphan(id: &ProcessIdentity) -> IdentityStatus {
     };
     assert!(
         !st.is_alive(),
-        "processo QEMU orfano ancora in esecuzione: {id:?} {st:?}"
+        "orphan QEMU process still running: {id:?} {st:?}"
     );
     if qemu_pids().contains(&id.pid) {
-        // Un qemu con lo stesso PID esiste ma non è il nostro (tempo di
-        // creazione diverso): ammesso solo se l'identità dice `Reused`.
-        assert_eq!(st, IdentityStatus::Reused, "PID {} ancora nostro", id.pid);
+        // A qemu with the same PID exists but it is not ours (different creation
+        // time): allowed only if the identity says `Reused`.
+        assert_eq!(st, IdentityStatus::Reused, "PID {} still ours", id.pid);
     }
     st
 }
@@ -371,12 +371,12 @@ fn stats(v: &[f64]) -> (f64, f64, f64) {
     (s[0], med, s[s.len() - 1])
 }
 
-/// Probe dei binari approvati, hash rifiutato e acceleratore assente simulato
-/// con `-accel kvm` (non compilato nella build Windows: stesso percorso di un
-/// binario senza WHPX).
+/// Probe of the approved binaries, rejected hash and missing accelerator simulated
+/// with `-accel kvm` (not compiled into the Windows build: same path as a
+/// binary without WHPX).
 #[test]
-#[ignore = "richiede QEMU reale: impostare LIGHTVM_QEMU_DIR"]
-fn reale_probe_hash_e_acceleratore_assente() {
+#[ignore = "needs real QEMU: set LIGHTVM_QEMU_DIR"]
+fn real_probe_hash_and_missing_accelerator() {
     let _g = SERIAL
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -385,7 +385,7 @@ fn reale_probe_hash_e_acceleratore_assente() {
     let paths = lab_paths(&lab, &mut log);
     let caps = probe_caps(&lab, &paths, &mut log);
 
-    // 1. Hash non approvato: il binario non viene eseguito.
+    // 1. Unapproved hash: the binary is not executed.
     let cfg = ProbeConfig {
         approved_qemu_system_sha256: vec!["00".repeat(32)],
         ..ProbeConfig::default()
@@ -398,13 +398,13 @@ fn reale_probe_hash_e_acceleratore_assente() {
     .unwrap_err();
     let p = e.to_public();
     log.line(format!(
-        "hash non approvato: {e} -> {} / {}",
+        "unapproved hash: {e} -> {} / {}",
         p.code, p.message
     ));
     assert!(matches!(e, BackendError::UnapprovedBinary { .. }));
     assert_eq!(p.code, ErrorCode::Unsupported);
 
-    // 2. Acceleratore assente: probe reale con `-accel kvm`.
+    // 2. Missing accelerator: real probe with `-accel kvm`.
     let probe_dir = ManagedPath::verify(lab.work.join("p").join("probe")).unwrap();
     let machine = caps.recommended_machine().unwrap().clone();
     let cpu = caps.cpu_model("qemu64").unwrap();
@@ -430,10 +430,10 @@ fn reale_probe_hash_e_acceleratore_assente() {
         .collect();
     assert!(
         leftover.is_empty(),
-        "processi QEMU nuovi dopo il probe: {leftover:?}"
+        "new QEMU processes after the probe: {leftover:?}"
     );
 
-    // 3. Avvio rifiutato prima dello spawn con l'esito del probe negativo.
+    // 3. Launch refused before the spawn with a negative probe outcome.
     let mut caps_kvm = caps.clone();
     caps_kvm.accelerator = status;
     let run_id = RunId::new_v7();
@@ -445,7 +445,7 @@ fn reale_probe_hash_e_acceleratore_assente() {
         .unwrap_err();
     let p = e.to_public();
     log.line(format!(
-        "avvio con acceleratore assente: {} / {}",
+        "launch with missing accelerator: {} / {}",
         p.code, p.message
     ));
     assert_eq!(p.code, ErrorCode::Unsupported);
@@ -456,7 +456,7 @@ fn reale_probe_hash_e_acceleratore_assente() {
     );
     assert!(!paths.private_dir_path(&run_id).join("qmp.sock").exists());
 
-    // 4. Specifica WHPX ma probe che ha verificato un altro acceleratore.
+    // 4. WHPX specification but a probe that verified another accelerator.
     let mut caps_mismatch = caps.clone();
     caps_mismatch.accelerator = AcceleratorStatus::Available {
         accelerator: Accelerator::Kvm,
@@ -473,39 +473,39 @@ fn reale_probe_hash_e_acceleratore_assente() {
         ))
         .unwrap_err();
     log.line(format!(
-        "acceleratore diverso dal probe: {}",
+        "accelerator different from the probe: {}",
         e.to_public().message
     ));
     assert_eq!(e.code(), ErrorCode::Unsupported);
 }
 
-/// Percorsi e risorse non validi rifiutati prima dello spawn.
+/// Invalid paths and resources rejected before the spawn.
 #[test]
-#[ignore = "richiede QEMU reale: impostare LIGHTVM_QEMU_DIR"]
-fn reale_rifiuto_percorsi_e_risorse() {
+#[ignore = "needs real QEMU: set LIGHTVM_QEMU_DIR"]
+fn real_rejection_of_paths_and_resources() {
     let _g = SERIAL
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let lab = require_lab!();
-    let mut log = Log::new(&lab, "rifiuti");
+    let mut log = Log::new(&lab, "rejections");
     let paths = lab_paths(&lab, &mut log);
     let caps = probe_caps(&lab, &paths, &mut log);
     let before = qemu_pids();
     let rt = rt();
 
     let mut checks: Vec<(&str, BackendError)> = Vec::new();
-    // Percorsi.
+    // Paths.
     for (name, p) in [
-        ("virgola", lab.work.join("a,file.driver=nbd").join("x.iso")),
-        ("relativo", PathBuf::from(r"lab\media\x.iso")),
+        ("comma", lab.work.join("a,file.driver=nbd").join("x.iso")),
+        ("relative", PathBuf::from(r"lab\media\x.iso")),
         ("unc", PathBuf::from(r"\\server\share\x.iso")),
-        ("dispositivo", PathBuf::from(r"\\.\PhysicalDrive0")),
+        ("device", PathBuf::from(r"\\.\PhysicalDrive0")),
         ("traversal", lab.work.join("..").join("x.iso")),
-        ("protocollo", PathBuf::from("nbd://127.0.0.1/x")),
+        ("protocol", PathBuf::from("nbd://127.0.0.1/x")),
     ] {
         checks.push((name, ManagedPath::verify(p).unwrap_err()));
     }
-    // Media con percorso non valido restituito dal registro.
+    // Medium with an invalid path returned by the registry.
     let bad_iso = LabPaths {
         iso: lab.work.join("a,b.iso"),
         qemu_dir: paths.qemu_dir.clone(),
@@ -524,21 +524,21 @@ fn reale_rifiuto_percorsi_e_risorse() {
             RunConfig::default(),
         ))
         .unwrap_err();
-    checks.push(("media con virgola", e));
-    // Media non registrato.
+    checks.push(("medium with comma", e));
+    // Unregistered medium.
     let mut s = spec(&caps, &paths, run_id);
     s.install_media = Some(MediaId::new_v7());
     checks.push((
-        "media non registrato",
+        "unregistered medium",
         rt.block_on(QemuRun::start(&caps, &s, &paths, RunConfig::default()))
             .unwrap_err(),
     ));
-    // Risorse.
+    // Resources.
     for (name, vcpus, mem) in [
         ("vcpu 0", 0, 2048),
         ("vcpu 65", 65, 2048),
         ("ram 64 MiB", 2, 64),
-        ("ram eccessiva", 2, u32::MAX),
+        ("excessive ram", 2, u32::MAX),
     ] {
         let mut s = spec(&caps, &paths, run_id);
         s.vcpus = vcpus;
@@ -551,26 +551,26 @@ fn reale_rifiuto_percorsi_e_risorse() {
     }
     checks.push(("cpu host", CpuModel::nominal("host").unwrap_err()));
     checks.push((
-        "cpu con flag",
+        "cpu with flags",
         CpuModel::nominal("qemu64,+vmx").unwrap_err(),
     ));
     checks.push((
-        "macchina alias q35",
+        "q35 alias machine",
         qemu_backend::MachineType::versioned_q35("q35").unwrap_err(),
     ));
-    checks.push(("cpu assente", caps.cpu_model("Fantasia-v9").unwrap_err()));
+    checks.push(("missing cpu", caps.cpu_model("Fantasia-v9").unwrap_err()));
     checks.push((
-        "protocollo nbd",
+        "nbd protocol",
         qemu_backend::validate::check_block_protocol("nbd").unwrap_err(),
     ));
     checks.push((
-        "protocollo https",
+        "https protocol",
         qemu_backend::validate::check_block_protocol("https").unwrap_err(),
     ));
 
     for (name, e) in &checks {
         let p = e.to_public();
-        log.line(format!("rifiuto [{name}]: {} / {}", p.code, p.message));
+        log.line(format!("rejection [{name}]: {} / {}", p.code, p.message));
         assert!(
             matches!(
                 p.code,
@@ -580,27 +580,27 @@ fn reale_rifiuto_percorsi_e_risorse() {
         );
     }
     assert!(!paths.private_dir_path(&run_id).join("qmp.sock").exists());
-    let nuovi: Vec<_> = qemu_pids()
+    let new_pids: Vec<_> = qemu_pids()
         .into_iter()
         .filter(|p| !before.contains(p))
         .collect();
     assert!(
-        nuovi.is_empty(),
-        "QEMU avviato da una richiesta rifiutata: {nuovi:?}"
+        new_pids.is_empty(),
+        "QEMU started by a rejected request: {new_pids:?}"
     );
     log.line(format!(
-        "rifiuti verificati: {}, nessun processo QEMU creato",
+        "rejections verified: {}, no QEMU process created",
         checks.len()
     ));
 }
 
-/// Il rilevatore di NIC funziona su QEMU reale: con una NIC esplicita (senza
-/// backend di rete, VM in pausa) `info network` e `query-pci` la riportano.
-/// Il processo è avviato direttamente (fuori dall'API, che non può produrre una
-/// NIC) e terminato al termine.
+/// The NIC detector works on real QEMU: with an explicit NIC (without a
+/// network backend, VM paused) `info network` and `query-pci` report it.
+/// The process is started directly (outside the API, which cannot produce a
+/// NIC) and terminated at the end.
 #[test]
-#[ignore = "richiede QEMU reale: impostare LIGHTVM_QEMU_DIR"]
-fn reale_rilevatore_nic() {
+#[ignore = "needs real QEMU: set LIGHTVM_QEMU_DIR"]
+fn real_nic_detector() {
     let _g = SERIAL
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -665,20 +665,20 @@ fn reale_rilevatore_nic() {
         (info, pci)
     });
     let code = child.0.wait().ok().and_then(|s| s.code());
-    log.line(format!("info network con NIC: {:?}", info.trim()));
-    log.line(format!("query-pci classe rete: {pci:?}; uscita {code:?}"));
+    log.line(format!("info network with NIC: {:?}", info.trim()));
+    log.line(format!("query-pci network class: {pci:?}; exit {code:?}"));
     let e = check_no_nic(&info, &pci).unwrap_err();
-    log.line(format!("verifica NIC: {e} -> {}", e.to_public().code));
+    log.line(format!("NIC check: {e} -> {}", e.to_public().code));
     assert!(!pci.is_empty());
     assert!(!info.trim().is_empty());
     let _ = std::fs::remove_file(sock.as_path());
 }
 
-/// Criterio di uscita F1: almeno 20 cicli start/stop reali con WHPX, disco
-/// overlay creato con `qemu-img`, nessun orfano, nessuna NIC inattesa.
+/// F1 exit criterion: at least 20 real start/stop cycles with WHPX, overlay
+/// disk created with `qemu-img`, no orphans, no unexpected NIC.
 #[test]
-#[ignore = "richiede QEMU reale: impostare LIGHTVM_QEMU_DIR"]
-fn reale_cicli_start_stop() {
+#[ignore = "needs real QEMU: set LIGHTVM_QEMU_DIR"]
+fn real_start_stop_cycles() {
     let _g = SERIAL
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -687,15 +687,15 @@ fn reale_cicli_start_stop() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(20);
-    let mut log = Log::new(&lab, "cicli");
-    log.line("Host condiviso: i tempi seguenti non sono misure di release.");
+    let mut log = Log::new(&lab, "cycles");
+    log.line("Shared host: the following times are not release measurements.");
     let paths = lab_paths(&lab, &mut log);
     let caps = probe_caps(&lab, &paths, &mut log);
-    let csv_path = lab.logs.join(format!("{}-cicli.csv", lab.session));
+    let csv_path = lab.logs.join(format!("{}-cycles.csv", lab.session));
     let mut csv = std::fs::File::create(&csv_path).unwrap();
     writeln!(
         csv,
-        "ciclo,run_id,pid,overlay_ms,start_ms,stop_ms,close_ms,fase,codice,classe,causa,attivi_dopo,job_chiuso,handle_rilasciato,identita_dopo,nic_ok,stato_riconciliato,note"
+        "cycle,run_id,pid,overlay_ms,start_ms,stop_ms,close_ms,phase,code,class,cause,active_after,job_closed,handle_released,identity_after,nic_ok,reconciled_state,notes"
     )
     .unwrap();
     let rt = rt();
@@ -708,14 +708,14 @@ fn reale_cicli_start_stop() {
         let run_id = RunId::new_v7();
         let overlay = paths.prepare_run(&run_id);
         if i == 1 {
-            // Socket orfano di un'esecuzione precedente: va rimosso dal backend.
-            std::fs::write(paths.private_dir_path(&run_id).join("qmp.sock"), b"orfano").unwrap();
+            // Orphan socket of a previous run: the backend must remove it.
+            std::fs::write(paths.private_dir_path(&run_id).join("qmp.sock"), b"orphan").unwrap();
         }
         let s = spec(&caps, &paths, run_id);
         let t0 = Instant::now();
         let run = rt
             .block_on(QemuRun::start(&caps, &s, &paths, RunConfig::default()))
-            .unwrap_or_else(|e| panic!("ciclo {i}: avvio fallito: {e}"));
+            .unwrap_or_else(|e| panic!("cycle {i}: launch failed: {e}"));
         let t_start = t0.elapsed();
         let id = run.identity();
         identities.push(id);
@@ -725,16 +725,16 @@ fn reale_cicli_start_stop() {
         assert_eq!(
             run.active_processes().unwrap(),
             1,
-            "un solo processo nel job"
+            "a single process in the job"
         );
         let nic_ok = rt.block_on(run.verify_no_nic()).is_ok();
-        assert!(nic_ok, "ciclo {i}: NIC inattesa");
+        assert!(nic_ok, "cycle {i}: unexpected NIC");
         let rec = rt.block_on(run.reconcile(Duration::from_secs(5))).unwrap();
         assert_eq!(rec.observed.state, VmState::Running, "{rec:?}");
 
         if i == 1 {
-            // Cattura e input reali sulla prima esecuzione: screenshot ripetuti
-            // fino a un'immagine non nera (firmware o boot loader), massimo 30 s.
+            // Real capture and input on the first run: repeated screenshots
+            // until a non-black image (firmware or boot loader), at most 30 s.
             let t_shot = Instant::now();
             let (shot, img) = loop {
                 std::thread::sleep(Duration::from_secs(1));
@@ -744,7 +744,7 @@ fn reale_cicli_start_stop() {
                 }
             };
             log.line(format!(
-                "screendump dopo {:?}: {}x{}, PNG {} byte, sha256 {}, non nero {:.2}%",
+                "screendump after {:?}: {}x{}, PNG {} bytes, sha256 {}, non-black {:.2}%",
                 t_shot.elapsed(),
                 shot.geometry.width,
                 shot.geometry.height,
@@ -754,17 +754,14 @@ fn reale_cicli_start_stop() {
             ));
             let png_path = lab.logs.join(format!("{}-screendump.png", lab.session));
             std::fs::write(&png_path, &shot.png).unwrap();
-            log.line(format!("PNG salvato: {}", png_path.display()));
+            log.line(format!("PNG saved: {}", png_path.display()));
             let leftovers: Vec<_> = std::fs::read_dir(paths.private_dir_path(&run_id))
                 .unwrap()
                 .filter_map(|e| e.ok())
                 .map(|e| e.file_name().to_string_lossy().into_owned())
                 .filter(|n| n.ends_with(".ppm"))
                 .collect();
-            assert!(
-                leftovers.is_empty(),
-                "file screendump rimasti: {leftovers:?}"
-            );
+            assert!(leftovers.is_empty(), "screendump files left: {leftovers:?}");
             let g = shot.geometry;
             let shift_down = InputEvent::Key(KeyAction {
                 qcode: QCode::parse("shift").unwrap(),
@@ -778,11 +775,11 @@ fn reale_cicli_start_stop() {
             assert!(run.has_pressed_input());
             let released = rt.block_on(run.release_all_input(run_id)).unwrap();
             log.line(format!(
-                "input: movimento + shift premuto, rilasciati {released} tasti"
+                "input: move + shift pressed, released {released} keys"
             ));
             assert_eq!(released, 1);
             assert!(!run.has_pressed_input());
-            // Geometria obsoleta e run_id superato rifiutati.
+            // Stale geometry and superseded run_id rejected.
             let stale = DisplayGeometry::new(g.width + 1, g.height).unwrap();
             assert!(rt.block_on(run.send_input(run_id, stale, &[])).is_err());
             assert!(
@@ -794,15 +791,15 @@ fn reale_cicli_start_stop() {
                 down: true,
             });
             assert!(rt.block_on(run.send_input(run_id, g, &[power])).is_err());
-            // Limite di dimensione dello screenshot.
+            // Screenshot size limit.
             let e = rt.block_on(run.screenshot_limited(16)).unwrap_err();
             assert_eq!(e.code(), ErrorCode::ResourceLimit);
         } else {
             std::thread::sleep(Duration::from_millis(1500));
         }
 
-        // Arresto: alternanza fra scalata completa (powerdown → quit), solo
-        // quit ed Emergency Stop nell'ultimo ciclo.
+        // Shutdown: alternating between full escalation (powerdown → quit), quit
+        // only, and Emergency Stop in the last cycle.
         let t1 = Instant::now();
         let report = if i == cycles {
             rt.block_on(run.emergency_stop(Duration::from_secs(10)))
@@ -826,7 +823,7 @@ fn reale_cicli_start_stop() {
         let t_stop = t1.elapsed();
         assert_eq!(
             report.active_after, 0,
-            "ciclo {i}: processi nel job dopo l'uscita"
+            "cycle {i}: processes in the job after the exit"
         );
         match report.phase {
             StopPhase::Quit => {
@@ -838,21 +835,21 @@ fn reale_cicli_start_stop() {
                 assert_eq!(report.class, ExitCodeClass::EmergencyStop);
             }
             StopPhase::Powerdown => assert_eq!(report.cause, ExitCause::GuestShutdown),
-            StopPhase::AlreadyExited => panic!("ciclo {i}: uscita prima dell'arresto"),
+            StopPhase::AlreadyExited => panic!("cycle {i}: exit before the shutdown"),
         }
         let rec = rt.block_on(run.reconcile(Duration::from_secs(1))).unwrap();
         assert_eq!(rec.observed.state, VmState::Stopped, "{rec:?}");
         let t2 = Instant::now();
         let closed = rt.block_on(run.close()).unwrap();
         let t_close = t2.elapsed();
-        assert!(closed.job_closed, "ciclo {i}: Job Object non chiuso");
+        assert!(closed.job_closed, "cycle {i}: Job Object not closed");
         assert!(
             closed.process_handle_released,
-            "ciclo {i}: handle del processo trattenuto"
+            "cycle {i}: process handle retained"
         );
         assert!(!closed.forced);
         assert_eq!(closed.active_at_close, 0);
-        assert!(!closed.qmp_socket_left, "ciclo {i}: socket QMP rimasto");
+        assert!(!closed.qmp_socket_left, "cycle {i}: QMP socket left");
         let after = assert_no_orphan(&id);
         *phases.entry(format!("{:?}", report.phase)).or_default() += 1;
         start_ms.push(ms(t_start));
@@ -877,35 +874,35 @@ fn reale_cicli_start_stop() {
             report.notes.join(" / ").replace(',', ";")
         );
         writeln!(csv, "{line}").unwrap();
-        log.line(format!("ciclo {line}"));
+        log.line(format!("cycle {line}"));
     }
 
-    // Verifica finale su tutte le identità della sessione.
+    // Final check on all identities of the session.
     for id in &identities {
         assert_no_orphan(id);
     }
     let (a0, a1, a2) = stats(&start_ms);
     let (b0, b1, b2) = stats(&stop_ms);
     log.line(format!(
-        "RIEPILOGO {cycles} cicli: avvio ms min {a0:.1} mediana {a1:.1} max {a2:.1}; \
-         arresto ms min {b0:.1} mediana {b1:.1} max {b2:.1}; fasi {phases:?}; \
-         nessun orfano su {} identità; csv {}",
+        "SUMMARY {cycles} cycles: start ms min {a0:.1} median {a1:.1} max {a2:.1}; \
+         stop ms min {b0:.1} median {b1:.1} max {b2:.1}; phases {phases:?}; \
+         no orphans across {} identities; csv {}",
         identities.len(),
         csv_path.display()
     ));
     assert!(cycles >= 20 || std::env::var("LIGHTVM_F1_CYCLES").is_ok());
 }
 
-/// F1-17 (D-1, ADR-0011 criterio 2): boot della ISO live con un modello CPU
-/// nominale più ricco di `qemu64` (`LIGHTVM_F1_CPU`, predefinito
-/// `Skylake-Client-v4`), 2 vCPU, 4096 MiB. Uno screendump ogni 10 s per al
-/// massimo `LIGHTVM_F1_BOOT_S` secondi (predefinito 240), salvati in
-/// `lab/logs/f1-03/`. Il test verifica solo che il processo resti vivo e che
-/// le immagini non siano nere; l'arrivo al desktop si giudica dalle immagini
-/// e si registra nel file di verifica.
+/// F1-17 (D-1, ADR-0011 criterion 2): boot of the live ISO with a nominal CPU
+/// model richer than `qemu64` (`LIGHTVM_F1_CPU`, default
+/// `Skylake-Client-v4`), 2 vCPUs, 4096 MiB. One screendump every 10 s for at
+/// most `LIGHTVM_F1_BOOT_S` seconds (default 240), saved in
+/// `lab/logs/f1-03/`. The test only verifies that the process stays alive and that
+/// the images are not black; reaching the desktop is judged from the images
+/// and recorded in the verification file.
 #[test]
-#[ignore = "richiede QEMU reale: impostare LIGHTVM_QEMU_DIR"]
-fn reale_boot_live_cpu_nominale() {
+#[ignore = "needs real QEMU: set LIGHTVM_QEMU_DIR"]
+fn real_live_boot_nominal_cpu() {
     let _g = SERIAL
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -920,7 +917,7 @@ fn reale_boot_live_cpu_nominale() {
     let caps = probe_caps(&lab, &paths, &mut log);
     let cpu = caps
         .cpu_model(&cpu_name)
-        .unwrap_or_else(|e| panic!("modello {cpu_name}: {e}"));
+        .unwrap_or_else(|e| panic!("model {cpu_name}: {e}"));
     let run_id = RunId::new_v7();
     paths.prepare_run(&run_id);
     let mut s = spec(&caps, &paths, run_id);
@@ -930,9 +927,9 @@ fn reale_boot_live_cpu_nominale() {
     let t0 = Instant::now();
     let run = rt
         .block_on(QemuRun::start(&caps, &s, &paths, RunConfig::default()))
-        .unwrap_or_else(|e| panic!("avvio con {cpu_name}: {e}"));
+        .unwrap_or_else(|e| panic!("launch with {cpu_name}: {e}"));
     log.line(format!(
-        "avvio con -cpu {cpu_name}: {:?}, pid {}",
+        "launch with -cpu {cpu_name}: {:?}, pid {}",
         t0.elapsed(),
         run.identity().pid
     ));
@@ -942,7 +939,7 @@ fn reale_boot_live_cpu_nominale() {
         assert_eq!(
             run.state(),
             ProcessState::Running,
-            "QEMU uscito durante il boot con {cpu_name}"
+            "QEMU exited during boot with {cpu_name}"
         );
         let (shot, img) = rt.block_on(run.screenshot_rgb()).unwrap();
         n += 1;
@@ -953,7 +950,7 @@ fn reale_boot_live_cpu_nominale() {
         ));
         std::fs::write(&png, &shot.png).unwrap();
         log.line(format!(
-            "t={:>4}s {}x{} non nero {:.2}% sha256 {} -> {}",
+            "t={:>4}s {}x{} non-black {:.2}% sha256 {} -> {}",
             t0.elapsed().as_secs(),
             shot.geometry.width,
             shot.geometry.height,
@@ -968,26 +965,26 @@ fn reale_boot_live_cpu_nominale() {
     assert_eq!(report.active_after, 0);
     let closed = rt.block_on(run.close()).unwrap();
     assert!(closed.job_closed);
-    log.line(format!("{n} screendump; arresto {:?}", report.phase));
+    log.line(format!("{n} screendumps; shutdown {:?}", report.phase));
 }
 
-/// ADR-0017: limiti del Job Object applicati a QEMU reale. (1) Tetto CPU e
-/// memoria del job = RAM + 1024 MiB: riletti dal job, VM avviata, picco
-/// registrato. (2) Memoria del job inferiore alla RAM del guest (512 MiB contro
-/// 2048 MiB): QEMU non deve restare in esecuzione oltre il limite.
+/// ADR-0017: Job Object limits applied to real QEMU. (1) CPU cap and
+/// job memory = RAM + 1024 MiB: read back from the job, VM started, peak
+/// recorded. (2) Job memory lower than the guest RAM (512 MiB versus
+/// 2048 MiB): QEMU must not keep running beyond the limit.
 #[test]
-#[ignore = "richiede QEMU reale: impostare LIGHTVM_QEMU_DIR"]
-fn reale_limiti_job_cpu_e_memoria() {
+#[ignore = "needs real QEMU: set LIGHTVM_QEMU_DIR"]
+fn real_job_cpu_and_memory_limits() {
     let _g = SERIAL
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let lab = require_lab!();
-    let mut log = Log::new(&lab, "limiti-job");
+    let mut log = Log::new(&lab, "job-limits");
     let paths = lab_paths(&lab, &mut log);
     let caps = probe_caps(&lab, &paths, &mut log);
     let rt = rt();
 
-    // (1) Limiti compatibili con la VM.
+    // (1) Limits compatible with the VM.
     let run_id = RunId::new_v7();
     paths.prepare_run(&run_id);
     let mut s = spec(&caps, &paths, run_id);
@@ -997,11 +994,11 @@ fn reale_limiti_job_cpu_e_memoria() {
     };
     let run = rt
         .block_on(QemuRun::start(&caps, &s, &paths, RunConfig::default()))
-        .expect("avvio con limiti");
+        .expect("launch with limits");
     std::thread::sleep(Duration::from_secs(5));
     assert_eq!(run.state(), ProcessState::Running);
     let r = run.limit_report().unwrap();
-    log.line(format!("limiti applicati: {r:?}"));
+    log.line(format!("applied limits: {r:?}"));
     assert_eq!(r.cpu_rate, Some(300));
     assert_eq!(r.job_memory_bytes, Some((2048 + 1024) << 20));
     assert!(r.peak_job_memory_bytes > 0);
@@ -1014,7 +1011,7 @@ fn reale_limiti_job_cpu_e_memoria() {
     let _ = rt.block_on(run.close()).unwrap();
     assert_no_orphan(&id);
 
-    // (2) Memoria del job sotto la RAM del guest.
+    // (2) Job memory below the guest RAM.
     let run_id = RunId::new_v7();
     paths.prepare_run(&run_id);
     let mut s = spec(&caps, &paths, run_id);
@@ -1025,30 +1022,30 @@ fn reale_limiti_job_cpu_e_memoria() {
     let t0 = Instant::now();
     match rt.block_on(QemuRun::start(&caps, &s, &paths, RunConfig::default())) {
         Err(e) => log.line(format!(
-            "memoria del job 512 MiB: avvio rifiutato dopo {:?}: {e}",
+            "job memory 512 MiB: launch refused after {:?}: {e}",
             t0.elapsed()
         )),
         Ok(run) => {
             let id = run.identity();
-            let mut uscito = None;
+            let mut exited = None;
             while t0.elapsed() < Duration::from_secs(60) {
                 if let ProcessState::Exited { .. } = run.state() {
-                    uscito = Some(t0.elapsed());
+                    exited = Some(t0.elapsed());
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(200));
             }
             let r = run.limit_report().unwrap();
             log.line(format!(
-                "memoria del job 512 MiB: stato {:?}, uscita dopo {uscito:?}, rapporto {r:?}, limite raggiunto {}",
+                "job memory 512 MiB: state {:?}, exit after {exited:?}, report {r:?}, limit reached {}",
                 run.state(),
                 r.memory_limit_reached()
             ));
-            if uscito.is_none() {
+            if exited.is_none() {
                 let _ = rt.block_on(run.emergency_stop(Duration::from_secs(10)));
                 let _ = rt.block_on(run.close());
                 assert_no_orphan(&id);
-                panic!("QEMU ancora in esecuzione oltre il limite di memoria del job");
+                panic!("QEMU still running beyond the job memory limit");
             }
             assert!(r.peak_job_memory_bytes <= 512 << 20);
             let _ = rt.block_on(run.close());
@@ -1057,54 +1054,58 @@ fn reale_limiti_job_cpu_e_memoria() {
     }
 }
 
-/// Qcode (layout US) e Shift per un carattere del comando digitato nel guest.
+/// Qcode (US layout) and Shift for a character of the command typed in the guest.
 fn qcode_us(c: char) -> (&'static str, bool) {
-    const LETTERE: [&str; 26] = [
+    const LETTERS: [&str; 26] = [
         "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r",
         "s", "t", "u", "v", "w", "x", "y", "z",
     ];
-    const CIFRE: [&str; 10] = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
+    const DIGITS: [&str; 10] = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
     match c {
-        'a'..='z' => (LETTERE[(c as u8 - b'a') as usize], false),
-        '0'..='9' => (CIFRE[(c as u8 - b'0') as usize], false),
+        'a'..='z' => (LETTERS[(c as u8 - b'a') as usize], false),
+        '0'..='9' => (DIGITS[(c as u8 - b'0') as usize], false),
         ' ' => ("spc", false),
         '-' => ("minus", false),
         '/' => ("slash", false),
         '.' => ("dot", false),
         '&' => ("7", true),
         '\n' => ("ret", false),
-        _ => panic!("carattere non previsto: {c:?}"),
+        _ => panic!("unexpected character: {c:?}"),
     }
 }
 
-fn tasto(qcode: &str, down: bool) -> InputEvent {
+fn key(qcode: &str, down: bool) -> InputEvent {
     InputEvent::Key(KeyAction {
         qcode: QCode::parse(qcode).unwrap(),
         down,
     })
 }
 
-/// P-5, parte Linux (docs/STATUS.md): nel guest Ubuntu live, con l'ISO dati
+/// P-5, Linux part (docs/STATUS.md): in the live Ubuntu guest, with the data ISO
 /// `lab/media/p5-dati.iso` (script `crates/lightvm-service/scripts/
-/// p5-prova-guest.sh` e `lightvm-peer-check` per Linux) sul secondo CD-ROM,
-/// apre un terminale e lancia la prova; salva gli screenshot in
-/// `lab/logs/f1-03/` per la lettura dell'esito. `LIGHTVM_P5_ISO` sostituisce
-/// il percorso dell'ISO dati.
+/// p5-guest-test.sh` and `lightvm-peer-check` for Linux) on the second CD-ROM,
+/// opens a terminal and runs the test; saves the screenshots in
+/// `lab/logs/f1-03/` for reading the outcome. `LIGHTVM_P5_ISO` overrides
+/// the path of the data ISO.
 #[test]
-#[ignore = "richiede QEMU reale: impostare LIGHTVM_QEMU_DIR"]
-fn reale_p5_secondo_utente_linux_in_vm() {
+#[ignore = "needs real QEMU: set LIGHTVM_QEMU_DIR"]
+fn real_p5_second_user_linux_in_vm() {
     let _g = SERIAL
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let lab = require_lab!();
-    let dati = std::env::var_os("LIGHTVM_P5_ISO")
+    let data_iso = std::env::var_os("LIGHTVM_P5_ISO")
         .map(PathBuf::from)
         .unwrap_or_else(|| lab.iso.with_file_name("p5-dati.iso"));
-    assert!(dati.is_file(), "ISO dati assente: {}", dati.display());
+    assert!(
+        data_iso.is_file(),
+        "data ISO missing: {}",
+        data_iso.display()
+    );
     let mut log = Log::new(&lab, "p5");
     let mut paths = lab_paths(&lab, &mut log);
     let data_id = MediaId::new_v7();
-    paths.data = Some((data_id, dati));
+    paths.data = Some((data_id, data_iso));
     let caps = probe_caps(&lab, &paths, &mut log);
     let run_id = RunId::new_v7();
     paths.prepare_run(&run_id);
@@ -1115,67 +1116,67 @@ fn reale_p5_secondo_utente_linux_in_vm() {
     let rt = rt();
     let run = rt
         .block_on(QemuRun::start(&caps, &s, &paths, RunConfig::default()))
-        .expect("avvio");
+        .expect("launch");
     let t0 = Instant::now();
-    let salva = |nome: &str, log: &mut Log| {
+    let save = |name: &str, log: &mut Log| {
         let (shot, img) = rt.block_on(run.screenshot_rgb()).unwrap();
-        let png = lab.logs.join(format!("{}-p5-{nome}.png", lab.session));
+        let png = lab.logs.join(format!("{}-p5-{name}.png", lab.session));
         std::fs::write(&png, &shot.png).unwrap();
         log.line(format!(
-            "t={:>4}s {nome}: non nero {:.2}% -> {}",
+            "t={:>4}s {name}: non-black {:.2}% -> {}",
             t0.elapsed().as_secs(),
             img.non_black_percent(),
             png.display()
         ));
         shot.geometry
     };
-    // Desktop live: circa 100 s con Skylake-Client-v4 (F1-03).
+    // Live desktop: about 100 s with Skylake-Client-v4 (F1-03).
     std::thread::sleep(Duration::from_secs(130));
-    let g = salva("desktop", &mut log);
-    // Terminale: Ctrl+Alt+T.
+    let g = save("desktop", &mut log);
+    // Terminal: Ctrl+Alt+T.
     let combo = [
-        tasto("ctrl", true),
-        tasto("alt", true),
-        tasto("t", true),
-        tasto("t", false),
-        tasto("alt", false),
-        tasto("ctrl", false),
+        key("ctrl", true),
+        key("alt", true),
+        key("t", true),
+        key("t", false),
+        key("alt", false),
+        key("ctrl", false),
     ];
     rt.block_on(run.send_input(run_id, g, &combo)).unwrap();
     std::thread::sleep(Duration::from_secs(8));
-    salva("terminale", &mut log);
-    let comando = "sudo mount -o ro /dev/sr1 /mnt && bash /mnt/prova.sh\n";
-    for c in comando.chars() {
+    save("terminal", &mut log);
+    let command = "sudo mount -o ro /dev/sr1 /mnt && bash /mnt/prova.sh\n";
+    for c in command.chars() {
         let (q, shift) = qcode_us(c);
         let mut ev = Vec::new();
         if shift {
-            ev.push(tasto("shift", true));
+            ev.push(key("shift", true));
         }
-        ev.push(tasto(q, true));
-        ev.push(tasto(q, false));
+        ev.push(key(q, true));
+        ev.push(key(q, false));
         if shift {
-            ev.push(tasto("shift", false));
+            ev.push(key("shift", false));
         }
         rt.block_on(run.send_input(run_id, g, &ev)).unwrap();
         std::thread::sleep(Duration::from_millis(40));
     }
     std::thread::sleep(Duration::from_secs(20));
-    salva("esito", &mut log);
+    save("outcome", &mut log);
     let id = run.identity();
     let _ = rt.block_on(run.emergency_stop(Duration::from_secs(10)));
     let _ = rt.block_on(run.close());
     assert_no_orphan(&id);
 }
 
-/// Percorsi con disco e variabili UEFI persistenti fra esecuzioni (F1-17):
-/// stessi percorsi del laboratorio per il resto.
-struct DiscoFisso<'a> {
+/// Paths with disk and UEFI variables persistent across runs (F1-17):
+/// same lab paths for everything else.
+struct FixedDisk<'a> {
     base: &'a LabPaths,
-    disco: PathBuf,
+    disk: PathBuf,
     vars: PathBuf,
 }
 
-impl ManagedPaths for DiscoFisso<'_> {
+impl ManagedPaths for FixedDisk<'_> {
     fn qemu_system(&self) -> qemu_backend::error::Result<ManagedPath> {
         self.base.qemu_system()
     }
@@ -1186,7 +1187,7 @@ impl ManagedPaths for DiscoFisso<'_> {
         ManagedPath::verify(&self.vars)
     }
     fn disk(&self, _run: &RunId) -> qemu_backend::error::Result<Option<ManagedPath>> {
-        ManagedPath::verify(&self.disco).map(Some)
+        ManagedPath::verify(&self.disk).map(Some)
     }
     fn protected_readonly(&self, _run: &RunId) -> qemu_backend::error::Result<Vec<ManagedPath>> {
         Ok(Vec::new())
@@ -1202,16 +1203,16 @@ impl ManagedPaths for DiscoFisso<'_> {
     }
 }
 
-/// Disco (32 GiB) e variabili UEFI di F1-17 in `lab/vms/f1-17/`, creati se assenti.
-fn disco_f1_17(lab: &Lab, paths: &LabPaths) -> (PathBuf, PathBuf) {
+/// F1-17 disk (32 GiB) and UEFI variables in `lab/vms/f1-17/`, created if missing.
+fn f1_17_disk(lab: &Lab, paths: &LabPaths) -> (PathBuf, PathBuf) {
     let dir = lab.work.parent().unwrap().parent().unwrap().join("f1-17");
     std::fs::create_dir_all(&dir).unwrap();
-    let disco = dir.join("disco.qcow2");
+    let disk = dir.join("disco.qcow2");
     let vars = dir.join("vars.fd");
-    if !disco.exists() {
+    if !disk.exists() {
         prepare::create_disk(
             &ManagedPath::verify(paths.qemu_img()).unwrap(),
-            &ManagedPath::verify(&disco).unwrap(),
+            &ManagedPath::verify(&disk).unwrap(),
             DiskFormat::Qcow2,
             32 * 1024,
             prepare::QEMU_IMG_TIMEOUT,
@@ -1225,39 +1226,39 @@ fn disco_f1_17(lab: &Lab, paths: &LabPaths) -> (PathBuf, PathBuf) {
         )
         .unwrap();
     }
-    (disco, vars)
+    (disk, vars)
 }
 
-/// F1-17, parte 1: installazione automatica di Ubuntu su disco (autoinstall da
-/// un volume `CIDATA`, `lab/media/f1-17-cidata.iso`, sul secondo CD-ROM). Il
-/// guest si spegne da solo a fine installazione (`shutdown: poweroff`).
-/// Screenshot ogni 2 minuti; attesa massima `LIGHTVM_F1_17_MIN` minuti (45).
+/// F1-17, part 1: automatic installation of Ubuntu on disk (autoinstall from
+/// a `CIDATA` volume, `lab/media/f1-17-cidata.iso`, on the second CD-ROM). The
+/// guest powers off by itself at the end of the installation (`shutdown: poweroff`).
+/// Screenshot every 2 minutes; maximum wait `LIGHTVM_F1_17_MIN` minutes (45).
 #[test]
-#[ignore = "richiede QEMU reale: impostare LIGHTVM_QEMU_DIR"]
-fn reale_f1_17_installazione_su_disco() {
+#[ignore = "needs real QEMU: set LIGHTVM_QEMU_DIR"]
+fn real_f1_17_install_to_disk() {
     let _g = SERIAL
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let lab = require_lab!();
-    let minuti: u64 = std::env::var("LIGHTVM_F1_17_MIN")
+    let minutes: u64 = std::env::var("LIGHTVM_F1_17_MIN")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(45);
-    let mut log = Log::new(&lab, "f1-17-installazione");
+    let mut log = Log::new(&lab, "f1-17-install");
     let mut paths = lab_paths(&lab, &mut log);
     let cidata = lab.iso.with_file_name("f1-17-cidata.iso");
     assert!(
         cidata.is_file(),
-        "volume CIDATA assente: {}",
+        "CIDATA volume missing: {}",
         cidata.display()
     );
     let cid = MediaId::new_v7();
     paths.data = Some((cid, cidata));
     let caps = probe_caps(&lab, &paths, &mut log);
-    let (disco, vars) = disco_f1_17(&lab, &paths);
-    let fisso = DiscoFisso {
+    let (disk, vars) = f1_17_disk(&lab, &paths);
+    let fixed = FixedDisk {
         base: &paths,
-        disco,
+        disk,
         vars,
     };
     let run_id = RunId::new_v7();
@@ -1269,24 +1270,24 @@ fn reale_f1_17_installazione_su_disco() {
     s.data_media = Some(cid);
     let rt = rt();
     let run = rt
-        .block_on(QemuRun::start(&caps, &s, &fisso, RunConfig::default()))
-        .expect("avvio dell'installazione");
+        .block_on(QemuRun::start(&caps, &s, &fixed, RunConfig::default()))
+        .expect("installation launch");
     let t0 = Instant::now();
     let mut n = 0u32;
-    let mut cliccato = false;
-    let esito = loop {
+    let mut clicked = false;
+    let outcome = loop {
         if let ProcessState::Exited { cause, code, .. } = run.state() {
             break Some((cause, code));
         }
-        // L'installatore desktop mostra il riepilogo dell'autoinstall e
-        // attende "Install" (in basso a destra) circa 2 minuti dopo l'avvio.
-        if !cliccato && t0.elapsed() >= Duration::from_secs(140) {
-            cliccato = true;
+        // The desktop installer shows the autoinstall summary and
+        // waits for "Install" (bottom right) about 2 minutes after startup.
+        if !clicked && t0.elapsed() >= Duration::from_secs(140) {
+            clicked = true;
             let (shot, _) = rt.block_on(run.screenshot_rgb()).unwrap();
             let g = shot.geometry;
             let png = lab
                 .logs
-                .join(format!("{}-f1-17-inst-riepilogo.png", lab.session));
+                .join(format!("{}-f1-17-inst-summary.png", lab.session));
             std::fs::write(&png, &shot.png).unwrap();
             let x = g.width * 1035 / 1280;
             let y = g.height * 716 / 800;
@@ -1303,11 +1304,11 @@ fn reale_f1_17_installazione_su_disco() {
             ];
             rt.block_on(run.send_input(run_id, g, &click)).unwrap();
             log.line(format!(
-                "clic su Install ({x},{y}) a t={}s",
+                "click on Install ({x},{y}) at t={}s",
                 t0.elapsed().as_secs()
             ));
         }
-        if t0.elapsed() > Duration::from_secs(minuti * 60) {
+        if t0.elapsed() > Duration::from_secs(minutes * 60) {
             break None;
         }
         std::thread::sleep(Duration::from_secs(10));
@@ -1321,7 +1322,7 @@ fn reale_f1_17_installazione_su_disco() {
                 ));
                 std::fs::write(&png, &shot.png).unwrap();
                 log.line(format!(
-                    "t={:>5}s non nero {:.2}% -> {}",
+                    "t={:>5}s non-black {:.2}% -> {}",
                     t0.elapsed().as_secs(),
                     img.non_black_percent(),
                     png.display()
@@ -1329,25 +1330,25 @@ fn reale_f1_17_installazione_su_disco() {
             }
         }
     };
-    log.line(format!("esito dopo {:?}: {esito:?}", t0.elapsed()));
+    log.line(format!("outcome after {:?}: {outcome:?}", t0.elapsed()));
     let id = run.identity();
-    if esito.is_none() {
+    if outcome.is_none() {
         let _ = rt.block_on(run.emergency_stop(Duration::from_secs(10)));
     }
     let _ = rt.block_on(run.close());
     assert_no_orphan(&id);
     assert!(
-        esito.is_some(),
-        "installazione non conclusa in {minuti} minuti"
+        outcome.is_some(),
+        "installation not completed in {minutes} minutes"
     );
 }
 
-/// F1-17, parte 2: boot di Ubuntu dal disco installato (nessuna ISO), poi
-/// arresto ACPI ordinario (`system_powerdown`): un guest reale deve spegnersi
-/// da solo, senza `quit` né terminazione.
+/// F1-17, part 2: boot of Ubuntu from the installed disk (no ISO), then
+/// ordinary ACPI shutdown (`system_powerdown`): a real guest must power off
+/// by itself, without `quit` or termination.
 #[test]
-#[ignore = "richiede QEMU reale: impostare LIGHTVM_QEMU_DIR"]
-fn reale_f1_17_boot_da_disco_e_arresto_acpi() {
+#[ignore = "needs real QEMU: set LIGHTVM_QEMU_DIR"]
+fn real_f1_17_boot_from_disk_and_acpi_shutdown() {
     let _g = SERIAL
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1355,10 +1356,10 @@ fn reale_f1_17_boot_da_disco_e_arresto_acpi() {
     let mut log = Log::new(&lab, "f1-17-boot");
     let paths = lab_paths(&lab, &mut log);
     let caps = probe_caps(&lab, &paths, &mut log);
-    let (disco, vars) = disco_f1_17(&lab, &paths);
-    let fisso = DiscoFisso {
+    let (disk, vars) = f1_17_disk(&lab, &paths);
+    let fixed = FixedDisk {
         base: &paths,
-        disco,
+        disk,
         vars,
     };
     let run_id = RunId::new_v7();
@@ -1369,8 +1370,8 @@ fn reale_f1_17_boot_da_disco_e_arresto_acpi() {
     s.install_media = None;
     let rt = rt();
     let run = rt
-        .block_on(QemuRun::start(&caps, &s, &fisso, RunConfig::default()))
-        .expect("avvio dal disco");
+        .block_on(QemuRun::start(&caps, &s, &fixed, RunConfig::default()))
+        .expect("launch from disk");
     let t0 = Instant::now();
     for i in 1..=8 {
         std::thread::sleep(Duration::from_secs(15));
@@ -1382,7 +1383,7 @@ fn reale_f1_17_boot_da_disco_e_arresto_acpi() {
         ));
         std::fs::write(&png, &shot.png).unwrap();
         log.line(format!(
-            "boot {i}: t={}s non nero {:.2}% -> {}",
+            "boot {i}: t={}s non-black {:.2}% -> {}",
             t0.elapsed().as_secs(),
             img.non_black_percent(),
             png.display()
@@ -1397,7 +1398,7 @@ fn reale_f1_17_boot_da_disco_e_arresto_acpi() {
         }))
         .unwrap();
     log.line(format!(
-        "arresto ACPI: fase {:?}, causa {:?}, codice {:?}, durata {:?}",
+        "ACPI shutdown: phase {:?}, cause {:?}, code {:?}, duration {:?}",
         report.phase,
         report.cause,
         report.code,
@@ -1409,12 +1410,12 @@ fn reale_f1_17_boot_da_disco_e_arresto_acpi() {
     assert_eq!(
         report.phase,
         StopPhase::Powerdown,
-        "il guest non si è spento con ACPI"
+        "the guest did not power off with ACPI"
     );
 }
 
-/// Tempo CPU totale (secondi) di un processo, letto dal sistema operativo.
-fn cpu_secondi(pid: u32) -> f64 {
+/// Total CPU time (seconds) of a process, read from the operating system.
+fn cpu_seconds(pid: u32) -> f64 {
     let out = Command::new("powershell")
         .args([
             "-NoProfile",
@@ -1429,26 +1430,26 @@ fn cpu_secondi(pid: u32) -> f64 {
     out.parse().unwrap_or(f64::NAN)
 }
 
-/// ADR-0017 / F1-10: effetto del tetto CPU del Job Object su un guest reale.
-/// Boot di Ubuntu dal disco di F1-17 (2 vCPU) per 60 s senza tetto e con il
-/// tetto minimo (5 % dei vCPU = 0,1 core): il boot usa in media circa 0,2
-/// core (prima esecuzione: un tetto al 25 % non veniva mai raggiunto). Il
-/// tempo CPU di QEMU con il tetto deve restare vicino alla quota concessa e
-/// ben sotto quello senza tetto.
+/// ADR-0017 / F1-10: effect of the Job Object CPU cap on a real guest.
+/// Boot of Ubuntu from the F1-17 disk (2 vCPUs) for 60 s without a cap and with the
+/// minimum cap (5 % of the vCPUs = 0.1 core): the boot uses on average about 0.2
+/// cores (first run: a 25 % cap was never reached). The
+/// QEMU CPU time with the cap must stay close to the granted share and
+/// well below the one without a cap.
 #[test]
-#[ignore = "richiede QEMU reale e il disco di F1-17: impostare LIGHTVM_QEMU_DIR"]
-fn reale_effetto_tetto_cpu_durante_il_boot() {
+#[ignore = "needs real QEMU and the F1-17 disk: set LIGHTVM_QEMU_DIR"]
+fn real_cpu_cap_effect_during_boot() {
     let _g = SERIAL
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let lab = require_lab!();
-    let mut log = Log::new(&lab, "tetto-cpu");
+    let mut log = Log::new(&lab, "cpu-cap");
     let paths = lab_paths(&lab, &mut log);
     let caps = probe_caps(&lab, &paths, &mut log);
-    let (disco, vars) = disco_f1_17(&lab, &paths);
-    let fisso = DiscoFisso {
+    let (disk, vars) = f1_17_disk(&lab, &paths);
+    let fixed = FixedDisk {
         base: &paths,
-        disco,
+        disk,
         vars,
     };
     let logical = u32::try_from(
@@ -1458,7 +1459,7 @@ fn reale_effetto_tetto_cpu_durante_il_boot() {
     )
     .unwrap();
     let rt = rt();
-    let mut misura = |cpu_rate: Option<u32>| -> f64 {
+    let mut measure = |cpu_rate: Option<u32>| -> f64 {
         let run_id = RunId::new_v7();
         paths.prepare_run(&run_id);
         let mut s = spec(&caps, &paths, run_id);
@@ -1471,37 +1472,37 @@ fn reale_effetto_tetto_cpu_durante_il_boot() {
             job_memory_bytes: None,
         };
         let run = rt
-            .block_on(QemuRun::start(&caps, &s, &fisso, RunConfig::default()))
-            .expect("avvio dal disco");
+            .block_on(QemuRun::start(&caps, &s, &fixed, RunConfig::default()))
+            .expect("launch from disk");
         let pid = run.identity().pid;
-        let c0 = cpu_secondi(pid);
+        let c0 = cpu_seconds(pid);
         std::thread::sleep(Duration::from_secs(60));
-        let c1 = cpu_secondi(pid);
+        let c1 = cpu_seconds(pid);
         let id = run.identity();
         let _ = rt.block_on(run.emergency_stop(Duration::from_secs(10)));
         let _ = rt.block_on(run.close());
         assert_no_orphan(&id);
-        let usati = c1 - c0;
+        let used = c1 - c0;
         log.line(format!(
-            "tetto {cpu_rate:?}: {usati:.1} s di CPU in 60 s ({:.2} core medi)",
-            usati / 60.0
+            "cap {cpu_rate:?}: {used:.1} s of CPU in 60 s ({:.2} average cores)",
+            used / 60.0
         ));
-        usati
+        used
     };
-    let libero = misura(None);
-    // 5 % di 2 vCPU = 0,1 core: quota della macchina in centesimi di punto.
+    let uncapped = measure(None);
+    // 5 % of 2 vCPUs = 0.1 core: machine share in hundredths of a point.
     let rate = (2 * 5 * 100 / logical).max(1);
-    let con_tetto = misura(Some(rate));
-    let quota_core = f64::from(rate) / 10_000.0 * f64::from(logical);
+    let capped = measure(Some(rate));
+    let share_cores = f64::from(rate) / 10_000.0 * f64::from(logical);
     log.line(format!(
-        "quota concessa {quota_core:.2} core; senza tetto {libero:.1} s, con tetto {con_tetto:.1} s"
+        "granted share {share_cores:.2} cores; uncapped {uncapped:.1} s, capped {capped:.1} s"
     ));
     assert!(
-        con_tetto <= quota_core * 60.0 * 1.25,
-        "tempo CPU con tetto oltre la quota: {con_tetto:.1} s"
+        capped <= share_cores * 60.0 * 1.25,
+        "capped CPU time beyond the share: {capped:.1} s"
     );
     assert!(
-        libero > con_tetto * 1.5,
-        "il tetto non riduce il consumo: senza {libero:.1} s, con {con_tetto:.1} s"
+        uncapped > capped * 1.5,
+        "the cap does not reduce consumption: without {uncapped:.1} s, with {capped:.1} s"
     );
 }

@@ -1,8 +1,8 @@
-//! Esclusione dei dischi senza affidarsi al lock di QEMU (F0-05, punto 7).
+//! Disk exclusion without relying on QEMU's lock (F0-05, item 7).
 //!
-//! Il supervisor tiene aperti `base.qcow2` (e, in varianti, l'overlay) con
-//! `CreateFile` tramite `OpenOptions` + `share_mode`, e verifica che cosa possono
-//! ancora fare QEMU, `qemu-img`, `qemu-io` e il filesystem.
+//! The supervisor keeps `base.qcow2` (and, in variants, the overlay) open with
+//! `CreateFile` through `OpenOptions` + `share_mode`, and checks what QEMU,
+//! `qemu-img`, `qemu-io` and the filesystem can still do.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -20,7 +20,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 const DIR: &str = r"E:\OpenVM\lab\vms\f0-05\excl";
 
 fn sha256_of(p: &Path) -> String {
-    // Hash tramite certutil per non aggiungere dipendenze a questo spike.
+    // Hash via certutil so as not to add dependencies to this spike.
     Command::new("certutil.exe")
         .args(["-hashfile", p.to_str().unwrap_or(""), "SHA256"])
         .output()
@@ -48,7 +48,7 @@ fn tool(exe: &Path, args: &[&str]) -> (Option<i32>, String) {
             .trim()
             .to_string(),
         ),
-        Err(e) => (None, format!("spawn fallito: {e}")),
+        Err(e) => (None, format!("spawn failed: {e}")),
     }
 }
 
@@ -101,7 +101,7 @@ fn prepare(log: &mut Log) -> io::Result<Lab> {
         &qemu_io(),
         &["-f", "qcow2", "-c", "write -P 0x11 0 1M", "base.qcow2"],
     );
-    log.line(&format!("qemu-io scrive 1 MiB 0x11 nella base: {r:?}"));
+    log.line(&format!("qemu-io writes 1 MiB 0x11 into the base: {r:?}"));
     let r = tool(
         &qemu_img(),
         &[
@@ -170,20 +170,20 @@ fn qemu_state(vm: &Vm, log: &mut Log, tag: &str) -> bool {
                             .collect()
                     })
                     .unwrap_or_default();
-                log.line(&format!("  QEMU vivo, nodi: {list:?}"));
+                log.line(&format!("  QEMU alive, nodes: {list:?}"));
             }
             true
         }
         Ok(Some(code)) => {
             let err = std::fs::read_to_string(&vm.stderr).unwrap_or_default();
             log.line(&format!(
-                "  QEMU USCITO codice={code} stderr={}",
+                "  QEMU EXITED code={code} stderr={}",
                 err.trim().replace(['\r', '\n'], " | ")
             ));
             false
         }
         Err(e) => {
-            log.line(&format!("  errore attesa: {e}"));
+            log.line(&format!("  wait error: {e}"));
             false
         }
     }
@@ -248,7 +248,7 @@ fn attempts_on_base(lab: &Lab, log: &mut Log) {
         std::fs::remove_file(&lab.base).map_err(|e| e.to_string())
     ));
     log.line(&format!(
-        "  apertura in scrittura (share R|W|D) dal processo di test: {:?}",
+        "  open for writing (share R|W|D) from the test process: {:?}",
         open_share(
             &lab.base,
             true,
@@ -261,7 +261,7 @@ fn attempts_on_base(lab: &Lab, log: &mut Log) {
     if let Ok(mut perm) = ro {
         perm.set_readonly(true);
         log.line(&format!(
-            "  imposta attributo sola lettura: {:?}",
+            "  set read-only attribute: {:?}",
             std::fs::set_permissions(&lab.base, perm.clone()).map_err(|e| e.to_string())
         ));
         #[allow(clippy::permissions_set_readonly_false)]
@@ -299,8 +299,8 @@ fn attempts_on_overlay(lab: &Lab, log: &mut Log) {
     ));
 }
 
-/// Sonda le modalità di condivisione con cui QEMU ha aperto un file: tenta
-/// aperture con accessi e share diversi mentre QEMU lo tiene aperto.
+/// Probes the share modes with which QEMU opened a file: tries
+/// opens with different access and share modes while QEMU keeps it open.
 fn probe_qemu_share(p: &Path, log: &mut Log) {
     let all = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
     for (write, share) in [
@@ -313,7 +313,7 @@ fn probe_qemu_share(p: &Path, log: &mut Log) {
             .map(|_| ())
             .map_err(|e| e.to_string());
         log.line(&format!(
-            "  apertura {} accesso={} share={} → {r:?}",
+            "  open {} access={} share={} → {r:?}",
             p.file_name().unwrap_or_default().to_string_lossy(),
             if write { "RW" } else { "R" },
             share_name(share)
@@ -324,61 +324,61 @@ fn probe_qemu_share(p: &Path, log: &mut Log) {
 pub(crate) fn run(logs: &Path) -> io::Result<()> {
     let mut log = Log::create(&logs.join("f0-05-exclusion.log"))?;
 
-    // --- Controllo: nessun handle del supervisor (riproduce F0-02 8.3).
-    log.line("== T0 controllo: QEMU con overlay, nessun handle del supervisor");
+    // --- Control: no supervisor handle (reproduces F0-02 8.3).
+    log.line("== T0 control: QEMU with overlay, no supervisor handle");
     let lab = prepare(&mut log)?;
     let h0 = sha256_of(&lab.base);
-    log.line(&format!("  sha256 base iniziale={h0}"));
+    log.line(&format!("  initial base sha256={h0}"));
     let vm = start_qemu(&lab, "f0-05-excl-t0")?;
     qemu_state(&vm, &mut log, "f0-05-excl-t0");
-    log.line("  sonda delle share mode di QEMU sulla base:");
+    log.line("  probe of QEMU's share modes on the base:");
     probe_qemu_share(&lab.base, &mut log);
-    log.line("  sonda delle share mode di QEMU sull'overlay:");
+    log.line("  probe of QEMU's share modes on the overlay:");
     probe_qemu_share(&lab.overlay, &mut log);
     let (code, out) = tool(
         &qemu_io(),
         &["-f", "qcow2", "-c", "write -P 0xee 0 64k", "base.qcow2"],
     );
     log.line(&format!(
-        "  qemu-io write base (senza protezione): exit={code:?} {out}"
+        "  qemu-io write base (without protection): exit={code:?} {out}"
     ));
-    log.line(&format!("  sha256 base dopo={}", sha256_of(&lab.base)));
+    log.line(&format!("  base sha256 after={}", sha256_of(&lab.base)));
     vm.emergency_stop(Duration::from_secs(10))?;
     drop(vm);
 
-    // --- T1: base aperta dal supervisor con FILE_SHARE_READ prima di QEMU.
-    log.line("== T1 supervisor apre base.qcow2 (accesso R, share READ) PRIMA di QEMU");
+    // --- T1: base opened by the supervisor with FILE_SHARE_READ before QEMU.
+    log.line("== T1 supervisor opens base.qcow2 (access R, share READ) BEFORE QEMU");
     let lab = prepare(&mut log)?;
     let h1 = sha256_of(&lab.base);
     let guard = open_share(&lab.base, false, FILE_SHARE_READ)?;
-    log.line(&format!("  handle supervisor aperto; sha256 base={h1}"));
+    log.line(&format!("  supervisor handle open; base sha256={h1}"));
     let vm = start_qemu(&lab, "f0-05-excl-t1")?;
     let alive = qemu_state(&vm, &mut log, "f0-05-excl-t1");
     log.line(&format!(
-        "  QEMU avviato con overlay e backing base: {alive}"
+        "  QEMU started with overlay and backing base: {alive}"
     ));
     attempts_on_base(&lab, &mut log);
-    log.line("  overlay (nessun handle del supervisor sull'overlay):");
+    log.line("  overlay (no supervisor handle on the overlay):");
     attempts_on_overlay(&lab, &mut log);
     let still = qemu_state(&vm, &mut log, "f0-05-excl-t1");
-    log.line(&format!("  QEMU ancora vivo dopo i tentativi: {still}"));
+    log.line(&format!("  QEMU still alive after the attempts: {still}"));
     vm.emergency_stop(Duration::from_secs(10))?;
     drop(vm);
     drop(guard);
     let h1b = sha256_of(&lab.base);
     log.line(&format!(
-        "  sha256 base dopo T1={h1b} invariato={}",
+        "  base sha256 after T1={h1b} unchanged={}",
         h1 == h1b
     ));
 
-    // --- T1b: supervisor apre la base DOPO QEMU.
-    log.line("== T1b supervisor apre base.qcow2 (R, share READ) DOPO l'avvio di QEMU");
+    // --- T1b: supervisor opens the base AFTER QEMU.
+    log.line("== T1b supervisor opens base.qcow2 (R, share READ) AFTER QEMU has started");
     let lab = prepare(&mut log)?;
     let vm = start_qemu(&lab, "f0-05-excl-t1b")?;
     qemu_state(&vm, &mut log, "f0-05-excl-t1b");
     let g = open_share(&lab.base, false, FILE_SHARE_READ);
     log.line(&format!(
-        "  apertura supervisor: {:?}",
+        "  supervisor open: {:?}",
         g.as_ref().map(|_| ()).map_err(|e| e.to_string())
     ));
     if g.is_ok() {
@@ -392,10 +392,10 @@ pub(crate) fn run(logs: &Path) -> io::Result<()> {
     drop(vm);
     drop(g);
 
-    // --- T2: overlay aperto dal supervisor PRIMA di QEMU.
+    // --- T2: overlay opened by the supervisor BEFORE QEMU.
     for share in [FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_SHARE_READ] {
         log.line(&format!(
-            "== T2 supervisor apre overlay (R, share {}) PRIMA di QEMU; base protetta come T1",
+            "== T2 supervisor opens overlay (R, share {}) BEFORE QEMU; base protected as in T1",
             share_name(share)
         ));
         let lab = prepare(&mut log)?;
@@ -413,10 +413,10 @@ pub(crate) fn run(logs: &Path) -> io::Result<()> {
         drop(gb);
     }
 
-    // --- T3: overlay aperto dal supervisor DOPO QEMU.
+    // --- T3: overlay opened by the supervisor AFTER QEMU.
     for share in [FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_SHARE_READ] {
         log.line(&format!(
-            "== T3 supervisor apre overlay (R, share {}) DOPO QEMU",
+            "== T3 supervisor opens overlay (R, share {}) AFTER QEMU",
             share_name(share)
         ));
         let lab = prepare(&mut log)?;
@@ -426,7 +426,7 @@ pub(crate) fn run(logs: &Path) -> io::Result<()> {
         qemu_state(&vm, &mut log, &tag);
         let go = open_share(&lab.overlay, false, share);
         log.line(&format!(
-            "  apertura overlay supervisor: {:?}",
+            "  supervisor overlay open: {:?}",
             go.as_ref().map(|_| ()).map_err(|e| e.to_string())
         ));
         if go.is_ok() {
@@ -438,8 +438,8 @@ pub(crate) fn run(logs: &Path) -> io::Result<()> {
         drop(gb);
     }
 
-    // --- T4: un altro processo ha già la base aperta in scrittura.
-    log.line("== T4 qemu-io interattivo tiene la base aperta in scrittura prima del supervisor");
+    // --- T4: another process already has the base open for writing.
+    log.line("== T4 interactive qemu-io keeps the base open for writing before the supervisor");
     let lab = prepare(&mut log)?;
     let mut qio = Command::new(qemu_io())
         .args(["-f", "qcow2", "base.qcow2"])
@@ -451,17 +451,17 @@ pub(crate) fn run(logs: &Path) -> io::Result<()> {
     std::thread::sleep(Duration::from_secs(1));
     let g = open_share(&lab.base, false, FILE_SHARE_READ);
     log.line(&format!(
-        "  apertura supervisor (R, share READ) con scrittore esistente: {:?}",
+        "  supervisor open (R, share READ) with an existing writer: {:?}",
         g.as_ref().map(|_| ()).map_err(|e| e.to_string())
     ));
-    // Osservato: qemu-io con stdin in pipe non elabora "quit" su Windows e resta
-    // in attesa; dopo il tentativo viene terminato.
+    // Observed: qemu-io with piped stdin does not process "quit" on Windows and keeps
+    // waiting; after the attempt it is killed.
     if let Some(mut stdin) = qio.stdin.take() {
         let _ = stdin.write_all(b"quit\n");
     }
     std::thread::sleep(Duration::from_secs(2));
     if qio.try_wait()?.is_none() {
-        log.line("  qemu-io non ha elaborato 'quit' da stdin in pipe: terminato");
+        log.line("  qemu-io did not process 'quit' from piped stdin: killed");
         let _ = qio.kill();
     }
     let _ = qio.wait();
@@ -472,23 +472,23 @@ pub(crate) fn run(logs: &Path) -> io::Result<()> {
     drop(g);
     let g2 = open_share(&lab.base, false, FILE_SHARE_READ);
     log.line(&format!(
-        "  apertura supervisor dopo la chiusura di qemu-io: {:?}",
+        "  supervisor open after qemu-io closed: {:?}",
         g2.as_ref().map(|_| ()).map_err(|e| e.to_string())
     ));
     drop(g2);
 
-    // --- T5: vars della baseline protetto con share READ.
-    log.line("== T5 vars della baseline aperto dal supervisor (R, share READ)");
+    // --- T5: baseline vars protected with share READ.
+    log.line("== T5 baseline vars opened by the supervisor (R, share READ)");
     let bvars = Path::new(DIR).join("baseline-vars.fd");
     std::fs::copy(f0_supervisor::fw_vars_template(), &bvars)?;
     let gv = open_share(&bvars, false, FILE_SHARE_READ)?;
     let copy_to = Path::new(DIR).join("copy-vars.fd");
     log.line(&format!(
-        "  copia per l'esecuzione: {:?}",
+        "  copy for the run: {:?}",
         std::fs::copy(&bvars, &copy_to).map_err(|e| e.to_string())
     ));
     log.line(&format!(
-        "  scrittura sul vars della baseline: {:?}",
+        "  write to the baseline vars: {:?}",
         OpenOptions::new()
             .write(true)
             .open(&bvars)
@@ -500,6 +500,6 @@ pub(crate) fn run(logs: &Path) -> io::Result<()> {
         let _ = std::fs::remove_file(p);
     }
     let r = f0_supervisor::qemu_residuals("lightvm-f0-05-excl");
-    log.line(&format!("residui (totali host, spike)={r:?}"));
+    log.line(&format!("residuals (host total, spike)={r:?}"));
     Ok(())
 }

@@ -1,1 +1,1 @@
-Test end-to-end su runner fisici con boot reale: segnaposto, nessun test ancora presente.
+End-to-end tests on physical runners with a real boot: placeholder, no tests yet.

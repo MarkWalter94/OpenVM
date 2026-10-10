@@ -1,11 +1,11 @@
-# Workspace LightVM (ROADMAP sezione 6.2).
-# I crate in `crates/` sono scheletri: le API nascono nelle fasi che le richiedono.
-# `crates/mcp-server` non esiste ancora: viene aggiunto in F5.
+# LightVM workspace (ROADMAP section 6.2).
+# The crates in `crates/` are skeletons: APIs are born in the phases that need them.
+# `crates/mcp-server` does not exist yet: it is added in F5.
 
 [workspace]
 resolver = "3"
-# `spikes/*` contiene le prove di fattibilità di F0: non sono codice di prodotto
-# e non fanno parte dei default-members (si compilano con `-p <nome>`).
+# `spikes/*` contains the F0 feasibility spikes: they are not product code
+# and are not part of default-members (build them with `-p <name>`).
 members = [
     "apps/desktop",
     "crates/*",
@@ -15,7 +15,7 @@ default-members = [
     "apps/desktop",
     "crates/*",
 ]
-# Copie patchate di dipendenze (vedi `vendor/README.md`): non sono membri.
+# Patched copies of dependencies (see `vendor/README.md`): they are not members.
 exclude = ["vendor"]
 
 [workspace.package]
@@ -25,8 +25,8 @@ rust-version = "1.99"
 license = "MIT"
 publish = false
 
-# Versioni esatte (`=`) per la UI: decisione F0 sulle versioni egui/eframe, vedi
-# docs/verification/F0-01-toolchain-eframe.md. Nessuna dipendenza git.
+# Exact versions (`=`) for the UI: F0 decision on egui/eframe versions, see
+# docs/verification/F0-01-toolchain-eframe.md. No git dependencies.
 [workspace.dependencies]
 eframe = { version = "=0.36.2", default-features = false }
 egui = { version = "=0.36.2", default-features = false }
@@ -49,11 +49,11 @@ print_stderr = "allow"
 undocumented_unsafe_blocks = "deny"
 
 [profile.release]
-# Simboli di debug separati restano utili per la diagnostica dello spike.
+# Separate debug symbols remain useful for spike diagnostics.
 debug = "line-tables-only"
 
-# F1-13: egui-winit 0.36.2 senza lettura degli appunti dell'host (patch in
-# `vendor/egui-winit`, descritta in `vendor/README.md`). Da riallineare a ogni
-# aggiornamento di egui/eframe (ADR-0014).
+# F1-13: egui-winit 0.36.2 without reading the host clipboard (patch in
+# `vendor/egui-winit`, described in `vendor/README.md`). To be realigned on every
+# egui/eframe update (ADR-0014).
 [patch.crates-io]
 egui-winit = { path = "vendor/egui-winit" }

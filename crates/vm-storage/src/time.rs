@@ -1,21 +1,21 @@
-//! Timestamp UTC senza dipendenze esterne.
+//! UTC timestamps without external dependencies.
 //!
-//! Formato RFC 3339 con millisecondi (`2026-10-09T12:34:56.789Z`): ordinabile
-//! lessicograficamente, quindi confrontabile anche in SQL.
+//! RFC 3339 format with milliseconds (`2026-10-09T12:34:56.789Z`): sorts
+//! lexicographically, so it can also be compared in SQL.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// Istante UTC in millisecondi dall'epoca Unix.
+/// UTC instant in milliseconds since the Unix epoch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct UtcMillis(pub i64);
 
 impl UtcMillis {
-    /// Istante corrente.
+    /// Current instant.
     pub fn now() -> Self {
         Self::from_system_time(SystemTime::now())
     }
 
-    /// Conversione da [`SystemTime`] (istanti prima del 1970 diventano 0).
+    /// Conversion from [`SystemTime`] (instants before 1970 become 0).
     pub fn from_system_time(t: SystemTime) -> Self {
         let ms = t
             .duration_since(UNIX_EPOCH)
@@ -24,24 +24,24 @@ impl UtcMillis {
         Self(i64::try_from(ms).unwrap_or(i64::MAX))
     }
 
-    /// Conversione verso [`SystemTime`].
+    /// Conversion to [`SystemTime`].
     pub fn to_system_time(self) -> SystemTime {
         UNIX_EPOCH + Duration::from_millis(u64::try_from(self.0).unwrap_or(0))
     }
 
-    /// RFC 3339 con millisecondi.
+    /// RFC 3339 with milliseconds.
     pub fn rfc3339(self) -> String {
         let (y, mo, d, h, mi, s, ms) = self.parts();
         format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}.{ms:03}Z")
     }
 
-    /// Forma compatta per nomi di file (`20261009T123456Z`).
+    /// Compact form for file names (`20261009T123456Z`).
     pub fn compact(self) -> String {
         let (y, mo, d, h, mi, s, _) = self.parts();
         format!("{y:04}{mo:02}{d:02}T{h:02}{mi:02}{s:02}Z")
     }
 
-    /// Lettura del formato prodotto da [`Self::rfc3339`].
+    /// Parses the format produced by [`Self::rfc3339`].
     pub fn parse_rfc3339(s: &str) -> Option<Self> {
         let b = s.as_bytes();
         if b.len() != 24 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[23] != b'Z' {
@@ -69,12 +69,12 @@ impl UtcMillis {
     }
 }
 
-/// Timestamp corrente in RFC 3339.
+/// Current timestamp in RFC 3339.
 pub fn now_rfc3339() -> String {
     UtcMillis::now().rfc3339()
 }
 
-// Algoritmi di H. Hinnant per il calendario gregoriano prolettico.
+// H. Hinnant's algorithms for the proleptic Gregorian calendar.
 fn civil_from_days(z: i64) -> (i64, i64, i64) {
     let z = z + 719_468;
     let era = z.div_euclid(146_097);

@@ -1,29 +1,30 @@
-//! Adattatori del backend QEMU (`qemu-backend`):
+//! QEMU backend adapters (`qemu-backend`):
 //!
-//! - [`QemuVmBackend`]: porta `vm_core::ports::VmBackend` (più le osservazioni
-//!   di [`BackendPort`]) su [`qemu_backend::QemuRun`]; vive sul thread del
-//!   supervisor e usa un proprio runtime tokio per le API asincrone del backend;
-//! - [`QemuHost`]: host del servizio ([`crate::supervisor::Backend`]) con il
-//!   percorso prioritario dell'Emergency Stop: un registro condiviso dei
-//!   gestori [`qemu_backend::EmergencyStop`] (Job Object su Windows), usabile
-//!   da qualunque thread senza passare dal supervisor né da QMP (ADR-0009);
-//! - [`UnavailableBackend`] / [`UnavailableHost`]: QEMU non configurato; il
-//!   core resta reale e l'avvio è rifiutato (`unsupported`) con audit.
+//! - [`QemuVmBackend`]: the `vm_core::ports::VmBackend` port (plus the
+//!   [`BackendPort`] observations) over [`qemu_backend::QemuRun`]; it lives on
+//!   the supervisor thread and uses its own tokio runtime for the backend's
+//!   asynchronous APIs;
+//! - [`QemuHost`]: service host ([`crate::supervisor::Backend`]) with the
+//!   Emergency Stop priority path: a shared registry of
+//!   [`qemu_backend::EmergencyStop`] handlers (Job Object on Windows), usable
+//!   from any thread without going through the supervisor or QMP (ADR-0009);
+//! - [`UnavailableBackend`] / [`UnavailableHost`]: QEMU not configured; the
+//!   core stays real and starting is rejected (`unsupported`) with audit.
 //!
-//! Lacune dell'API attuale, coperte qui nel modo più sottile possibile e
-//! riportate nei file di verifica F1-03/F1-04:
-//! - il disco principale (`vms/<vm_id>/primary.qcow2`) è creato o ingrandito
-//!   qui con `qemu-img` al primo avvio, senza passare dal journal del catalogo
-//!   (F3);
-//! - le directory dell'esecuzione e la directory privata dei socket sono create
-//!   qui con l'ACL ereditata (l'ACL esplicita solo-utente è F1-06/F1-09); la
-//!   directory privata è rimossa al rilascio dell'esecuzione, quella
-//!   dell'esecuzione (`runs/<run_id>/`, log di QEMU e variabili UEFI) resta
-//!   per la diagnostica e non conta nel budget di storage della VM;
-//! - la copia per esecuzione delle variabili UEFI è fatta qui dal modello del
-//!   firmware della distribuzione QEMU (lo storage non la produce ancora);
-//! - screenshot e input non sono collegati (le capacità host li dichiarano
-//!   assenti, quindi il core non li inoltra).
+//! Gaps in the current API, covered here as thinly as possible and reported
+//! in the F1-03/F1-04 verification files:
+//! - the primary disk (`vms/<vm_id>/primary.qcow2`) is created or grown here
+//!   with `qemu-img` on first start, without going through the catalog
+//!   journal (F3);
+//! - the run directories and the private socket directory are created here
+//!   with the inherited ACL (the explicit user-only ACL is F1-06/F1-09); the
+//!   private directory is removed when the run is released, the run directory
+//!   (`runs/<run_id>/`, QEMU log and UEFI variables) stays for diagnostics and
+//!   does not count towards the VM storage budget;
+//! - the per-run copy of the UEFI variables is made here from the firmware
+//!   template of the QEMU distribution (the storage does not produce it yet);
+//! - screenshot and input are not connected (the host capabilities declare
+//!   them absent, so the core does not forward them).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -51,26 +52,26 @@ use crate::supervisor::{Backend, EmergencyOutcome, EmergencyStop, ParentLossPoli
 
 type Registry = Arc<Mutex<BTreeMap<VmId, qemu_backend::EmergencyStop>>>;
 
-/// Politica di arresto imposta alla perdita della UI (`shutdown_vms`):
-/// sostituisce quella ordinaria per gli arresti che seguono.
+/// Stop policy imposed when the UI is lost (`shutdown_vms`): replaces the
+/// ordinary one for the stops that follow.
 type StopOverride = Arc<Mutex<Option<ShutdownPolicy>>>;
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Errore pubblico del backend; il dettaglio (con percorsi) resta su stderr.
+/// Public backend error; the detail (with paths) stays on stderr.
 fn public(e: &BackendError) -> PublicError {
-    crate::diag!("lightvm-service: backend QEMU: {e}");
+    crate::diag!("lightvm-service: QEMU backend: {e}");
     e.to_public()
 }
 
 fn io_public(what: &str, e: &std::io::Error) -> PublicError {
-    crate::diag!("lightvm-service: backend QEMU: {what}: {e}");
-    PublicError::infrastructure(format!("backend QEMU: {what}"))
+    crate::diag!("lightvm-service: QEMU backend: {what}: {e}");
+    PublicError::infrastructure(format!("QEMU backend: {what}"))
 }
 
-/// Nome dell'eseguibile QEMU nella distribuzione approvata.
+/// Name of the QEMU executable in the approved distribution.
 const QEMU_SYSTEM: &str = if cfg!(windows) {
     "qemu-system-x86_64.exe"
 } else {
@@ -82,35 +83,35 @@ const QEMU_IMG: &str = if cfg!(windows) {
     "qemu-img"
 };
 
-/// Configurazione del backend QEMU reale.
+/// Configuration of the real QEMU backend.
 #[derive(Debug, Clone)]
 pub struct QemuSetup {
-    /// Directory della distribuzione QEMU approvata (binari e `share/`).
+    /// Directory of the approved QEMU distribution (binaries and `share/`).
     pub qemu_dir: PathBuf,
-    /// Radice del catalogo (directory `runs/` e copie gestite dei media).
+    /// Catalog root (`runs/` directory and managed media copies).
     pub catalog_root: PathBuf,
-    /// Radice delle directory private per i socket QMP/VNC: deve essere corta
-    /// (limite di 107 byte del percorso di un socket Unix).
+    /// Root of the private directories for the QMP/VNC sockets: it must be short
+    /// (107-byte limit of a Unix socket path).
     pub private_root: PathBuf,
-    /// Modello CPU nominale (F0: `qemu64`; F1-17 valuta modelli più ricchi).
+    /// Nominal CPU model (F0: `qemu64`; F1-17 evaluates richer models).
     pub cpu_model: String,
-    /// Politica dell'arresto ordinario (`system_powerdown` → `quit` → kill).
+    /// Ordinary stop policy (`system_powerdown` → `quit` → kill).
     pub stop_policy: ShutdownPolicy,
-    /// Attesa massima dell'Emergency Stop e dell'arresto forzato.
+    /// Maximum wait for the Emergency Stop and the forced stop.
     pub emergency_timeout: Duration,
-    /// Configurazione delle esecuzioni.
+    /// Run configuration.
     pub run_config: RunConfig,
-    /// Configurazione del probe (hash dei binari approvati, timeout).
+    /// Probe configuration (hashes of the approved binaries, timeout).
     pub probe: ProbeConfig,
-    /// Spazio libero per il catalogo in GiB, usato solo se la misura sul
-    /// volume del catalogo (`prepare::host_resources`) non riesce. Limita
-    /// `disk_gib` alla creazione e la crescita del disco; un disco già
-    /// creato resta avviabile anche con meno spazio libero.
+    /// Free space for the catalog in GiB, used only if the measurement on the
+    /// catalog volume (`prepare::host_resources`) fails. It limits `disk_gib`
+    /// at creation and disk growth; a disk already created stays bootable even
+    /// with less free space.
     pub free_storage_gib: u64,
 }
 
 impl QemuSetup {
-    /// Valori predefiniti per una distribuzione e un catalogo.
+    /// Default values for a distribution and a catalog.
     pub fn new(qemu_dir: PathBuf, catalog_root: PathBuf, private_root: PathBuf) -> Self {
         Self {
             qemu_dir,
@@ -126,7 +127,7 @@ impl QemuSetup {
     }
 }
 
-/// Memoria fisica totale in MiB, se rilevabile.
+/// Total physical memory in MiB, if detectable.
 fn total_memory_mib() -> Option<u64> {
     #[cfg(windows)]
     {
@@ -148,18 +149,18 @@ fn total_memory_mib() -> Option<u64> {
     }
 }
 
-/// Processori logici dell'host.
+/// Logical processors of the host.
 fn logical_cpus() -> u32 {
     std::thread::available_parallelism()
         .map(|n| u32::try_from(n.get()).unwrap_or(u32::MAX))
         .unwrap_or(1)
 }
 
-/// Limiti del Job Object dai limiti della VM (ADR-0017):
-/// - tetto CPU: `cpu_max_percent` della capacità dei vCPU assegnati, espresso
-///   come quota dell'intera macchina in centesimi di punto percentuale
-///   (`vcpus × percento × 100 / processori logici`); 100 % = nessun tetto;
-/// - memoria del job: RAM guest più `memory_margin_mib`.
+/// Job Object limits from the VM limits (ADR-0017):
+/// - CPU cap: `cpu_max_percent` of the capacity of the assigned vCPUs,
+///   expressed as a share of the whole machine in hundredths of a percentage
+///   point (`vcpus × percent × 100 / logical processors`); 100 % = no cap;
+/// - job memory: guest RAM plus `memory_margin_mib`.
 pub fn job_limits(config: &lightvm_proto::VmConfig, logical: u32) -> JobLimits {
     let l = config.limits;
     let cpu_rate = (l.cpu_max_percent < 100).then(|| {
@@ -177,9 +178,9 @@ pub fn job_limits(config: &lightvm_proto::VmConfig, logical: u32) -> JobLimits {
     }
 }
 
-/// Byte occupati dai file sotto `dir` (ricorsivo, senza seguire collegamenti),
-/// escluso `escluso`.
-fn dir_usage(dir: &Path, escluso: &Path) -> u64 {
+/// Bytes used by the files under `dir` (recursive, without following links),
+/// excluding `excluded`.
+fn dir_usage(dir: &Path, excluded: &Path) -> u64 {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return 0;
     };
@@ -187,15 +188,15 @@ fn dir_usage(dir: &Path, escluso: &Path) -> u64 {
         .map(|e| {
             let p = e.path();
             match std::fs::symlink_metadata(&p) {
-                Ok(m) if m.is_dir() => dir_usage(&p, escluso),
-                Ok(m) if m.is_file() && p != escluso => m.len(),
+                Ok(m) if m.is_dir() => dir_usage(&p, excluded),
+                Ok(m) if m.is_file() && p != excluded => m.len(),
                 _ => 0,
             }
         })
         .sum()
 }
 
-/// Capacità host per il core a partire dal probe.
+/// Host capacity for the core, derived from the probe.
 fn host_capacity(caps: &HostCapabilities, free_storage_gib: u64) -> HostCapacity {
     HostCapacity {
         logical_cpus: logical_cpus(),
@@ -206,18 +207,18 @@ fn host_capacity(caps: &HostCapabilities, free_storage_gib: u64) -> HostCapacity
         accelerator_available: caps.accelerator.is_available()
             && caps.firmware.is_some()
             && caps.recommended_machine().is_some(),
-        // Non collegati al servizio in F1 (vedi intestazione del modulo).
+        // Not connected to the service in F1 (see the module header).
         screenshot_available: false,
         input_available: false,
         baseline_available: false,
     }
 }
 
-/// Probe dei binari approvati e dell'acceleratore; restituisce host, backend
-/// delle VM e capacità host per il core.
+/// Probe of the approved binaries and of the accelerator; returns the host,
+/// the VM backend and the host capacity for the core.
 ///
-/// Va chiamato fuori da un runtime tokio (usa `block_on` sul runtime proprio
-/// del backend).
+/// Must be called outside a tokio runtime (it uses `block_on` on the backend's
+/// own runtime).
 pub fn probe(setup: QemuSetup) -> Result<(QemuHost, QemuVmBackend, HostCapacity), PublicError> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
@@ -232,10 +233,10 @@ pub fn probe(setup: QemuSetup) -> Result<(QemuHost, QemuVmBackend, HostCapacity)
     let machine = caps
         .recommended_machine()
         .cloned()
-        .ok_or_else(|| PublicError::unsupported("nessuna macchina q35 versionata nel binario"))?;
+        .ok_or_else(|| PublicError::unsupported("no versioned q35 machine in the binary"))?;
     let cpu = caps.cpu_model(&setup.cpu_model).map_err(|e| public(&e))?;
     let probe_dir = setup.private_root.join("probe");
-    std::fs::create_dir_all(&probe_dir).map_err(|e| io_public("directory del probe", &e))?;
+    std::fs::create_dir_all(&probe_dir).map_err(|e| io_public("probe directory", &e))?;
     let probe_dir = ManagedPath::verify(probe_dir).map_err(|e| public(&e))?;
     caps.accelerator = rt.block_on(probe_accelerator(
         &caps,
@@ -247,7 +248,7 @@ pub fn probe(setup: QemuSetup) -> Result<(QemuHost, QemuVmBackend, HostCapacity)
     ));
     if !caps.accelerator.is_available() {
         crate::diag!(
-            "lightvm-service: acceleratore non disponibile: {}",
+            "lightvm-service: accelerator not available: {}",
             caps.accelerator.public_message()
         );
     }
@@ -256,7 +257,7 @@ pub fn probe(setup: QemuSetup) -> Result<(QemuHost, QemuVmBackend, HostCapacity)
         .map(|r| r.free_disk_bytes >> 30)
         .unwrap_or_else(|e| {
             crate::diag!(
-                "lightvm-service: spazio libero del catalogo non misurato ({e}): uso {} GiB",
+                "lightvm-service: catalog free space not measured ({e}): using {} GiB",
                 setup.free_storage_gib
             );
             setup.free_storage_gib
@@ -288,7 +289,7 @@ pub fn probe(setup: QemuSetup) -> Result<(QemuHost, QemuVmBackend, HostCapacity)
     Ok((host, backend, capacity))
 }
 
-/// Percorsi di un'esecuzione per `qemu-backend`, tutti decisi dal servizio.
+/// Paths of a run for `qemu-backend`, all decided by the service.
 #[derive(Debug)]
 struct RunPaths {
     run_id: RunId,
@@ -306,7 +307,7 @@ impl RunPaths {
         if *run == self.run_id {
             Ok(())
         } else {
-            Err(BackendError::invalid("run_id", "esecuzione diversa"))
+            Err(BackendError::invalid("run_id", "different run"))
         }
     }
 }
@@ -334,7 +335,7 @@ impl ManagedPaths for RunPaths {
         self.media
             .get(media)
             .cloned()
-            .ok_or_else(|| BackendError::invalid("media", "supporto non verificato dal core"))
+            .ok_or_else(|| BackendError::invalid("media", "medium not verified by the core"))
     }
     fn run_dir(&self, run: &RunId) -> qemu_backend::error::Result<ManagedPath> {
         self.check(run)?;
@@ -346,12 +347,12 @@ impl ManagedPaths for RunPaths {
     }
 }
 
-/// Percorso assoluto di una copia gestita (`ManagedRelPath`, separatore `/`).
+/// Absolute path of a managed copy (`ManagedRelPath`, `/` separator).
 fn managed_abs(root: &Path, rel: &str) -> PathBuf {
     rel.split('/').fold(root.to_path_buf(), |p, c| p.join(c))
 }
 
-/// Backend delle VM su `qemu-backend`.
+/// VM backend over `qemu-backend`.
 pub struct QemuVmBackend {
     rt: tokio::runtime::Runtime,
     caps: HostCapabilities,
@@ -359,7 +360,7 @@ pub struct QemuVmBackend {
     cpu: CpuModel,
     setup: QemuSetup,
     runs: BTreeMap<VmId, QemuRun>,
-    /// Directory privata (socket) di ciascuna esecuzione, rimossa al rilascio.
+    /// Private (socket) directory of each run, removed on release.
     private_dirs: BTreeMap<VmId, PathBuf>,
     registry: Registry,
     stop_override: StopOverride,
@@ -380,24 +381,24 @@ impl QemuVmBackend {
         match self.runs.get(&vm_id) {
             Some(r) if r.run_id() == run_id => Ok(r),
             Some(_) => Err(PublicError::state_conflict(
-                "esecuzione diversa da quella attiva",
+                "run differs from the active one",
             )),
-            None => Err(PublicError::state_conflict("nessuna esecuzione attiva")),
+            None => Err(PublicError::state_conflict("no active run")),
         }
     }
 
-    /// Rilascia un'esecuzione terminata: QMP, socket, file protetti, Job
-    /// Object, directory privata.
+    /// Releases a terminated run: QMP, sockets, protected files, Job Object,
+    /// private directory.
     fn release(&mut self, vm_id: VmId) {
         lock(&self.registry).remove(&vm_id);
         if let Some(run) = self.runs.remove(&vm_id) {
             match self.rt.block_on(run.close()) {
                 Ok(r) if r.active_at_close > 0 => crate::diag!(
-                    "lightvm-service: {} processi ancora attivi alla chiusura dell'esecuzione",
+                    "lightvm-service: {} processes still active when closing the run",
                     r.active_at_close
                 ),
                 Ok(_) => {}
-                Err(e) => crate::diag!("lightvm-service: chiusura dell'esecuzione: {e}"),
+                Err(e) => crate::diag!("lightvm-service: closing the run: {e}"),
             }
         }
         if let Some(dir) = self.private_dirs.remove(&vm_id) {
@@ -405,19 +406,19 @@ impl QemuVmBackend {
         }
     }
 
-    /// Esecuzione già uscita (anche per la terminazione finale della scalata
-    /// di arresto, registrata come Emergency Stop dal backend): può essere
-    /// rilasciata senza attendere altro.
+    /// Run already exited (also through the final termination of the stop
+    /// escalation, recorded as an Emergency Stop by the backend): it can be
+    /// released without waiting any further.
     fn exited(&self, vm_id: VmId) -> bool {
         self.runs
             .get(&vm_id)
             .is_some_and(|r| matches!(r.state(), ProcessState::Exited { .. }))
     }
 
-    /// Disco principale della VM (`vms/<vm_id>/primary.qcow2`, disposizione
-    /// di `vm-storage`): creato con `qemu-img` al primo avvio con la
-    /// dimensione di `disk_gib`, poi riusato. La creazione non passa ancora dal
-    /// journal del catalogo (F3): un file preesistente è usato così com'è.
+    /// Primary disk of the VM (`vms/<vm_id>/primary.qcow2`, `vm-storage`
+    /// layout): created with `qemu-img` on first start with the size of
+    /// `disk_gib`, then reused. Creation does not go through the catalog
+    /// journal yet (F3): a pre-existing file is used as is.
     fn primary_disk(&self, vm: &VmRecord) -> Result<ManagedPath, PublicError> {
         let path = managed_abs(
             &self.setup.catalog_root,
@@ -428,10 +429,10 @@ impl QemuVmBackend {
             .config
             .disk_gib
             .checked_mul(1024)
-            .ok_or_else(|| PublicError::resource_limit("disco fuori intervallo"))?;
+            .ok_or_else(|| PublicError::resource_limit("disk out of range"))?;
         if std::fs::symlink_metadata(&path).is_ok() {
-            // Disco esistente: portato alla dimensione configurata se è stata
-            // aumentata nelle impostazioni della VM (mai ridotto).
+            // Existing disk: brought to the configured size if it was increased
+            // in the VM settings (never shrunk).
             if prepare::grow_disk(
                 &self.caps.qemu_img,
                 &disk,
@@ -442,14 +443,14 @@ impl QemuVmBackend {
             .map_err(|e| public(&e))?
             {
                 crate::diag!(
-                    "lightvm-service: disco della VM ingrandito a {} GiB",
+                    "lightvm-service: VM disk grown to {} GiB",
                     vm.config.disk_gib
                 );
             }
             return Ok(disk);
         }
         if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| io_public("directory della VM", &e))?;
+            std::fs::create_dir_all(dir).map_err(|e| io_public("VM directory", &e))?;
         }
         prepare::create_disk(
             &self.caps.qemu_img,
@@ -469,13 +470,12 @@ impl QemuVmBackend {
         media: &[VerifiedMedia],
     ) -> Result<RunPaths, PublicError> {
         let fw = self.caps.firmware.as_ref().ok_or_else(|| {
-            PublicError::unsupported("firmware UEFI non trovato nella distribuzione QEMU")
+            PublicError::unsupported("UEFI firmware not found in the QEMU distribution")
         })?;
         let run_text = run_id.to_string();
         let run_dir = self.setup.catalog_root.join("runs").join(&run_text);
-        std::fs::create_dir_all(&run_dir)
-            .map_err(|e| io_public("directory dell'esecuzione", &e))?;
-        // Ultimi 12 caratteri esadecimali (parte casuale del UUID v7): percorso corto.
+        std::fs::create_dir_all(&run_dir).map_err(|e| io_public("run directory", &e))?;
+        // Last 12 hexadecimal characters (random part of the UUID v7): short path.
         let short: String = run_text
             .chars()
             .filter(char::is_ascii_hexdigit)
@@ -483,9 +483,9 @@ impl QemuVmBackend {
             .take(12)
             .collect();
         let private_dir = self.setup.private_root.join(short);
-        std::fs::create_dir_all(&private_dir).map_err(|e| io_public("directory privata", &e))?;
+        std::fs::create_dir_all(&private_dir).map_err(|e| io_public("private directory", &e))?;
         let vars = run_dir.join("vars.fd");
-        std::fs::copy(&fw.vars_template, &vars).map_err(|e| io_public("variabili UEFI", &e))?;
+        std::fs::copy(&fw.vars_template, &vars).map_err(|e| io_public("UEFI variables", &e))?;
         let mut media_paths = BTreeMap::new();
         for m in media {
             let p = managed_abs(&self.setup.catalog_root, m.entry().managed_path.as_str());
@@ -516,14 +516,12 @@ impl VmBackend for QemuVmBackend {
         media: &[VerifiedMedia],
     ) -> Result<(), PublicError> {
         if self.exited(vm.id) {
-            // Esecuzione precedente uscita ma mai rilasciata (per esempio
-            // un arresto concluso dopo il timeout della scalata).
+            // Previous run exited but never released (for example a stop that
+            // completed after the escalation timeout).
             self.release(vm.id);
         }
         if self.runs.contains_key(&vm.id) {
-            return Err(PublicError::state_conflict(
-                "esecuzione già attiva per la VM",
-            ));
+            return Err(PublicError::state_conflict("run already active for the VM"));
         }
         if let Some(budget) = vm.config.limits.storage_budget_gib {
             let vm_dir = managed_abs(
@@ -536,11 +534,9 @@ impl VmBackend for QemuVmBackend {
             );
             let used = dir_usage(&vm_dir, &primary);
             if used > budget << 30 {
-                return Err(
-                    PublicError::resource_limit("budget di storage della VM superato")
-                        .with_detail("used_mib", (used >> 20).to_string())
-                        .with_detail("budget_gib", budget.to_string()),
-                );
+                return Err(PublicError::resource_limit("VM storage budget exceeded")
+                    .with_detail("used_mib", (used >> 20).to_string())
+                    .with_detail("budget_gib", budget.to_string()));
             }
         }
         let paths = self.prepare(vm, run_id, media)?;
@@ -551,7 +547,7 @@ impl VmBackend for QemuVmBackend {
             cpu: self.cpu.clone(),
             vcpus: vm.config.vcpus,
             memory_mib: u32::try_from(vm.config.memory_mib)
-                .map_err(|_| PublicError::resource_limit("memoria fuori intervallo"))?,
+                .map_err(|_| PublicError::resource_limit("memory out of range"))?,
             disk: Some(DiskSpec {
                 format: DiskFormat::Qcow2,
             }),
@@ -589,8 +585,8 @@ impl VmBackend for QemuVmBackend {
                 self.release(vm_id);
                 Ok(())
             }
-            // Il processo è uscito anche se la scalata ha superato il tempo:
-            // l'arresto è comunque concluso.
+            // The process exited even though the escalation ran out of time:
+            // the stop is complete anyway.
             Err(_) if self.exited(vm_id) => {
                 self.release(vm_id);
                 Ok(())
@@ -601,7 +597,7 @@ impl VmBackend for QemuVmBackend {
 
     fn force_stop(&mut self, vm_id: VmId, run_id: RunId) -> Result<(), PublicError> {
         if !self.runs.contains_key(&vm_id) {
-            // Nessun processo posseduto: nulla da terminare.
+            // No owned process: nothing to terminate.
             return Ok(());
         }
         let timeout = self.setup.emergency_timeout;
@@ -630,7 +626,7 @@ impl VmBackend for QemuVmBackend {
         _max_bytes: u64,
     ) -> Result<Screenshot, PublicError> {
         Err(PublicError::unsupported(
-            "screenshot non ancora collegato al servizio",
+            "screenshot not yet connected to the service",
         ))
     }
 
@@ -642,18 +638,18 @@ impl VmBackend for QemuVmBackend {
         _events: &[InputEvent],
     ) -> Result<(), PublicError> {
         Err(PublicError::unsupported(
-            "input non ancora collegato al servizio",
+            "input not yet connected to the service",
         ))
     }
 }
 
-/// Rimuove la directory privata di un'esecuzione (socket già chiusi).
+/// Removes the private directory of a run (sockets already closed).
 fn remove_private_dir(dir: &Path) {
     if let Err(e) = std::fs::remove_dir_all(dir)
         && e.kind() != std::io::ErrorKind::NotFound
     {
         crate::diag!(
-            "lightvm-service: directory privata non rimossa ({}): {e}",
+            "lightvm-service: private directory not removed ({}): {e}",
             dir.display()
         );
     }
@@ -665,8 +661,8 @@ impl BackendPort for QemuVmBackend {
             .runs
             .iter()
             .filter(|(_, r)| match r.state() {
-                // Le uscite da Emergency Stop sono confermate dal core con
-                // `force_stop` dopo il percorso prioritario.
+                // Exits from an Emergency Stop are confirmed by the core with
+                // `force_stop` after the priority path.
                 ProcessState::Exited {
                     cause: ExitCause::EmergencyStop,
                     ..
@@ -683,7 +679,7 @@ impl BackendPort for QemuVmBackend {
                     && r.memory_limit_reached()
                 {
                     crate::diag!(
-                        "lightvm-service: QEMU terminato al limite di memoria della VM (picco {} MiB, limite {} MiB)",
+                        "lightvm-service: QEMU terminated at the VM memory limit (peak {} MiB, limit {} MiB)",
                         r.peak_job_memory_bytes >> 20,
                         r.job_memory_bytes.unwrap_or(0) >> 20
                     );
@@ -696,7 +692,7 @@ impl BackendPort for QemuVmBackend {
     }
 }
 
-/// Host del servizio con backend QEMU.
+/// Service host with the QEMU backend.
 #[derive(Debug)]
 pub struct QemuHost {
     version: String,
@@ -714,7 +710,7 @@ struct QemuEmergency {
 
 impl EmergencyStop for QemuEmergency {
     fn emergency_stop_all(&self) -> EmergencyOutcome {
-        // Copia dei gestori: il registro non resta bloccato durante l'attesa.
+        // Copy of the handlers: the registry does not stay locked during the wait.
         let handles: Vec<qemu_backend::EmergencyStop> =
             lock(&self.registry).values().cloned().collect();
         let mut out = EmergencyOutcome {
@@ -748,13 +744,13 @@ impl Backend for QemuHost {
         })
     }
     fn stop_agent_sessions(&mut self, _reason: StopReason) {
-        // Nessuna sessione agente in F1: connessioni e credenziali non UI sono
-        // già revocate dal servizio; le sessioni del core arrivano con F4.
+        // No agent sessions in F1: non-UI connections and credentials are
+        // already revoked by the service; the core sessions arrive with F4.
     }
     fn prepare_shutdown(&mut self) {
-        // ACPI 15 s → `quit` 5 s → terminazione 5 s per VM: entro i 30 s per
-        // VM del budget di arresto del servizio. Un guest che si spegne prima
-        // termina prima; una politica `shutdown_vms` già impostata resta.
+        // ACPI 15 s → `quit` 5 s → termination 5 s per VM: within the 30 s per
+        // VM of the service shutdown budget. A guest that powers off earlier
+        // ends earlier; a `shutdown_vms` policy already set stays.
         let mut o = lock(&self.stop_override);
         if o.is_none() {
             *o = Some(ShutdownPolicy {
@@ -775,8 +771,8 @@ impl Backend for QemuHost {
         }
     }
     fn shutdown(&mut self) {
-        // Il motore ha già arrestato le VM; restano solo esecuzioni non
-        // confermate, terminate con il percorso prioritario.
+        // The engine has already stopped the VMs; only unconfirmed runs remain,
+        // terminated through the priority path.
         let leftover = QemuEmergency {
             registry: self.registry.clone(),
             timeout: self.emergency_timeout,
@@ -784,19 +780,19 @@ impl Backend for QemuHost {
         .emergency_stop_all();
         if leftover.processes_terminated > 0 {
             crate::diag!(
-                "lightvm-service: {} esecuzioni terminate all'arresto",
+                "lightvm-service: {} runs terminated at shutdown",
                 leftover.processes_terminated
             );
         }
     }
 }
 
-/// Backend delle VM senza QEMU configurato: ogni avvio è rifiutato.
+/// VM backend without a configured QEMU: every start is rejected.
 #[derive(Debug, Default)]
 pub struct UnavailableBackend;
 
 fn not_configured() -> PublicError {
-    PublicError::unsupported("backend QEMU non configurato in questo servizio")
+    PublicError::unsupported("QEMU backend not configured in this service")
 }
 
 impl VmBackend for UnavailableBackend {
@@ -807,7 +803,7 @@ impl VmBackend for UnavailableBackend {
         Err(not_configured())
     }
     fn force_stop(&mut self, _: VmId, _: RunId) -> Result<(), PublicError> {
-        // Nessun processo può esistere senza backend.
+        // No process can exist without a backend.
         Ok(())
     }
     fn reset(&mut self, _: VmId, _: RunId) -> Result<(), PublicError> {
@@ -833,7 +829,7 @@ impl BackendPort for UnavailableBackend {
     }
 }
 
-/// Host senza QEMU: nessun processo da terminare.
+/// Host without QEMU: no process to terminate.
 #[derive(Debug, Default)]
 pub struct UnavailableHost;
 
@@ -851,7 +847,7 @@ impl EmergencyStop for NoProcesses {
 
 impl Backend for UnavailableHost {
     fn name(&self) -> String {
-        "non configurato".into()
+        "not configured".into()
     }
     fn accelerator(&self) -> Option<String> {
         None
@@ -864,8 +860,8 @@ impl Backend for UnavailableHost {
     fn shutdown(&mut self) {}
 }
 
-/// Capacità host senza QEMU: nessun acceleratore approvato, quindi `vm.start`
-/// non è nella policy effettiva (errore `unsupported`, nessun ripiego TCG).
+/// Host capacity without QEMU: no approved accelerator, so `vm.start` is not
+/// in the effective policy (`unsupported` error, no TCG fallback).
 pub fn unavailable_capacity(free_storage_gib: u64) -> HostCapacity {
     HostCapacity {
         logical_cpus: std::thread::available_parallelism()
@@ -889,15 +885,15 @@ mod tests {
     use lightvm_proto::VmLimits;
 
     #[test]
-    fn limiti_del_job_dai_limiti_della_vm() {
-        let mut c = sample_config("limiti");
+    fn job_limits_from_vm_limits() {
+        let mut c = sample_config("limits");
         c.vcpus = 2;
         c.memory_mib = 2048;
-        // Predefiniti: nessun tetto CPU, memoria = RAM + 1024 MiB.
+        // Defaults: no CPU cap, memory = RAM + 1024 MiB.
         let l = job_limits(&c, 32);
         assert_eq!(l.cpu_rate, None);
         assert_eq!(l.job_memory_bytes, Some(3072 << 20));
-        // 50 % di 2 vCPU su 32 processori logici = 1 core = 3,12 % della macchina.
+        // 50 % of 2 vCPUs on 32 logical processors = 1 core = 3.12 % of the machine.
         c.limits = VmLimits {
             cpu_max_percent: 50,
             memory_margin_mib: 512,
@@ -906,7 +902,7 @@ mod tests {
         let l = job_limits(&c, 32);
         assert_eq!(l.cpu_rate, Some(312));
         assert_eq!(l.job_memory_bytes, Some(2560 << 20));
-        // Mai sotto 1 né sopra il 100 % della macchina.
+        // Never below 1 nor above 100 % of the machine.
         c.vcpus = 1;
         c.limits.cpu_max_percent = 5;
         assert_eq!(job_limits(&c, 1024).cpu_rate, Some(1));
@@ -916,7 +912,7 @@ mod tests {
     }
 
     #[test]
-    fn uso_della_directory_esclude_il_disco_principale() {
+    fn directory_usage_excludes_the_primary_disk() {
         let d = std::env::temp_dir().join(format!(
             "lightvm-dir-usage-{}-{}",
             std::process::id(),

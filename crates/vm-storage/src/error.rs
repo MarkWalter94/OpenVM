@@ -1,117 +1,117 @@
-//! Errori del catalogo.
+//! Catalog errors.
 //!
-//! Gli errori sono specifici dello storage; la traduzione negli errori pubblici
-//! stabili (`vm_busy`, `state_conflict`, `resource_limit`, ...) avviene nel
-//! supervisor tramite [`StorageError::public_code`].
+//! Errors are specific to storage; translation into the stable public errors
+//! (`vm_busy`, `state_conflict`, `resource_limit`, ...) happens in the
+//! supervisor through [`StorageError::public_code`].
 
 use std::path::PathBuf;
 
-/// Risultato con [`StorageError`].
+/// Result with [`StorageError`].
 pub type Result<T> = std::result::Result<T, StorageError>;
 
-/// Motivo per cui un percorso gestito è stato rifiutato.
+/// Reason why a managed path was rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathRejection {
-    /// Stringa vuota.
+    /// Empty string.
     Empty,
-    /// Percorso assoluto o con radice (`/x`, `\x`, `C:\x`, `C:x`).
+    /// Absolute or rooted path (`/x`, `\x`, `C:\x`, `C:x`).
     Absolute,
-    /// Percorso UNC (`\\server\share`) o device path (`\\?\`, `\\.\`).
+    /// UNC path (`\\server\share`) or device path (`\\?\`, `\\.\`).
     UncOrDevice,
-    /// Componente `..` o `.`.
+    /// `..` or `.` component.
     Traversal,
-    /// Nome riservato di Windows (`CON`, `NUL`, `COM1`, ...).
+    /// Windows reserved name (`CON`, `NUL`, `COM1`, ...).
     ReservedName,
-    /// Carattere non ammesso (controllo, `<>:"|?*`, barra rovesciata).
+    /// Disallowed character (control, `<>:"|?*`, backslash).
     InvalidCharacter,
-    /// Componente che termina con punto o spazio (normalizzato da Windows).
+    /// Component ending with a dot or space (normalized by Windows).
     TrailingDotOrSpace,
-    /// Percorso troppo lungo.
+    /// Path too long.
     TooLong,
-    /// Un componente esistente è un collegamento simbolico o un reparse point
-    /// (junction inclusa).
+    /// An existing component is a symbolic link or a reparse point
+    /// (junctions included).
     Link,
-    /// Il percorso non si trova sotto la directory attesa (per esempio `tmp/`).
+    /// The path is not under the expected directory (for example `tmp/`).
     OutsideArea,
 }
 
-/// Errore dello storage.
+/// Storage error.
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
-    /// Errore SQLite.
-    #[error("errore SQLite: {0}")]
+    /// SQLite error.
+    #[error("SQLite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
-    /// Errore di I/O su un percorso gestito.
-    #[error("errore di I/O su {path}: {source}")]
+    /// I/O error on a managed path.
+    #[error("I/O error on {path}: {source}")]
     Io {
-        /// Percorso coinvolto.
+        /// Path involved.
         path: PathBuf,
-        /// Errore originale.
+        /// Original error.
         source: std::io::Error,
     },
-    /// Errore di serializzazione JSON.
-    #[error("errore JSON: {0}")]
+    /// JSON serialization error.
+    #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
-    /// Un'altra istanza tiene già il lock del catalogo.
-    #[error("catalogo già in uso da un'altra istanza: {0}")]
+    /// Another instance already holds the catalog lock.
+    #[error("catalog already in use by another instance: {0}")]
     CatalogLocked(PathBuf),
-    /// Il database ha una versione di schema più recente di quella supportata.
+    /// The database has a schema version newer than the supported one.
     #[error(
-        "schema del catalogo v{found} più recente della versione supportata v{supported}: downgrade non ammesso"
+        "catalog schema v{found} newer than the supported version v{supported}: downgrade not allowed"
     )]
     SchemaTooNew {
-        /// Versione trovata nel database.
+        /// Version found in the database.
         found: u32,
-        /// Versione massima nota a questo binario.
+        /// Highest version known to this binary.
         supported: u32,
     },
-    /// Una migrazione già applicata non corrisponde a quella incorporata.
-    #[error("migrazione v{version} applicata con contenuto diverso da quello incorporato")]
+    /// An already applied migration does not match the embedded one.
+    #[error("migration v{version} applied with content different from the embedded one")]
     MigrationMismatch {
-        /// Versione divergente.
+        /// Diverging version.
         version: u32,
     },
-    /// Percorso gestito rifiutato.
-    #[error("percorso gestito rifiutato ({reason:?}): {path}")]
+    /// Managed path rejected.
+    #[error("managed path rejected ({reason:?}): {path}")]
     InvalidPath {
-        /// Percorso proposto (mai letto né aperto).
+        /// Proposed path (never read nor opened).
         path: String,
-        /// Motivo.
+        /// Reason.
         reason: PathRejection,
     },
-    /// Cancellazione impedita da un riferimento (baseline, disco, media).
-    #[error("oggetto referenziato, operazione impedita: {0}")]
+    /// Deletion prevented by a reference (baseline, disk, media).
+    #[error("object is referenced, operation prevented: {0}")]
     Referenced(&'static str),
-    /// Violazione di una regola del catalogo applicata dal database.
-    #[error("vincolo del catalogo violato: {0}")]
+    /// Violation of a catalog rule enforced by the database.
+    #[error("catalog constraint violated: {0}")]
     Constraint(String),
-    /// Oggetto non trovato.
-    #[error("{kind} non trovato: {id}")]
+    /// Object not found.
+    #[error("{kind} not found: {id}")]
     NotFound {
-        /// Tipo di oggetto.
+        /// Object kind.
         kind: &'static str,
-        /// Identificativo.
+        /// Identifier.
         id: String,
     },
-    /// Un'altra operazione con journal è in corso sulla stessa VM.
-    #[error("operazione in corso sulla VM {0}")]
+    /// Another journaled operation is in progress on the same VM.
+    #[error("operation in progress on VM {0}")]
     VmBusy(String),
-    /// Transizione non ammessa dallo stato corrente.
-    #[error("stato non compatibile: {0}")]
+    /// Transition not allowed from the current state.
+    #[error("incompatible state: {0}")]
     StateConflict(String),
-    /// Budget storage o riserva host superati.
-    #[error("limite di storage: {0}")]
+    /// Storage budget or host reserve exceeded.
+    #[error("storage limit: {0}")]
     ResourceLimit(String),
-    /// Capacità richiesta non disponibile (per esempio quota rigida OS).
-    #[error("non supportato: {0}")]
+    /// Required capability not available (for example a hard OS quota).
+    #[error("not supported: {0}")]
     Unsupported(&'static str),
-    /// Il contenuto di un file gestito non corrisponde a quanto registrato
-    /// (hash o dimensione): baseline o media alterati fuori dal catalogo.
-    #[error("integrità non verificata per {path}: {detail}")]
+    /// The content of a managed file does not match what was recorded
+    /// (hash or size): baseline or media altered outside the catalog.
+    #[error("integrity check failed for {path}: {detail}")]
     IntegrityMismatch {
-        /// Percorso gestito.
+        /// Managed path.
         path: String,
-        /// Dettaglio (valore atteso e osservato).
+        /// Detail (expected and observed value).
         detail: String,
     },
 }
@@ -131,8 +131,8 @@ impl StorageError {
         }
     }
 
-    /// Codice pubblico stabile (ROADMAP 6.3) più vicino, se esiste.
-    /// Gli errori interni (I/O, SQLite, migrazioni) non hanno un codice pubblico.
+    /// Closest stable public code (ROADMAP 6.3), if any.
+    /// Internal errors (I/O, SQLite, migrations) have no public code.
     pub fn public_code(&self) -> Option<&'static str> {
         match self {
             Self::VmBusy(_) | Self::CatalogLocked(_) => Some("vm_busy"),
@@ -148,7 +148,7 @@ impl StorageError {
     }
 }
 
-/// Converte gli errori `RAISE(ABORT, 'lightvm:...')` dei trigger in errori nominati.
+/// Converts the triggers' `RAISE(ABORT, 'lightvm:...')` errors into named errors.
 pub(crate) fn map_sqlite(err: rusqlite::Error) -> StorageError {
     if let rusqlite::Error::SqliteFailure(code, Some(msg)) = &err {
         if let Some(tag) = msg.strip_prefix("lightvm:") {
@@ -167,7 +167,7 @@ pub(crate) fn map_sqlite(err: rusqlite::Error) -> StorageError {
     StorageError::Sqlite(err)
 }
 
-/// Estensione per mappare i risultati rusqlite con [`map_sqlite`].
+/// Extension to map rusqlite results with [`map_sqlite`].
 pub(crate) trait SqlResultExt<T> {
     fn db(self) -> Result<T>;
 }

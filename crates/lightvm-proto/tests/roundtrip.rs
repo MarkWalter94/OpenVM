@@ -1,4 +1,4 @@
-//! Round-trip serde e validazioni dei tipi pubblici.
+//! Serde round-trips and validations of the public types.
 
 use std::collections::BTreeSet;
 
@@ -8,9 +8,9 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::json;
 
 fn rt<T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(v: &T) {
-    let s = serde_json::to_string(v).expect("serializzazione");
-    let back: T = serde_json::from_str(&s).expect("deserializzazione");
-    assert_eq!(&back, v, "round-trip di {s}");
+    let s = serde_json::to_string(v).expect("serialization");
+    let back: T = serde_json::from_str(&s).expect("deserialization");
+    assert_eq!(&back, v, "round-trip of {s}");
 }
 
 fn ts(ms: i64) -> UtcTimestamp {
@@ -44,7 +44,7 @@ fn ids_roundtrip_and_reject_non_v7() {
     assert_eq!(s.parse::<VmId>().unwrap(), id);
     assert_eq!(serde_json::to_value(id).unwrap(), json!(s));
     assert_eq!(VmId::from_bytes(id.to_bytes()).unwrap(), id);
-    // v4 e nil rifiutati; forme non canoniche rifiutate.
+    // v4 and nil rejected; non-canonical forms rejected.
     assert_eq!(
         "550e8400-e29b-41d4-a716-446655440000".parse::<VmId>(),
         Err(IdParseError::NotVersion7)
@@ -57,7 +57,7 @@ fn ids_roundtrip_and_reject_non_v7() {
     assert!(format!("{{{s}}}").parse::<VmId>().is_err());
     assert!(s.replace('-', "").parse::<VmId>().is_err());
     assert!(serde_json::from_value::<VmId>(json!("../etc/passwd")).is_err());
-    // Gli ID sono ordinati per istante di creazione.
+    // IDs are ordered by creation instant.
     assert!(VmId::from_unix_millis(1, [0xff; 10]) < VmId::from_unix_millis(2, [0; 10]));
 }
 
@@ -67,7 +67,7 @@ fn timestamp_roundtrip_is_millisecond_utc() {
     assert_eq!(t.to_string(), "2025-10-09T10:00:00.123Z");
     rt(&t);
     let parsed: UtcTimestamp = "2025-10-09T12:00:00.123456+02:00".parse().unwrap();
-    assert_eq!(parsed, t, "offset convertito in UTC, troncato al ms");
+    assert_eq!(parsed, t, "offset converted to UTC, truncated to ms");
     assert!("2025-10-09 10:00:00".parse::<UtcTimestamp>().is_err());
     assert_eq!(
         t.checked_add_millis(877).unwrap().as_unix_millis(),
@@ -91,7 +91,7 @@ fn models_roundtrip() {
         kind: MediaKind::DataIso,
         sha256: Sha256Digest::from_bytes([0xab; 32]),
         size_bytes: 1 << 30,
-        declared_origin: Label::parse("ISO prodotta dall'utente").unwrap(),
+        declared_origin: Label::parse("ISO produced by the user").unwrap(),
         approved_at: ts(10),
     };
     rt(&media);
@@ -169,7 +169,7 @@ fn config_rejects_unknown_fields_and_non_offline_network() {
     v["qemu_args"] = json!("-drive file=/etc/shadow");
     assert!(
         serde_json::from_value::<VmConfig>(v).is_err(),
-        "campi sconosciuti rifiutati"
+        "unknown fields rejected"
     );
 }
 
@@ -244,7 +244,7 @@ fn lease_limit_is_ten_seconds() {
     let l = Lease::new(sid, ts(0), 10_000).unwrap();
     assert!(l.is_valid_at(ts(9_999)));
     assert!(!l.is_valid_at(ts(10_000)));
-    // Un lease deserializzato con durata oltre il limite non è mai valido.
+    // A deserialized lease with a duration over the limit is never valid.
     let forged = Lease {
         session_id: sid,
         renewed_at: ts(0),
@@ -256,7 +256,7 @@ fn lease_limit_is_ten_seconds() {
 #[test]
 fn session_token_is_redacted() {
     let t = SessionToken::from_bytes([0x5a; 32]);
-    assert_eq!(format!("{t:?}"), "SessionToken(<redatto>)");
+    assert_eq!(format!("{t:?}"), "SessionToken(<redacted>)");
     rt(&t);
     assert!(t.ct_eq(&SessionToken::from_bytes([0x5a; 32])));
     assert!(!t.ct_eq(&SessionToken::from_bytes([0x5b; 32])));
@@ -323,7 +323,7 @@ fn pointer_scaling_matches_qemu() {
     let bad: PointerMove = serde_json::from_value(json!({"x": 40000, "y": 1})).unwrap();
     assert!(
         bad.validate().is_err(),
-        "intervallo verificato dopo la deserializzazione"
+        "range checked after deserialization"
     );
     assert!(DisplayGeometry::new(0, 10).is_err());
     assert!(DisplayGeometry::new(8193, 10).is_err());
@@ -351,12 +351,12 @@ fn text_validation_rejects_host_paths() {
         "trail.",
         "a//b",
         "a/b/c/d/e",
-        "spazio nel nome",
+        "space in name",
     ] {
-        assert!(ManagedRelPath::parse(bad).is_err(), "accettato: {bad:?}");
+        assert!(ManagedRelPath::parse(bad).is_err(), "accepted: {bad:?}");
     }
     for good in ["media/x.iso", "vms/0192/disk.qcow2", "com10.iso", "console"] {
-        assert!(ManagedRelPath::parse(good).is_ok(), "rifiutato: {good:?}");
+        assert!(ManagedRelPath::parse(good).is_ok(), "rejected: {good:?}");
     }
     let long = "x".repeat(65);
     for bad in [
@@ -372,11 +372,11 @@ fn text_validation_rejects_host_paths() {
         "x\u{0}",
         long.as_str(),
     ] {
-        assert!(VmName::parse(bad).is_err(), "nome accettato: {bad:?}");
+        assert!(VmName::parse(bad).is_err(), "name accepted: {bad:?}");
     }
     assert!(VmName::parse("Ubuntu 24.04_test-1").is_ok());
-    assert!(Label::parse("riga\nnuova").is_err());
-    assert!(Label::parse("\u{1b}[31mrosso").is_err());
+    assert!(Label::parse("line\nbreak").is_err());
+    assert!(Label::parse("\u{1b}[31mred").is_err());
     assert!(QCode::parse("ret").is_ok());
     assert!(QCode::parse("Ret").is_err());
     assert!(QCode::parse("a b").is_err());
@@ -452,7 +452,7 @@ proptest! {
         prop_assert_eq!(Sha256Digest::parse_hex(&d.to_hex()).unwrap(), d);
     }
 
-    /// Nessuna stringa accettata come percorso gestito contiene separatori o componenti pericolosi.
+    /// No string accepted as a managed path contains dangerous separators or components.
     #[test]
     fn prop_managed_path_never_escapes(s in "[a-zA-Z0-9./\\\\:_ -]{0,40}") {
         if let Ok(p) = ManagedRelPath::parse(s.clone()) {
@@ -470,8 +470,8 @@ proptest! {
         prop_assert!(p.x <= ABS_AXIS_MAX && p.y <= ABS_AXIS_MAX);
     }
 
-    /// Le transizioni non sono riflessive; `stopped` si raggiunge solo da `stopping`
-    /// o `recovering`; `running` solo da `starting`.
+    /// Transitions are not reflexive; `stopped` is reached only from `stopping`
+    /// or `recovering`; `running` only from `starting`.
     #[test]
     fn prop_transition_table_invariants(a in any_state(), b in any_state()) {
         if a.can_transition_to(b) {

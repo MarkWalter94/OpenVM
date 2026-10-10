@@ -1,6 +1,6 @@
-//! Eventi di audit minimi (ROADMAP 7.2 punto 9, 9; F1: creazione, avvio,
-//! arresto e dinieghi). Solo tipo azione, identificativi, esito e ordine: nessun
-//! payload sensibile (testo digitato, token, percorsi host, contenuto guest).
+//! Minimal audit events (ROADMAP 7.2 item 9, 9; F1: creation, start,
+//! stop and denials). Only action type, identifiers, outcome and order: no
+//! sensitive payload (typed text, tokens, host paths, guest content).
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -10,94 +10,94 @@ use crate::{
     VmId,
 };
 
-/// Tipo di azione registrata.
+/// Type of recorded action.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum AuditAction {
-    /// Creazione VM.
+    /// VM creation.
     VmCreate,
-    /// Avvio VM (richiesta inoltrata o esito).
+    /// VM start (request forwarded or outcome).
     VmStart,
-    /// Arresto VM (ordinario o forzato).
+    /// VM stop (ordinary or forced).
     VmStop,
-    /// Reset VM.
+    /// VM reset.
     VmReset,
     /// Screenshot.
     VmScreenshot,
-    /// Input (solo conteggio implicito, mai il contenuto).
+    /// Input (implicit count only, never the content).
     VmInput,
-    /// Cambio di stato osservato (processo/QMP).
+    /// Observed state change (process/QMP).
     VmStateObserved,
     /// Emergency Stop.
     EmergencyStop,
-    /// Creazione sessione.
+    /// Session creation.
     SessionCreate,
-    /// Pausa sessione.
+    /// Session pause.
     SessionPause,
-    /// Ripresa sessione.
+    /// Session resume.
     SessionResume,
-    /// Terminazione sessione (revoca, scadenza...).
+    /// Session termination (revocation, expiry...).
     SessionTerminate,
-    /// Operazione scartata prima dell'inoltro.
+    /// Operation discarded before forwarding.
     OperationDiscard,
-    /// Modifica della configurazione di una VM (risorse e limiti).
+    /// Change to a VM's configuration (resources and limits).
     VmConfigure,
 }
 
-/// Esito registrato.
+/// Recorded outcome.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum AuditOutcome {
-    /// Accettata (in coda).
+    /// Accepted (queued).
     Accepted,
-    /// Inoltrata al backend.
+    /// Forwarded to the backend.
     Forwarded,
-    /// Completata.
+    /// Completed.
     Succeeded,
-    /// Fallita.
+    /// Failed.
     Failed,
-    /// Negata: nessun effetto.
+    /// Denied: no effect.
     Denied,
-    /// Scartata prima dell'inoltro: nessun effetto.
+    /// Discarded before forwarding: no effect.
     Discarded,
 }
 
-/// Evento di audit. `seq` è l'ordine totale assegnato dal core, strettamente crescente.
+/// Audit event. `seq` is the total order assigned by the core, strictly increasing.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AuditEvent {
-    /// Ordine (da 1, strettamente crescente).
+    /// Order (from 1, strictly increasing).
     pub seq: u64,
-    /// Istante UTC.
+    /// UTC instant.
     pub at: UtcTimestamp,
-    /// Attore.
+    /// Actor.
     pub actor: Actor,
-    /// Azione.
+    /// Action.
     pub action: AuditAction,
-    /// Esito.
+    /// Outcome.
     pub outcome: AuditOutcome,
-    /// VM coinvolta.
+    /// VM involved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vm_id: Option<VmId>,
-    /// Esecuzione coinvolta.
+    /// Run involved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<RunId>,
-    /// Operazione coinvolta.
+    /// Operation involved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation_id: Option<OperationId>,
-    /// Sessione coinvolta.
+    /// Session involved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<SessionId>,
-    /// Capability valutata (per i dinieghi).
+    /// Capability evaluated (for denials).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capability: Option<Capability>,
-    /// Codice d'errore pubblico (per dinieghi e fallimenti).
+    /// Public error code (for denials and failures).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<ErrorCode>,
-    /// Causa di terminazione (per `session_terminate`).
+    /// Termination cause (for `session_terminate`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub termination: Option<TerminationCause>,
 }

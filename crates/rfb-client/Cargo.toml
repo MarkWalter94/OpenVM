@@ -1,26 +1,26 @@
 [package]
 name = "rfb-client"
-description = "LightVM: client RFB 3.8 minimo in sola lettura per la console (spike F0-04)"
+description = "LightVM: minimal read-only RFB 3.8 client for the console (spike F0-04)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
-# Dipendenze con versione esatta e nessuna sorgente git (ADR-0023).
-# Sono dichiarate qui e non in [workspace.dependencies] per non modificare il
-# Cargo.toml di radice durante F0.
+# Dependencies with exact versions and no git sources (ADR-0023).
+# They are declared here and not in [workspace.dependencies] so as not to modify the
+# root Cargo.toml during F0.
 [dependencies]
-# ZRLE: flusso zlib persistente per connessione. Backend Rust puro (miniz_oxide).
+# ZRLE: persistent zlib stream per connection. Pure Rust backend (miniz_oxide).
 flate2 = { version = "=1.1.10", default-features = false, features = ["rust_backend"] }
-# Socket AF_UNIX (anche su Windows) e TCP per VeNCrypt.
+# AF_UNIX sockets (Windows too) and TCP for VeNCrypt.
 socket2 = { version = "=0.6.5", features = ["all"] }
-# TLS per VeNCrypt X.509 con certificato client. Provider `ring`: aws-lc-rs
-# richiederebbe CMake/NASM sull'host di build.
+# TLS for VeNCrypt X.509 with a client certificate. `ring` provider: aws-lc-rs
+# would require CMake/NASM on the build host.
 rustls = { version = "=0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
 
 [target.'cfg(windows)'.dependencies]
-# Implementazione alternativa AF_UNIX, provata contro socket2 in F0-04.
+# Alternative AF_UNIX implementation, tested against socket2 in F0-04.
 uds_windows = "=1.2.1"
 
 [lints]

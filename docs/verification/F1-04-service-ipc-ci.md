@@ -1,372 +1,372 @@
-# F1-04 — `lightvm-service`: IPC locale autenticato, istanza singola, skeleton del supervisor e CI
+# F1-04 — `lightvm-service`: authenticated local IPC, single instance, supervisor skeleton and CI
 
-- Data di esecuzione (UTC): 2026-10-09, dalle 14:30 alle 15:20 circa
-- Esecutore: agente di sviluppo (sessione Claude Code), su richiesta del responsabile del progetto
-- Passo della roadmap: sezione 10, F1 ("Skeleton del supervisor e test headless senza dipendenza dalla UI", "CI Windows/Linux; build macOS … senza dichiarare supporto operativo"); sezioni 6.1, 6.3, 7.1, 7.3, 7.4 (righe "Sessioni", "IPC/console", "Lifecycle"), 9 (adapter stdio, named pipe con ACL / socket locale, rate limit e code limitate), 13 (pipeline di verifica)
-- ADR collegati: ADR-0002, ADR-0006, ADR-0009, ADR-0015 (parte B in sospeso), ADR-0023, ADR-0026 (non modificati)
-- Aggiornamento del 2026-10-09 (dalle 15:20 alle 15:50 circa UTC): integrazione reale del composition root, involucro IPC in `lightvm-proto`, audit minimo, prova end-to-end con QEMU reale; vedi la sezione datata in coda "Integrazione del composition root". Le sezioni precedenti restano come registrate (prima esecuzione, con backend e catalogo finti).
-- Esito complessivo (prima esecuzione): **parziale** — trasporto, handshake, istanza singola, revoca, rate limit, arresto controllato e rilevamento della morte del genitore verificati su Windows e su Linux (WSL2) con backend e catalogo **finti**; rifiuto di un processo a integrità bassa verificato su Windows; workflow CI scritti e validati in locale ma **non eseguiti** su GitHub (nessun repository remoto); la sequenza CI completa sul workspace fallisce oggi per cause esterne a questo flusso (vedi Risultati, punto 6).
+- Execution date (UTC): 2026-10-09, from about 14:30 to 15:20
+- Executed by: development agent (Claude Code session), at the request of the project owner
+- Roadmap step: section 10, F1 ("Supervisor skeleton and headless tests without dependency on the UI", "Windows/Linux CI; macOS build … without declaring operational support"); sections 6.1, 6.3, 7.1, 7.3, 7.4 (rows "Sessions", "IPC/console", "Lifecycle"), 9 (stdio adapter, named pipe with ACL / local socket, rate limit and bounded queues), 13 (verification pipeline)
+- Related ADRs: ADR-0002, ADR-0006, ADR-0009, ADR-0015 (part B pending), ADR-0023, ADR-0026 (not modified)
+- Update of 2026-10-09 (from about 15:20 to 15:50 UTC): real integration of the composition root, IPC envelope in `lightvm-proto`, minimal audit, end-to-end test with real QEMU; see the dated section at the end "Composition root integration". The previous sections remain as recorded (first run, with fake backend and catalog).
+- Overall outcome (first run): **partial** — transport, handshake, single instance, revocation, rate limit, controlled shutdown and parent death detection verified on Windows and on Linux (WSL2) with a **fake** backend and catalog; rejection of a low-integrity process verified on Windows; CI workflows written and validated locally but **not run** on GitHub (no remote repository); the full CI sequence on the workspace fails today for causes external to this stream (see Results, point 6).
 
-Esiti ammessi: **verificato**, **fallito**, **non eseguito** (sezione 17). Log grezzi in `lab/logs/` (fuori dal repository): `f1-04-windows-test.txt`, `f1-04-windows-checks.txt`, `f1-04-pipe-sddl.txt`, `f1-04-linux-test.txt`, `f1-04-linux-pidfd.txt`, `f1-04-ci-windows.txt`, `f1-04-ci-linux.txt`, `f1-04-cargo-deny.txt`, `f1-04-yaml-check.txt`.
+Allowed outcomes: **verified**, **failed**, **not executed** (section 17). Raw logs in `lab/logs/` (outside the repository): `f1-04-windows-test.txt`, `f1-04-windows-checks.txt`, `f1-04-pipe-sddl.txt`, `f1-04-linux-test.txt`, `f1-04-linux-pidfd.txt`, `f1-04-ci-windows.txt`, `f1-04-ci-linux.txt`, `f1-04-cargo-deny.txt`, `f1-04-yaml-check.txt`.
 
-## Scopo
+## Purpose
 
-Portare `crates/lightvm-service` da scheletro a skeleton funzionante del supervisor (ROADMAP 6.1, 10 F1):
+Bring `crates/lightvm-service` from a skeleton to a working supervisor skeleton (ROADMAP 6.1, 10 F1):
 
-1. trasporto IPC locale autenticato con permessi OS restrittivi e verifica dell'identità del peer;
-2. protocollo con framing limitato, versione negoziata, handshake con credenziale, errori stabili;
-3. istanza singola per catalogo;
-4. ciclo del supervisor con `Catalog` e `Backend` come tratti, dispatcher tipizzato, eventi, registro delle connessioni con revoca, arresto controllato, Emergency Stop su percorso prioritario;
-5. avvio come figlio della UI con credenziale iniziale fuori dagli argomenti e rilevamento della morte del genitore;
-6. CI Windows/Linux, portabilità macOS, schemi, licenze e advisory.
+1. authenticated local IPC transport with restrictive OS permissions and verification of the peer's identity;
+2. protocol with bounded framing, negotiated version, handshake with credential, stable errors;
+3. single instance per catalog;
+4. supervisor loop with `Catalog` and `Backend` as traits, typed dispatcher, events, connection registry with revocation, controlled shutdown, Emergency Stop on a priority path;
+5. startup as a child of the UI with the initial credential outside the arguments and detection of the parent's death;
+6. Windows/Linux CI, macOS portability, schemas, licences and advisories.
 
-Non dimostra: processi QEMU, Job Object, QMP o storage reali (le implementazioni di `Catalog` e `Backend` sono finte, sezione 10 F1: "test sintetici e mock sono ammessi per errori/protocollo"); pairing con approvazione dell'utente, grant e lease (F4); adapter MCP (F5); isolamento rispetto a un secondo utente locale (nessun secondo account disponibile, come in F0-04); esecuzione dei workflow su runner GitHub.
+It does not demonstrate: real QEMU processes, Job Object, QMP or storage (the `Catalog` and `Backend` implementations are fake, section 10 F1: "synthetic tests and mocks are allowed for errors/protocol"); pairing with user approval, grants and leases (F4); MCP adapter (F5); isolation from a second local user (no second account available, as in F0-04); running the workflows on GitHub runners.
 
-## Ambiente
+## Environment
 
-| Voce | Valore |
+| Item | Value |
 | --- | --- |
-| Host | HP ZBook Fury 16 G9, Intel Core i7-12800HX, 32 GiB RAM (come F0-01/F0-04) |
-| OS e build | Windows 11 Pro 10.0.26200; utente di dominio non amministratore, shell a integrità media (`S-1-16-8192`) |
-| Linux | WSL2, kernel `6.18.33.1-microsoft-standard-WSL2`, Ubuntu 26.04, `XDG_RUNTIME_DIR=/run/user/1000`; build con linker zig come in F0-07 (`lab/wsl/env.sh`), `CARGO_TARGET_DIR=lab/wsl/target` |
-| Acceleratore e stato | non usato (nessun QEMU in questa prova) |
-| Toolchain | Rust 1.99.0 (`b940084d7 2026-09-28`), `x86_64-pc-windows-msvc` con ambiente Build Tools 2022 (`vcvars64.bat`, F0-01 §4.1); `x86_64-unknown-linux-gnu` in WSL |
-| Binario QEMU / firmware / guest | non applicabile |
-| Sessione grafica | non applicabile (test headless) |
-| Strumenti di verifica | cargo-deny 0.20.2 (profilo utente); Node 24.15.0 con js-yaml 4.1.0 (scratchpad); actionlint 1.7.7 (scratchpad, SHA-256 dello zip `7f12f1801bca3d480d67aaf7774f4c2a6359a3ca8eebe382c95c10c9704aa731` uguale al file checksums della release) |
-| Binari provati | `target\debug\lightvm-service.exe` SHA-256 `f4f67bf7f7ff27311311985d9018a3251e26a7852e12dc0612a7ee711966a15f`; `target\debug\lightvm-ipc-probe.exe` SHA-256 `6c1a4187755d052f614c5c4ba2d4934c519035d7cccd7f9a36c8b4a483bcb97b` |
+| Host | HP ZBook Fury 16 G9, Intel Core i7-12800HX, 32 GiB RAM (as in F0-01/F0-04) |
+| OS and build | Windows 11 Pro 10.0.26200; non-administrator domain user, shell at medium integrity (`S-1-16-8192`) |
+| Linux | WSL2, kernel `6.18.33.1-microsoft-standard-WSL2`, Ubuntu 26.04, `XDG_RUNTIME_DIR=/run/user/1000`; build with the zig linker as in F0-07 (`lab/wsl/env.sh`), `CARGO_TARGET_DIR=lab/wsl/target` |
+| Accelerator and state | not used (no QEMU in this test) |
+| Toolchain | Rust 1.99.0 (`b940084d7 2026-09-28`), `x86_64-pc-windows-msvc` with the Build Tools 2022 environment (`vcvars64.bat`, F0-01 §4.1); `x86_64-unknown-linux-gnu` in WSL |
+| QEMU binary / firmware / guest | not applicable |
+| Graphics session | not applicable (headless tests) |
+| Verification tools | cargo-deny 0.20.2 (user profile); Node 24.15.0 with js-yaml 4.1.0 (scratchpad); actionlint 1.7.7 (scratchpad, SHA-256 of the zip `7f12f1801bca3d480d67aaf7774f4c2a6359a3ca8eebe382c95c10c9704aa731` equal to the release checksums file) |
+| Binaries tested | `target\debug\lightvm-service.exe` SHA-256 `f4f67bf7f7ff27311311985d9018a3251e26a7852e12dc0612a7ee711966a15f`; `target\debug\lightvm-ipc-probe.exe` SHA-256 `6c1a4187755d052f614c5c4ba2d4934c519035d7cccd7f9a36c8b4a483bcb97b` |
 
-Dipendenze aggiunte a `lightvm-service` (versioni esatte, nessuna dipendenza git; licenze dall'inventario `cargo deny list`):
+Dependencies added to `lightvm-service` (exact versions, no git dependencies; licences from the `cargo deny list` inventory):
 
-| Crate | Versione | Licenza | Uso |
+| Crate | Version | Licence | Use |
 | --- | --- | --- | --- |
-| tokio | 1.53.2 (già nel lockfile) | MIT | runtime asincrono, socket Unix, canali |
-| serde, serde_json | 1.0.229, 1.0.151 | MIT OR Apache-2.0 | payload JSON |
-| getrandom | 0.3.4 (già nel lockfile) | MIT OR Apache-2.0 | credenziali e nomi casuali dal generatore del sistema operativo |
+| tokio | 1.53.2 (already in the lockfile) | MIT | async runtime, Unix sockets, channels |
+| serde, serde_json | 1.0.229, 1.0.151 | MIT OR Apache-2.0 | JSON payloads |
+| getrandom | 0.3.4 (already in the lockfile) | MIT OR Apache-2.0 | credentials and random names from the operating system generator |
 | lightvm-proto | path | MIT | `PublicError`, `ErrorCode`, `ProtocolError`, `ReplyError` |
-| interprocess (solo Windows) | 2.4.4 | 0BSD OR MIT OR Apache-2.0 | named pipe asincrona con descrittore di sicurezza, conversione SDDL, PID e sessione del client |
-| sysinfo (solo Windows) | 0.39.6 | MIT | SID dell'utente proprietario di un processo (proprio e del peer) |
-| widestring (solo Windows) | 1.2.1 | MIT OR Apache-2.0 | stringa SDDL UTF-16 per `interprocess` |
-| rustix (solo Unix) | 1.1.5 (già nel lockfile) | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | `geteuid`, `pidfd_open`, `poll`, `getppid` |
+| interprocess (Windows only) | 2.4.4 | 0BSD OR MIT OR Apache-2.0 | async named pipe with security descriptor, SDDL conversion, client PID and session |
+| sysinfo (Windows only) | 0.39.6 | MIT | SID of the user owning a process (own and peer) |
+| widestring (Windows only) | 1.2.1 | MIT OR Apache-2.0 | UTF-16 SDDL string for `interprocess` |
+| rustix (Unix only) | 1.1.5 (already in the lockfile) | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | `geteuid`, `pidfd_open`, `poll`, `getppid` |
 
-Nessun `unsafe` nel crate (`unsafe_code = "deny"` del workspace, nessuna deroga): le chiamate Win32 e Linux sono incapsulate nei crate sopra.
+No `unsafe` in the crate (`unsafe_code = "deny"` of the workspace, no exemptions): the Win32 and Linux calls are encapsulated in the crates above.
 
-## Progetto
+## Design
 
-### Trasporto scelto e motivazione
+### Chosen transport and rationale
 
-**Windows: named pipe con ACL**, non socket Unix in directory privata.
+**Windows: named pipe with ACL**, not a Unix socket in a private directory.
 
-- La named pipe consente di fissare il descrittore di sicurezza **alla creazione** (nessuna finestra tra creazione e ACL) e di includervi l'etichetta di integrità; il socket Unix su Windows richiederebbe una directory privata con DACL impostata via API (con `icacls` non è accettabile in produzione) e non offre credenziali del peer.
-- Si ottiene in modo sicuro senza `unsafe` diretto: `interprocess` 2.4.4 espone `SecurityDescriptor::deserialize(SDDL)` e `PipeListenerOptions::security_descriptor`, imposta `FILE_FLAG_FIRST_PIPE_INSTANCE` sulla prima istanza (se il nome esiste già la creazione fallisce invece di condividere la pipe) e `PIPE_REJECT_REMOTE_CLIENTS` (`accept_remote(false)`), e fornisce `client_process_id`/`client_session_id`.
-- Descrittore applicato: `O:<SID>D:P(A;;GA;;;<SID>)S:(ML;;NWNRNX;;;ME)`, dove `<SID>` è il SID dell'utente del processo servizio (letto con `sysinfo`, validato come `S-1-` seguito solo da cifre e trattini per escludere iniezioni nell'SDDL). DACL protetta con un solo ACE per l'utente corrente (nessun accesso per SYSTEM, Administrators, Everyone o pacchetti AppContainer); etichetta obbligatoria di integrità media con no-write-up/no-read-up/no-execute-up: un processo a integrità bassa non apre la pipe.
-- Dopo l'accettazione: la sessione di logon del client deve coincidere con quella del servizio e il SID del processo client (dal PID riportato dal kernel per la pipe) deve coincidere con quello del servizio; altrimenti la connessione viene chiusa prima di leggere qualsiasi byte.
-- Nome della pipe casuale (`\\.\pipe\lightvm-<128 bit esadecimali>`): non è un segreto, la protezione è l'ACL più la credenziale.
+- The named pipe makes it possible to set the security descriptor **at creation** (no window between creation and ACL) and to include the integrity label in it; the Unix socket on Windows would require a private directory with a DACL set via API (with `icacls` it is not acceptable in production) and does not offer peer credentials.
+- It is obtained safely without direct `unsafe`: `interprocess` 2.4.4 exposes `SecurityDescriptor::deserialize(SDDL)` and `PipeListenerOptions::security_descriptor`, sets `FILE_FLAG_FIRST_PIPE_INSTANCE` on the first instance (if the name already exists creation fails instead of sharing the pipe) and `PIPE_REJECT_REMOTE_CLIENTS` (`accept_remote(false)`), and provides `client_process_id`/`client_session_id`.
+- Descriptor applied: `O:<SID>D:P(A;;GA;;;<SID>)S:(ML;;NWNRNX;;;ME)`, where `<SID>` is the SID of the user of the service process (read with `sysinfo`, validated as `S-1-` followed only by digits and dashes to rule out injections into the SDDL). Protected DACL with a single ACE for the current user (no access for SYSTEM, Administrators, Everyone or AppContainer packages); mandatory medium integrity label with no-write-up/no-read-up/no-execute-up: a low-integrity process cannot open the pipe.
+- After acceptance: the client's logon session must match the service's and the SID of the client process (from the PID reported by the kernel for the pipe) must match the service's; otherwise the connection is closed before reading any byte.
+- Random pipe name (`\\.\pipe\lightvm-<128 hexadecimal bits>`): it is not a secret, the protection is the ACL plus the credential.
 
-**Linux: socket Unix** in `$XDG_RUNTIME_DIR/lightvm` (ripiego `<catalogo>/.run`, o `--runtime-dir`). La directory viene creata con `0700` o, se esiste, deve essere una directory (non un collegamento simbolico), dell'utente effettivo e senza permessi per gruppo e altri; il socket viene portato a `0600` (la directory protegge la finestra tra `bind` e `chmod`). Dopo l'accettazione l'UID del peer da `SO_PEERCRED` (`tokio::net::UnixStream::peer_cred`) deve coincidere con l'UID effettivo del servizio. Percorso del socket limitato a 100 byte (limite di `sun_path`) con errore esplicito. Il socket viene rimosso all'arresto. Lo stesso codice compila su macOS (`getpeereid`), senza supporto dichiarato.
+**Linux: Unix socket** in `$XDG_RUNTIME_DIR/lightvm` (fallback `<catalog>/.run`, or `--runtime-dir`). The directory is created with `0700` or, if it exists, it must be a directory (not a symbolic link), owned by the effective user and without permissions for group and others; the socket is set to `0600` (the directory protects the window between `bind` and `chmod`). After acceptance the peer's UID from `SO_PEERCRED` (`tokio::net::UnixStream::peer_cred`) must match the effective UID of the service. Socket path limited to 100 bytes (limit of `sun_path`) with an explicit error. The socket is removed on shutdown. The same code compiles on macOS (`getpeereid`), without declared support.
 
-### Protocollo
+### Protocol
 
-- **Framing:** 4 byte big-endian di lunghezza più payload JSON. Lunghezza zero → errore di protocollo `malformed_message`; lunghezza oltre il limite (predefinito 64 KiB, configurabile) → `message_too_large` e chiusura, **senza leggere né allocare il payload**. La lettura avviene in un task dedicato che consegna frame completi su un canale limitato (4 frame): nessuna lettura viene interrotta a metà frame e la coda per connessione è limitata.
-- **Messaggi:** `{"type":"hello",...}` e `{"type":"request","request_id":N,"body":{"op":...}}` dal client; `hello_ok`, `response`, `error`, `event`, `closing` dal servizio. Ogni richiesta porta un `request_id` restituito nella risposta. Operazioni sconosciute (per esempio `qmp_execute`) non sono deserializzabili → `malformed_message`, nessun effetto.
-- **Versione:** il client offre un elenco (`protocol_versions`), il servizio sceglie la prima supportata in ordine di preferenza (oggi solo `1`); nessuna versione comune → errore di protocollo `unsupported_version` e chiusura.
-- **Handshake:** il primo messaggio deve essere `hello` entro 5 s. Verifiche in ordine: identità OS (già nel trasporto), versione, credenziale. Credenziale assente, malformata, sconosciuta, scaduta o revocata → errore operativo `permission_denied` e chiusura, senza registrare la connessione e senza alcun effetto sul backend; i motivi non sono distinti verso il client. Una richiesta prima di `hello` → `permission_denied` e chiusura. Un secondo `hello` → `malformed_message`.
-- **Credenziali:** 32 byte dal generatore del sistema operativo (`getrandom`), trasmessi in esadecimale, confrontati a tempo costante, azzerati al rilascio, mai in `Debug`, mai negli argomenti di processo. Vivono solo in memoria: un riavvio del servizio le invalida tutte. Ruoli: `ui` (credenziale iniziale) e `pairing` (emessa su richiesta della UI con scadenza di 10 minuti, da consegnare fuori banda; **nessun permesso VM**, solo `ping` e `get_capabilities`, ADR-0006).
-- **Errori:** dalla fonte unica `lightvm-proto`: `ReplyError::Operational(PublicError{code, message, retryable})` con i codici stabili (`permission_denied`, `session_expired`, `vm_busy`, `unsupported`, `resource_limit`, `state_conflict`, …) e `ReplyError::Protocol(ProtocolError{code, message})` (`malformed_message`, `unsupported_version`, `message_too_large`, …), mai confusi.
-- **Limiti (sezione 9):** rate limit per connessione a token bucket (predefinito 50 in raffica, 100/s) → `resource_limit` senza effetto; coda verso il supervisor condivisa e limitata (64 posti) con rifiuto immediato `resource_limit` se piena; connessioni simultanee limitate (16) → `resource_limit` e chiusura.
-- **Doppio controllo (sezione 7.3):** il ruolo è verificato al ricevimento; il thread del supervisor ricontrolla che la connessione non sia stata revocata immediatamente prima di eseguire.
+- **Framing:** 4 big-endian length bytes plus a JSON payload. Zero length → protocol error `malformed_message`; length beyond the limit (default 64 KiB, configurable) → `message_too_large` and close, **without reading or allocating the payload**. Reading happens in a dedicated task that delivers complete frames on a bounded channel (4 frames): no read is interrupted mid-frame and the per-connection queue is bounded.
+- **Messages:** `{"type":"hello",...}` and `{"type":"request","request_id":N,"body":{"op":...}}` from the client; `hello_ok`, `response`, `error`, `event`, `closing` from the service. Every request carries a `request_id` returned in the response. Unknown operations (for example `qmp_execute`) cannot be deserialized → `malformed_message`, no effect.
+- **Version:** the client offers a list (`protocol_versions`), the service picks the first supported one in order of preference (today only `1`); no common version → protocol error `unsupported_version` and close.
+- **Handshake:** the first message must be `hello` within 5 s. Checks in order: OS identity (already in the transport), version, credential. Credential missing, malformed, unknown, expired or revoked → operational error `permission_denied` and close, without registering the connection and without any effect on the backend; the reasons are not distinguished towards the client. A request before `hello` → `permission_denied` and close. A second `hello` → `malformed_message`.
+- **Credentials:** 32 bytes from the operating system generator (`getrandom`), transmitted in hexadecimal, compared in constant time, zeroed on drop, never in `Debug`, never in process arguments. They live only in memory: a restart of the service invalidates them all. Roles: `ui` (initial credential) and `pairing` (issued at the UI's request with a 10-minute expiry, to be delivered out of band; **no VM permissions**, only `ping` and `get_capabilities`, ADR-0006).
+- **Errors:** from the single source `lightvm-proto`: `ReplyError::Operational(PublicError{code, message, retryable})` with the stable codes (`permission_denied`, `session_expired`, `vm_busy`, `unsupported`, `resource_limit`, `state_conflict`, …) and `ReplyError::Protocol(ProtocolError{code, message})` (`malformed_message`, `unsupported_version`, `message_too_large`, …), never mixed up.
+- **Limits (section 9):** per-connection token-bucket rate limit (default burst 50, 100/s) → `resource_limit` without effect; shared bounded queue towards the supervisor (64 slots) with immediate `resource_limit` rejection when full; simultaneous connections limited (16) → `resource_limit` and close.
+- **Double check (section 7.3):** the role is checked on receipt; the supervisor thread rechecks that the connection has not been revoked immediately before executing.
 
 ### Supervisor
 
-- Un thread dedicato possiede `Box<dyn Catalog>` e `Box<dyn Backend>` (unico proprietario, nessun lock condiviso sullo stato VM) e serve i comandi in ordine: `ping`, `get_capabilities`, `list_vms`, perdita del genitore, arresto. `subscribe` iscrive la connessione al canale di eventi (`service_state`, `vm_state`, `connection_revoked`, `agent_sessions_stopped`, `events_lost` per i client lenti).
-- **Registro delle connessioni con revoca:** `list_connections`, `revoke_connection` (solo UI). La revoca chiude la connessione con `closing{reason: revoked}`, invalida la credenziale se il ruolo non è `ui`, interrompe l'eventuale richiesta in attesa e pubblica `connection_revoked`.
-- **Emergency Stop (ADR-0009):** richiesta `emergency_stop` (solo UI) o `ServiceHandle::emergency_stop`. Revoca prima tutte le connessioni e credenziali non UI, poi chiama `EmergencyStop::emergency_stop_all` del backend su un thread bloccante: non occupa posti in coda e non passa dal thread del supervisor. Il backend reale dovrà terminare l'albero QEMU con primitive OS e dichiarare `completed` solo dopo averne osservato la fine.
-- **Arresto controllato:** `shutdown` (solo UI), riga `shutdown` sullo stdin o `ServiceHandle::shutdown`: stop dell'accettazione; `closing{reason: service_stopping}` a tutte le connessioni dopo aver consegnato gli eventi già pubblicati; il supervisor completa l'operazione in corso, risponde `state_conflict` a quelle in coda, chiama `stop_agent_sessions(Shutdown)` e `shutdown()` del backend; attesa limitata (30 s, poi il thread non viene più atteso); rilascio del lock; rimozione del socket su Unix.
-- **Istanza singola:** lock esclusivo su `<catalogo>/.lightvm-service.lock` con `std::fs::File::try_lock` (`LockFileEx` su Windows, `flock` su Linux), rilasciato dal sistema operativo alla chiusura dell'handle anche se il processo muore. Seconda istanza → codice di uscita 3 e messaggio "un'altra istanza di lightvm-service sta già usando questo catalogo (lock: …)", nessuna riga `ready` e nessuna credenziale emessa.
+- A dedicated thread owns `Box<dyn Catalog>` and `Box<dyn Backend>` (single owner, no shared lock on the VM state) and serves commands in order: `ping`, `get_capabilities`, `list_vms`, parent loss, shutdown. `subscribe` subscribes the connection to the event channel (`service_state`, `vm_state`, `connection_revoked`, `agent_sessions_stopped`, `events_lost` for slow clients).
+- **Connection registry with revocation:** `list_connections`, `revoke_connection` (UI only). Revocation closes the connection with `closing{reason: revoked}`, invalidates the credential if the role is not `ui`, interrupts any pending request and publishes `connection_revoked`.
+- **Emergency Stop (ADR-0009):** request `emergency_stop` (UI only) or `ServiceHandle::emergency_stop`. It first revokes all non-UI connections and credentials, then calls the backend's `EmergencyStop::emergency_stop_all` on a blocking thread: it takes no queue slots and does not go through the supervisor thread. The real backend will have to terminate the QEMU tree with OS primitives and declare `completed` only after observing its end.
+- **Controlled shutdown:** `shutdown` (UI only), a `shutdown` line on stdin or `ServiceHandle::shutdown`: accepting stops; `closing{reason: service_stopping}` to all connections after delivering the events already published; the supervisor completes the operation in progress, answers `state_conflict` to queued ones, calls `stop_agent_sessions(Shutdown)` and the backend's `shutdown()`; bounded wait (30 s, after which the thread is no longer waited for); release of the lock; removal of the socket on Unix.
+- **Single instance:** exclusive lock on `<catalog>/.lightvm-service.lock` with `std::fs::File::try_lock` (`LockFileEx` on Windows, `flock` on Linux), released by the operating system when the handle is closed even if the process dies. Second instance → exit code 3 and the message "un'altra istanza di lightvm-service sta già usando questo catalogo (lock: …)", no `ready` line and no credential issued.
 
-### Avvio come figlio della UI e morte del genitore
+### Startup as a child of the UI and parent death
 
-Contratto del binario `lightvm-service` (nessun segreto negli argomenti, sezione 9):
+Contract of the `lightvm-service` binary (no secrets in the arguments, section 9):
 
 ```text
 lightvm-service --catalog <dir> [--runtime-dir <dir>] [--parent-watch stdin|none] [--orphan-policy shutdown|keep-manual-vms]
-stdout: una riga {"event":"ready","pid":…,"endpoint":"…","protocol_versions":[1],"credential":"<64 hex>"}
-stdin:  pipe di vita; EOF = genitore terminato; riga "shutdown" = arresto controllato
-stderr: diagnostica senza segreti (scritture che non vanno mai in panico se la pipe è chiusa)
-uscita: 0 regolare, 2 uso errato, 3 catalogo già in uso, 4 altri errori di avvio
+stdout: one line {"event":"ready","pid":…,"endpoint":"…","protocol_versions":[1],"credential":"<64 hex>"}
+stdin:  lifeline pipe; EOF = parent terminated; line "shutdown" = controlled shutdown
+stderr: diagnostics without secrets (writes that never panic if the pipe is closed)
+exit:   0 normal, 2 wrong usage, 3 catalog already in use, 4 other startup errors
 ```
 
-**Consegna della credenziale UI: stdout del figlio.** È una pipe anonima creata dalla UI e posseduta solo da lei (equivale a un handle ereditato, senza file su disco da proteggere né da cancellare); la credenziale non compare negli argomenti né nell'ambiente. Alternativa scartata: file in directory privata (su Windows richiede una DACL via API sulla directory, da cancellare in modo affidabile anche dopo un crash).
+**Delivery of the UI credential: the child's stdout.** It is an anonymous pipe created by the UI and owned only by it (equivalent to an inherited handle, with no file on disk to protect or delete); the credential appears neither in the arguments nor in the environment. Rejected alternative: a file in a private directory (on Windows it requires a DACL via API on the directory, to be deleted reliably even after a crash).
 
-**Rilevamento della morte del genitore:**
+**Detection of the parent's death:**
 
-- Meccanismo principale, identico su Windows e Linux: **pipe di vita sullo stdin**. Quando la UI termina (anche per crash o kill) il sistema operativo chiude l'unica estremità di scrittura e il servizio legge EOF. Non dipende dal PID (nessun riuso possibile) e non richiede `unsafe`.
-- **Linux, in aggiunta:** `pidfd_open(getppid())` più `poll`, come in F0-07, con il controllo `getppid()` ripetuto dopo l'apertura per escludere un PID già riusato. Copre il caso in cui l'estremità di scrittura dello stdin sia stata ereditata per errore da un altro processo (verificato sotto). Non si usa `PR_SET_PDEATHSIG`: invierebbe un segnale invece di avviare l'arresto controllato.
-- **Windows:** l'attesa su un handle del genitore (`OpenProcess` + `WaitForSingleObject`) richiederebbe FFI `unsafe` nel crate o un handle ereditato convertito con `from_raw_handle` (anch'esso `unsafe`); la pipe di vita offre la stessa semantica legata alla vita del processo. Limite: se la UI lasciasse ereditare l'estremità di scrittura dello stdin del servizio a un altro processo, la morte della UI non verrebbe rilevata finché quel processo vive. La UI deve quindi creare la pipe non ereditabile verso altri figli (comportamento predefinito di `std::process::Command`).
-- Alla perdita del genitore: revoca di connessioni e credenziali non UI, `Backend::stop_agent_sessions(ParentLost)`, hook `Backend::on_parent_lost(policy)` per le VM manuali (**ADR-0015 parte B in sospeso**), evento `agent_sessions_stopped{reason: parent_lost}`, poi `OrphanPolicy`: predefinito `shutdown` (arresto controllato: senza UI la credenziale iniziale non è recuperabile, quindi oggi nessun ricollegamento è possibile); `keep-manual-vms` lascia il servizio attivo per la futura decisione.
+- Main mechanism, identical on Windows and Linux: **lifeline pipe on stdin**. When the UI terminates (even through a crash or kill) the operating system closes the only write end and the service reads EOF. It does not depend on the PID (no reuse possible) and does not require `unsafe`.
+- **Linux, in addition:** `pidfd_open(getppid())` plus `poll`, as in F0-07, with the `getppid()` check repeated after opening to rule out an already reused PID. It covers the case where the write end of stdin was inherited by mistake by another process (verified below). `PR_SET_PDEATHSIG` is not used: it would send a signal instead of starting the controlled shutdown.
+- **Windows:** waiting on a handle of the parent (`OpenProcess` + `WaitForSingleObject`) would require `unsafe` FFI in the crate or an inherited handle converted with `from_raw_handle` (also `unsafe`); the lifeline pipe offers the same semantics tied to the lifetime of the process. Limit: if the UI let another process inherit the write end of the service's stdin, the UI's death would not be detected while that process lives. The UI must therefore create the pipe non-inheritable towards other children (default behaviour of `std::process::Command`).
+- On parent loss: revocation of non-UI connections and credentials, `Backend::stop_agent_sessions(ParentLost)`, hook `Backend::on_parent_lost(policy)` for manual VMs (**ADR-0015 part B pending**), event `agent_sessions_stopped{reason: parent_lost}`, then `OrphanPolicy`: default `shutdown` (controlled shutdown: without the UI the initial credential cannot be recovered, so today no reattachment is possible); `keep-manual-vms` leaves the service running for the future decision.
 
-## Procedura
+## Procedure
 
-1. Build e lint del crate su Windows, nell'ambiente MSVC di F0-01 (wrapper `cmd` che chiama `vcvars64.bat`, nella scratchpad):
+1. Build and lint of the crate on Windows, in the MSVC environment of F0-01 (`cmd` wrapper that calls `vcvars64.bat`, in the scratchpad):
 
    ```text
-   cargo fmt --all --check            (verificato per lightvm-service; vedi punto 6 per il workspace)
+   cargo fmt --all --check            (verified for lightvm-service; see point 6 for the workspace)
    cargo clippy -p lightvm-service --all-targets -- -D warnings
    cargo test -p lightvm-service -- --nocapture --test-threads=4
    ```
 
-2. Prove manuali Windows con lo script versionato `crates/lightvm-service/scripts/f1-04-windows-checks.ps1` (dopo `cargo build -p lightvm-service --bins`):
+2. Manual tests on Windows with the versioned script `crates/lightvm-service/scripts/f1-04-windows-checks.ps1` (after `cargo build -p lightvm-service --bins`):
 
    ```text
    powershell -NoProfile -ExecutionPolicy Bypass -File crates/lightvm-service/scripts/f1-04-windows-checks.ps1
    ```
 
-   Lo script copia `lightvm-ipc-probe.exe` e `whoami.exe` in una directory temporanea, marca le copie con `icacls <file> /setintegritylevel Low` (approccio di F0-04), avvia il servizio con stdin/stdout reindirizzati, legge la riga `ready` (la credenziale non viene stampata), esegue il probe a integrità bassa e media passando la credenziale **sullo stdin**, prova credenziale errata e assente, una seconda istanza, l'arresto via stdin e infine il kill reale del genitore (PowerShell intermedio che avvia il servizio e viene terminato con `Stop-Process -Force`).
+   The script copies `lightvm-ipc-probe.exe` and `whoami.exe` into a temporary directory, marks the copies with `icacls <file> /setintegritylevel Low` (approach from F0-04), starts the service with stdin/stdout redirected, reads the `ready` line (the credential is not printed), runs the probe at low and medium integrity passing the credential **on stdin**, tries a wrong and a missing credential, a second instance, shutdown via stdin and finally the real kill of the parent (intermediate PowerShell that starts the service and is terminated with `Stop-Process -Force`).
 
-3. Lettura del descrittore della pipe da PowerShell: `[System.IO.Directory]::GetAccessControl(<endpoint>).GetSecurityDescriptorSddlForm('All')`.
+3. Reading the pipe's descriptor from PowerShell: `[System.IO.Directory]::GetAccessControl(<endpoint>).GetSecurityDescriptorSddlForm('All')`.
 
-4. Linux (WSL2), con `lab/wsl/env.sh` e `CARGO_TARGET_DIR=lab/wsl/target`: `cargo clippy -p lightvm-service --all-targets -- -D warnings` e tre esecuzioni di `cargo test -p lightvm-service`.
+4. Linux (WSL2), with `lab/wsl/env.sh` and `CARGO_TARGET_DIR=lab/wsl/target`: `cargo clippy -p lightvm-service --all-targets -- -D warnings` and three runs of `cargo test -p lightvm-service`.
 
-5. Linux, kill reale del genitore con la pipe di vita tenuta aperta da un altro processo: `bash -c "sleep 1000 | lightvm-service --catalog $D --runtime-dir $D/run > $D/ready.txt"` in background, poi `kill -9` della `bash` genitore (lo `sleep` resta vivo e tiene aperto lo stdin del servizio: solo il pidfd può rilevare la morte).
+5. Linux, real kill of the parent with the lifeline pipe kept open by another process: `bash -c "sleep 1000 | lightvm-service --catalog $D --runtime-dir $D/run > $D/ready.txt"` in the background, then `kill -9` of the parent `bash` (the `sleep` stays alive and keeps the service's stdin open: only the pidfd can detect the death).
 
-6. Replica manuale della sequenza CI su tutto il workspace (Windows e WSL): `cargo fmt --all --check`; `cargo clippy --workspace --all-targets --locked -- -D warnings`; `cargo clippy -p lightvm-desktop --no-default-features --features glow --all-targets --locked -- -D warnings`; `cargo test --workspace --locked` (Windows) / `--no-fail-fast` (Linux); `cargo build --release --locked -p lightvm-desktop`; `cargo test --locked -p lightvm-proto --test schema_snapshot`.
+6. Manual replica of the CI sequence on the whole workspace (Windows and WSL): `cargo fmt --all --check`; `cargo clippy --workspace --all-targets --locked -- -D warnings`; `cargo clippy -p lightvm-desktop --no-default-features --features glow --all-targets --locked -- -D warnings`; `cargo test --workspace --locked` (Windows) / `--no-fail-fast` (Linux); `cargo build --release --locked -p lightvm-desktop`; `cargo test --locked -p lightvm-proto --test schema_snapshot`.
 
-7. `cargo deny check` dalla radice con `deny.toml`; validazione dei workflow con js-yaml (sintassi, `runs-on`/`steps`, azioni fissate a SHA) e actionlint 1.7.7 (`-shellcheck= -pyflakes=`, strumenti non disponibili sull'host).
+7. `cargo deny check` from the root with `deny.toml`; validation of the workflows with js-yaml (syntax, `runs-on`/`steps`, actions pinned to SHA) and actionlint 1.7.7 (`-shellcheck= -pyflakes=`, tools not available on the host).
 
-## Risultati
+## Results
 
-### 1. Test headless (`cargo test -p lightvm-service`)
+### 1. Headless tests (`cargo test -p lightvm-service`)
 
-Trasporto reale (named pipe su Windows, socket Unix su Linux), catalogo e backend finti. 18 test unitari su Windows (17 su Linux: i test del trasporto differiscono per piattaforma) e 20 test di integrazione in `crates/lightvm-service/tests/ipc.rs`.
+Real transport (named pipe on Windows, Unix socket on Linux), fake catalog and backend. 18 unit tests on Windows (17 on Linux: the transport tests differ per platform) and 20 integration tests in `crates/lightvm-service/tests/ipc.rs`.
 
-| Test di integrazione | Cosa verifica | Windows | Linux (WSL2) |
+| Integration test | What it verifies | Windows | Linux (WSL2) |
 | --- | --- | --- | --- |
-| `valid_handshake_and_typed_requests` | `hello_ok` con versione 1 e ruolo `ui`; `ping`, `get_capabilities`, `list_vms` | verificato | verificato |
-| `invalid_credential_is_denied_and_closed` | credenziale casuale e credenziale malformata → `permission_denied`, chiusura, nessuna connessione registrata, nessuna chiamata al backend | verificato | verificato |
-| `missing_credential_and_request_before_hello_are_denied` | `hello` senza credenziale e `emergency_stop` prima di `hello` → `permission_denied`, chiusura, nessun Emergency Stop eseguito | verificato | verificato |
-| `unsupported_protocol_version_is_rejected` | versioni `[0,2,99]` → `unsupported_version`, chiusura; `[7,1]` → negoziata la 1 | verificato | verificato |
-| `oversized_frame_is_rejected_before_and_after_handshake` | intestazione da 1 MiB prima dell'handshake e frame da 8 KiB con limite 4 KiB dopo → `message_too_large`, chiusura | verificato | verificato |
-| `malformed_message_is_a_protocol_error_and_connection_survives` | `op: qmp_execute` → `malformed_message`; la connessione resta utilizzabile | verificato | verificato |
-| `two_clients_with_different_roles` | UI e pairing contemporanei; il pairing ottiene solo `ping`; `list_vms`, `subscribe`, `emergency_stop`, `shutdown`, `create_pairing_credential`, `revoke_connection` → `permission_denied`; `list_connections` mostra 2 connessioni con PID del peer | verificato | verificato |
-| `revoking_a_connection_closes_it_and_invalidates_the_credential` | revoca dalla UI → `closing{revoked}` e chiusura del client; evento `connection_revoked` all'iscritto; credenziale non più accettata; revoca di un id inesistente → `state_conflict` | verificato | verificato |
-| `second_instance_on_same_catalog_is_rejected` | seconda `start` → `AlreadyRunning`; dopo l'arresto il riavvio riesce | verificato | verificato (vedi nota) |
-| `credential_is_not_valid_after_restart` | credenziale UI della prima esecuzione rifiutata dopo il riavvio (riga "Sessioni" della 7.4) | verificato | verificato |
-| `rate_limit_per_connection` | raffica 3, ricarica 0,5/s: 3 `pong` e 3 `resource_limit` su 6 richieste; un'altra connessione ha il proprio bucket | verificato | verificato |
-| `bounded_queue_and_emergency_stop_does_not_wait_for_it` | coda da 1 posto occupata da un `list_vms` bloccato nel catalogo: `ping` → `resource_limit` immediato; `emergency_stop` completato con supervisor bloccato (785 µs su Windows), connessione di pairing revocata; sblocco → `list_vms` risponde | verificato | verificato |
-| `connection_limit_and_handshake_timeout` | limite 1 connessione → `resource_limit`; client muto chiuso al timeout di handshake (300 ms) | verificato | verificato |
-| `controlled_shutdown_via_ipc_closes_connections_and_releases_lock` | `shutdown` → `shutting_down`; l'altra connessione riceve `closing{service_stopping}`; backend: `stop_agent_sessions:Shutdown` poi `shutdown`; lock libero; nuove connessioni rifiutate | verificato | verificato |
-| `parent_lost_in_process_stops_agent_sessions_then_shuts_down` | `parent_lost`: backend `stop_agent_sessions:ParentLost`, `on_parent_lost:ShutdownService`; pairing revocato; evento `agent_sessions_stopped{parent_lost}` consegnato prima della chiusura | verificato | verificato |
-| `binary::second_binary_instance_exits_with_clear_error` | secondo processo sullo stesso catalogo: uscita 3, messaggio chiaro, stdout vuoto | verificato | verificato |
-| `binary::parent_death_closes_sessions_and_releases_lock` | binario reale; chiusura dello stdin (morte del genitore simulata): eventi `agent_sessions_stopped{parent_lost}` e `service_state{stopping}`, `closing{service_stopping}`, uscita 0 in 26,5 ms (Windows), lock libero | verificato | verificato |
-| `binary::lock_released_when_service_is_killed` | kill del servizio: il lock del catalogo si libera | verificato | verificato |
-| `binary::shutdown_command_on_stdin` | riga `shutdown` sullo stdin → uscita 0 | verificato | verificato |
-| `binary::bad_arguments_exit_2_without_secrets` | argomento sconosciuto → uscita 2, stdout vuoto | verificato | verificato |
+| `valid_handshake_and_typed_requests` | `hello_ok` with version 1 and role `ui`; `ping`, `get_capabilities`, `list_vms` | verified | verified |
+| `invalid_credential_is_denied_and_closed` | random credential and malformed credential → `permission_denied`, close, no connection registered, no call to the backend | verified | verified |
+| `missing_credential_and_request_before_hello_are_denied` | `hello` without credential and `emergency_stop` before `hello` → `permission_denied`, close, no Emergency Stop executed | verified | verified |
+| `unsupported_protocol_version_is_rejected` | versions `[0,2,99]` → `unsupported_version`, close; `[7,1]` → 1 negotiated | verified | verified |
+| `oversized_frame_is_rejected_before_and_after_handshake` | 1 MiB header before the handshake and 8 KiB frame with a 4 KiB limit after → `message_too_large`, close | verified | verified |
+| `malformed_message_is_a_protocol_error_and_connection_survives` | `op: qmp_execute` → `malformed_message`; the connection remains usable | verified | verified |
+| `two_clients_with_different_roles` | UI and pairing at the same time; pairing gets only `ping`; `list_vms`, `subscribe`, `emergency_stop`, `shutdown`, `create_pairing_credential`, `revoke_connection` → `permission_denied`; `list_connections` shows 2 connections with the peer's PID | verified | verified |
+| `revoking_a_connection_closes_it_and_invalidates_the_credential` | revocation from the UI → `closing{revoked}` and the client closed; `connection_revoked` event to the subscriber; credential no longer accepted; revocation of a nonexistent id → `state_conflict` | verified | verified |
+| `second_instance_on_same_catalog_is_rejected` | second `start` → `AlreadyRunning`; after shutdown the restart succeeds | verified | verified (see note) |
+| `credential_is_not_valid_after_restart` | UI credential from the first run rejected after the restart (row "Sessions" of 7.4) | verified | verified |
+| `rate_limit_per_connection` | burst 3, refill 0.5/s: 3 `pong` and 3 `resource_limit` out of 6 requests; another connection has its own bucket | verified | verified |
+| `bounded_queue_and_emergency_stop_does_not_wait_for_it` | 1-slot queue occupied by a `list_vms` blocked in the catalog: `ping` → immediate `resource_limit`; `emergency_stop` completed with the supervisor blocked (785 µs on Windows), pairing connection revoked; unblocking → `list_vms` responds | verified | verified |
+| `connection_limit_and_handshake_timeout` | limit of 1 connection → `resource_limit`; silent client closed at the handshake timeout (300 ms) | verified | verified |
+| `controlled_shutdown_via_ipc_closes_connections_and_releases_lock` | `shutdown` → `shutting_down`; the other connection receives `closing{service_stopping}`; backend: `stop_agent_sessions:Shutdown` then `shutdown`; lock free; new connections rejected | verified | verified |
+| `parent_lost_in_process_stops_agent_sessions_then_shuts_down` | `parent_lost`: backend `stop_agent_sessions:ParentLost`, `on_parent_lost:ShutdownService`; pairing revoked; event `agent_sessions_stopped{parent_lost}` delivered before the close | verified | verified |
+| `binary::second_binary_instance_exits_with_clear_error` | second process on the same catalog: exit 3, clear message, empty stdout | verified | verified |
+| `binary::parent_death_closes_sessions_and_releases_lock` | real binary; closing of stdin (simulated parent death): events `agent_sessions_stopped{parent_lost}` and `service_state{stopping}`, `closing{service_stopping}`, exit 0 in 26.5 ms (Windows), lock free | verified | verified |
+| `binary::lock_released_when_service_is_killed` | kill of the service: the catalog lock is released | verified | verified |
+| `binary::shutdown_command_on_stdin` | `shutdown` line on stdin → exit 0 | verified | verified |
+| `binary::bad_arguments_exit_2_without_secrets` | unknown argument → exit 2, empty stdout | verified | verified |
 
-Esecuzioni: Windows 3 serie complete + 1 con output (tutte `20 passed`, log `f1-04-windows-test.txt`); Linux 3 serie consecutive dopo la correzione sotto (18 unitari prima dell'integrazione degli errori di `lightvm-proto`, che ha rimosso un test locale ridondante; `20 passed` integrazione; log `f1-04-linux-test.txt`) più una serie dopo l'integrazione dentro `cargo test --workspace` (17 unitari, 20 integrazione; `f1-04-ci-linux.txt`). `cargo clippy -p lightvm-service --all-targets -- -D warnings`: nessun avviso su Windows e su Linux.
+Runs: Windows 3 complete series + 1 with output (all `20 passed`, log `f1-04-windows-test.txt`); Linux 3 consecutive series after the fix below (18 unit tests before the integration of the `lightvm-proto` errors, which removed a redundant local test; `20 passed` integration; log `f1-04-linux-test.txt`) plus one series after the integration within `cargo test --workspace` (17 unit, 20 integration; `f1-04-ci-linux.txt`). `cargo clippy -p lightvm-service --all-targets -- -D warnings`: no warnings on Windows and on Linux.
 
-Nota (Linux): la prima esecuzione su WSL ha dato **fallito** per `second_instance_on_same_catalog_is_rejected` (`riavvio dopo il rilascio del lock: Lock(AlreadyRunning …)`); da solo il test passava 5 volte su 5. Causa: un altro test, in parallelo, avvia processi figli; tra `fork` ed `exec` il figlio possiede per un istante una copia del descrittore del lock (`O_CLOEXEC` lo chiude solo all'`exec`) e `flock` appartiene alla descrizione di file aperto condivisa. I test che verificano il rilascio del lock ora riprovano per al massimo 2 s. Conseguenza per il prodotto: nessuna, il lock è tenuto per tutta la vita del servizio; un nuovo avvio immediatamente dopo l'arresto può però vedere il catalogo occupato per un istante se il servizio sta avviando figli: la UI deve riprovare brevemente su codice di uscita 3 dopo un arresto appena concluso.
+Note (Linux): the first run on WSL gave **failed** for `second_instance_on_same_catalog_is_rejected` (`riavvio dopo il rilascio del lock: Lock(AlreadyRunning …)`); on its own the test passed 5 times out of 5. Cause: another test, in parallel, starts child processes; between `fork` and `exec` the child briefly owns a copy of the lock descriptor (`O_CLOEXEC` closes it only at `exec`) and `flock` belongs to the shared open file description. The tests that verify the lock release now retry for at most 2 s. Consequence for the product: none, the lock is held for the whole lifetime of the service; however, a new start immediately after shutdown may see the catalog busy for an instant if the service is starting children: the UI must retry briefly on exit code 3 after a shutdown that has just finished.
 
-### 2. Processo a integrità bassa (Windows)
+### 2. Low-integrity process (Windows)
 
-| Prova | Esito | Evidenza (`lab/logs/f1-04-windows-checks.txt`) |
+| Test | Outcome | Evidence (`lab/logs/f1-04-windows-checks.txt`) |
 | --- | --- | --- |
-| Livello effettivo della copia marcata | verificato | `whoami-low.exe /groups`: `Etichetta obbligatoria\Livello obbligatorio basso S-1-16-4096`; shell: `S-1-16-8192` |
-| Probe a integrità bassa, credenziale valida | verificato (rifiutato) | `uscita=10 PROBE connessione=rifiutata errore_os=Some(5) messaggio="Accesso negato. (os error 5)"`: il sistema operativo rifiuta l'apertura della pipe prima di qualsiasi scambio |
-| Controllo a integrità media, credenziale valida | verificato | `uscita=0 PROBE connessione=ok handshake=ok connection_id=1 ruolo=Ui ping=pong` |
-| Integrità media, credenziale errata / assente | verificato (rifiutato) | `uscita=11 … Operational(PublicError { code: PermissionDenied, message: "credenziale assente o non valida", … })` |
-| Seconda istanza sullo stesso catalogo | verificato | `uscita=3 lightvm-service: un'altra istanza di lightvm-service sta già usando questo catalogo (lock: …\.lightvm-service.lock)` |
-| Arresto via stdin | verificato | `uscita servizio=0 stderr: lightvm-service: arresto completato` |
-| Kill reale del genitore (`Stop-Process -Force` del PowerShell intermedio) | verificato | `servizio terminato dopo il kill del genitore: True in 42 ms`; `processi lightvm-service residui per questa prova: 0` (prima esecuzione: 29 ms) |
-| DACL effettiva della pipe | verificato | `O:S-1-5-21-…-7907G:DUD:P(A;;FA;;;S-1-5-21-…-7907)`: un solo ACE, per l'utente corrente (`f1-04-pipe-sddl.txt`). La SACL con l'etichetta non è leggibile da questa API senza privilegi: l'effetto è dimostrato dalla riga del probe a integrità bassa |
-| Secondo utente locale | **non eseguito** | nessun secondo account e nessuna elevazione, come in F0-04. Da eseguire con `runas /user:<altro> lightvm-ipc-probe.exe --endpoint …` |
+| Effective level of the marked copy | verified | `whoami-low.exe /groups`: `Etichetta obbligatoria\Livello obbligatorio basso S-1-16-4096`; shell: `S-1-16-8192` |
+| Low-integrity probe, valid credential | verified (rejected) | `uscita=10 PROBE connessione=rifiutata errore_os=Some(5) messaggio="Accesso negato. (os error 5)"`: the operating system refuses to open the pipe before any exchange |
+| Medium-integrity control, valid credential | verified | `uscita=0 PROBE connessione=ok handshake=ok connection_id=1 ruolo=Ui ping=pong` |
+| Medium integrity, wrong / missing credential | verified (rejected) | `uscita=11 … Operational(PublicError { code: PermissionDenied, message: "credenziale assente o non valida", … })` |
+| Second instance on the same catalog | verified | `uscita=3 lightvm-service: un'altra istanza di lightvm-service sta già usando questo catalogo (lock: …\.lightvm-service.lock)` |
+| Shutdown via stdin | verified | `uscita servizio=0 stderr: lightvm-service: arresto completato` |
+| Real kill of the parent (`Stop-Process -Force` of the intermediate PowerShell) | verified | `servizio terminato dopo il kill del genitore: True in 42 ms`; `processi lightvm-service residui per questa prova: 0` (first run: 29 ms) |
+| Effective DACL of the pipe | verified | `O:S-1-5-21-…-7907G:DUD:P(A;;FA;;;S-1-5-21-…-7907)`: a single ACE, for the current user (`f1-04-pipe-sddl.txt`). The SACL with the label cannot be read by this API without privileges: the effect is demonstrated by the low-integrity probe row |
+| Second local user | **not executed** | no second account and no elevation, as in F0-04. To be run with `runas /user:<other> lightvm-ipc-probe.exe --endpoint …` |
 
-### 3. Linux: permessi e pidfd
+### 3. Linux: permissions and pidfd
 
-| Prova | Esito | Evidenza (`lab/logs/f1-04-linux-pidfd.txt`) |
+| Test | Outcome | Evidence (`lab/logs/f1-04-linux-pidfd.txt`) |
 | --- | --- | --- |
-| Permessi di directory e socket | verificato | `permessi directory privata: 700 socket: 600`; test unitari: directory `0755` e collegamento simbolico rifiutati |
-| Kill della `bash` genitore con lo stdin tenuto aperto da `sleep` | verificato | `ppid_servizio=459` (la bash); dopo `kill -9`: `servizio terminato dopo il kill del genitore in 27 ms (sleep ancora vivo: si)`; stderr `processo genitore terminato`, `arresto completato`; `socket residui: 0` |
-| Verifica `SO_PEERCRED` con UID diverso | **non eseguito** | nessun secondo utente nella distro senza `sudo`; il controllo è nel codice (`transport/unix.rs`) ma solo il ramo positivo è stato esercitato |
+| Directory and socket permissions | verified | `permessi directory privata: 700 socket: 600`; unit tests: `0755` directory and symbolic link rejected |
+| Kill of the parent `bash` with stdin kept open by `sleep` | verified | `ppid_servizio=459` (the bash); after `kill -9`: `servizio terminato dopo il kill del genitore in 27 ms (sleep ancora vivo: si)`; stderr `processo genitore terminato`, `arresto completato`; `socket residui: 0` |
+| `SO_PEERCRED` check with a different UID | **not executed** | no second user in the distro without `sudo`; the check is in the code (`transport/unix.rs`) but only the positive branch was exercised |
 
 ### 4. CI (`.github/workflows/ci.yml`, `.github/dependabot.yml`, `deny.toml`)
 
-| Job | Runner | Contenuto |
+| Job | Runner | Content |
 | --- | --- | --- |
-| `build-test` | `windows-latest`, `ubuntu-latest` (matrice, `fail-fast: false`) | toolchain dal canale di `rust-toolchain.toml` (`rustup toolchain install <canale> --component rustfmt,clippy`); su Ubuntu `build-essential pkg-config` e librerie runtime di eframe/winit (`libxkbcommon0 libxkbcommon-x11-0 libwayland-* libx11-* libxcursor1 libxrandr2 libxi6 libxcb1 libegl1 libgl1`); cache `Swatinem/rust-cache`; `cargo fmt --all --check`; `cargo clippy --workspace --all-targets --locked -- -D warnings`; clippy di `lightvm-desktop` con `glow`; `cargo test --workspace --locked --no-fail-fast` (il test con QEMU reale resta `#[ignore]`; i test kittest sono headless, nessun display virtuale); `cargo build --release --locked -p lightvm-desktop` |
-| `macos-portability` | `macos-latest`, `continue-on-error: true` | "portabilità, nessun supporto dichiarato": `cargo check --workspace --locked` |
-| `schema` | `ubuntu-latest` | `cargo test --locked -p lightvm-proto --test schema_snapshot` (test creato dall'agente proto) e `git diff --exit-code -- crates/lightvm-proto/schema` |
-| `cargo-deny` | `ubuntu-latest` | `cargo install cargo-deny --version 0.20.2 --locked`, poi `cargo deny --locked check` (licenze, advisory RustSec, sorgenti, duplicati) |
+| `build-test` | `windows-latest`, `ubuntu-latest` (matrix, `fail-fast: false`) | toolchain from the channel in `rust-toolchain.toml` (`rustup toolchain install <channel> --component rustfmt,clippy`); on Ubuntu `build-essential pkg-config` and eframe/winit runtime libraries (`libxkbcommon0 libxkbcommon-x11-0 libwayland-* libx11-* libxcursor1 libxrandr2 libxi6 libxcb1 libegl1 libgl1`); cache `Swatinem/rust-cache`; `cargo fmt --all --check`; `cargo clippy --workspace --all-targets --locked -- -D warnings`; clippy of `lightvm-desktop` with `glow`; `cargo test --workspace --locked --no-fail-fast` (the test with real QEMU stays `#[ignore]`; the kittest tests are headless, no virtual display); `cargo build --release --locked -p lightvm-desktop` |
+| `macos-portability` | `macos-latest`, `continue-on-error: true` | "portability, no declared support": `cargo check --workspace --locked` |
+| `schema` | `ubuntu-latest` | `cargo test --locked -p lightvm-proto --test schema_snapshot` (test created by the proto agent) and `git diff --exit-code -- crates/lightvm-proto/schema` |
+| `cargo-deny` | `ubuntu-latest` | `cargo install cargo-deny --version 0.20.2 --locked`, then `cargo deny --locked check` (licences, RustSec advisories, sources, duplicates) |
 
-Proprietà comuni: `permissions: contents: read`, nessun segreto, nessun accesso al laboratorio, `persist-credentials: false`, azioni fissate a commit SHA (`actions/checkout` v7.0.1, `Swatinem/rust-cache` v2.9.2, SHA letti con `git ls-remote`), `concurrency` con annullamento delle esecuzioni superate. Nessun runner ha un acceleratore: boot, QMP e console reali, Emergency Stop su QEMU, cicli start/stop del criterio di uscita F1 e limiti di risorse non sono verificabili in questa CI e restano ai runner fisici (F0-07, "CI minima per F1"). Dependabot: `cargo` settimanale con gruppi `ui` (egui/eframe/wgpu/winit insieme, ADR-0014) e `cargo-minor-patch`, più `github-actions` settimanale.
+Common properties: `permissions: contents: read`, no secrets, no access to the lab, `persist-credentials: false`, actions pinned to commit SHAs (`actions/checkout` v7.0.1, `Swatinem/rust-cache` v2.9.2, SHAs read with `git ls-remote`), `concurrency` with cancellation of superseded runs. No runner has an accelerator: real boot, QMP and console, Emergency Stop on QEMU, start/stop cycles of the F1 exit criterion and resource limits are not verifiable in this CI and remain for the physical runners (F0-07, "minimal CI for F1"). Dependabot: weekly `cargo` with groups `ui` (egui/eframe/wgpu/winit together, ADR-0014) and `cargo-minor-patch`, plus weekly `github-actions`.
 
-| Verifica locale | Esito | Evidenza |
+| Local check | Outcome | Evidence |
 | --- | --- | --- |
-| Sintassi e struttura YAML (js-yaml 4.1.0) | verificato | `OK .github/workflows/ci.yml` (4 job, azioni fissate a SHA), `OK .github/dependabot.yml` (`f1-04-yaml-check.txt`) |
-| actionlint 1.7.7 | verificato | nessun problema, `EXIT=0` (shellcheck e pyflakes non disponibili, disattivati) |
-| `cargo deny check` | verificato | `advisories ok, bans ok, licenses ok, sources ok` (avvisi non bloccanti per versioni duplicate, da eframe/wgpu/windows-sys) (`f1-04-cargo-deny.txt`) |
-| Esecuzione su GitHub | **non eseguito** | nessun repository remoto (regola del compito); in particolare non sono provati: `rustup toolchain install` sui runner, il problema `LNK1104 msvcrt.lib` di F0-01 (atteso assente sui runner con Visual Studio completo), i pacchetti apt, il job macOS |
+| YAML syntax and structure (js-yaml 4.1.0) | verified | `OK .github/workflows/ci.yml` (4 jobs, actions pinned to SHA), `OK .github/dependabot.yml` (`f1-04-yaml-check.txt`) |
+| actionlint 1.7.7 | verified | no problems, `EXIT=0` (shellcheck and pyflakes not available, disabled) |
+| `cargo deny check` | verified | `advisories ok, bans ok, licenses ok, sources ok` (non-blocking warnings for duplicate versions, from eframe/wgpu/windows-sys) (`f1-04-cargo-deny.txt`) |
+| Run on GitHub | **not executed** | no remote repository (task rule); in particular the following are not tested: `rustup toolchain install` on the runners, the `LNK1104 msvcrt.lib` problem of F0-01 (expected absent on runners with full Visual Studio), the apt packages, the macOS job |
 
-### 5. Integrazione con `lightvm-proto`
+### 5. Integration with `lightvm-proto`
 
-Integrati da `lightvm-proto`: `ErrorCode`, `PublicError`, `ProtocolError`, `ProtocolErrorCode`, `ReplyError` (riesportati da `lightvm_service::compat`). Restano locali in `compat` con `TODO(F1)`: involucro IPC (`ClientMessage`, `ServerMessage`, `Request`, `ResponseBody`, `ServiceEvent`), `Role`, `VmSummary`/`VmState` (in `lightvm-proto` esistono `VmState` e i modelli del catalogo, da adottare quando `vm-storage` implementerà `Catalog`). La credenziale resta il tipo locale `Credential` (in `lightvm-proto` esiste `SessionToken([u8; 32])`, da allineare con l'agente proto). Differenza da allineare: `lightvm-proto` prevede il codice di protocollo `unauthenticated` per "credenziale IPC assente o non valida", mentre la sezione 7.4 e questo compito chiedono `permission_denied`; il servizio usa `permission_denied`.
+Integrated from `lightvm-proto`: `ErrorCode`, `PublicError`, `ProtocolError`, `ProtocolErrorCode`, `ReplyError` (re-exported from `lightvm_service::compat`). Still local in `compat` with `TODO(F1)`: IPC envelope (`ClientMessage`, `ServerMessage`, `Request`, `ResponseBody`, `ServiceEvent`), `Role`, `VmSummary`/`VmState` (in `lightvm-proto` there are `VmState` and the catalog models, to be adopted when `vm-storage` implements `Catalog`). The credential remains the local type `Credential` (in `lightvm-proto` there is `SessionToken([u8; 32])`, to be aligned with the proto agent). Difference to align: `lightvm-proto` provides the protocol code `unauthenticated` for "IPC credential missing or invalid", while section 7.4 and this task ask for `permission_denied`; the service uses `permission_denied`.
 
-### 6. Replica della sequenza CI sul workspace (2026-10-09, ~15:00 UTC)
+### 6. Replica of the CI sequence on the workspace (2026-10-09, ~15:00 UTC)
 
-Windows (`f1-04-ci-windows.txt`) — esito per passo:
+Windows (`f1-04-ci-windows.txt`) — outcome per step:
 
-| Passo | Esito | Causa |
+| Step | Outcome | Cause |
 | --- | --- | --- |
-| `cargo fmt --all --check` | **fallito** | differenze di formattazione in `crates/lightvm-proto`, `crates/qemu-backend`, `crates/vm-core`, `crates/vm-storage` (lavoro in corso di altri agenti); nessuna in `lightvm-service` |
-| `cargo clippy --workspace --all-targets --locked -- -D warnings` | **fallito** | `crates\qemu-backend\src\cmdline.rs:803:9` `collapsible_if` (lavoro in corso di altri agenti) |
-| clippy `lightvm-desktop` con `glow` | verificato | `EXIT=0` |
-| `cargo test --workspace --locked` | **fallito** | `lightvm-proto` `schema_snapshot::committed_schemas_match_generated`: schemi committati diversi dai generati (lavoro in corso dell'agente proto); `cargo test` si ferma al primo binario fallito, per questo in CI si usa `--no-fail-fast` |
-| `cargo build --release --locked -p lightvm-desktop` | verificato | `EXIT=0` |
-| `schema_snapshot` | **fallito** | stessa causa del test |
+| `cargo fmt --all --check` | **failed** | formatting differences in `crates/lightvm-proto`, `crates/qemu-backend`, `crates/vm-core`, `crates/vm-storage` (work in progress by other agents); none in `lightvm-service` |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | **failed** | `crates\qemu-backend\src\cmdline.rs:803:9` `collapsible_if` (work in progress by other agents) |
+| clippy `lightvm-desktop` with `glow` | verified | `EXIT=0` |
+| `cargo test --workspace --locked` | **failed** | `lightvm-proto` `schema_snapshot::committed_schemas_match_generated`: committed schemas different from the generated ones (work in progress by the proto agent); `cargo test` stops at the first failed binary, which is why CI uses `--no-fail-fast` |
+| `cargo build --release --locked -p lightvm-desktop` | verified | `EXIT=0` |
+| `schema_snapshot` | **failed** | same cause as the test |
 
-Linux, WSL2 con linker zig (`f1-04-ci-linux.txt`, 14:58–15:06 UTC, eseguita pochi minuti dopo quella Windows sullo stesso albero in evoluzione):
+Linux, WSL2 with the zig linker (`f1-04-ci-linux.txt`, 14:58–15:06 UTC, run a few minutes after the Windows one on the same evolving tree):
 
-| Passo | Esito | Causa / evidenza |
+| Step | Outcome | Cause / evidence |
 | --- | --- | --- |
-| `cargo fmt --all --check` | **fallito** | stessi quattro crate di altri agenti; nessuna differenza in `lightvm-service` |
-| `cargo clippy --workspace --all-targets --locked -- -D warnings` | **fallito** | `crates/qemu-backend/src/paths.rs:127:9` `unused import`, `crates/qemu-backend/src/cmdline.rs:803:9` `collapsible_if` |
-| clippy `lightvm-desktop` con `glow` | verificato | `EXIT=0` |
-| `cargo test --workspace --locked --no-fail-fast` | verificato | `EXIT=0`, 40 binari di test `ok`, nessun `FAILED`; `lightvm-service` 17 unitari e 20 di integrazione |
-| `cargo build --release --locked -p lightvm-desktop` | verificato | `EXIT=0` in 169 s |
-| `schema_snapshot` | verificato | `3 passed` (l'agente proto aveva nel frattempo aggiornato gli schemi) |
+| `cargo fmt --all --check` | **failed** | the same four crates of other agents; no differences in `lightvm-service` |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | **failed** | `crates/qemu-backend/src/paths.rs:127:9` `unused import`, `crates/qemu-backend/src/cmdline.rs:803:9` `collapsible_if` |
+| clippy `lightvm-desktop` with `glow` | verified | `EXIT=0` |
+| `cargo test --workspace --locked --no-fail-fast` | verified | `EXIT=0`, 40 test binaries `ok`, no `FAILED`; `lightvm-service` 17 unit and 20 integration |
+| `cargo build --release --locked -p lightvm-desktop` | verified | `EXIT=0` in 169 s |
+| `schema_snapshot` | verified | `3 passed` (the proto agent had meanwhile updated the schemas) |
 
-Per il solo `lightvm-service` le condizioni richieste sono soddisfatte su entrambi i sistemi: `cargo fmt -p lightvm-service --check` senza differenze (e nessuna differenza dei file di questo flusso in `cargo fmt --all --check`), `cargo clippy -p lightvm-service --all-targets -- -D warnings` senza avvisi, `cargo test -p lightvm-service` superato.
+For `lightvm-service` alone the required conditions are met on both systems: `cargo fmt -p lightvm-service --check` without differences (and no differences in this stream's files in `cargo fmt --all --check`), `cargo clippy -p lightvm-service --all-targets -- -D warnings` without warnings, `cargo test -p lightvm-service` passed.
 
-## Limiti
+## Limits
 
-- Backend e catalogo finti: nessun processo QEMU, Job Object, QMP o file VM. L'Emergency Stop verifica solo il percorso prioritario nel servizio, non la terminazione dell'albero dei processi né la latenza della sezione 13.
-- Nessun secondo utente locale su Windows né su Linux: il rifiuto di un altro utente si basa sull'ACL e sul controllo dell'UID, non su una prova eseguita.
-- Le stesse garanzie non coprono un processo malevolo dello stesso utente a integrità media (sezione 7.1): può aprire la pipe o il socket; lo ferma solo la credenziale, che non può leggere dallo stdout privato della UI salvo accesso alla memoria di processi dello stesso utente.
-- `GA` nell'ACE concede all'utente corrente anche la creazione di ulteriori istanze della pipe: un processo dello stesso utente potrebbe accodare una propria istanza (squatting) e ricevere connessioni destinate al servizio; è fuori dal threat model (stesso utente) ma va riesaminato con l'adapter MCP, che dovrà autenticare anche il server (per esempio confrontando `server_process_id` con il PID annunciato dalla UI).
-- Su Windows la morte del genitore è rilevata solo tramite la pipe di vita (vedi Progetto); non è stata provata la variante con handle ereditato del genitore.
-- Le directory temporanee dei test (`%TEMP%\lightvm-service-tests`, `/tmp/lightvm-service-tests`) non vengono rimosse.
-- Su Windows i test di integrazione impiegano circa 2,4–3,7 s contro 0,65 s su Linux: l'arresto attende fino a 2 s la chiusura delle connessioni; non indagato oltre.
-- In WSL la build usa il linker zig (F0-07), non `build-essential` come in CI.
-- I workflow non sono stati eseguiti su GitHub.
+- Fake backend and catalog: no QEMU process, Job Object, QMP or VM files. The Emergency Stop verifies only the priority path in the service, not the termination of the process tree nor the section 13 latency.
+- No second local user on Windows or on Linux: the rejection of another user relies on the ACL and the UID check, not on an executed test.
+- The same guarantees do not cover a malicious process of the same user at medium integrity (section 7.1): it can open the pipe or the socket; it is stopped only by the credential, which it cannot read from the UI's private stdout short of accessing the memory of processes of the same user.
+- `GA` in the ACE also grants the current user the creation of further instances of the pipe: a process of the same user could queue its own instance (squatting) and receive connections meant for the service; this is outside the threat model (same user) but must be re-examined with the MCP adapter, which will also have to authenticate the server (for example by comparing `server_process_id` with the PID announced by the UI).
+- On Windows the parent's death is detected only through the lifeline pipe (see Design); the variant with an inherited parent handle was not tested.
+- The tests' temporary directories (`%TEMP%\lightvm-service-tests`, `/tmp/lightvm-service-tests`) are not removed.
+- On Windows the integration tests take about 2.4–3.7 s versus 0.65 s on Linux: shutdown waits up to 2 s for connections to close; not investigated further.
+- In WSL the build uses the zig linker (F0-07), not `build-essential` as in CI.
+- The workflows were not run on GitHub.
 
-## Azioni richieste
+## Required actions
 
-1. Pubblicare il repository ed eseguire la CI; registrare l'esito per job (in particolare Windows MSVC, apt su Ubuntu e macOS) in un file di verifica successivo.
-2. ~~Allineare con l'agente proto: spostare l'involucro IPC in `lightvm-proto` con schema generato, decidere `permission_denied` contro `unauthenticated` per l'handshake, adottare `SessionToken` e `VmState`.~~ **Chiusa il 2026-10-09** (sezione in coda, punti 1–2): involucro in `lightvm_proto::ipc` con schemi `ipc_*.json`, `unauthenticated` secondo ADR-0026, `VmState`/`VmId`/`RunId` del proto adottati. `SessionToken` resta per le sessioni agente (F4): la credenziale del canale rimane il tipo locale `Credential` (azzerata al rilascio).
-3. Implementare `Catalog` in `vm-storage` e `Backend`/`EmergencyStop` in `qemu-backend` (Job Object su Windows, meccanismo ADR-0015 parte A su Linux), poi ripetere i test di arresto e perdita del genitore con QEMU reale e misurare l'Emergency Stop (sezione 13). **In parte chiusa il 2026-10-09** (sezione in coda, punti 3–6): adattatori reali nel servizio e ciclo crea → avvia → stato → arresta → Emergency Stop con QEMU reale su Windows/WHPX, 2 esecuzioni. Restano: perdita del genitore con QEMU reale, misura ripetuta dell'Emergency Stop (sezione 13), Linux.
-4. Decidere ADR-0015 parte B e implementare `on_parent_lost` di conseguenza; se si sceglie il ricollegamento della UI serve un canale per riemettere la credenziale UI.
-5. Prova con un secondo utente locale (Windows: `runas`; Linux: altro UID) contro la pipe e il socket.
-6. Pairing reale (F4): codice verificabile nell'app, approvazione dell'utente, grant con scadenza e lease ≤ 10 s; autenticazione del server da parte dell'adapter MCP (F5) e scoperta dell'endpoint da parte dell'adapter.
-7. Fuzzing mirato del parser dei frame e dei messaggi (sezione 13).
-8. La UI che avvia il servizio deve riprovare brevemente su codice di uscita 3 subito dopo un arresto (nota Linux del punto 1).
-9. Decidere chi tiene gli handle di guardia dei file dell'esecuzione (`qemu_backend::StorageGuards`, oggi usato tramite `QemuRun::start`, oppure `vm_storage::Catalog::guard_run`) quando arrivano disco e baseline (F1-09, F1-12).
-10. Colmare nelle API di `vm-storage` e `qemu-backend` le lacune della sezione in coda (punto 7), poi assottigliare gli adattatori: creazione del disco principale, `insert_vm` con identificativo del core, letture `&self` del catalogo, ACL esplicita della directory privata dei socket.
+1. Publish the repository and run the CI; record the outcome per job (in particular Windows MSVC, apt on Ubuntu and macOS) in a subsequent verification file.
+2. ~~Align with the proto agent: move the IPC envelope into `lightvm-proto` with a generated schema, decide `permission_denied` versus `unauthenticated` for the handshake, adopt `SessionToken` and `VmState`.~~ **Closed on 2026-10-09** (section at the end, points 1–2): envelope in `lightvm_proto::ipc` with `ipc_*.json` schemas, `unauthenticated` according to ADR-0026, proto's `VmState`/`VmId`/`RunId` adopted. `SessionToken` remains for agent sessions (F4): the channel credential remains the local type `Credential` (zeroed on drop).
+3. Implement `Catalog` in `vm-storage` and `Backend`/`EmergencyStop` in `qemu-backend` (Job Object on Windows, ADR-0015 part A mechanism on Linux), then repeat the shutdown and parent loss tests with real QEMU and measure the Emergency Stop (section 13). **Partly closed on 2026-10-09** (section at the end, points 3–6): real adapters in the service and the cycle create → start → status → stop → Emergency Stop with real QEMU on Windows/WHPX, 2 runs. Remaining: parent loss with real QEMU, repeated Emergency Stop measurement (section 13), Linux.
+4. Decide ADR-0015 part B and implement `on_parent_lost` accordingly; if reattaching the UI is chosen, a channel to reissue the UI credential is needed.
+5. Test with a second local user (Windows: `runas`; Linux: another UID) against the pipe and the socket.
+6. Real pairing (F4): code verifiable in the app, user approval, grant with expiry and lease ≤ 10 s; authentication of the server by the MCP adapter (F5) and discovery of the endpoint by the adapter.
+7. Targeted fuzzing of the frame and message parser (section 13).
+8. The UI that starts the service must retry briefly on exit code 3 right after a shutdown (Linux note of point 1).
+9. Decide who holds the guard handles of the run's files (`qemu_backend::StorageGuards`, today used through `QemuRun::start`, or `vm_storage::Catalog::guard_run`) when disk and baseline arrive (F1-09, F1-12).
+10. Fill in the `vm-storage` and `qemu-backend` APIs the gaps of the section at the end (point 7), then slim down the adapters: creation of the primary disk, `insert_vm` with the core's identifier, `&self` reads of the catalog, explicit ACL of the private socket directory.
 
-## Decisioni proposte
+## Proposed decisions
 
-- **ADR-0002 / sezione 9 (trasporto):** su Windows named pipe con DACL limitata al SID dell'utente, etichetta di integrità media `NW/NR/NX`, client remoti rifiutati e verifica di sessione e SID del peer, tramite `interprocess`/`sysinfo` senza `unsafe` nel crate; su Unix socket in directory `0700` con verifica dell'UID del peer.
-- **Avvio del supervisor:** credenziale iniziale della UI sullo stdout del figlio, pipe di vita sullo stdin come meccanismo comune di rilevamento della morte del genitore, pidfd in aggiunta su Linux.
-- **ADR-0023:** adottare `cargo-deny` con `deny.toml` (licenze permissive, eccezione per i font di `epaint_default_fonts`, sole sorgenti crates.io, advisory senza eccezioni) e Dependabot settimanale raggruppato.
+- **ADR-0002 / section 9 (transport):** on Windows a named pipe with a DACL limited to the user's SID, medium integrity label `NW/NR/NX`, remote clients rejected and verification of the peer's session and SID, through `interprocess`/`sysinfo` without `unsafe` in the crate; on Unix a socket in a `0700` directory with verification of the peer's UID.
+- **Supervisor startup:** initial UI credential on the child's stdout, lifeline pipe on stdin as the common mechanism to detect the parent's death, pidfd in addition on Linux.
+- **ADR-0023:** adopt `cargo-deny` with `deny.toml` (permissive licences, exception for the `epaint_default_fonts` fonts, crates.io sources only, advisories without exceptions) and weekly grouped Dependabot.
 
-## File prodotti
+## Files produced
 
-- `crates/lightvm-service/Cargo.toml`, `src/{lib,main,frame,credential,ratelimit,lock,server,supervisor,client,parent,test_support,engine,fakes}.rs`, `src/adapters/{mod,catalog,backend,audit}.rs` (`src/compat.rs` rimosso il 2026-10-09), `src/transport/{mod,windows,unix}.rs`, `src/bin/lightvm-ipc-probe.rs`, `tests/ipc.rs`, `tests/core_path.rs`, `scripts/f1-04-windows-checks.ps1`
-- `crates/lightvm-proto/src/ipc.rs`, `crates/lightvm-proto/schema/ipc_client_message.json`, `crates/lightvm-proto/schema/ipc_server_message.json`; in `crates/lightvm-proto/src/{lib,schema}.rs` solo `pub mod ipc;` e l'aggiunta degli schemi IPC all'elenco
+- `crates/lightvm-service/Cargo.toml`, `src/{lib,main,frame,credential,ratelimit,lock,server,supervisor,client,parent,test_support,engine,fakes}.rs`, `src/adapters/{mod,catalog,backend,audit}.rs` (`src/compat.rs` removed on 2026-10-09), `src/transport/{mod,windows,unix}.rs`, `src/bin/lightvm-ipc-probe.rs`, `tests/ipc.rs`, `tests/core_path.rs`, `scripts/f1-04-windows-checks.ps1`
+- `crates/lightvm-proto/src/ipc.rs`, `crates/lightvm-proto/schema/ipc_client_message.json`, `crates/lightvm-proto/schema/ipc_server_message.json`; in `crates/lightvm-proto/src/{lib,schema}.rs` only `pub mod ipc;` and the addition of the IPC schemas to the list
 - `.github/workflows/ci.yml`, `.github/dependabot.yml`, `deny.toml`
-- `docs/verification/F1-04-service-ipc-ci.md` (questo file)
-- `lab/logs/f1-04-*` (fuori dal repository)
+- `docs/verification/F1-04-service-ipc-ci.md` (this file)
+- `lab/logs/f1-04-*` (outside the repository)
 
-## Integrazione del composition root (2026-10-09, dalle 15:20 alle 15:50 circa UTC)
+## Composition root integration (2026-10-09, from about 15:20 to 15:50 UTC)
 
-Sezione aggiunta in coda (regola 8 di `docs/verification/README.md`): le sezioni precedenti restano come registrate.
+Section appended at the end (rule 8 of `docs/verification/README.md`): the previous sections remain as recorded.
 
-### Scopo
+### Purpose
 
-Chiudere l'azione richiesta 2 e, in parte, la 3: involucro IPC con fonte unica in `lightvm-proto`; semantica `unauthenticated`/`permission_denied` (ADR-0026); `vm_core::Core` nel servizio con catalogo SQLite di `vm-storage`, backend `qemu-backend`, orologio e identificativi di sistema e audit su file (F1-10); test headless del percorso reale e una prova end-to-end senza UI con QEMU reale (F1-11).
+Close required action 2 and, in part, 3: IPC envelope with a single source in `lightvm-proto`; `unauthenticated`/`permission_denied` semantics (ADR-0026); `vm_core::Core` in the service with the `vm-storage` SQLite catalog, the `qemu-backend` backend, system clock and identifiers and file audit (F1-10); headless tests of the real path and an end-to-end test without the UI with real QEMU (F1-11).
 
-Non dimostra: perdita del genitore con QEMU reale; cicli ripetuti del criterio di uscita F1 (F1-12); disco, ISO o boot di un sistema operativo guest (la VM resta nel firmware UEFI); misura statistica dell'Emergency Stop (sezione 13); Linux; esecuzione su GitHub.
+It does not demonstrate: parent loss with real QEMU; repeated cycles of the F1 exit criterion (F1-12); disk, ISO or boot of a guest operating system (the VM stays in the UEFI firmware); statistical measurement of the Emergency Stop (section 13); Linux; run on GitHub.
 
-### Ambiente
+### Environment
 
-Come sopra (HP ZBook Fury 16 G9, Windows 11 Pro 10.0.26200, utente non amministratore, Rust 1.99.0 MSVC con `vcvars64.bat`), più:
+As above (HP ZBook Fury 16 G9, Windows 11 Pro 10.0.26200, non-administrator user, Rust 1.99.0 MSVC with `vcvars64.bat`), plus:
 
-| Voce | Valore |
+| Item | Value |
 | --- | --- |
-| Acceleratore e stato | WHPX, verificato dal probe di `qemu-backend` (`query-accelerators`) |
-| Binario QEMU | `lab/qemu/qemu-11.1.0/qemu-system-x86_64.exe` 11.1.0, SHA-256 `47d57a6072e0bb3bd98f87926eb129eb1736dfe818c67b3b81ef7ce4edd0b3cd`; `qemu-img.exe` SHA-256 `9d930582d0d574bb106d89982c547688e10b8f356192d302cc3d0ae4e8674534` (uguali agli hash approvati in `qemu_backend::probe`) |
-| Firmware | `share/edk2-x86_64-code.fd` SHA-256 `33090cc07675baa5190d9f1e84bf5176b33bcbfa9bacac522961150cdb6dbb2a`; modello delle variabili `share/edk2-i386-vars.fd` copiato per esecuzione |
-| Guest / media | nessuno: VM senza disco né ISO, `-cpu qemu64`, 1 vCPU, 1024 MiB |
-| Sessione grafica | headless (nessuna UI, `-display none`) |
+| Accelerator and state | WHPX, verified by the `qemu-backend` probe (`query-accelerators`) |
+| QEMU binary | `lab/qemu/qemu-11.1.0/qemu-system-x86_64.exe` 11.1.0, SHA-256 `47d57a6072e0bb3bd98f87926eb129eb1736dfe818c67b3b81ef7ce4edd0b3cd`; `qemu-img.exe` SHA-256 `9d930582d0d574bb106d89982c547688e10b8f356192d302cc3d0ae4e8674534` (equal to the hashes approved in `qemu_backend::probe`) |
+| Firmware | `share/edk2-x86_64-code.fd` SHA-256 `33090cc07675baa5190d9f1e84bf5176b33bcbfa9bacac522961150cdb6dbb2a`; variables template `share/edk2-i386-vars.fd` copied per run |
+| Guest / media | none: VM without disk or ISO, `-cpu qemu64`, 1 vCPU, 1024 MiB |
+| Graphics session | headless (no UI, `-display none`) |
 
-### Progetto
+### Design
 
-1. **Involucro IPC in `lightvm_proto::ipc`.** `ClientMessage`, `ServerMessage`, `Request`, `ResponseBody`, `ServiceEvent`, `Role`, `VmSummary`, `Capabilities`, `ConnectionInfo`, `EmergencyStopReport`, `ServiceState`, `StopReason`, `CloseReason`, `SUPPORTED_PROTOCOL_VERSIONS`. Riutilizzati dal proto: `VmId`, `RunId`, `VmName`, `VmState`, `VmConfig`, `VmRecord`, `VmRequest`, `Admission`, `OperationRecord`, `ReplyError`. Nuove richieste: `vm_status`, `create_vm`, `submit_vm` (risposta dopo l'esito del backend). Schemi generati `schema/ipc_client_message.json` e `schema/ipc_server_message.json`, inclusi nell'elenco di `schema::public_schemas` e quindi nel test `schema_snapshot`; la credenziale del canale è `writeOnly` nello schema e resta testo libero, perché una credenziale malformata abbia lo stesso esito di una errata. `crates/lightvm-service/src/compat.rs` è stato rimosso.
-2. **Errori (ADR-0026).** Credenziale assente, malformata, sconosciuta, revocata o di un avvio precedente, richiesta prima di `hello` e connessione revocata con richiesta in coda → `unauthenticated`; ruolo `pairing` su operazioni riservate alla UI → `permission_denied`. Nessuna mappatura provvisoria.
-3. **Composition root.** `main.rs` compone prima del runtime tokio: `SqliteStore::open(--catalog)` (lock e migrazioni di `vm-storage`; catalogo già in uso → uscita 3 con lo stesso messaggio), `FileAuditSink` (`--audit-log`; predefinito `%LOCALAPPDATA%\LightVM\audit.jsonl` su Windows, `$XDG_STATE_HOME/lightvm/audit.jsonl` su Unix), `ManagedMediaInspector`; con `--qemu-dir` il probe di `qemu-backend` (hash dei binari, macchina q35 versionata, CPU `qemu64`, acceleratore reale) e `CoreEngine` con `QemuVmBackend`; senza `--qemu-dir` `CoreEngine` con `UnavailableBackend` e capacità host senza acceleratore (`vm.start` → `unsupported`, con audit). Il thread del supervisor possiede `Box<dyn VmEngine>` e `Box<dyn Backend>`; `submit_vm` esegue `Core::submit` e poi `Core::execute_next` fino a coda vuota.
-4. **Emergency Stop.** Percorso prioritario invariato (revoca dei non UI, terminazione fuori dal supervisor) più: generazione di Emergency Stop che fa scartare (`state_conflict`) le mutazioni già accodate verso il supervisor; registro condiviso dei gestori `qemu_backend::EmergencyStop` (Job Object) per la terminazione reale; dopo la terminazione il comando `EmergencyReconcile` registra l'arresto nel core con `Core::emergency_stop_with` (audit `accepted` e `succeeded`, fine processo confermata), senza che la risposta al client lo attenda.
-5. **Arresto controllato del servizio.** Prima delle chiusure: `stop_agent_sessions(Shutdown)`, arresto delle VM in esecuzione tramite il core (`stop`/`force_stop`, con audit), poi `Backend::shutdown` (termina eventuali esecuzioni non confermate).
-6. **Perdita del genitore: comportamento invariato** (ADR-0015 parte B non decisa): revoca dei non UI, `stop_agent_sessions(ParentLost)`, hook `on_parent_lost(policy)` senza azioni proprie nell'host QEMU, poi con la politica predefinita `shutdown` l'arresto controllato del punto 5, che arresta anche le VM manuali; `keep-manual-vms` lascia servizio e VM attivi. La decisione spetta al responsabile del progetto.
-7. **Lacune delle API altrui coperte negli adattatori** (`src/adapters/`):
-   - `vm-storage`: `Tx::insert_vm(&NewVm) -> VmId` genera l'identificativo, mentre il core lo sceglie con `IdGenerator`: il `VmRecord` del core è conservato in `config_json` e l'adattatore tiene la corrispondenza identificativo del core → identificativo dello storage; `Catalog::read` richiede `&mut self` mentre le letture di `CatalogStore` sono `&self` (catalogo in `RefCell`); `OperationRecord` non conserva `session_id` e `set_operation_state` non aggiorna `run_id`; `end_run` usa l'istante dello storage invece di `ended_at`; `MediaRecord` non conserva l'identità OS del file.
-   - `qemu-backend`: nessuna creazione del disco principale (`qemu-img create`), quindi VM avviate senza disco; directory dell'esecuzione e directory privata dei socket create dal servizio con ACL ereditata; copia per esecuzione delle variabili UEFI fatta dal servizio; screenshot (`CapturedScreenshot`) e input non collegati (capacità host dichiarate assenti, il core non li inoltra); nessuna API di probe di memoria e spazio libero (memoria letta con `sysinfo` o `/proc/meminfo`, spazio libero dichiarato 256 GiB in `QemuSetup`).
-   - Uscite del processo: si usa `QemuRun::observation()`; le uscite da Emergency Stop sono lasciate alla conferma di `force_stop` nel core.
-   - Handle di guardia dei file: quelli di `qemu_backend::StorageGuards` dentro `QemuRun::start` (oggi senza disco: elenco vuoto), non `vm_storage::Catalog::guard_run`; decisione aperta (azione 9).
+1. **IPC envelope in `lightvm_proto::ipc`.** `ClientMessage`, `ServerMessage`, `Request`, `ResponseBody`, `ServiceEvent`, `Role`, `VmSummary`, `Capabilities`, `ConnectionInfo`, `EmergencyStopReport`, `ServiceState`, `StopReason`, `CloseReason`, `SUPPORTED_PROTOCOL_VERSIONS`. Reused from the proto: `VmId`, `RunId`, `VmName`, `VmState`, `VmConfig`, `VmRecord`, `VmRequest`, `Admission`, `OperationRecord`, `ReplyError`. New requests: `vm_status`, `create_vm`, `submit_vm` (response after the backend's outcome). Generated schemas `schema/ipc_client_message.json` and `schema/ipc_server_message.json`, included in the list of `schema::public_schemas` and therefore in the `schema_snapshot` test; the channel credential is `writeOnly` in the schema and remains free text, so that a malformed credential has the same outcome as a wrong one. `crates/lightvm-service/src/compat.rs` was removed.
+2. **Errors (ADR-0026).** Credential missing, malformed, unknown, revoked or from a previous start, request before `hello` and revoked connection with a queued request → `unauthenticated`; `pairing` role on operations reserved to the UI → `permission_denied`. No provisional mapping.
+3. **Composition root.** `main.rs` composes before the tokio runtime: `SqliteStore::open(--catalog)` (lock and migrations of `vm-storage`; catalog already in use → exit 3 with the same message), `FileAuditSink` (`--audit-log`; default `%LOCALAPPDATA%\LightVM\audit.jsonl` on Windows, `$XDG_STATE_HOME/lightvm/audit.jsonl` on Unix), `ManagedMediaInspector`; with `--qemu-dir` the `qemu-backend` probe (binary hashes, versioned q35 machine, CPU `qemu64`, real accelerator) and `CoreEngine` with `QemuVmBackend`; without `--qemu-dir` `CoreEngine` with `UnavailableBackend` and host capabilities without an accelerator (`vm.start` → `unsupported`, with audit). The supervisor thread owns `Box<dyn VmEngine>` and `Box<dyn Backend>`; `submit_vm` runs `Core::submit` and then `Core::execute_next` until the queue is empty.
+4. **Emergency Stop.** Priority path unchanged (revocation of non-UI, termination outside the supervisor) plus: an Emergency Stop generation that makes mutations already queued towards the supervisor be discarded (`state_conflict`); shared registry of the `qemu_backend::EmergencyStop` handlers (Job Object) for the real termination; after the termination the `EmergencyReconcile` command records the stop in the core with `Core::emergency_stop_with` (audit `accepted` and `succeeded`, process end confirmed), without the response to the client waiting for it.
+5. **Controlled shutdown of the service.** Before the closes: `stop_agent_sessions(Shutdown)`, stop of the running VMs through the core (`stop`/`force_stop`, with audit), then `Backend::shutdown` (terminates any unconfirmed runs).
+6. **Parent loss: behaviour unchanged** (ADR-0015 part B not decided): revocation of non-UI, `stop_agent_sessions(ParentLost)`, hook `on_parent_lost(policy)` without its own actions in the QEMU host, then with the default policy `shutdown` the controlled shutdown of point 5, which also stops the manual VMs; `keep-manual-vms` leaves service and VMs running. The decision is up to the project owner.
+7. **Gaps in other APIs covered in the adapters** (`src/adapters/`):
+   - `vm-storage`: `Tx::insert_vm(&NewVm) -> VmId` generates the identifier, while the core chooses it with `IdGenerator`: the core's `VmRecord` is kept in `config_json` and the adapter keeps the mapping core identifier → storage identifier; `Catalog::read` requires `&mut self` while the reads of `CatalogStore` are `&self` (catalog in a `RefCell`); `OperationRecord` does not keep `session_id` and `set_operation_state` does not update `run_id`; `end_run` uses the storage's instant instead of `ended_at`; `MediaRecord` does not keep the OS identity of the file.
+   - `qemu-backend`: no creation of the primary disk (`qemu-img create`), so VMs are started without a disk; run directory and private socket directory created by the service with an inherited ACL; per-run copy of the UEFI variables done by the service; screenshots (`CapturedScreenshot`) and input not wired (host capabilities declared absent, the core does not forward them); no API to probe memory and free space (memory read with `sysinfo` or `/proc/meminfo`, free space declared as 256 GiB in `QemuSetup`).
+   - Process exits: `QemuRun::observation()` is used; exits caused by the Emergency Stop are left to the `force_stop` confirmation in the core.
+   - File guard handles: those of `qemu_backend::StorageGuards` inside `QemuRun::start` (today without a disk: empty list), not `vm_storage::Catalog::guard_run`; open decision (action 9).
 
-### Procedura
+### Procedure
 
 ```text
 cargo fmt -p lightvm-service -p lightvm-proto -- --check
 cargo clippy -p lightvm-service -p lightvm-proto --all-targets -- -D warnings
-cargo test -p lightvm-service -p lightvm-proto            (3 serie consecutive, più una con log)
+cargo test -p lightvm-service -p lightvm-proto            (3 consecutive series, plus one with a log)
 cargo check --workspace --all-targets
 set LIGHTVM_E2E_QEMU_DIR=E:\OpenVM\lab\qemu\qemu-11.1.0
-cargo test -p lightvm-service --test core_path -- --ignored --nocapture   (2 esecuzioni)
+cargo test -p lightvm-service --test core_path -- --ignored --nocapture   (2 runs)
 ```
 
-Schemi rigenerati con `LIGHTVM_UPDATE_SCHEMAS=1 cargo test -p lightvm-proto --test schema_snapshot`, che riscrive tutti i file di `schema/`: i file non IPC risultano quelli generati dalla sorgente corrente dell'agente proto.
+Schemas regenerated with `LIGHTVM_UPDATE_SCHEMAS=1 cargo test -p lightvm-proto --test schema_snapshot`, which rewrites all the files in `schema/`: the non-IPC files turn out to be those generated from the proto agent's current source.
 
-### Risultati
+### Results
 
-| Prova | Esito | Evidenza |
+| Test | Outcome | Evidence |
 | --- | --- | --- |
-| `cargo fmt … --check`, `cargo clippy … -D warnings` | verificato | nessuna differenza, nessun avviso |
-| `cargo test -p lightvm-service -p lightvm-proto` | verificato | serie verdi (`lab/logs/f1-04-integrazione-test.txt`): proto 4 unitari (test di `ipc`), 6 `error_codes`, 18 `roundtrip`, 3 `schema_snapshot`; servizio 15 unitari, 20 `ipc.rs`, 3 `core_path.rs` (+1 ignorato) |
-| `cargo check --workspace --all-targets` | verificato | nessun errore, alle 15:44 UTC |
-| `tests/ipc.rs` (20 test; core reale con catalogo e audit in memoria, backend e host finti) | verificato | stessi 20 test della prima esecuzione; asserzioni aggiornate a `unauthenticated` per credenziale errata, malformata, assente, revocata, dopo riavvio e richiesta prima di `hello`; il ruolo `pairing` resta `permission_denied` |
-| Corsa nei test | fallito, poi verificato dopo correzione | in una serie `revoking_a_connection_closes_it_and_invalidates_the_credential` è fallito: l'iscritto riceveva `service_state{running}`, pubblicato dal thread del supervisor dopo la `subscribe`. L'evento iniziale è ora pubblicato prima dell'avvio del thread; serie successive verdi |
-| `core_path::create_start_stop_emergency_and_denials_are_persisted_and_audited` | verificato | IPC → core → SQLite in directory temporanea → audit su file, backend finto: creazione, diniego di creazione (`invalid_argument`), avvio, stato `running`, arresto, diniego di arresto a VM spenta (`state_conflict`), Emergency Stop con stato finale `stopped`; eventi `vm_state`; righe di audit `vm_create` `succeeded`/`denied`, `vm_start` e `vm_stop` `accepted`/`forwarded`/`succeeded`, `vm_stop` `denied`, `emergency_stop` `accepted`/`succeeded`, `seq` crescente, credenziale assente dal file; dopo il riavvio la VM è letta da SQLite (spenta) e l'arresto controllato del servizio arresta la VM avviata, con audit |
-| `core_path::without_qemu_start_is_unsupported_and_audited` | verificato | senza QEMU: `vm.start` → `unsupported`, VM `stopped`, audit `vm_start` `denied` `unsupported` |
-| `core_path::pairing_role_cannot_touch_vms` | verificato | `create_vm` e `vm_status` dal ruolo `pairing` → `permission_denied`, nessuna chiamata al backend |
-| End-to-end senza UI con QEMU reale (`core_path::e2e_real_qemu_create_start_status_stop`, `#[ignore]`) | verificato (2 esecuzioni) | `lab/logs/f1-04-e2e-qemu.txt` (seconda esecuzione): probe 2,4 s (`accelerator_available: true`, backend `qemu 11.1.0`, acceleratore `whpx`); handshake; `create_vm`; avvio completato in 378 ms (prima esecuzione 527 ms) con processo vivo, QMP pronto, acceleratore e assenza di NIC verificati da `qemu-backend`; stato `running` anche dopo 2 s; arresto in 3,18 s (3,26 s) con scalata `system_powerdown` (3 s, il firmware non risponde) → `quit`; stato `stopped`; secondo avvio ed Emergency Stop: risposta in 56 ms (148 ms), `processes_terminated: 1`, `completed: true`, poi stato `stopped`; 20 righe di audit con `vm_start`, `vm_stop` ed `emergency_stop` `succeeded`. Nessun processo QEMU residuo di questa prova al termine |
-| Perdita del genitore con QEMU reale | **non eseguito** | — |
-| Linux (WSL2) per questa sezione | **non eseguito** | — |
-| CI su GitHub | **non eseguito** | nessun repository remoto; nessun job nuovo (il test reale è `#[ignore]`, la CI esistente esegue gli altri) |
+| `cargo fmt … --check`, `cargo clippy … -D warnings` | verified | no differences, no warnings |
+| `cargo test -p lightvm-service -p lightvm-proto` | verified | green series (`lab/logs/f1-04-integrazione-test.txt`): proto 4 unit (tests of `ipc`), 6 `error_codes`, 18 `roundtrip`, 3 `schema_snapshot`; service 15 unit, 20 `ipc.rs`, 3 `core_path.rs` (+1 ignored) |
+| `cargo check --workspace --all-targets` | verified | no errors, at 15:44 UTC |
+| `tests/ipc.rs` (20 tests; real core with in-memory catalog and audit, fake backend and host) | verified | the same 20 tests as the first run; assertions updated to `unauthenticated` for a wrong, malformed, missing or revoked credential, after a restart and for a request before `hello`; the `pairing` role remains `permission_denied` |
+| Race in the tests | failed, then verified after a fix | in one series `revoking_a_connection_closes_it_and_invalidates_the_credential` failed: the subscriber received `service_state{running}`, published by the supervisor thread after the `subscribe`. The initial event is now published before the thread starts; subsequent series green |
+| `core_path::create_start_stop_emergency_and_denials_are_persisted_and_audited` | verified | IPC → core → SQLite in a temporary directory → file audit, fake backend: creation, creation denial (`invalid_argument`), start, state `running`, stop, stop denial with the VM off (`state_conflict`), Emergency Stop with final state `stopped`; `vm_state` events; audit rows `vm_create` `succeeded`/`denied`, `vm_start` and `vm_stop` `accepted`/`forwarded`/`succeeded`, `vm_stop` `denied`, `emergency_stop` `accepted`/`succeeded`, increasing `seq`, credential absent from the file; after the restart the VM is read from SQLite (off) and the controlled shutdown of the service stops the started VM, with audit |
+| `core_path::without_qemu_start_is_unsupported_and_audited` | verified | without QEMU: `vm.start` → `unsupported`, VM `stopped`, audit `vm_start` `denied` `unsupported` |
+| `core_path::pairing_role_cannot_touch_vms` | verified | `create_vm` and `vm_status` from the `pairing` role → `permission_denied`, no call to the backend |
+| End-to-end without UI with real QEMU (`core_path::e2e_real_qemu_create_start_status_stop`, `#[ignore]`) | verified (2 runs) | `lab/logs/f1-04-e2e-qemu.txt` (second run): probe 2.4 s (`accelerator_available: true`, backend `qemu 11.1.0`, accelerator `whpx`); handshake; `create_vm`; start completed in 378 ms (first run 527 ms) with process alive, QMP ready, accelerator and absence of NIC verified by `qemu-backend`; state `running` also after 2 s; stop in 3.18 s (3.26 s) with escalation `system_powerdown` (3 s, the firmware does not respond) → `quit`; state `stopped`; second start and Emergency Stop: response in 56 ms (148 ms), `processes_terminated: 1`, `completed: true`, then state `stopped`; 20 audit rows with `vm_start`, `vm_stop` and `emergency_stop` `succeeded`. No QEMU process left over from this test at the end |
+| Parent loss with real QEMU | **not executed** | — |
+| Linux (WSL2) for this section | **not executed** | — |
+| CI on GitHub | **not executed** | no remote repository; no new job (the real test is `#[ignore]`, the existing CI runs the others) |
 
-### Limiti
+### Limits
 
-- Una sola macchina e due esecuzioni reali: nessuna statistica; i tempi indicati sono campioni singoli.
-- La VM reale non ha disco né sistema operativo: l'arresto ordinario passa sempre per `quit` dopo il timeout di `system_powerdown` (3 s nel test; 60 s predefiniti in `QemuSetup`).
-- L'Emergency Stop è registrato nel core dopo la terminazione: se il supervisor è occupato, le letture già in coda vedono lo stato precedente fino alla riconciliazione.
-- I dinieghi del ruolo IPC (`permission_denied` per `pairing`) avvengono nel servizio e non passano dal core: non compaiono nell'audit.
-- Il `seq` dell'audit riparte da 1 a ogni avvio del supervisor nello stesso file.
-- Directory privata dei socket QEMU con ACL ereditata (radice `--runtime-dir` o `<catalogo>/p`).
+- A single machine and two real runs: no statistics; the times given are single samples.
+- The real VM has no disk nor operating system: the ordinary stop always goes through `quit` after the `system_powerdown` timeout (3 s in the test; 60 s default in `QemuSetup`).
+- The Emergency Stop is recorded in the core after the termination: if the supervisor is busy, reads already queued see the previous state until the reconciliation.
+- IPC role denials (`permission_denied` for `pairing`) happen in the service and do not go through the core: they do not appear in the audit.
+- The audit `seq` restarts from 1 at every supervisor start in the same file.
+- Private QEMU socket directory with an inherited ACL (root `--runtime-dir` or `<catalog>/p`).
 
 
-## Aggiornamento del 2026-10-10 (sera): riesame generale del codice del supervisor e del core
+## Update of 2026-10-10 (evening): general review of the supervisor and core code
 
-Sezione aggiunta in coda (regola 8). Riesame in sola lettura di `lightvm-proto`, `lightvm-service`, `qemu-backend`, `vm-core`, `vm-storage`, `rfb-client`, `lightvm-mcp`; nessun problema trovato in grammatica degli argomenti QEMU, Job Object, ACL della pipe, credenziali, limiti dei frame, percorsi del catalogo, decoder RFB. Problemi trovati e corretti:
+Section appended at the end (rule 8). Read-only review of `lightvm-proto`, `lightvm-service`, `qemu-backend`, `vm-core`, `vm-storage`, `rfb-client`, `lightvm-mcp`; no problems found in the QEMU argument grammar, Job Object, pipe ACL, credentials, frame limits, catalog paths, RFB decoder. Problems found and fixed:
 
-| Problema | Correzione | Prova |
+| Problem | Fix | Test |
 | --- | --- | --- |
-| Uscita di una VM non richiesta (spegnimento dal guest, crash) pubblicata solo alla richiesta successiva di un client | il supervisor osserva il backend ogni secondo senza comandi e pubblica `vm_state` | `core_path.rs`: `unrequested_exit_is_published_without_requests` |
-| Budget dell'arresto del servizio unico (30 s) con VM arrestate una dopo l'altra: dalla seconda VM terminazione forzata | budget per ciascuna VM con processo | test esistenti; non provato con più VM reali |
-| Disco esistente rifiutato all'avvio e alla modifica se lo spazio libero scende sotto la sua dimensione | lo spazio libero limita solo creazione e crescita | `scenarios.rs`: `existing_disk_survives_less_free_space` |
-| Errore del catalogo durante l'inoltro: operazione persa e VM bloccata in `starting` | operazione scartata con l'errore e stato precedente ripristinato; a fine inoltro lo stato segue l'esito del backend | test esistenti (nessuna iniezione di guasti nel catalogo finto) |
-| Risposta oltre 64 KiB (molte VM) chiudeva la connessione senza errore | errore `resource_limit` per quella richiesta | — |
-| Esecuzione uscita durante la terminazione della scalata di arresto mai rilasciata (avvio successivo rifiutato) | rilascio se il processo risulta uscito, all'arresto e prima di un nuovo avvio | — |
-| Directory privata dei socket mai rimossa | rimossa al rilascio e all'avvio fallito; `runs/<run_id>/` resta per la diagnostica (fuori dal budget di storage, documentato) | — |
-| Riga del catalogo illeggibile: saltata all'apertura ma fatale nell'elenco (servizio non avviabile) | saltata con diagnostica anche nell'elenco | — |
-| Emergency Stop automatico alla perdita della UI registrato nell'audit come azione dell'utente | attore `system` | test esistenti |
-| Credenziali scadute o revocate mai rimosse | rimosse a ogni emissione | test esistenti |
-| Intestazione di `adapters/backend.rs` superata (disco non creato) | aggiornata | — |
+| Exit of a VM not requested (power-off from the guest, crash) published only at a client's next request | the supervisor observes the backend every second without commands and publishes `vm_state` | `core_path.rs`: `unrequested_exit_is_published_without_requests` |
+| Single shutdown budget for the service (30 s) with VMs stopped one after another: forced termination from the second VM on | budget for each VM with a process | existing tests; not tested with several real VMs |
+| Existing disk rejected at start and on edit if free space drops below its size | free space limits only creation and growth | `scenarios.rs`: `existing_disk_survives_less_free_space` |
+| Catalog error during forwarding: operation lost and VM stuck in `starting` | operation discarded with the error and previous state restored; at the end of forwarding the state follows the backend's outcome | existing tests (no fault injection in the fake catalog) |
+| Response over 64 KiB (many VMs) closed the connection without an error | `resource_limit` error for that request | — |
+| Run that exited during the termination of the shutdown escalation never released (subsequent start rejected) | released if the process has exited, at shutdown and before a new start | — |
+| Private socket directory never removed | removed on release and on a failed start; `runs/<run_id>/` stays for diagnostics (outside the storage budget, documented) | — |
+| Unreadable catalog row: skipped on open but fatal in the listing (service cannot start) | skipped with diagnostics in the listing too | — |
+| Automatic Emergency Stop on UI loss recorded in the audit as a user action | actor `system` | existing tests |
+| Expired or revoked credentials never removed | removed at every issuance | existing tests |
+| Header of `adapters/backend.rs` outdated (disk not created) | updated | — |
 
-Lasciato com'è, con commento nel codice: l'indice degli `operation_id` del core non si riduce, così un id uscito dalla finestra di idempotenza non può essere riusato per un'altra richiesta.
+Left as is, with a comment in the code: the core's index of `operation_id`s does not shrink, so an id that has left the idempotency window cannot be reused for another request.

@@ -1,6 +1,7 @@
-//! Test headless della UI con `egui_kittest` (ROADMAP 13: candidato framework di
-//! test UI). Pilota l'interfaccia attraverso l'albero AccessKit, senza finestra,
-//! senza GPU e senza supervisor: non verifica rendering nativo né IPC.
+//! Headless UI tests with `egui_kittest` (ROADMAP 13: UI test framework
+//! candidate). They drive the interface through the AccessKit tree, without a
+//! window, without GPU and without supervisor: they verify neither native
+//! rendering nor IPC.
 
 use egui::accesskit::Role;
 use egui_kittest::Harness;
@@ -8,92 +9,123 @@ use egui_kittest::kittest::{NodeT as _, Queryable as _};
 use lightvm_desktop::{LightVmApp, Section, UiTheme};
 
 fn harness(app: LightVmApp) -> Harness<'static, LightVmApp> {
-    harness_di_altezza(app, 800.0)
+    harness_with_height(app, 800.0)
 }
 
-/// La pagina Settings scorre: i test che ne usano tutti i controlli la
-/// rendono per intero, perché kittest non scorre fino al nodo.
-fn harness_di_altezza(app: LightVmApp, altezza: f32) -> Harness<'static, LightVmApp> {
+/// The Settings page scrolls: tests using all its controls render it in
+/// full, because kittest does not scroll to the node.
+fn harness_with_height(app: LightVmApp, height: f32) -> Harness<'static, LightVmApp> {
     Harness::builder()
-        .with_size(egui::vec2(1280.0, altezza))
+        .with_size(egui::vec2(1280.0, height))
         .build_ui_state(|ui, app: &mut LightVmApp| app.ui(ui), app)
 }
 
 #[test]
-fn albero_accesskit_contiene_le_voci_di_navigazione() {
+fn accesskit_tree_contains_the_navigation_items() {
     let mut h = harness(LightVmApp::new(false));
     h.run();
     for label in ["Dashboard", "Console", "Settings"] {
-        // `get_by_role_and_label` fallisce se il nodo non esiste o non è unico.
-        // Il ruolo serve a distinguere la voce di navigazione dal titolo della sezione.
+        // `get_by_role_and_label` fails if the node does not exist or is not unique.
+        // The role distinguishes the navigation item from the section title.
         let node = h.get_by_role_and_label(Role::Button, label);
         assert_eq!(node.accesskit_node().label().as_deref(), Some(label));
     }
 }
 
 #[test]
-fn click_su_dashboard_cambia_sezione() {
+fn starts_on_dashboard_and_click_on_console_changes_section() {
     let mut h = harness(LightVmApp::new(false));
     h.run();
-    assert_eq!(h.state().section(), Section::Console);
-    h.get_by_role_and_label(Role::Button, "Dashboard").click();
-    h.run();
     assert_eq!(h.state().section(), Section::Dashboard);
+    h.get_by_role_and_label(Role::Button, "Console").click();
+    h.run();
+    assert_eq!(h.state().section(), Section::Console);
+}
+
+/// Without a real console and without `--simulated-console` the Console page
+/// shows a declared empty state: no simulated image (ROADMAP F2 exit
+/// criterion: no screen with simulated data).
+#[test]
+fn default_console_page_shows_empty_state_and_no_image() {
+    let mut h = harness(LightVmApp::new(false));
+    h.run();
+    h.get_by_role_and_label(Role::Button, "Console").click();
+    h.run();
+    h.get_by_label("No console connected.");
+    assert_eq!(h.query_all_by_role(Role::Image).count(), 0);
+    assert!(
+        h.query_by_label("Simulated console framebuffer").is_none(),
+        "simulated framebuffer shown by default"
+    );
+    assert_eq!(h.state().fb_updates(), 0);
+}
+
+/// With the simulated console enabled the page shows the generated
+/// framebuffer (measurements only).
+#[test]
+fn simulated_console_is_opt_in() {
+    let mut app = LightVmApp::new(false);
+    app.set_simulated_console(true);
+    app.set_section(Section::Console);
+    let mut h = harness(app);
+    h.run();
+    h.get_by_label("Simulated console framebuffer");
+    assert!(h.state().fb_updates() > 0);
 }
 
 #[test]
-fn tema_scuro_predefinito_e_passaggio_al_chiaro() {
+fn dark_theme_by_default_and_switch_to_light() {
     let mut h = harness(LightVmApp::new(false));
     h.run();
     assert_eq!(h.state().theme(), UiTheme::Dark);
     assert_eq!(h.ctx.theme(), egui::Theme::Dark);
     h.get_by_role_and_label(Role::Button, "Settings").click();
     h.run();
-    h.get_by_role_and_label(Role::Button, "Chiaro").click();
+    h.get_by_role_and_label(Role::Button, "Light").click();
     h.run();
     assert_eq!(h.state().theme(), UiTheme::Light);
     assert_eq!(h.ctx.theme(), egui::Theme::Light);
-    // Il tema scelto è un'impostazione salvata.
-    assert_eq!(h.state().impostazioni().tema, UiTheme::Light);
+    // The chosen theme is a saved setting.
+    assert_eq!(h.state().settings().theme, UiTheme::Light);
 }
 
-/// Il testo delle etichette non si seleziona: nessuna copia verso gli
-/// appunti dell'host (ROADMAP: nessuna funzione degli appunti).
+/// Label text is not selectable: no copy to the host clipboard (ROADMAP: no
+/// clipboard features).
 #[test]
-fn etichette_non_selezionabili() {
+fn labels_not_selectable() {
     let mut h = harness(LightVmApp::new(false));
     h.run();
-    for tema in [egui::Theme::Dark, egui::Theme::Light] {
-        assert!(!h.ctx.style_of(tema).interaction.selectable_labels);
+    for theme in [egui::Theme::Dark, egui::Theme::Light] {
+        assert!(!h.ctx.style_of(theme).interaction.selectable_labels);
     }
 }
 
-/// Test negativo F0-04 (ROADMAP 7.4, righe "Host" e "File"): nessuna sezione
-/// della UI espone campi di testo che possano finire nella riga di comando di
-/// QEMU. La console reale riceve i percorsi dei socket solo da riga di comando.
+/// F0-04 negative test (ROADMAP 7.4, rows "Host" and "File"): no section of
+/// the UI exposes text fields that could end up in the QEMU command line. The
+/// real console receives the socket paths only from the command line.
 #[test]
-fn nessun_campo_di_testo_in_alcuna_sezione() {
+fn no_text_field_in_any_section() {
     let mut h = harness(LightVmApp::new(false));
     h.run();
     for label in ["Dashboard", "Console", "Settings"] {
         h.get_by_role_and_label(Role::Button, label).click();
         h.run();
-        let campi = h.query_all_by_role(Role::TextInput).count()
+        let fields = h.query_all_by_role(Role::TextInput).count()
             + h.query_all_by_role(Role::MultilineTextInput).count()
             + h.query_all_by_role(Role::SearchInput).count()
             + h.query_all_by_role(Role::SpinButton).count();
-        assert_eq!(campi, 0, "campi di input nella sezione {label}");
+        assert_eq!(fields, 0, "input fields in the {label} section");
     }
 }
 
-/// Come sopra, con la console reale configurata (socket inesistenti: la
-/// connessione fallisce e lo stato lo mostra). Anche in questo caso nessun
-/// campo di testo e nessun controllo che costruisca opzioni QEMU.
+/// As above, with the real console configured (non-existent sockets: the
+/// connection fails and the status shows it). Also in this case no text
+/// field and no control that builds QEMU options.
 #[test]
-fn nessun_campo_di_testo_con_console_reale_configurata() {
+fn no_text_field_with_real_console_configured() {
     use lightvm_desktop::console::ConsoleConfig;
     use lightvm_desktop::keymap::KeyboardLayout;
-    let dir = std::env::temp_dir().join("lightvm-f0-04-inesistente");
+    let dir = std::env::temp_dir().join("lightvm-f0-04-nonexistent");
     let cfg = ConsoleConfig {
         vnc: rfb_client::Transport::Unix {
             path: dir.join("vnc.sock"),
@@ -105,7 +137,9 @@ fn nessun_campo_di_testo_con_console_reale_configurata() {
         layout: KeyboardLayout::It,
         max_fps: 30,
     };
-    let mut h = harness(LightVmApp::with_console(cfg));
+    let mut app = LightVmApp::with_console(cfg);
+    app.set_section(Section::Console);
+    let mut h = harness(app);
     for _ in 0..20 {
         h.step();
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -113,63 +147,62 @@ fn nessun_campo_di_testo_con_console_reale_configurata() {
     for label in ["Console", "Dashboard", "Settings"] {
         h.get_by_role_and_label(Role::Button, label).click();
         h.run();
-        let campi = h.query_all_by_role(Role::TextInput).count()
+        let fields = h.query_all_by_role(Role::TextInput).count()
             + h.query_all_by_role(Role::MultilineTextInput).count()
             + h.query_all_by_role(Role::SearchInput).count()
             + h.query_all_by_role(Role::SpinButton).count();
-        assert_eq!(campi, 0, "campi di input nella sezione {label}");
+        assert_eq!(fields, 0, "input fields in the {label} section");
     }
     h.get_by_role_and_label(Role::Button, "Console").click();
     h.run();
-    // L'unico controllo d'azione della console è "Screenshot".
+    // The only action control of the console is "Screenshot".
     h.get_by_role_and_label(Role::Button, "Screenshot");
 }
 
-/// Settings: politica alla chiusura anomala della UI e backend preferito,
-/// scelti con pulsanti di opzione e salvati su file.
+/// Settings: policy on unexpected UI close and preferred backend, chosen
+/// with radio buttons and saved to file.
 #[test]
-fn settings_salva_politica_e_rendering() {
-    use lightvm_desktop::impostazioni::{Impostazioni, PreferenzaRendering};
+fn settings_saves_policy_and_rendering() {
+    use lightvm_desktop::settings::{RenderingPreference, UiSettings};
     use lightvm_proto::ipc::ParentLossPolicy;
     let dir = std::env::temp_dir().join(format!(
-        "lightvm-kittest-impostazioni-{}-{}",
+        "lightvm-kittest-settings-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos())
     ));
-    let file = dir.join("impostazioni-ui.json");
+    let file = dir.join("ui-settings.json");
     let mut app = LightVmApp::new(false);
-    app.set_impostazioni(Impostazioni::default(), Some(file.clone()), None);
-    let mut h = harness_di_altezza(app, 1600.0);
+    app.set_settings(UiSettings::default(), Some(file.clone()), None);
+    let mut h = harness_with_height(app, 1600.0);
     h.run();
     h.get_by_role_and_label(Role::Button, "Settings").click();
     h.run();
     assert_eq!(
-        h.state().impostazioni().politica_perdita_ui,
+        h.state().settings().ui_loss_policy,
         ParentLossPolicy::KillVms
     );
-    h.get_by_label("Spegnimento ordinato, poi terminazione")
+    h.get_by_label("Orderly shutdown, then termination").click();
+    h.run();
+    h.get_by_label("wgpu (DX12/Vulkan) first: uses more memory")
         .click();
     h.run();
-    h.get_by_label("wgpu (DX12/Vulkan) per primo: usa più memoria")
-        .click();
-    h.run();
-    let atteso = Impostazioni {
-        politica_perdita_ui: ParentLossPolicy::ShutdownVms { powerdown_s: 10 },
-        rendering: PreferenzaRendering::Wgpu,
-        ..Impostazioni::default()
+    let expected = UiSettings {
+        ui_loss_policy: ParentLossPolicy::ShutdownVms { powerdown_s: 10 },
+        rendering: RenderingPreference::Wgpu,
+        ..UiSettings::default()
     };
-    assert_eq!(h.state().impostazioni(), &atteso);
-    assert_eq!(Impostazioni::carica(&file), (atteso, None));
+    assert_eq!(h.state().settings(), &expected);
+    assert_eq!(UiSettings::load(&file), (expected, None));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Settings, sezione Supervisor: cartelle scelte con il selettore (finto nel
-/// test), mostrate come testo non modificabile e salvate; avvio automatico.
+/// Settings, Supervisor section: folders chosen with the picker (fake in the
+/// test), shown as non-editable text and saved; automatic start.
 #[test]
-fn settings_supervisor_sceglie_cartelle_senza_campi_di_testo() {
-    use lightvm_desktop::impostazioni::Impostazioni;
+fn settings_supervisor_chooses_folders_without_text_fields() {
+    use lightvm_desktop::settings::UiSettings;
     use std::path::PathBuf;
     let dir = std::env::temp_dir().join(format!(
         "lightvm-kittest-supervisor-{}-{}",
@@ -178,46 +211,46 @@ fn settings_supervisor_sceglie_cartelle_senza_campi_di_testo() {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos())
     ));
-    let file = dir.join("impostazioni-ui.json");
+    let file = dir.join("ui-settings.json");
     let mut app = LightVmApp::new(false);
-    app.set_impostazioni(Impostazioni::default(), Some(file.clone()), None);
-    let scelte = std::rc::Rc::new(std::cell::RefCell::new(vec![
+    app.set_settings(UiSettings::default(), Some(file.clone()), None);
+    let choices = std::rc::Rc::new(std::cell::RefCell::new(vec![
         PathBuf::from(r"D:\qemu-11.1.0"),
-        PathBuf::from(r"D:m\catalogo"),
+        PathBuf::from(r"D:\vm\catalog"),
     ]));
-    let s2 = scelte.clone();
-    app.set_selettore(Some(Box::new(move |_titolo: &str| s2.borrow_mut().pop())));
-    let mut h = harness_di_altezza(app, 1600.0);
+    let c2 = choices.clone();
+    app.set_folder_picker(Some(Box::new(move |_title: &str| c2.borrow_mut().pop())));
+    let mut h = harness_with_height(app, 1600.0);
     h.run();
     h.get_by_role_and_label(Role::Button, "Settings").click();
     h.run();
-    h.get_by_label("non avviato");
-    h.get_by_label("non impostata: le VM non si possono avviare");
-    // Due "Sfoglia…" visibili, distinti dal nome accessibile.
-    h.get_by_role_and_label(Role::Button, "Scegli la cartella del catalogo")
+    h.get_by_label("not started");
+    h.get_by_label("not set: VMs cannot be started");
+    // Two visible "Browse…" buttons, distinguished by the accessible name.
+    h.get_by_role_and_label(Role::Button, "Choose the catalog folder")
         .click();
     h.run();
-    h.get_by_role_and_label(Role::Button, "Scegli la cartella di QEMU")
+    h.get_by_role_and_label(Role::Button, "Choose the QEMU folder")
         .click();
     h.run();
-    h.get_by_label("Avvia il supervisor all'apertura di LightVM")
+    h.get_by_label("Start the supervisor when LightVM opens")
         .click();
     h.run();
-    let i = h.state().impostazioni().clone();
-    assert_eq!(i.catalogo, Some(PathBuf::from(r"D:m\catalogo")));
+    let i = h.state().settings().clone();
+    assert_eq!(i.catalog, Some(PathBuf::from(r"D:\vm\catalog")));
     assert_eq!(i.qemu_dir, Some(PathBuf::from(r"D:\qemu-11.1.0")));
-    assert!(!i.avvio_supervisor);
-    h.get_by_label(r"D:m\catalogo");
+    assert!(!i.start_supervisor);
+    h.get_by_label(r"D:\vm\catalog");
     h.get_by_label(r"D:\qemu-11.1.0");
-    assert_eq!(Impostazioni::carica(&file), (i, None));
-    // "Nessuna" e "Predefinito" riportano ai valori iniziali.
-    h.get_by_role_and_label(Role::Button, "Nessuna distribuzione QEMU")
+    assert_eq!(UiSettings::load(&file), (i, None));
+    // "None" and "Default" bring back the initial values.
+    h.get_by_role_and_label(Role::Button, "No QEMU distribution")
         .click();
     h.run();
-    h.get_by_role_and_label(Role::Button, "Torna al catalogo predefinito")
+    h.get_by_role_and_label(Role::Button, "Go back to the default catalog")
         .click();
     h.run();
-    assert_eq!(h.state().impostazioni().qemu_dir, None);
-    assert_eq!(h.state().impostazioni().catalogo, None);
+    assert_eq!(h.state().settings().qemu_dir, None);
+    assert_eq!(h.state().settings().catalog, None);
     let _ = std::fs::remove_dir_all(&dir);
 }

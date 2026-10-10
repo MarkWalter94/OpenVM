@@ -1,11 +1,11 @@
-//! Rilevamento delle capacità dell'host e probe reale dell'acceleratore
+//! Detection of host capabilities and real accelerator probe
 //! (ROADMAP 3, 5, 10 F1; ADR-0007).
 //!
-//! Un binario trovato non dimostra che la VM possa avviarsi: oltre al parsing
-//! dell'output di `--version`, `-accel help`, `-machine help`, `-device help`,
-//! `-cpu help` e di `qemu-img`, [`probe_accelerator`] avvia QEMU in pausa con
-//! l'acceleratore, la macchina e il modello CPU che verranno usati e verifica
-//! via QMP `query-accelerators` quale acceleratore è attivo.
+//! A binary that was found does not prove that the VM can start: besides parsing
+//! the output of `--version`, `-accel help`, `-machine help`, `-device help`,
+//! `-cpu help` and of `qemu-img`, [`probe_accelerator`] starts QEMU paused with
+//! the accelerator, machine and CPU model that will be used and verifies
+//! via QMP `query-accelerators` which accelerator is active.
 
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
@@ -23,16 +23,16 @@ use crate::paths::ManagedPath;
 use crate::qmp::QmpConfig;
 use lightvm_proto::RunId;
 
-/// Versione di QEMU.
+/// QEMU version.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct QemuVersion {
-    /// Maggiore.
+    /// Major.
     pub major: u32,
-    /// Minore.
+    /// Minor.
     pub minor: u32,
     /// Micro.
     pub micro: u32,
-    /// Descrizione della build tra parentesi, se presente.
+    /// Build description in parentheses, if present.
     pub package: Option<String>,
 }
 
@@ -46,44 +46,44 @@ impl fmt::Display for QemuVersion {
     }
 }
 
-/// Voce di `-machine help`.
+/// Entry of `-machine help`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MachineEntry {
-    /// Nome.
+    /// Name.
     pub name: String,
-    /// Descrizione.
+    /// Description.
     pub description: String,
-    /// Nome di cui è alias.
+    /// Name it is an alias of.
     pub alias_of: Option<String>,
-    /// Deprecata.
+    /// Deprecated.
     pub deprecated: bool,
-    /// Predefinita.
+    /// Default.
     pub default: bool,
 }
 
-/// Firmware UEFI trovato accanto al binario.
+/// UEFI firmware found next to the binary.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FirmwareInfo {
-    /// Codice OVMF.
+    /// OVMF code.
     pub code: PathBuf,
-    /// SHA-256 del codice.
+    /// SHA-256 of the code.
     pub code_sha256: String,
-    /// Modello delle variabili UEFI.
+    /// UEFI variables template.
     pub vars_template: PathBuf,
-    /// SHA-256 del modello delle variabili.
+    /// SHA-256 of the variables template.
     pub vars_sha256: String,
-    /// `true` se entrambi gli hash coincidono con quelli verificati in F0-02.
+    /// `true` if both hashes match those verified in F0-02.
     pub matches_verified: bool,
 }
 
-/// Hash verificati in F0-02 (2.3) per QEMU 11.1.0 di qemu.weilnetz.de.
+/// Hashes verified in F0-02 (2.3) for QEMU 11.1.0 from qemu.weilnetz.de.
 pub const VERIFIED_OVMF_CODE_SHA256: &str =
     "33090cc07675baa5190d9f1e84bf5176b33bcbfa9bacac522961150cdb6dbb2a";
-/// Hash verificato del modello delle variabili UEFI.
+/// Verified hash of the UEFI variables template.
 pub const VERIFIED_OVMF_VARS_SHA256: &str =
     "5d2ac383371b408398accee7ec27c8c09ea5b74a0de0ceea6513388b15be5d1e";
 
-/// Dispositivi richiesti dal comando costruito da [`crate::cmdline`].
+/// Devices required by the command built by [`crate::cmdline`].
 pub const REQUIRED_DEVICES: &[&str] = &[
     "virtio-vga",
     "virtio-tablet-pci",
@@ -92,71 +92,71 @@ pub const REQUIRED_DEVICES: &[&str] = &[
     "ide-cd",
 ];
 
-/// Formati immagine richiesti.
+/// Required image formats.
 pub const REQUIRED_IMAGE_FORMATS: &[&str] = &["qcow2", "raw", "file"];
 
-/// Motivo per cui l'acceleratore non è disponibile.
+/// Reason why the accelerator is not available.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UnavailableReason {
-    /// Il binario non include l'acceleratore.
+    /// The binary does not include the accelerator.
     NotCompiled {
-        /// Acceleratori elencati da `-accel help`.
+        /// Accelerators listed by `-accel help`.
         available: Vec<String>,
     },
-    /// QEMU ha rifiutato l'acceleratore all'inizializzazione.
+    /// QEMU rejected the accelerator at initialisation.
     InitFailed {
-        /// Estratto di stderr.
+        /// stderr excerpt.
         stderr: String,
     },
-    /// QEMU è partito ma l'acceleratore attivo è un altro (per esempio TCG).
+    /// QEMU started but the active accelerator is a different one (for example TCG).
     WrongAccelerator {
-        /// Acceleratore attivo secondo `query-accelerators`.
+        /// Active accelerator according to `query-accelerators`.
         enabled: String,
     },
-    /// Configurazione non compatibile (macchina o CPU rifiutate).
+    /// Incompatible configuration (machine or CPU rejected).
     IncompatibleConfiguration {
-        /// Estratto di stderr.
+        /// stderr excerpt.
         stderr: String,
     },
-    /// Il probe non si è concluso.
+    /// The probe did not complete.
     ProbeFailed {
-        /// Descrizione.
+        /// Description.
         detail: String,
     },
 }
 
-/// Esito del probe reale dell'acceleratore.
+/// Outcome of the real accelerator probe.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AcceleratorStatus {
-    /// Acceleratore attivo con la configurazione provata.
+    /// Accelerator active with the tested configuration.
     Available {
-        /// Acceleratore.
+        /// Accelerator.
         accelerator: Accelerator,
-        /// Macchina usata nel probe.
+        /// Machine used in the probe.
         machine: String,
-        /// Modello CPU usato nel probe.
+        /// CPU model used in the probe.
         cpu: String,
     },
-    /// Non disponibile: nessun fallback TCG.
+    /// Not available: no TCG fallback.
     Unavailable {
-        /// Acceleratore richiesto.
+        /// Requested accelerator.
         accelerator: Accelerator,
-        /// Motivo.
+        /// Reason.
         reason: UnavailableReason,
     },
-    /// Probe non ancora eseguito.
+    /// Probe not yet run.
     NotProbed,
 }
 
 impl AcceleratorStatus {
-    /// `true` se l'acceleratore è utilizzabile.
+    /// `true` if the accelerator is usable.
     pub fn is_available(&self) -> bool {
         matches!(self, Self::Available { .. })
     }
 
-    /// Messaggio per l'utente senza estratti di stderr (che possono contenere
-    /// percorsi): motivo sintetico e suggerimento, sempre con la dichiarazione
-    /// che TCG non viene usato.
+    /// Message for the user without stderr excerpts (which may contain
+    /// paths): short reason and hint, always with the statement
+    /// that TCG is not used.
     pub fn public_message(&self) -> String {
         match self {
             Self::Available { .. } | Self::NotProbed => self.to_string(),
@@ -167,24 +167,24 @@ impl AcceleratorStatus {
                 let a = accelerator.qemu_name().to_uppercase();
                 let what = match reason {
                     UnavailableReason::NotCompiled { .. } => {
-                        format!("{a} non è incluso nel binario QEMU")
+                        format!("{a} is not included in the QEMU binary")
                     }
                     UnavailableReason::InitFailed { .. } => {
-                        format!("{a} non si è inizializzato")
+                        format!("{a} did not initialise")
                     }
                     UnavailableReason::WrongAccelerator { enabled } => {
-                        format!("QEMU è partito con `{enabled}` invece di {a}")
+                        format!("QEMU started with `{enabled}` instead of {a}")
                     }
                     UnavailableReason::IncompatibleConfiguration { .. } => {
-                        format!("macchina o modello CPU rifiutati da QEMU con {a}")
+                        format!("machine or CPU model rejected by QEMU with {a}")
                     }
                     UnavailableReason::ProbeFailed { .. } => {
-                        format!("verifica di {a} non conclusa")
+                        format!("verification of {a} not completed")
                     }
                 };
                 format!(
-                    "acceleratore hardware non disponibile: {what}. Avvio rifiutato: nessun \
-                     ripiego sull'emulazione TCG. {}",
+                    "hardware accelerator not available: {what}. Launch refused: no \
+                     fallback to TCG emulation. {}",
                     accel_hint(*accelerator)
                 )
             }
@@ -195,17 +195,17 @@ impl AcceleratorStatus {
 fn accel_hint(a: Accelerator) -> &'static str {
     match a {
         Accelerator::Whpx => {
-            "verificare che la funzionalità Windows \"Piattaforma hypervisor Windows\" \
-             (HypervisorPlatform) sia attiva, che la virtualizzazione sia abilitata nel \
-             firmware e che il binario QEMU includa WHPX; LightVM non usa l'emulazione TCG"
+            "check that the Windows feature \"Windows Hypervisor Platform\" \
+             (HypervisorPlatform) is enabled, that virtualization is enabled in the \
+             firmware and that the QEMU binary includes WHPX; LightVM does not use TCG emulation"
         }
         Accelerator::Kvm => {
-            "verificare che /dev/kvm esista e sia accessibile all'utente (gruppo kvm) e che \
-             la virtualizzazione sia abilitata nel firmware; LightVM non usa l'emulazione TCG"
+            "check that /dev/kvm exists and is accessible to the user (kvm group) and that \
+             virtualization is enabled in the firmware; LightVM does not use TCG emulation"
         }
         Accelerator::Hvf => {
-            "verificare che il binario QEMU includa HVF e che l'host lo supporti; LightVM non \
-             usa l'emulazione TCG"
+            "check that the QEMU binary includes HVF and that the host supports it; LightVM does \
+             not use TCG emulation"
         }
     }
 }
@@ -219,10 +219,10 @@ impl fmt::Display for AcceleratorStatus {
                 cpu,
             } => write!(
                 f,
-                "acceleratore {} attivo (macchina {machine}, CPU {cpu})",
+                "accelerator {} active (machine {machine}, CPU {cpu})",
                 accelerator.qemu_name()
             ),
-            Self::NotProbed => write!(f, "acceleratore non ancora verificato"),
+            Self::NotProbed => write!(f, "accelerator not yet verified"),
             Self::Unavailable {
                 accelerator,
                 reason,
@@ -231,27 +231,27 @@ impl fmt::Display for AcceleratorStatus {
                 match reason {
                     UnavailableReason::NotCompiled { available } => write!(
                         f,
-                        "{a} non è incluso in questo binario QEMU (acceleratori presenti: {}): {}",
+                        "{a} is not included in this QEMU binary (accelerators present: {}): {}",
                         available.join(", "),
                         accel_hint(*accelerator)
                     ),
                     UnavailableReason::InitFailed { stderr } => write!(
                         f,
-                        "{a} non inizializzato: {}. Messaggio di QEMU: {stderr}",
+                        "{a} not initialised: {}. QEMU message: {stderr}",
                         accel_hint(*accelerator)
                     ),
                     UnavailableReason::WrongAccelerator { enabled } => write!(
                         f,
-                        "QEMU è partito con l'acceleratore `{enabled}` invece di {a}: avvio \
-                         rifiutato (nessun fallback TCG)"
+                        "QEMU started with the `{enabled}` accelerator instead of {a}: launch \
+                         refused (no TCG fallback)"
                     ),
                     UnavailableReason::IncompatibleConfiguration { stderr } => write!(
                         f,
-                        "configurazione rifiutata da QEMU con {a} (macchina o modello CPU): \
+                        "configuration rejected by QEMU with {a} (machine or CPU model): \
                          {stderr}"
                     ),
                     UnavailableReason::ProbeFailed { detail } => {
-                        write!(f, "probe di {a} non concluso: {detail}")
+                        write!(f, "probe of {a} not completed: {detail}")
                     }
                 }
             }
@@ -259,96 +259,96 @@ impl fmt::Display for AcceleratorStatus {
     }
 }
 
-/// Capacità rilevate.
+/// Detected capabilities.
 #[derive(Clone, Debug)]
 pub struct HostCapabilities {
-    /// Binario `qemu-system-x86_64` approvato.
+    /// Approved `qemu-system-x86_64` binary.
     pub qemu_system: ManagedPath,
-    /// SHA-256 del binario.
+    /// SHA-256 of the binary.
     pub qemu_system_sha256: String,
-    /// Binario `qemu-img`.
+    /// `qemu-img` binary.
     pub qemu_img: ManagedPath,
-    /// SHA-256 di `qemu-img`.
+    /// SHA-256 of `qemu-img`.
     pub qemu_img_sha256: String,
-    /// Versione di QEMU.
+    /// QEMU version.
     pub version: QemuVersion,
-    /// Versione di `qemu-img`.
+    /// `qemu-img` version.
     pub qemu_img_version: QemuVersion,
-    /// Acceleratori compilati.
+    /// Compiled-in accelerators.
     pub accelerators: Vec<String>,
-    /// Tutte le macchine elencate.
+    /// All listed machines.
     pub machines: Vec<MachineEntry>,
-    /// Macchine q35 versionate non deprecate, dalla più recente.
+    /// Non-deprecated versioned q35 machines, newest first.
     pub q35_machines: Vec<MachineType>,
-    /// Dispositivi elencati da `-device help` (nomi e alias).
+    /// Devices listed by `-device help` (names and aliases).
     pub devices: BTreeSet<String>,
-    /// Dispositivi richiesti assenti.
+    /// Missing required devices.
     pub missing_devices: Vec<String>,
-    /// Modelli CPU disponibili.
+    /// Available CPU models.
     pub cpu_models: BTreeSet<String>,
-    /// Formati supportati da `qemu-img`.
+    /// Formats supported by `qemu-img`.
     pub image_formats: BTreeSet<String>,
-    /// Protocolli remoti presenti nella build (esclusi dall'allowlist).
+    /// Remote protocols present in the build (excluded by the allowlist).
     pub remote_protocols_present: Vec<String>,
-    /// Firmware UEFI.
+    /// UEFI firmware.
     pub firmware: Option<FirmwareInfo>,
-    /// Esito del probe reale dell'acceleratore.
+    /// Outcome of the real accelerator probe.
     pub accelerator: AcceleratorStatus,
 }
 
-/// Problema rilevato dal probe, con messaggio per l'utente.
+/// Problem detected by the probe, with a message for the user.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Diagnostic {
-    /// Codice breve stabile.
+    /// Short stable code.
     pub code: &'static str,
-    /// Messaggio per l'utente.
+    /// Message for the user.
     pub message: String,
 }
 
 impl HostCapabilities {
-    /// Macchina q35 versionata consigliata (la più recente non deprecata).
+    /// Recommended versioned q35 machine (the newest non-deprecated one).
     pub fn recommended_machine(&self) -> Option<&MachineType> {
         self.q35_machines.first()
     }
 
-    /// Modello CPU verificato presente nel binario.
+    /// Verified CPU model present in the binary.
     pub fn cpu_model(&self, name: &str) -> Result<CpuModel> {
         let m = CpuModel::nominal(name)?;
         if !self.cpu_models.contains(name) {
             return Err(BackendError::Unsupported {
-                what: format!("modello CPU `{name}`"),
-                hint: "non elencato da `-cpu help` di questo binario".into(),
+                what: format!("CPU model `{name}`"),
+                hint: "not listed by `-cpu help` of this binary".into(),
             });
         }
         Ok(m)
     }
 
-    /// Macchina q35 versionata presente nel binario.
+    /// Versioned q35 machine present in the binary.
     pub fn machine(&self, name: &str) -> Result<MachineType> {
         let m = MachineType::versioned_q35(name)?;
         if !self.q35_machines.contains(&m) {
             return Err(BackendError::Unsupported {
-                what: format!("macchina `{name}`"),
-                hint: "non elencata (o deprecata) in `-machine help` di questo binario".into(),
+                what: format!("machine `{name}`"),
+                hint: "not listed (or deprecated) in `-machine help` of this binary".into(),
             });
         }
         Ok(m)
     }
 
-    /// Problemi che impediscono l'avvio di una VM con il profilo LightVM.
+    /// Problems that prevent starting a VM with the LightVM profile.
     pub fn diagnostics(&self) -> Vec<Diagnostic> {
         let mut d = Vec::new();
         if self.q35_machines.is_empty() {
             d.push(Diagnostic {
                 code: "machine_missing",
-                message: "nessuna macchina q35 versionata non deprecata disponibile".into(),
+                message: "no non-deprecated versioned q35 machine available".into(),
             });
         }
         if !self.missing_devices.is_empty() {
             d.push(Diagnostic {
                 code: "device_missing",
                 message: format!(
-                    "dispositivi richiesti assenti dal binario: {}",
+                    "required devices missing from the binary: {}",
                     self.missing_devices.join(", ")
                 ),
             });
@@ -360,20 +360,20 @@ impl HostCapabilities {
         if !missing_fmt.is_empty() {
             d.push(Diagnostic {
                 code: "image_format_missing",
-                message: format!("qemu-img non supporta: {missing_fmt:?}"),
+                message: format!("qemu-img does not support: {missing_fmt:?}"),
             });
         }
         match &self.firmware {
             None => d.push(Diagnostic {
                 code: "firmware_missing",
-                message: "firmware UEFI (edk2-x86_64-code.fd, edk2-i386-vars.fd) non trovato \
-                          nella cartella share di QEMU"
+                message: "UEFI firmware (edk2-x86_64-code.fd, edk2-i386-vars.fd) not found \
+                          in the QEMU share folder"
                     .into(),
             }),
             Some(fw) if !fw.matches_verified => d.push(Diagnostic {
                 code: "firmware_unverified",
                 message: format!(
-                    "firmware UEFI con hash diverso da quello verificato (codice {})",
+                    "UEFI firmware with a hash different from the verified one (code {})",
                     fw.code_sha256
                 ),
             }),
@@ -383,7 +383,7 @@ impl HostCapabilities {
             d.push(Diagnostic {
                 code: "version_mismatch",
                 message: format!(
-                    "qemu-img {} diverso da qemu-system {}",
+                    "qemu-img {} differs from qemu-system {}",
                     self.qemu_img_version, self.version
                 ),
             });
@@ -399,7 +399,7 @@ impl HostCapabilities {
 }
 
 // ---------------------------------------------------------------------------
-// Parser (output reale di QEMU 11.1.0 nelle fixture `tests/fixtures/`).
+// Parsers (real QEMU 11.1.0 output in the `tests/fixtures/` fixtures).
 // ---------------------------------------------------------------------------
 
 fn parse_version_after(text: &str, marker: &str) -> Option<QemuVersion> {
@@ -480,7 +480,7 @@ pub fn parse_machine_help(text: &str) -> Vec<MachineEntry> {
     out
 }
 
-/// Macchine q35 versionate non deprecate, dalla più recente.
+/// Non-deprecated versioned q35 machines, newest first.
 pub fn q35_versioned(machines: &[MachineEntry]) -> Vec<MachineType> {
     let mut v: Vec<(u32, u32, MachineType)> = machines
         .iter()
@@ -494,7 +494,7 @@ pub fn q35_versioned(machines: &[MachineEntry]) -> Vec<MachineType> {
     v.into_iter().map(|(_, _, m)| m).collect()
 }
 
-/// `-device help`: nomi e alias.
+/// `-device help`: names and aliases.
 pub fn parse_device_help(text: &str) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     for line in text.lines() {
@@ -514,7 +514,7 @@ pub fn parse_device_help(text: &str) -> BTreeSet<String> {
     out
 }
 
-/// `-cpu help`: modelli della sezione "Available CPUs".
+/// `-cpu help`: models of the "Available CPUs" section.
 pub fn parse_cpu_help(text: &str) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     let mut in_list = false;
@@ -536,7 +536,7 @@ pub fn parse_cpu_help(text: &str) -> BTreeSet<String> {
     out
 }
 
-/// `qemu-img --help`: formati della sezione "Supported image formats".
+/// `qemu-img --help`: formats of the "Supported image formats" section.
 pub fn parse_qemu_img_formats(text: &str) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     let mut in_list = false;
@@ -559,7 +559,7 @@ pub fn parse_qemu_img_formats(text: &str) -> BTreeSet<String> {
     out
 }
 
-/// Classifica lo stderr di un avvio fallito con l'acceleratore richiesto.
+/// Classifies the stderr of a failed launch with the requested accelerator.
 pub fn classify_accel_stderr(accel: Accelerator, stderr: &str) -> UnavailableReason {
     let excerpt = stderr_excerpt(stderr);
     let lower = stderr.to_ascii_lowercase();
@@ -582,7 +582,7 @@ pub fn classify_accel_stderr(accel: Accelerator, stderr: &str) -> UnavailableRea
     UnavailableReason::ProbeFailed { detail: excerpt }
 }
 
-/// Ultime righe significative di stderr, senza il prefisso del percorso.
+/// Last meaningful lines of stderr, without the path prefix.
 pub fn stderr_excerpt(stderr: &str) -> String {
     let lines: Vec<String> = stderr
         .lines()
@@ -606,13 +606,13 @@ pub fn stderr_excerpt(stderr: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Esecuzione
+// Execution
 // ---------------------------------------------------------------------------
 
-/// Output di un comando di probe.
+/// Output of a probe command.
 #[derive(Debug)]
 pub struct CommandOutput {
-    /// Codice d'uscita.
+    /// Exit code.
     pub code: Option<i32>,
     /// Stdout.
     pub stdout: String,
@@ -620,8 +620,8 @@ pub struct CommandOutput {
     pub stderr: String,
 }
 
-/// Esegue `exe args` senza shell, con ambiente minimo, stdin nullo, nessuna
-/// console visibile e timeout (il processo viene terminato allo scadere).
+/// Runs `exe args` without a shell, with a minimal environment, null stdin, no
+/// visible console and a timeout (the process is terminated when it expires).
 pub fn run_capture(exe: &Path, args: &[&str], timeout: Duration) -> Result<CommandOutput> {
     let mut cmd = Command::new(exe);
     cmd.args(args.iter().map(OsStr::new))
@@ -664,7 +664,7 @@ pub fn run_capture(exe: &Path, args: &[&str], timeout: Duration) -> Result<Comma
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(BackendError::Timeout("comando di probe QEMU"));
+            return Err(BackendError::Timeout("QEMU probe command"));
         }
         std::thread::sleep(Duration::from_millis(10));
     };
@@ -677,7 +677,7 @@ pub fn run_capture(exe: &Path, args: &[&str], timeout: Duration) -> Result<Comma
     })
 }
 
-/// SHA-256 esadecimale di un file.
+/// Hexadecimal SHA-256 of a file.
 pub fn sha256_file(path: &Path) -> Result<String> {
     let mut f = std::fs::File::open(path)?;
     let mut h = Sha256::new();
@@ -692,7 +692,7 @@ pub fn sha256_file(path: &Path) -> Result<String> {
     Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// Cerca il firmware UEFI nella cartella `share` accanto al binario.
+/// Looks for the UEFI firmware in the `share` folder next to the binary.
 pub fn find_firmware(qemu_system: &Path) -> Result<Option<FirmwareInfo>> {
     let Some(dir) = qemu_system.parent() else {
         return Ok(None);
@@ -716,24 +716,24 @@ pub fn find_firmware(qemu_system: &Path) -> Result<Option<FirmwareInfo>> {
     }))
 }
 
-/// SHA-256 di `qemu-system-x86_64.exe` 11.1.0 approvato (ADR-0010, F0-02 §2).
+/// SHA-256 of the approved `qemu-system-x86_64.exe` 11.1.0 (ADR-0010, F0-02 §2).
 pub const APPROVED_QEMU_SYSTEM_SHA256: &str =
     "47d57a6072e0bb3bd98f87926eb129eb1736dfe818c67b3b81ef7ce4edd0b3cd";
-/// SHA-256 di `qemu-img.exe` 11.1.0 approvato (ADR-0010, F0-02 §2).
+/// SHA-256 of the approved `qemu-img.exe` 11.1.0 (ADR-0010, F0-02 §2).
 pub const APPROVED_QEMU_IMG_SHA256: &str =
     "9d930582d0d574bb106d89982c547688e10b8f356192d302cc3d0ae4e8674534";
 
-/// Configurazione del probe.
+/// Probe configuration.
 #[derive(Clone, Debug)]
 pub struct ProbeConfig {
-    /// Timeout per ciascun comando `help`/`--version`.
+    /// Timeout for each `help`/`--version` command.
     pub command_timeout: Duration,
-    /// Timeout complessivo del probe dell'acceleratore.
+    /// Overall timeout of the accelerator probe.
     pub accelerator_timeout: Duration,
-    /// SHA-256 (esadecimale minuscolo) dei `qemu-system-x86_64` approvati.
-    /// Un binario con hash diverso non viene eseguito.
+    /// SHA-256 (lowercase hexadecimal) of the approved `qemu-system-x86_64` binaries.
+    /// A binary with a different hash is not executed.
     pub approved_qemu_system_sha256: Vec<String>,
-    /// SHA-256 dei `qemu-img` approvati.
+    /// SHA-256 of the approved `qemu-img` binaries.
     pub approved_qemu_img_sha256: Vec<String>,
 }
 
@@ -748,11 +748,11 @@ impl Default for ProbeConfig {
     }
 }
 
-/// Calcola lo SHA-256 del binario e lo confronta con la lista approvata.
+/// Computes the SHA-256 of the binary and compares it with the approved list.
 ///
-/// Limite dichiarato: fra il calcolo dell'hash e l'esecuzione il file potrebbe
-/// essere sostituito da un processo dello stesso utente; la directory dei
-/// binari approvati va quindi protetta dal proprietario dell'installazione.
+/// Declared limit: between computing the hash and executing it the file could
+/// be replaced by a process of the same user; the directory of the
+/// approved binaries must therefore be protected by the installation owner.
 pub fn verify_approved_binary(
     binary: &'static str,
     path: &ManagedPath,
@@ -766,16 +766,16 @@ pub fn verify_approved_binary(
     }
 }
 
-/// Rileva le capacità statiche dei binari approvati. Il campo `accelerator`
-/// resta [`AcceleratorStatus::NotProbed`] finché non si esegue
-/// [`probe_accelerator`].
+/// Detects the static capabilities of the approved binaries. The `accelerator` field
+/// stays [`AcceleratorStatus::NotProbed`] until
+/// [`probe_accelerator`] is run.
 pub fn probe_host(
     qemu_system: &ManagedPath,
     qemu_img: &ManagedPath,
     cfg: &ProbeConfig,
 ) -> Result<HostCapabilities> {
     let exe = qemu_system.as_path();
-    // Hash prima di qualunque esecuzione (ADR-0010).
+    // Hash before any execution (ADR-0010).
     let qemu_system_sha256 = verify_approved_binary(
         "qemu-system-x86_64",
         qemu_system,
@@ -787,7 +787,7 @@ pub fn probe_host(
         let o = run_capture(exe, args, cfg.command_timeout)?;
         if o.code != Some(0) {
             return Err(BackendError::Probe(format!(
-                "`{}` è uscito con {:?}: {}",
+                "`{}` exited with {:?}: {}",
                 args.join(" "),
                 o.code,
                 stderr_excerpt(&o.stderr)
@@ -798,7 +798,7 @@ pub fn probe_host(
     let version_txt = run(&["--version"])?;
     let version = parse_qemu_version(&version_txt).ok_or_else(|| {
         BackendError::Probe(format!(
-            "versione non riconosciuta: {}",
+            "unrecognised version: {}",
             stderr_excerpt(&version_txt)
         ))
     })?;
@@ -808,9 +808,9 @@ pub fn probe_host(
     let cpu_models = parse_cpu_help(&run(&["-cpu", "help"])?);
     let img_version_out = run_capture(qemu_img.as_path(), &["--version"], cfg.command_timeout)?;
     let qemu_img_version = parse_qemu_img_version(&img_version_out.stdout)
-        .ok_or_else(|| BackendError::Probe("versione di qemu-img non riconosciuta".into()))?;
-    // `qemu-img --help` esce con codice 0 nelle versioni recenti; si usa
-    // comunque l'output anche con codice diverso.
+        .ok_or_else(|| BackendError::Probe("unrecognised qemu-img version".into()))?;
+    // `qemu-img --help` exits with code 0 in recent versions; the output
+    // is used anyway even with a different code.
     let img_help = run_capture(qemu_img.as_path(), &["--help"], cfg.command_timeout)?;
     let image_formats = parse_qemu_img_formats(&img_help.stdout);
     let remote_protocols_present = ["http", "https", "ftp", "ftps", "nbd", "nfs", "ssh"]
@@ -844,9 +844,9 @@ pub fn probe_host(
     })
 }
 
-/// Probe reale dell'acceleratore: avvio in pausa (`-S`) con macchina e CPU
-/// indicate, `query-accelerators` via QMP, poi `quit`. Il processo è nel
-/// contenitore dell'esecuzione e viene terminato in ogni caso.
+/// Real accelerator probe: paused launch (`-S`) with the given machine and CPU,
+/// `query-accelerators` via QMP, then `quit`. The process is in the
+/// run's container and is terminated in every case.
 pub async fn probe_accelerator(
     caps: &HostCapabilities,
     accelerator: Accelerator,
@@ -859,7 +859,7 @@ pub async fn probe_accelerator(
         accelerator,
         reason,
     };
-    // Ogni probe è un'esecuzione distinta con il proprio `run_id`.
+    // Every probe is a distinct run with its own `run_id`.
     let tag = RunId::new_v7();
     let cmd = match build_probe_command(
         caps.qemu_system.clone(),
@@ -927,7 +927,7 @@ mod tests {
     const ERR_WHPX: &str = include_str!("../tests/fixtures/stderr-whpx-noaccel-synthetic.txt");
 
     #[test]
-    fn versione_reale() {
+    fn real_version() {
         let v = parse_qemu_version(VERSION).unwrap();
         assert_eq!((v.major, v.minor, v.micro), (11, 1, 0));
         assert_eq!(v.package.as_deref(), Some("v11.1.0-12130-ge470268ff4"));
@@ -938,13 +938,13 @@ mod tests {
     }
 
     #[test]
-    fn acceleratori_reali() {
+    fn real_accelerators() {
         assert_eq!(parse_accel_help(ACCEL), vec!["tcg", "whpx"]);
         assert!(parse_accel_help("").is_empty());
     }
 
     #[test]
-    fn macchine_reali() {
+    fn real_machines() {
         let m = parse_machine_help(MACHINE);
         let q35 = m.iter().find(|e| e.name == "q35").unwrap();
         assert_eq!(q35.alias_of.as_deref(), Some("pc-q35-11.1"));
@@ -969,7 +969,7 @@ mod tests {
     }
 
     #[test]
-    fn dispositivi_reali() {
+    fn real_devices() {
         let d = parse_device_help(DEVICE);
         for r in REQUIRED_DEVICES {
             assert!(d.contains(*r), "{r}");
@@ -979,7 +979,7 @@ mod tests {
     }
 
     #[test]
-    fn cpu_reali() {
+    fn real_cpus() {
         let c = parse_cpu_help(CPU);
         for m in [
             "qemu64",
@@ -991,13 +991,13 @@ mod tests {
         ] {
             assert!(c.contains(m), "{m}");
         }
-        // la sezione dei flag CPUID non è confusa con i modelli
+        // the CPUID flags section is not mistaken for models
         assert!(!c.contains("vmx-ple"));
         assert!(!c.contains("Recognized"));
     }
 
     #[test]
-    fn formati_reali() {
+    fn real_formats() {
         let f = parse_qemu_img_formats(IMG_HELP);
         for x in ["qcow2", "raw", "file", "nbd", "vvfat"] {
             assert!(f.contains(x), "{x}");
@@ -1006,7 +1006,7 @@ mod tests {
     }
 
     #[test]
-    fn diagnosi_stderr() {
+    fn stderr_diagnosis() {
         assert!(matches!(
             classify_accel_stderr(Accelerator::Kvm, ERR_KVM),
             UnavailableReason::NotCompiled { .. }
@@ -1027,17 +1027,17 @@ mod tests {
             reason: classify_accel_stderr(Accelerator::Whpx, ERR_WHPX),
         }
         .to_string();
-        assert!(msg.contains("WHPX non inizializzato"));
-        assert!(msg.contains("Piattaforma hypervisor Windows"));
+        assert!(msg.contains("WHPX not initialised"));
+        assert!(msg.contains("Windows Hypervisor Platform"));
     }
 
     #[test]
-    fn lista_binari_approvati() {
+    fn approved_binaries_list() {
         let dir = std::env::temp_dir().join("lightvm-qemu-backend-tests");
         std::fs::create_dir_all(&dir).unwrap();
-        let p = ManagedPath::verify(dir.join("finto-qemu.bin")).unwrap();
+        let p = ManagedPath::verify(dir.join("fake-qemu.bin")).unwrap();
         std::fs::write(p.as_path(), b"abc").unwrap();
-        // SHA-256 di "abc".
+        // SHA-256 of "abc".
         let abc = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
         assert_eq!(
             verify_approved_binary("qemu-img", &p, &[abc.to_uppercase()]).unwrap(),
@@ -1053,7 +1053,7 @@ mod tests {
     }
 
     #[test]
-    fn messaggio_pubblico_acceleratore() {
+    fn accelerator_public_message() {
         let s = AcceleratorStatus::Unavailable {
             accelerator: Accelerator::Whpx,
             reason: classify_accel_stderr(Accelerator::Whpx, ERR_WHPX),
@@ -1062,12 +1062,12 @@ mod tests {
         assert!(m.contains("WHPX") && m.contains("TCG"), "{m}");
         assert!(
             !m.contains("No accelerator found"),
-            "niente stderr nel messaggio pubblico"
+            "no stderr in the public message"
         );
     }
 
     #[test]
-    fn estratto_limitato() {
+    fn limited_excerpt() {
         let long = "x".repeat(5000);
         assert!(stderr_excerpt(&long).len() <= 600);
         assert_eq!(stderr_excerpt("a\n\nb\nc\nd\ne\n"), "b | c | d | e");

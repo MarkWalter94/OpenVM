@@ -1,10 +1,10 @@
-//! Spike F0-04 (non è codice di prodotto): client QMP minimo per input e
-//! `screendump`, conversione PPM→PNG, tabella di digitazione US e statistiche.
+//! Spike F0-04 (not product code): minimal QMP client for input and
+//! `screendump`, PPM→PNG conversion, US typing table and statistics.
 //!
-//! Il client QMP accetta soltanto un percorso di socket Unix (canale privato,
-//! ADR-0012) e non espone un `execute` generico verso la UI: offre metodi
-//! tipizzati per input, cattura e stato. Il QMP di prodotto vive in
-//! `crates/qemu-backend` a partire da F1.
+//! The QMP client accepts only a Unix socket path (private channel,
+//! ADR-0012) and does not expose a generic `execute` to the UI: it offers
+//! typed methods for input, capture and status. The product QMP lives in
+//! `crates/qemu-backend` starting from F1.
 
 #![forbid(unsafe_code)]
 

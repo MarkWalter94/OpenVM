@@ -1,54 +1,54 @@
-//! `qemu-backend`: rilevamento delle capacità dell'host, costruzione del comando
-//! QEMU da opzioni controllate, client QMP asincrono su socket Unix e gestione
-//! dei processi QEMU (ROADMAP sezioni 5, 6.1, 6.3, 6.4, 7.2, 7.3, 7.4; F1).
+//! `qemu-backend`: detection of host capabilities, construction of the QEMU
+//! command from controlled options, asynchronous QMP client over a Unix socket and
+//! management of the QEMU processes (ROADMAP sections 5, 6.1, 6.3, 6.4, 7.2, 7.3, 7.4; F1).
 //!
 //! # API
 //!
-//! - [`probe`]: [`probe::probe_host`] esegue il binario QEMU approvato
+//! - [`probe`]: [`probe::probe_host`] runs the approved QEMU binary
 //!   (`--version`, `-accel help`, `-machine help`, `-device help`, `-cpu help`,
-//!   `qemu-img --version`/`--help`) con timeout e produce [`HostCapabilities`];
-//!   [`probe::probe_accelerator`] avvia davvero QEMU in pausa e interroga
+//!   `qemu-img --version`/`--help`) with a timeout and produces [`HostCapabilities`];
+//!   [`probe::probe_accelerator`] actually starts QEMU paused and queries
 //!   `query-accelerators` via QMP ([`AcceleratorStatus`]).
-//! - [`cmdline`]: [`VmLaunchSpec`] tipizzato → argomenti `Vec<OsString>`;
-//!   i percorsi arrivano soltanto da [`ManagedPaths`] come [`ManagedPath`]
-//!   già verificati, i valori testuali sono token di un alfabeto ristretto.
-//! - [`qmp`]: [`QmpClient`] asincrono (tokio) su socket Unix, comandi
-//!   tipizzati con `id` correlato, eventi su canale separato, timeout per
-//!   comando. Nessuna API pubblica esegue comandi QMP arbitrari.
-//! - [`process`]: [`ProcessContainer`] (Job Object su Windows; firma pronta
-//!   per cgroup/`PR_SET_PDEATHSIG` su Linux), identità del processo con handle e
-//!   tempo di creazione e `run_id`, classificazione dei codici d'uscita.
-//! - [`run`]: [`QemuRun`] collega processo, QMP, verifiche post-avvio
-//!   (acceleratore, assenza di NIC), macchina a stati, arresto gentile con
-//!   scalata ed [`EmergencyStop`] indipendente dalla coda QMP.
-//! - [`storage_guard`]: esclusione dei file tramite share mode (F0-05).
-//! - [`screenshot`]: `screendump` PPM → PNG con limiti e pulizia.
+//! - [`cmdline`]: typed [`VmLaunchSpec`] → `Vec<OsString>` arguments;
+//!   paths come only from [`ManagedPaths`] as already verified
+//!   [`ManagedPath`]s, text values are tokens of a restricted alphabet.
+//! - [`qmp`]: asynchronous (tokio) [`QmpClient`] over a Unix socket, typed
+//!   commands with a correlated `id`, events on a separate channel, per-command
+//!   timeout. No public API runs arbitrary QMP commands.
+//! - [`process`]: [`ProcessContainer`] (Job Object on Windows; signature ready
+//!   for cgroup/`PR_SET_PDEATHSIG` on Linux), process identity with handle,
+//!   creation time and `run_id`, classification of exit codes.
+//! - [`run`]: [`QemuRun`] ties together process, QMP, post-launch checks
+//!   (accelerator, absence of NICs), state machine, graceful shutdown with
+//!   escalation and an [`EmergencyStop`] independent of the QMP queue.
+//! - [`storage_guard`]: file exclusion through share mode (F0-05).
+//! - [`screenshot`]: `screendump` PPM → PNG with limits and cleanup.
 //!
-//! # Codice `unsafe`
+//! # `unsafe` code
 //!
-//! Il workspace imposta `unsafe_code = "deny"`. L'unica eccezione è il modulo
-//! `sys::windows`, annotato con `#[allow(unsafe_code)]`: Job Object con
-//! `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, `CreateProcessW` con
-//! `PROC_THREAD_ATTRIBUTE_JOB_LIST` (processo nel job dalla creazione, senza la
-//! finestra di un'assegnazione successiva) e `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`
-//! (eredità limitata ai tre handle standard), `TerminateJobObject`,
-//! `GetProcessTimes`, `OpenProcess` (verifica dell'identità PID + tempo di
-//! creazione). La libreria standard non espone queste primitive in forma
-//! stabile e il crate `win32job` non permette l'assegnazione alla creazione né
-//! la lista di handle: la scelta segue i risultati verificati in
-//! `docs/verification/F0-06-supervisore-processi.md`. Ogni blocco `unsafe` ha un
-//! commento `SAFETY:` e il modulo espone soltanto funzioni sicure.
+//! The workspace sets `unsafe_code = "deny"`. The only exception is the
+//! `sys::windows` module, annotated with `#[allow(unsafe_code)]`: Job Object with
+//! `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, `CreateProcessW` with
+//! `PROC_THREAD_ATTRIBUTE_JOB_LIST` (process in the job from creation, without the
+//! window of a later assignment) and `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`
+//! (inheritance limited to the three standard handles), `TerminateJobObject`,
+//! `GetProcessTimes`, `OpenProcess` (verification of the PID + creation time
+//! identity). The standard library does not expose these primitives in stable
+//! form and the `win32job` crate allows neither assignment at creation nor
+//! the handle list: the choice follows the results verified in
+//! `docs/verification/F0-06-process-supervisor.md`. Every `unsafe` block has a
+//! `SAFETY:` comment and the module exposes only safe functions.
 
 //!
-//! # Tipi condivisi
+//! # Shared types
 //!
-//! Identificativi ([`lightvm_proto::RunId`], [`lightvm_proto::MediaId`],
-//! [`lightvm_proto::VmId`]), input tipizzato ([`lightvm_proto::InputEvent`]),
-//! geometria, errori pubblici ([`lightvm_proto::PublicError`]) e osservazioni
-//! ([`lightvm_proto::BackendObservation`]) vengono da `lightvm-proto`. Restano
-//! locali soltanto i tipi specifici del backend: allowlist dei qcode
-//! ([`input`]), screenshot con i byte del PNG ([`CapturedScreenshot`]), stati e
-//! rapporti del processo ([`run`]).
+//! Identifiers ([`lightvm_proto::RunId`], [`lightvm_proto::MediaId`],
+//! [`lightvm_proto::VmId`]), typed input ([`lightvm_proto::InputEvent`]),
+//! geometry, public errors ([`lightvm_proto::PublicError`]) and observations
+//! ([`lightvm_proto::BackendObservation`]) come from `lightvm-proto`. Only the
+//! backend-specific types remain local: qcode allowlist
+//! ([`input`]), screenshot with the PNG bytes ([`CapturedScreenshot`]), process
+//! states and reports ([`run`]).
 
 pub mod cmdline;
 pub mod error;

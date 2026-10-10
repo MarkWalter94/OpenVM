@@ -1,16 +1,16 @@
-//! Trasporto IPC locale (ROADMAP 6.1, 9).
+//! Local IPC transport (ROADMAP 6.1, 9).
 //!
-//! - Windows: named pipe con descrittore di sicurezza che ammette solo il SID
-//!   dell'utente corrente, etichetta di integrità media con `NW/NR/NX` (un
-//!   processo a integrità bassa non apre la pipe), client remoti rifiutati,
-//!   flag di prima istanza. Dopo l'accettazione: stessa sessione di logon e
-//!   stesso SID del processo peer.
-//! - Unix: socket in una directory privata `0700` (per difetto
-//!   `$XDG_RUNTIME_DIR/lightvm`), socket `0600`, verifica dell'UID del peer con
-//!   `SO_PEERCRED`/`getpeereid` (tramite `tokio::net::UnixStream::peer_cred`).
+//! - Windows: named pipe with a security descriptor that admits only the SID
+//!   of the current user, medium integrity label with `NW/NR/NX` (a
+//!   low-integrity process cannot open the pipe), remote clients rejected,
+//!   first-instance flag. After acceptance: same logon session and same SID
+//!   of the peer process.
+//! - Unix: socket in a private `0700` directory (by default
+//!   `$XDG_RUNTIME_DIR/lightvm`), socket `0600`, peer UID check with
+//!   `SO_PEERCRED`/`getpeereid` (through `tokio::net::UnixStream::peer_cred`).
 //!
-//! L'identità OS è una condizione necessaria, non sufficiente: la credenziale
-//! viene verificata sempre nell'handshake (`server`).
+//! The OS identity is a necessary condition, not a sufficient one: the
+//! credential is always verified in the handshake (`server`).
 
 use std::io;
 use std::path::PathBuf;
@@ -27,46 +27,46 @@ use unix as imp;
 #[cfg(windows)]
 use windows as imp;
 
-/// Flusso bidirezionale di una connessione IPC.
+/// Bidirectional stream of an IPC connection.
 pub trait IpcStream: AsyncRead + AsyncWrite + Send + Unpin {}
 impl<T: AsyncRead + AsyncWrite + Send + Unpin> IpcStream for T {}
 
-/// Flusso in scatola, indipendente dalla piattaforma.
+/// Boxed stream, platform independent.
 pub type BoxedStream = Box<dyn IpcStream>;
 
-/// Identità del peer accettata dal trasporto.
+/// Peer identity accepted by the transport.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerInfo {
-    /// PID riportato dal sistema operativo (solo diagnostico, mai usato da solo
-    /// come identità).
+    /// PID reported by the operating system (diagnostic only, never used on its
+    /// own as an identity).
     pub pid: Option<u32>,
-    /// Identità OS verificata (SID su Windows, UID su Unix).
+    /// Verified OS identity (SID on Windows, UID on Unix).
     pub os_identity: String,
 }
 
-/// Opzioni di creazione dell'endpoint.
+/// Endpoint creation options.
 #[derive(Debug, Clone, Default)]
 pub struct EndpointOptions {
-    /// Directory privata per il socket (solo Unix). Se assente si usa
-    /// `$XDG_RUNTIME_DIR/lightvm`, poi `<catalogo>/.run`.
+    /// Private directory for the socket (Unix only). If absent,
+    /// `$XDG_RUNTIME_DIR/lightvm` is used, then `<catalog>/.run`.
     pub runtime_dir: Option<PathBuf>,
-    /// Directory del catalogo (ripiego per la directory privata su Unix).
+    /// Catalog directory (fallback for the private directory on Unix).
     pub catalog_dir: PathBuf,
 }
 
-/// Listener dell'endpoint locale.
+/// Listener of the local endpoint.
 #[derive(Debug)]
 pub struct Listener {
     inner: imp::Listener,
 }
 
-/// Esito di un'accettazione: connessione con peer verificato, oppure peer
-/// rifiutato dal controllo di identità OS (il flusso viene chiuso).
+/// Outcome of an accept: connection with a verified peer, or a peer rejected
+/// by the OS identity check (the stream is closed).
 #[derive(Debug)]
 pub enum Accepted {
-    /// Peer verificato.
+    /// Verified peer.
     Ok(BoxedStream, PeerInfo),
-    /// Peer rifiutato, con motivo diagnostico.
+    /// Rejected peer, with a diagnostic reason.
     Rejected(String),
 }
 
@@ -77,31 +77,31 @@ impl std::fmt::Debug for dyn IpcStream {
 }
 
 impl Listener {
-    /// Crea l'endpoint con permessi restrittivi.
+    /// Creates the endpoint with restrictive permissions.
     pub fn bind(opts: &EndpointOptions) -> io::Result<Self> {
         Ok(Self {
             inner: imp::Listener::bind(opts)?,
         })
     }
 
-    /// Nome dell'endpoint da consegnare ai client (percorso della pipe o del
-    /// socket). Non è un segreto.
+    /// Endpoint name to hand to clients (pipe or socket path). It is not a
+    /// secret.
     pub fn endpoint(&self) -> &str {
         self.inner.endpoint()
     }
 
-    /// Attende la prossima connessione e verifica l'identità OS del peer.
+    /// Waits for the next connection and verifies the peer's OS identity.
     pub async fn accept(&self) -> io::Result<Accepted> {
         self.inner.accept().await
     }
 }
 
-/// Connessione di un client all'endpoint.
+/// Connects a client to the endpoint.
 pub async fn connect(endpoint: &str) -> io::Result<BoxedStream> {
     imp::connect(endpoint).await
 }
 
-/// Nome casuale esadecimale per l'endpoint.
+/// Random hexadecimal name for the endpoint.
 pub(crate) fn random_suffix() -> io::Result<String> {
     let mut b = [0u8; 16];
     getrandom::fill(&mut b).map_err(io::Error::other)?;

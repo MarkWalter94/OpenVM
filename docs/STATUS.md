@@ -1,117 +1,117 @@
-# Stato del progetto
+# Project status
 
-Ultimo aggiornamento: 2026-10-10
+Last updated: 2026-10-10
 
-Documento operativo previsto dalla sezione 17 di `docs/ROADMAP.md`: fase corrente, impedimenti e avanzamento. **Questo file non modifica la Definition of Done (sezione 11), il perimetro né i criteri di uscita.** Uno stato qui riportato non vale come verifica: le prove stanno in `docs/verification/`.
+Operational document required by section 17 of `docs/ROADMAP.md`: current phase, impediments and progress. **This file does not change the Definition of Done (section 11), the scope or the exit criteria.** A status reported here does not count as verification: the evidence is in `docs/verification/`.
 
-## Fase corrente
+## Current phase
 
-**F0 — Fattibilità e decisioni: in riesame** (roadmap, sezioni 10 e 15, passo 6). Il riesame `docs/verification/F0-09-riesame-prove.md` conclude che il criterio di uscita è soddisfatto con deviazioni pubblicate sul primo host Windows, ma F0 **non è ancora chiusa**: restano i pendenti elencati sotto. Le prove F0 riguardano spike di fattibilità. Il lavoro F1 avviato in parallelo è descritto nella sezione "Lavoro F1 avviato in parallelo": alcune capacità di prodotto F1 sono `verificato su hardware` sul primo host, ma nessuna vale per il criterio di uscita di F1 finché F0 non è chiusa.
+**F0 — Feasibility and decisions: under review** (roadmap, sections 10 and 15, step 6). The review `docs/verification/F0-09-evidence-review.md` concludes that the exit criterion is met with published deviations on the first Windows host, but F0 is **not yet closed**: the pending items listed below remain. The F0 tests concern feasibility spikes. The F1 work started in parallel is described in the section "F1 work started in parallel": some F1 product capabilities are `verified on hardware` on the first host, but none counts towards the F1 exit criterion until F0 is closed.
 
-Classificazione usata per ogni capacità (sezione 16, punto 6): `implementato`, `verificato in simulazione/test`, `verificato su hardware`, `non verificato`. Le capacità di prodotto F1 sono `verificato su hardware` o `verificato in simulazione/test` secondo la tabella F1 qui sotto (file F1); le prove di fattibilità su hardware sono elencate nei file F0.
+Classification used for each capability (section 16, item 6): `implemented`, `verified in simulation/test`, `verified on hardware`, `not verified`. The F1 product capabilities are `verified on hardware` or `verified in simulation/test` according to the F1 table below (F1 files); the feasibility tests on hardware are listed in the F0 files.
 
-Regola della sezione 10: F1 parte dopo il criterio di uscita di F0. Il lavoro F1 avviato in parallelo non può essere usato per dichiarare un criterio di uscita F1 prima della chiusura di F0.
+Section 10 rule: F1 starts after the F0 exit criterion. The F1 work started in parallel cannot be used to declare an F1 exit criterion before F0 is closed.
 
-## Passi di F0 (sezione 15)
+## F0 steps (section 15)
 
-| Passo | Lavoro | Stato | Esito ed evidenze |
+| Step | Work | Status | Outcome and evidence |
 | --- | --- | --- | --- |
-| 1 | Congelare scenario, minacce, target e dipendenze; verificare toolchain | completato con limiti | `F0-01` (build Windows verificata con ambiente MSVC esplicito; WARP verificato; glow senza accelerazione fallito; RDP non eseguito); `F0-03` (Ubuntu 26.04.1 LTS, checksum e firma verificati); ADR iniziali; matrice in `COMPATIBILITY.md` |
-| 2 | QEMU reale su Windows, probe WHPX, QMP e stop | completato con deviazioni | `F0-02`: QEMU 11.1.0 con provenienza verificata (firma Authenticode scaduta), WHPX attivo, QMP su socket Unix, nessuna NIC con `-nodefaults -nic none`, arresto forzato senza orfani; boot fino al desktop live solo con `-cpu qemu64` (`-cpu host` fallito); lock immagini fallito |
-| 3 | Console nativa con client RFB, input e screenshot sul canale protetto | completato con pendente | `F0-04`: client RFB interno su socket Unix privato verificato, input QMP e screenshot verificati (p95 19,2 ms); VeNCrypt verificato con arresto fallito; tastiera fisica attraverso winit non eseguita (P-4); secondo utente non eseguito (P-5) |
-| 4 | Baseline/overlay/firmware e supervisione processi | completato con pendenti | `F0-05`: 5 cicli di ripristino con base e vars invariati, esclusione della base tramite share mode (ADR-0025), crash storage; `F0-06`: Job Object, morte del supervisor senza orfani, Emergency Stop p95 640,2 ms (30 campioni a desktop) e 273,3 ms (100 campioni durante il boot); crash della UI non eseguito (P-2) |
-| 5 | Smoke test Linux/KVM e controlli risorse | completato con esito "laboratorio assente" | `F0-07`: nessun host Linux fisico; build e meccanismi di processo in WSL2 con validità limitata; `F0-08`: limiti CPU e memoria del Job Object verificati, nessuna quota storage rigida senza amministratore |
-| 6 | Riesame delle prove | completato (proposta in attesa di conferma) | `F0-09`: decisione di prosecuzione proposta; backlog F1 in `docs/RELEASE_PLAN.md` |
+| 1 | Freeze scenario, threats, targets and dependencies; verify toolchain | completed with limits | `F0-01` (Windows build verified with an explicit MSVC environment; WARP verified; glow without acceleration failed; RDP not run); `F0-03` (Ubuntu 26.04.1 LTS, checksum and signature verified); initial ADRs; matrix in `COMPATIBILITY.md` |
+| 2 | Real QEMU on Windows, WHPX probe, QMP and stop | completed with deviations | `F0-02`: QEMU 11.1.0 with verified provenance (expired Authenticode signature), WHPX active, QMP over a Unix socket, no NIC with `-nodefaults -nic none`, forced shutdown without orphans; boot to the live desktop only with `-cpu qemu64` (`-cpu host` failed); image locking failed |
+| 3 | Native console with RFB client, input and screenshots on the protected channel | completed with a pending item | `F0-04`: internal RFB client over a private Unix socket verified, QMP input and screenshots verified (p95 19.2 ms); VeNCrypt verified with shutdown failed; physical keyboard through winit not run (P-4); second user not run (P-5) |
+| 4 | Baseline/overlay/firmware and process supervision | completed with pending items | `F0-05`: 5 restore cycles with base and vars unchanged, exclusion of the base through share mode (ADR-0025), storage crash; `F0-06`: Job Object, supervisor death without orphans, Emergency Stop p95 640.2 ms (30 samples at the desktop) and 273.3 ms (100 samples during boot); UI crash not run (P-2) |
+| 5 | Linux/KVM smoke test and resource controls | completed with outcome "lab unavailable" | `F0-07`: no physical Linux host; build and process mechanisms in WSL2 with limited validity; `F0-08`: Job Object CPU and memory limits verified, no hard storage quota without administrator rights |
+| 6 | Evidence review | completed (proposal awaiting confirmation) | `F0-09`: continuation decision proposed; F1 backlog in `docs/RELEASE_PLAN.md` |
 
-Vincolo della sezione 15: nessuna costruzione estesa della dashboard prima dell'esito di QEMU, console e isolamento sul primo host. L'esito sul primo host è ora registrato in `F0-09`.
+Section 15 constraint: no extensive dashboard construction before the outcome of QEMU, console and isolation on the first host. The outcome on the first host is now recorded in `F0-09`.
 
-## Decisione di prosecuzione di F0 (proposta)
+## F0 continuation decision (proposed)
 
-**Windows 11 x86_64 resta primo target e unico target del MVP, con esito "verificato solo Windows"** (sezione 10 F0, paragrafo "Laboratorio Linux assente"; ADR-0016). Nessun controllo è fallito senza un'alternativa ammessa; nessun risultato usa TCG. Dettaglio di deviazioni (D-1…D-18) e pendenti in `docs/verification/F0-09-riesame-prove.md` §2–§3.
+**Windows 11 x86_64 remains the first target and the only MVP target, with the outcome "verified on Windows only"** (section 10 F0, paragraph "Linux lab unavailable"; ADR-0016). No check failed without an allowed alternative; no result uses TCG. Details of deviations (D-1…D-18) and pending items in `docs/verification/F0-09-evidence-review.md` §2–§3.
 
-La decisione diventa efficace con la conferma dell'utente (U-5) e con la chiusura dei pendenti P-2 e P-4…P-7.
+The decision becomes effective with the user's confirmation (U-5) and with the closure of pending items P-2 and P-4…P-7.
 
-### Pendenti per la chiusura di F0
+### Pending items for closing F0
 
-| ID | Pendente | Chi |
+| ID | Pending item | Who |
 | --- | --- | --- |
-| P-1 | Conferma che in F0 non è disponibile un host Linux fisico con KVM | **chiuso il 2026-10-10**: confermato (U-5); server Linux fisico reperito dopo, per R2a; ADR-0016 accettata |
-| P-2 | Crash della UI su Windows (UI che avvia il supervisor come processo separato); decisione ADR-0015 parte B | **chiuso il 2026-10-10**: ADR-0015 B accettata (impostazione, predefinito terminare le VM); prova `F1-09` verificata con entrambe le politiche |
-| P-4 | Tastiera fisica → winit → egui → QMP, inclusi AltGr, Ctrl+C/V, tastierino | utente con sviluppo: il responsabile lo esegue a fine sviluppo F1 |
-| P-5 | Test con secondo utente locale sui socket privati, oppure decisione di registrarlo come limite | **parte Linux verificata il 2026-10-10** in una VM Ubuntu (`F1-11`, validità [processi]): altro utente → `Permission denied`; con permessi allentati → rifiutato per UID. **Parte Windows non eseguita**: serve un secondo account Windows (creato dal responsabile) o registrarla come limite |
-| P-6 | Disponibilità di firma del codice e revisione indipendente (ADR-0020) | **chiuso il 2026-10-10**: non disponibili (U-7); pubblicazione F6 bloccata finché manca, ADR-0020 accettata |
-| P-7 | Dettagli del supporto dati approvato (ADR-0008) | **chiuso il 2026-10-10**: formato ISO 9660/UDF verificato, limiti 16/8 GiB, CD-ROM IDE in sola lettura, hash riverificato a ogni avvio (ADR-0008); scrittura dal guest verificata impossibile (`F1-11`) |
+| P-1 | Confirmation that no physical Linux host with KVM is available in F0 | **closed on 2026-10-10**: confirmed (U-5); physical Linux server obtained later, for R2a; ADR-0016 accepted |
+| P-2 | UI crash on Windows (UI that launches the supervisor as a separate process); ADR-0015 part B decision | **closed on 2026-10-10**: ADR-0015 B accepted (setting, default terminate the VMs); test `F1-09` verified with both policies |
+| P-4 | Physical keyboard → winit → egui → QMP, including AltGr, Ctrl+C/V, numeric keypad | user with development: the project owner runs it at the end of F1 development |
+| P-5 | Test with a second local user on the private sockets, or decision to record it as a limit | **Linux part verified on 2026-10-10** in an Ubuntu VM (`F1-11`, validity [processes]): other user → `Permission denied`; with relaxed permissions → rejected by UID. **Windows part not run**: requires a second Windows account (created by the project owner) or recording it as a limit |
+| P-6 | Availability of code signing and independent review (ADR-0020) | **closed on 2026-10-10**: not available (U-7); F6 release blocked while missing, ADR-0020 accepted |
+| P-7 | Details of the approved data medium (ADR-0008) | **closed on 2026-10-10**: ISO 9660/UDF format verified, limits 16/8 GiB, read-only IDE CD-ROM, hash re-verified at every start (ADR-0008); writing from the guest verified impossible (`F1-11`) |
 
-## Lavoro F1 avviato in parallelo
+## F1 work started in parallel
 
-Avviato prima della chiusura di F0 e quindi **non utilizzabile per il criterio di uscita F1** (sezione 10). Avanzamento per voce di backlog in `docs/RELEASE_PLAN.md`, sezione "Avanzamento F1".
+Started before the closure of F0 and therefore **not usable for the F1 exit criterion** (section 10). Progress per backlog item in `docs/RELEASE_PLAN.md`, section "F1 progress".
 
-| Flusso | Crate | Evidenza | Esito dichiarato |
+| Stream | Crate | Evidence | Declared outcome |
 | --- | --- | --- | --- |
-| Tipi condivisi, modello VM, stati, risorse, sessioni, audit | `lightvm-proto`, `vm-core` | `F1-01` | verificato in simulazione/test |
-| Catalogo SQLite, migrazioni, journal, registro media, guardie dei dischi | `vm-storage` | `F1-02` | verificato in simulazione/test (Windows) |
-| Supervisor, IPC autenticato, composition root | `lightvm-service` | `F1-04` | verificato in simulazione/test (Windows, WSL2); end-to-end con QEMU reale su WHPX, 2 esecuzioni, VM ferma nel firmware |
-| SDK MCP su stdio | `lightvm-mcp` | `F1-06` | verificato in simulazione/test; nessun client MCP reale |
-| Licenze e `cargo deny` | workspace | `F1-07` | verificato |
-| CI e delega cgroup | `.github/workflows/ci.yml` | `F1-08` | validata in locale; **mai eseguita su GitHub** |
-| Probe, processi, QMP, input, screenshot, profilo offline, 20 cicli reali (anche via servizio), disco del servizio, installazione su disco e boot dal disco (F1-17) | `qemu-backend`, `lightvm-service` | `F1-03` | verificato su hardware (Windows, WHPX) |
-| UI che avvia il supervisor e usa l'IPC; crash della UI con VM reale | `apps/desktop`, `lightvm-service` | `F1-09` | verificato su hardware; politica alla perdita della UI come impostazione (ADR-0015 B) |
-| Limiti per VM (CPU, memoria, budget storage), impostazioni della VM, `--apri-vm` | `lightvm-proto`, `vm-core`, `qemu-backend`, `lightvm-service`, `apps/desktop` | `F1-10` | verificato su hardware (Windows); storage completo in F3 |
-| UI: appunti, backend di rendering, istantanee, misure | `apps/desktop` | `F1-05` | verificato su hardware (ripiego di rendering, misure, **lettura degli appunti host bloccata** con egui-winit patchato) e headless (istantanee); memoria con wgpu entro l'obiettivo dopo la correzione di D-12 (189 MiB) |
+| Shared types, VM model, states, resources, sessions, audit | `lightvm-proto`, `vm-core` | `F1-01` | verified in simulation/test |
+| SQLite catalog, migrations, journal, media registry, disk guards | `vm-storage` | `F1-02` | verified in simulation/test (Windows) |
+| Supervisor, authenticated IPC, composition root | `lightvm-service` | `F1-04` | verified in simulation/test (Windows, WSL2); end-to-end with real QEMU on WHPX, 2 runs, VM stopped in firmware |
+| MCP SDK over stdio | `lightvm-mcp` | `F1-06` | verified in simulation/test; no real MCP client |
+| Licenses and `cargo deny` | workspace | `F1-07` | verified |
+| CI and cgroup delegation | `.github/workflows/ci.yml` | `F1-08` | validated locally; **never run on GitHub** |
+| Probe, processes, QMP, input, screenshots, offline profile, 20 real cycles (also via the service), service disk, disk installation and boot from disk (F1-17) | `qemu-backend`, `lightvm-service` | `F1-03` | verified on hardware (Windows, WHPX) |
+| UI that launches the supervisor and uses IPC; UI crash with a real VM | `apps/desktop`, `lightvm-service` | `F1-09` | verified on hardware; policy on UI loss as a setting (ADR-0015 B) |
+| Per-VM limits (CPU, memory, storage budget), VM settings, `--open-vm` | `lightvm-proto`, `vm-core`, `qemu-backend`, `lightvm-service`, `apps/desktop` | `F1-10` | verified on hardware (Windows); full storage in F3 |
+| UI: clipboard, rendering backend, snapshots, measurements | `apps/desktop` | `F1-05` | verified on hardware (rendering fallback, measurements, **host clipboard reading blocked** with patched egui-winit) and headless (snapshots); memory with wgpu within target after the D-12 fix (189 MiB) |
 
-Situazione a fine giornata (2026-10-10):
+Situation at end of day (2026-10-10):
 
-- **Criterio di uscita F1 (F1-12)**: tutte le voci eseguite con esito positivo sul primo host (`F1-03`: creazione disco, 20 cicli reali anche attraverso il servizio, acceleratore assente, nessuna NIC, rifiuti), ma per la sezione 10 **non valgono finché F0 non è chiusa**. Per chiudere F0 restano **P-4** (tastiera fisica, script pronto) e la **parte Windows di P-5** (secondo account Windows o registrazione come limite).
-- Risolti nella giornata: arresto alla perdita della UI (ADR-0015 B), lettura degli appunti host (F1-13, egui-winit patchato), installazione su disco e boot dal disco (F1-17), limiti per VM (ADR-0017 in parte), dettagli del supporto dati (P-7), riconciliazione al riavvio.
-- Aperti in F1: avvio a freddo e RDP (F1-18, F1-16), CI mai eseguita su GitHub (F1-02), contenimento dei processi su Linux (F1-15, R2a).
-- **La console dello spike apre ancora direttamente il socket QMP**: il percorso di prodotto della console passa dal supervisor in F2 (ADR-0012, ADR-0013).
+- **F1 exit criterion (F1-12)**: all items run with a positive outcome on the first host (`F1-03`: disk creation, 20 real cycles also through the service, accelerator absent, no NIC, rejections), but per section 10 **they do not count until F0 is closed**. To close F0, **P-4** (physical keyboard, script ready) and the **Windows part of P-5** (second Windows account or recording as a limit) remain.
+- Resolved during the day: shutdown on UI loss (ADR-0015 B), host clipboard reading (F1-13, patched egui-winit), disk installation and boot from disk (F1-17), per-VM limits (ADR-0017 in part), details of the data medium (P-7), reconciliation on restart.
+- Open in F1: cold start and RDP (F1-18, F1-16), CI never run on GitHub (F1-02), process containment on Linux (F1-15, R2a).
+- **The spike console still opens the QMP socket directly**: the product path of the console goes through the supervisor in F2 (ADR-0012, ADR-0013).
 
-## Esito del laboratorio Linux
+## Linux lab outcome
 
-**"Verificato solo Windows"**, confermato dal responsabile il 2026-10-10 (ADR-0016); il server Linux fisico per R2a sarà reperito in seguito. Con questo esito Windows è l'unico target del MVP, la cella Ubuntu di `docs/COMPATIBILITY.md` resta "non verificato" e la qualificazione Linux è rinviata a R2a, che non si chiude senza la prova su host fisico. WSL2 è stato usato solo per build e test indipendenti dall'acceleratore (`F0-07`).
+**"Verified on Windows only"**, confirmed by the project owner on 2026-10-10 (ADR-0016); the physical Linux server for R2a will be obtained later. With this outcome Windows is the only MVP target, the Ubuntu cell of `docs/COMPATIBILITY.md` stays "not verified" and Linux qualification is deferred to R2a, which does not close without the test on a physical host. WSL2 was used only for builds and accelerator-independent tests (`F0-07`).
 
-## Documenti operativi di F0
+## F0 operational documents
 
-| Documento | Stato |
+| Document | Status |
 | --- | --- |
-| `docs/ARCHITECTURE.md` | aggiornato con gli esiti F0 (console, canali, modello di processo) |
-| `docs/SECURITY.md` | controlli "pianificato", con fattibilità provata dove indicato; rischi residui F0 aggiunti |
-| `docs/COMPATIBILITY.md` | riga Windows 11 → Linux "sperimentale" con i dati F0; riga Ubuntu "non verificato"; completato nel commit `aa04ccd` |
-| `docs/TESTING.md` | misure F0 registrate; egui_kittest provato; completato nel commit `aa04ccd`; misure F1-18 assenti |
-| `docs/RELEASE_PLAN.md` | backlog F0 con esiti; backlog F1 con avanzamento per voce |
-| `docs/adr/` | 21 ADR Accettata, di cui 0016 condizionata alla conferma dell'utente e 0021, 0023 accettate in parte; ADR Proposta o aperte in parte il 2026-10-10: 0015 parte A (Linux, R2a), 0017 (limiti per VM accettati; soglie host e storage completo in F3); accettate il 2026-10-10: 0015 parte B, 0016, 0020, 0022, 0026 |
+| `docs/ARCHITECTURE.md` | updated with the F0 outcomes (console, channels, process model) |
+| `docs/SECURITY.md` | controls "planned", with feasibility proven where indicated; F0 residual risks added |
+| `docs/COMPATIBILITY.md` | Windows 11 row → Linux "experimental" with the F0 data; Ubuntu row "not verified"; completed in commit `aa04ccd` |
+| `docs/TESTING.md` | F0 measurements recorded; egui_kittest tested; completed in commit `aa04ccd`; F1-18 measurements missing |
+| `docs/RELEASE_PLAN.md` | F0 backlog with outcomes; F1 backlog with per-item progress |
+| `docs/adr/` | 21 ADRs Accepted, of which 0016 conditional on user confirmation and 0021, 0023 partially accepted; ADRs Proposed or partially open on 2026-10-10: 0015 part A (Linux, R2a), 0017 (per-VM limits accepted; host thresholds and full storage in F3); accepted on 2026-10-10: 0015 part B, 0016, 0020, 0022, 0026 |
 
-## Impedimenti e punti aperti
+## Impediments and open points
 
-| # | Impedimento | Stato | Effetto | Riferimento |
+| # | Impediment | Status | Effect | Reference |
 | --- | --- | --- | --- | --- |
-| I-1 | QEMU assente all'avvio | risolto | QEMU 11.1.0 installato in modo portabile con provenienza verificata | `F0-02` §2; ADR-0010 |
-| I-2 | Stato di WHPX non verificato | risolto con deviazione | WHPX funzionante; feature `HypervisorPlatform` riportata *Disabled* via CIM (D-6); `-cpu host` non avvia OVMF (D-1) | `F0-02` §1, §9 |
-| I-3 | Host Linux fisico con KVM non disponibile | chiuso per F0 | esito "verificato solo Windows" (ADR-0016); server fisico per R2a reperito in seguito | `F0-07`; ADR-0016 |
-| I-4 | Avvisi di canonicalizzazione del percorso | non riprodotti | nessuna azione finché non ricompaiono | `F0-01` §8 |
-| I-5 | Firma del codice e revisione indipendente non disponibili | dichiarato (2026-10-10) | non blocca F1–F5; **blocca la pubblicazione in F6** | ADR-0020 |
-| I-6 | Comportamento di eframe senza accelerazione grafica (RDP) | aperto in parte | WARP verificato come modalità degradata; RDP non eseguito, limite dichiarato | `F0-01` §6; ADR-0014 |
-| I-7 | Build MSVC richiede l'ambiente di Build Tools 2022 caricato esplicitamente | aperto | sviluppo e CI devono impostare l'ambiente; correzione locale a scelta dell'utente | `F0-01` §4.1 |
-| I-8 | Nessun secondo account locale per i test negativi multiutente | aperto | P-5 | `F0-04` §6 |
-| I-9 | Host condiviso con altri agenti durante le misure | dichiarato | le latenze F0 non sono misure di release | `F0-06`, `F0-08` |
-| I-10 | Host di sviluppo attuale senza toolchain Rust 1.99.0 e senza QEMU 11.1.0; Visual Studio 2022 Community senza librerie MSVC x64 desktop | risolto | Rust 1.99.0 installato (rustup, senza modifica del PATH), componente MSVC x64 aggiunto (UAC), QEMU 11.1.0 e ISO scaricati con hash uguali a F0 | `F1-03` §Ambiente |
+| I-1 | QEMU missing at start | resolved | QEMU 11.1.0 installed portably with verified provenance | `F0-02` §2; ADR-0010 |
+| I-2 | WHPX status not verified | resolved with deviation | WHPX working; `HypervisorPlatform` feature reported *Disabled* via CIM (D-6); `-cpu host` does not boot OVMF (D-1) | `F0-02` §1, §9 |
+| I-3 | Physical Linux host with KVM not available | closed for F0 | outcome "verified on Windows only" (ADR-0016); physical server for R2a obtained later | `F0-07`; ADR-0016 |
+| I-4 | Path canonicalization warnings | not reproduced | no action unless they reappear | `F0-01` §8 |
+| I-5 | Code signing and independent review not available | declared (2026-10-10) | does not block F1–F5; **blocks release in F6** | ADR-0020 |
+| I-6 | eframe behavior without graphics acceleration (RDP) | partially open | WARP verified as degraded mode; RDP not run, limit declared | `F0-01` §6; ADR-0014 |
+| I-7 | MSVC build requires the Build Tools 2022 environment to be loaded explicitly | open | development and CI must set up the environment; local fix at the user's choice | `F0-01` §4.1 |
+| I-8 | No second local account for multi-user negative tests | open | P-5 | `F0-04` §6 |
+| I-9 | Host shared with other agents during measurements | declared | F0 latencies are not release measurements | `F0-06`, `F0-08` |
+| I-10 | Current development host without the Rust 1.99.0 toolchain and without QEMU 11.1.0; Visual Studio 2022 Community without the MSVC x64 desktop libraries | resolved | Rust 1.99.0 installed (rustup, without modifying PATH), MSVC x64 component added (UAC), QEMU 11.1.0 and ISO downloaded with hashes identical to F0 | `F1-03` §Ambiente |
 
-Il silenzio su un impedimento non equivale alla sua risoluzione (sezione 14, ultima riga).
+Silence about an impediment does not equal its resolution (section 14, last line).
 
-## Azioni richieste all'utente
+## Actions required from the user
 
-Elenco completo con origine in `docs/verification/F0-09-riesame-prove.md` §8.
+Full list with origin in `docs/verification/F0-09-evidence-review.md` §8.
 
-| ID | Azione | Necessaria per |
+| ID | Action | Needed for |
 | --- | --- | --- |
-| U-1 | Da amministratore: verificare ed eventualmente abilitare la feature `HypervisorPlatform`, poi ripetere il probe e `-cpu host` | facoltativa (D-1, D-6) |
-| U-2 | Fornire un host Linux fisico Ubuntu LTS con KVM, se disponibile | alternativa a U-5 |
-| U-3 | Creare un secondo account locale non amministratore per i test sui socket privati, o decidere di registrare il limite | P-5 (risposta: "in una VM", vedi P-5) |
-| U-4 | Prova con tastiera fisica a sessione sbloccata | P-4 — pronta: `powershell -ExecutionPolicy Bypass -File apps\desktop\scripts\prova-tastiera-u4.ps1` (istruzioni nello script; prova a vuoto del 2026-10-10: console con desktop Ubuntu dopo circa 100 s) |
-| U-5 | Confermare l'esito "verificato solo Windows" | P-1 — **fatto il 2026-10-10** |
-| U-6 | In WSL: `sudo apt install build-essential pkg-config` (ed eventualmente `libxkbcommon-x11-0`) | build Linux standard (non bloccante) |
-| U-7 | Dichiarare responsabili di firma del codice e revisione indipendente, o la loro indisponibilità | P-6 — **fatto il 2026-10-10**: nessuno |
-| U-8 | Facoltativa: smoke di `lightvm-desktop` in sessione RDP verso l'host | limite L-1 |
-| U-9 | Decidere la correzione dell'ambiente MSVC locale | I-7 — sull'host attuale aggiunto il componente MSVC x64 a VS 2022 (2026-10-10) |
-| U-10 | Facoltativa, da amministratore: interrogare le quote NTFS | ADR-0017 |
-| U-11 | Facoltativa e non valida per la matrice: probe KVM annidato in WSL | solo integrazione |
+| U-1 | As administrator: check and if needed enable the `HypervisorPlatform` feature, then repeat the probe and `-cpu host` | optional (D-1, D-6) |
+| U-2 | Provide a physical Ubuntu LTS Linux host with KVM, if available | alternative to U-5 |
+| U-3 | Create a second non-administrator local account for the tests on the private sockets, or decide to record the limit | P-5 (answer: "in a VM", see P-5) |
+| U-4 | Test with a physical keyboard in an unlocked session | P-4 — ready: `powershell -ExecutionPolicy Bypass -File apps\desktop\scripts\keyboard-test-u4.ps1` (instructions in the script; dry run on 2026-10-10: console with the Ubuntu desktop after about 100 s) |
+| U-5 | Confirm the outcome "verified on Windows only" | P-1 — **done on 2026-10-10** |
+| U-6 | In WSL: `sudo apt install build-essential pkg-config` (and possibly `libxkbcommon-x11-0`) | standard Linux build (non-blocking) |
+| U-7 | Name those responsible for code signing and independent review, or declare their unavailability | P-6 — **done on 2026-10-10**: nobody |
+| U-8 | Optional: smoke test of `lightvm-desktop` in an RDP session to the host | limit L-1 |
+| U-9 | Decide on the fix for the local MSVC environment | I-7 — on the current host the MSVC x64 component was added to VS 2022 (2026-10-10) |
+| U-10 | Optional, as administrator: query the NTFS quotas | ADR-0017 |
+| U-11 | Optional and not valid for the matrix: nested KVM probe in WSL | integration only |

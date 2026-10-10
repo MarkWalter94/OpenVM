@@ -1,25 +1,25 @@
-//! `lightvm-service`: supervisor e IPC locale autenticato.
+//! `lightvm-service`: supervisor and authenticated local IPC.
 //!
-//! Responsabilità (ROADMAP 6.1, 7.3): processo distinto dalla UI, unica
-//! autorità su processi, sessioni, policy e file VM; IPC locale autenticato
-//! usato da UI e adapter MCP; istanza singola per catalogo; percorso
-//! prioritario per revoca ed Emergency Stop indipendente dalla coda.
+//! Responsibilities (ROADMAP 6.1, 7.3): a process separate from the UI, sole
+//! authority over processes, sessions, policies and VM files; authenticated
+//! local IPC used by the UI and the MCP adapter; single instance per catalog;
+//! priority path for revocation and Emergency Stop independent of the queue.
 //!
-//! Composizione (F1):
-//! - involucro IPC da `lightvm_proto::ipc` (fonte unica con JSON Schema);
-//! - [`engine::CoreEngine`]: `vm_core::Core` con le porte reali di
-//!   [`adapters`] (catalogo SQLite di `vm-storage`, backend `qemu-backend`,
-//!   audit su file, orologio e identificativi di sistema);
-//! - [`fakes`]: stesse porte in memoria e backend finto per i test headless.
+//! Composition (F1):
+//! - IPC envelope from `lightvm_proto::ipc` (single source with the JSON Schema);
+//! - [`engine::CoreEngine`]: `vm_core::Core` with the real ports from
+//!   [`adapters`] (SQLite catalog from `vm-storage`, `qemu-backend` backend,
+//!   file audit, system clock and identifiers);
+//! - [`fakes`]: the same ports in memory and a fake backend for headless tests.
 //!
-//! Senza la feature `supervisore` restano solo i moduli del lato client, usati
-//! dalla UI (ADR-0024: `qemu-backend` non entra nel processo della UI).
+//! Without the `supervisor` feature only the client-side modules remain, used
+//! by the UI (ADR-0024: `qemu-backend` does not enter the UI process).
 //!
-//! Dettagli e prove: `docs/verification/F1-04-service-ipc-ci.md`.
+//! Details and evidence: `docs/verification/F1-04-service-ipc-ci.md`.
 
-/// Diagnostica su stderr senza panico: se il genitore è morto e la pipe di
-/// stderr è chiusa, la scrittura fallisce in silenzio invece di interrompere
-/// l'arresto controllato (`eprintln!` andrebbe in panico).
+/// Diagnostics on stderr without panicking: if the parent died and the stderr
+/// pipe is closed, the write fails silently instead of interrupting the
+/// controlled shutdown (`eprintln!` would panic).
 #[macro_export]
 macro_rules! diag {
     ($($arg:tt)*) => {{
@@ -33,27 +33,27 @@ pub mod credential;
 pub mod frame;
 pub mod transport;
 
-#[cfg(feature = "supervisore")]
+#[cfg(feature = "supervisor")]
 pub mod adapters;
-#[cfg(feature = "supervisore")]
+#[cfg(feature = "supervisor")]
 pub mod engine;
-#[cfg(feature = "supervisore")]
+#[cfg(feature = "supervisor")]
 pub mod lock;
-#[cfg(feature = "supervisore")]
+#[cfg(feature = "supervisor")]
 pub mod parent;
-#[cfg(feature = "supervisore")]
+#[cfg(feature = "supervisor")]
 pub mod ratelimit;
-#[cfg(feature = "supervisore")]
+#[cfg(feature = "supervisor")]
 pub mod server;
-#[cfg(feature = "supervisore")]
+#[cfg(feature = "supervisor")]
 pub mod supervisor;
 
-#[cfg(feature = "supervisore")]
+#[cfg(feature = "supervisor")]
 #[doc(hidden)]
 pub mod fakes;
-#[cfg(feature = "supervisore")]
+#[cfg(feature = "supervisor")]
 #[doc(hidden)]
 pub mod test_support;
 
-#[cfg(feature = "supervisore")]
+#[cfg(feature = "supervisor")]
 pub use server::{ServiceConfig, ServiceHandle, StartError, start};

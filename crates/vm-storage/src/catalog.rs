@@ -1,4 +1,4 @@
-//! Catalogo: radice, lock, database, journal a intenti e manifest.
+//! Catalog: root, lock, database, intent journal and manifests.
 
 use std::path::{Path, PathBuf};
 
@@ -19,30 +19,30 @@ use crate::records::Tx;
 use crate::recover::RecoveryReport;
 use crate::time::{UtcMillis, now_rfc3339};
 
-/// Esito registrato quando la pubblicazione trova la destinazione già occupata
-/// da un file che l'intento non ha creato: quel file non va mai rimosso.
+/// Resolution recorded when publishing finds the destination already taken
+/// by a file the intent did not create: that file must never be removed.
 const DESTINATION_CONFLICT: &str = "destination_conflict";
 
-/// Esito dell'apertura del catalogo.
+/// Outcome of opening the catalog.
 #[derive(Debug, Clone)]
 pub struct OpenReport {
-    /// Migrazioni applicate.
+    /// Migrations applied.
     pub migration: MigrationReport,
-    /// Avvio precedente registrato (UTC), se esiste.
+    /// Previously recorded start (UTC), if any.
     pub previous_start: Option<String>,
-    /// Riconciliazione degli intenti non conclusi.
+    /// Reconciliation of unfinished intents.
     pub recovery: RecoveryReport,
-    /// Pulizia prudente di `tmp/`.
+    /// Conservative cleanup of `tmp/`.
     pub tmp_cleanup: TmpCleanup,
 }
 
-/// Catalogo aperto: tiene il lock di istanza singola per tutta la sua vita.
+/// Open catalog: holds the single-instance lock for its whole lifetime.
 ///
-/// Le mutazioni richiedono `&mut self`: insieme al lock del catalogo questo
-/// serializza le operazioni distruttive dell'istanza.
+/// Mutations require `&mut self`: together with the catalog lock this
+/// serializes the instance's destructive operations.
 #[derive(Debug)]
 pub struct Catalog {
-    // Ordine dei campi = ordine di rilascio: la connessione prima del lock.
+    // Field order = drop order: the connection before the lock.
     pub(crate) conn: Connection,
     pub(crate) layout: CatalogLayout,
     pub(crate) started_at: UtcMillis,
@@ -50,55 +50,55 @@ pub struct Catalog {
     _lock: CatalogLock,
 }
 
-/// Richiesta di un nuovo intento del journal.
+/// Request for a new journal intent.
 #[derive(Debug, Clone)]
 pub struct IntentSpec {
-    /// Tipo.
+    /// Kind.
     pub kind: IntentKind,
-    /// VM coinvolta (serializza gli intenti per VM).
+    /// VM involved (serializes intents per VM).
     pub vm_id: Option<VmId>,
-    /// Operazione: intenti della stessa operazione possono coesistere sulla VM.
+    /// Operation: intents of the same operation may coexist on the VM.
     pub operation_id: Option<OperationId>,
-    /// Tipo di riga coinvolta.
+    /// Kind of row involved.
     pub target_kind: TargetKind,
-    /// Identificativo della riga coinvolta (che sarà creata o cancellata).
+    /// Identifier of the row involved (to be created or deleted).
     pub target_id: Option<String>,
-    /// Destinazione (creazione) o sorgente (cancellazione) gestita. `None` per export.
+    /// Managed destination (creation) or source (deletion). `None` for export.
     pub final_path: Option<ManagedPath>,
-    /// Imposta l'attributo di sola lettura prima dello spostamento (basi, media).
+    /// Sets the read-only attribute before the move (bases, media).
     pub read_only: bool,
 }
 
-/// Intento registrato.
+/// Recorded intent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Intent {
-    /// Identificativo progressivo.
+    /// Sequential identifier.
     pub id: i64,
-    /// Tipo.
+    /// Kind.
     pub kind: IntentKind,
     /// VM.
     pub vm_id: Option<String>,
-    /// Operazione.
+    /// Operation.
     pub operation_id: Option<String>,
-    /// Tipo di riga coinvolta.
+    /// Kind of row involved.
     pub target_kind: TargetKind,
-    /// Riga coinvolta.
+    /// Row involved.
     pub target_id: Option<String>,
-    /// Percorso temporaneo gestito (`tmp/...`).
+    /// Managed temporary path (`tmp/...`).
     pub temp_rel: ManagedPath,
-    /// Percorso finale gestito.
+    /// Managed final path.
     pub final_rel: Option<ManagedPath>,
-    /// Percorso temporaneo assoluto: il chiamante vi scrive il file da creare.
+    /// Absolute temporary path: the caller writes the file to be created there.
     pub temp_path: PathBuf,
-    /// Percorso finale assoluto.
+    /// Absolute final path.
     pub final_path: Option<PathBuf>,
     read_only: bool,
 }
 
 impl Catalog {
-    /// Apre (o crea) il catalogo in `root`:
-    /// lock esclusivo → migrazioni (con backup) → riconciliazione del journal →
-    /// pulizia prudente di `tmp/`.
+    /// Opens (or creates) the catalog in `root`:
+    /// exclusive lock → migrations (with backup) → journal reconciliation →
+    /// conservative cleanup of `tmp/`.
     pub fn open(root: &Path) -> Result<Self> {
         let layout = CatalogLayout::prepare(root)?;
         let lock = CatalogLock::acquire(layout.root())?;
@@ -139,27 +139,27 @@ impl Catalog {
         Ok(cat)
     }
 
-    /// Esito dell'apertura.
+    /// Outcome of opening.
     pub fn open_report(&self) -> Option<&OpenReport> {
         self.report.as_ref()
     }
 
-    /// Layout della radice.
+    /// Root layout.
     pub fn layout(&self) -> &CatalogLayout {
         &self.layout
     }
 
-    /// Istante di apertura di questa istanza.
+    /// Instant this instance was opened.
     pub fn started_at(&self) -> UtcMillis {
         self.started_at
     }
 
-    /// Versione di schema corrente.
+    /// Current schema version.
     pub fn schema_version(&self) -> Result<u32> {
         migrate::current_version(&self.conn)
     }
 
-    /// Esegue `f` in una transazione `IMMEDIATE`, confermata se `f` riesce.
+    /// Runs `f` in an `IMMEDIATE` transaction, committed if `f` succeeds.
     pub fn with_tx<T>(&mut self, f: impl FnOnce(&Tx<'_>) -> Result<T>) -> Result<T> {
         let tx = Tx {
             inner: self
@@ -172,7 +172,7 @@ impl Catalog {
         Ok(out)
     }
 
-    /// Lettura in una transazione (annullata al termine).
+    /// Read inside a transaction (rolled back at the end).
     pub fn read<T>(&mut self, f: impl FnOnce(&Tx<'_>) -> Result<T>) -> Result<T> {
         let tx = Tx {
             inner: self.conn.transaction().db()?,
@@ -182,13 +182,12 @@ impl Catalog {
 
     // ------------------------------------------------------------ journal
 
-    /// Registra un intento `pending` prima di qualunque modifica al filesystem.
+    /// Records a `pending` intent before any filesystem change.
     ///
-    /// Controlli: percorsi validi e senza collegamenti; per la creazione la
-    /// destinazione non deve esistere e la riga non deve esistere; per la
-    /// cancellazione la sorgente deve esistere e la riga non deve essere
-    /// referenziata; un solo gruppo di intenti aperti per VM
-    /// ([`StorageError::VmBusy`]).
+    /// Checks: valid paths without links; for creation the destination must
+    /// not exist and the row must not exist; for deletion the source must
+    /// exist and the row must not be referenced; only one group of open
+    /// intents per VM ([`StorageError::VmBusy`]).
     pub fn begin_intent(&mut self, spec: IntentSpec) -> Result<Intent> {
         let temp_rel = ManagedPath::parse(&format!(
             "{TMP_DIR}/{}-{}.part",
@@ -215,22 +214,22 @@ impl Catalog {
                 k if k.is_create() => {
                     let (Some(fp), Some(rel)) = (&final_path, &spec.final_path) else {
                         return Err(StorageError::StateConflict(
-                            "intento di creazione senza destinazione".into(),
+                            "creation intent without destination".into(),
                         ));
                     };
                     if spec.target_kind == TargetKind::None || spec.target_id.is_none() {
                         return Err(StorageError::StateConflict(
-                            "intento di creazione senza riga di destinazione".into(),
+                            "creation intent without target row".into(),
                         ));
                     }
                     if target_exists(tx, spec.target_kind, spec.target_id.as_deref())? {
                         return Err(StorageError::StateConflict(
-                            "riga di destinazione già presente".into(),
+                            "target row already present".into(),
                         ));
                     }
                     if exists_no_follow(fp)? {
                         return Err(StorageError::StateConflict(format!(
-                            "destinazione già esistente: {rel}"
+                            "destination already exists: {rel}"
                         )));
                     }
                     if let Some((parent, _)) = rel.as_str().rsplit_once('/') {
@@ -240,7 +239,7 @@ impl Catalog {
                 IntentKind::DeleteFile => {
                     let (Some(fp), Some(rel)) = (&final_path, &spec.final_path) else {
                         return Err(StorageError::StateConflict(
-                            "cancellazione senza sorgente".into(),
+                            "deletion without source".into(),
                         ));
                     };
                     if !exists_no_follow(fp)? {
@@ -297,13 +296,13 @@ impl Catalog {
         })
     }
 
-    /// Completa la parte su filesystem e passa a `applied`.
+    /// Completes the filesystem part and moves to `applied`.
     ///
-    /// - creazione: il file temporaneo (regolare, non collegamento) viene
-    ///   sincronizzato, eventualmente reso di sola lettura e rinominato sulla
-    ///   destinazione, che non deve esistere;
-    /// - cancellazione: la sorgente viene rinominata nel temporaneo;
-    /// - export: il temporaneo deve esistere.
+    /// - creation: the temporary file (regular, not a link) is synced,
+    ///   optionally made read-only and renamed onto the destination, which
+    ///   must not exist;
+    /// - deletion: the source is renamed into the temporary;
+    /// - export: the temporary must exist.
     pub fn mark_applied(&mut self, intent: &Intent) -> Result<()> {
         self.expect_state(intent.id, &[IntentState::Pending])?;
         match intent.kind {
@@ -311,7 +310,7 @@ impl Catalog {
                 let dest = intent
                     .final_path
                     .as_ref()
-                    .ok_or_else(|| StorageError::StateConflict("destinazione assente".into()))?;
+                    .ok_or_else(|| StorageError::StateConflict("missing destination".into()))?;
                 let meta = std::fs::symlink_metadata(&intent.temp_path)
                     .map_err(|e| StorageError::io(&intent.temp_path, e))?;
                 if is_link(&meta) || !meta.is_file() {
@@ -321,18 +320,18 @@ impl Catalog {
                     ));
                 }
                 sync_file(&intent.temp_path)?;
-                // Ricontrollo dei collegamenti sul percorso di destinazione.
+                // Re-check for links on the destination path.
                 let rel = intent
                     .final_rel
                     .as_ref()
-                    .ok_or_else(|| StorageError::StateConflict("destinazione assente".into()))?;
+                    .ok_or_else(|| StorageError::StateConflict("missing destination".into()))?;
                 self.layout.resolve(rel)?;
-                // Pubblicazione senza sovrascrittura (collegamento fisico): una
-                // destinazione comparsa nel frattempo non viene mai sostituita.
+                // Publish without overwriting (hard link): a destination that
+                // appeared in the meantime is never replaced.
                 if let Err(e) = fsx::publish_no_replace(&intent.temp_path, dest, rel) {
                     if matches!(e, StorageError::StateConflict(_)) {
-                        // La destinazione non è nostra: l'annullamento e la
-                        // riconciliazione non devono rimuoverla.
+                        // The destination is not ours: abort and
+                        // reconciliation must not remove it.
                         self.set_resolution(intent.id, DESTINATION_CONFLICT)?;
                     }
                     return Err(e);
@@ -345,7 +344,7 @@ impl Catalog {
                 let src = intent
                     .final_path
                     .as_ref()
-                    .ok_or_else(|| StorageError::StateConflict("sorgente assente".into()))?;
+                    .ok_or_else(|| StorageError::StateConflict("missing source".into()))?;
                 if let Some(rel) = &intent.final_rel {
                     self.layout.resolve(rel)?;
                 }
@@ -354,7 +353,7 @@ impl Catalog {
             _ => {
                 if !exists_no_follow(&intent.temp_path)? {
                     return Err(StorageError::NotFound {
-                        kind: "file temporaneo",
+                        kind: "temporary file",
                         id: intent.temp_rel.to_string(),
                     });
                 }
@@ -363,18 +362,18 @@ impl Catalog {
         self.set_intent_state(intent.id, IntentState::Applied, None)
     }
 
-    /// Applica l'effetto sul DB e conferma l'intento nella stessa transazione.
-    /// Vedi [`Self::commit_many`].
+    /// Applies the DB effect and commits the intent in the same transaction.
+    /// See [`Self::commit_many`].
     pub fn commit(&mut self, intent: &Intent, f: impl FnOnce(&Tx<'_>) -> Result<()>) -> Result<()> {
         self.commit_many(std::slice::from_ref(intent), f)
     }
 
-    /// Applica l'effetto sul DB di più intenti `applied` e li conferma tutti
-    /// nella stessa transazione SQL. Dopo `f` verifica che le righe di
-    /// destinazione esistano (creazione) o non esistano più (cancellazione);
-    /// altrimenti annulla la transazione e restituisce errore lasciando gli
-    /// intenti `applied` (da annullare o riconciliare). Dopo la conferma
-    /// rimuove i temporanei delle cancellazioni e degli export.
+    /// Applies the DB effect of several `applied` intents and commits them all
+    /// in the same SQL transaction. After `f` it checks that the target rows
+    /// exist (creation) or no longer exist (deletion); otherwise it rolls back
+    /// the transaction and returns an error, leaving the intents `applied`
+    /// (to be aborted or reconciled). After the commit it removes the
+    /// temporaries of deletions and exports.
     pub fn commit_many(
         &mut self,
         intents: &[Intent],
@@ -394,7 +393,7 @@ impl Catalog {
                 };
                 if !ok {
                     return Err(StorageError::StateConflict(format!(
-                        "intento {}: effetto sul DB non coerente con {}",
+                        "intent {}: DB effect inconsistent with {}",
                         i.id, i.kind
                     )));
                 }
@@ -412,7 +411,7 @@ impl Catalog {
         Ok(())
     }
 
-    /// Annulla un intento `pending` o `applied`, ripristinando il filesystem.
+    /// Aborts a `pending` or `applied` intent, restoring the filesystem.
     pub fn abort(&mut self, intent: &Intent) -> Result<()> {
         let state = self.expect_state(intent.id, &[IntentState::Pending, IntentState::Applied])?;
         let row = self.intent_row(intent.id)?;
@@ -420,7 +419,7 @@ impl Catalog {
         self.set_intent_state(intent.id, IntentState::Aborted, Some(&resolution))
     }
 
-    /// Stato corrente di un intento.
+    /// Current state of an intent.
     pub fn intent_state(&self, id: i64) -> Result<IntentState> {
         self.conn
             .query_row(
@@ -436,7 +435,7 @@ impl Catalog {
             })
     }
 
-    /// Esito registrato dalla riconciliazione o dall'annullamento.
+    /// Resolution recorded by reconciliation or by abort.
     pub fn intent_resolution(&self, id: i64) -> Result<Option<String>> {
         self.conn
             .query_row(
@@ -447,7 +446,7 @@ impl Catalog {
             .db()
     }
 
-    /// Intenti non conclusi (`pending`, `applied` o `needs_review`).
+    /// Unfinished intents (`pending`, `applied` or `needs_review`).
     pub fn open_intents(&self) -> Result<Vec<Intent>> {
         self.intent_ids_in("'pending','applied','needs_review'")?
             .into_iter()
@@ -455,14 +454,14 @@ impl Catalog {
             .collect()
     }
 
-    /// Intenti che la riconciliazione non è riuscita a risolvere ("da
-    /// verificare"): la VM coinvolta resta occupata. Il dettaglio dell'ultimo
-    /// tentativo è in [`Self::intent_resolution`].
+    /// Intents that reconciliation could not resolve ("needs review"): the
+    /// VM involved stays busy. Details of the last attempt are in
+    /// [`Self::intent_resolution`].
     pub fn intents_needing_review(&self) -> Result<Vec<i64>> {
         self.intent_ids_in("'needs_review'")
     }
 
-    /// Identificativi degli intenti negli stati indicati (letterali SQL fissi).
+    /// Identifiers of intents in the given states (fixed SQL literals).
     pub(crate) fn intent_ids_in(&self, states: &'static str) -> Result<Vec<i64>> {
         let mut st = self
             .conn
@@ -526,9 +525,9 @@ impl Catalog {
         })
     }
 
-    /// Temporanei degli intenti non conclusi, da non toccare nella pulizia di
-    /// `tmp/`. Letti come testo: un intento con percorsi non risolvibili (per
-    /// esempio dietro un collegamento) non impedisce l'apertura del catalogo.
+    /// Temporaries of unfinished intents, not to be touched by the `tmp/`
+    /// cleanup. Read as text: an intent with unresolvable paths (for
+    /// example behind a link) does not prevent the catalog from opening.
     fn open_intent_temp_paths(&self) -> Result<Vec<ManagedPath>> {
         let mut st = self
             .conn
@@ -551,7 +550,7 @@ impl Catalog {
             Ok(s)
         } else {
             Err(StorageError::StateConflict(format!(
-                "intento {id} in stato {s}"
+                "intent {id} in state {s}"
             )))
         }
     }
@@ -575,7 +574,7 @@ impl Catalog {
         Ok(())
     }
 
-    /// Annullamento sul filesystem (usato da `abort` e dalla riconciliazione).
+    /// Filesystem rollback (used by `abort` and by reconciliation).
     pub(crate) fn rollback_fs(&mut self, i: &Intent, _state: IntentState) -> Result<String> {
         let temp_exists = exists_no_follow(&i.temp_path)?;
         let final_exists = match &i.final_path {
@@ -608,9 +607,9 @@ impl Catalog {
                     && i.kind == IntentKind::PromoteBaseline
                     && let Some(rel) = &i.final_rel
                 {
-                    // Interruzione prima della pubblicazione: la directory
-                    // della nuova baseline (creata da `begin_intent`) e un
-                    // eventuale manifest vanno rimossi.
+                    // Interrupted before publishing: the new baseline's
+                    // directory (created by `begin_intent`) and any
+                    // manifest must be removed.
                     remove_baseline_leftovers(&self.layout, rel)?;
                 }
                 if parts.is_empty() {
@@ -621,7 +620,7 @@ impl Catalog {
             IntentKind::DeleteFile => {
                 let res = if temp_exists && !final_exists {
                     let (Some(src), Some(rel)) = (&i.final_path, &i.final_rel) else {
-                        return Err(StorageError::StateConflict("sorgente assente".into()));
+                        return Err(StorageError::StateConflict("missing source".into()));
                     };
                     self.layout.resolve(rel)?;
                     std::fs::rename(&i.temp_path, src).map_err(|e| StorageError::io(src, e))?;
@@ -662,7 +661,7 @@ impl Catalog {
 
     // ----------------------------------------------------------- manifest
 
-    /// Riscrive il manifest della VM dal DB e ne registra l'hash.
+    /// Rewrites the VM manifest from the DB and records its hash.
     pub fn write_vm_manifest(&mut self, vm: &VmId) -> Result<String> {
         let m = self.read(|tx| build_vm_manifest(tx, vm))?;
         let sha = manifest::write_atomic(&self.layout, &CatalogLayout::vm_manifest(vm), &m)?;
@@ -670,7 +669,7 @@ impl Catalog {
         Ok(sha)
     }
 
-    /// Confronta il manifest della VM con il DB.
+    /// Compares the VM manifest with the DB.
     pub fn verify_vm_manifest(&mut self, vm: &VmId) -> Result<Vec<Divergence>> {
         let layout = self.layout.clone();
         self.read(|tx| {
@@ -693,8 +692,8 @@ impl Catalog {
         })
     }
 
-    /// Confronta il manifest di una baseline con il DB. Con `deep` ricalcola
-    /// anche lo SHA-256 del disco base e delle vars (lettura completa).
+    /// Compares a baseline manifest with the DB. With `deep` it also
+    /// recomputes the SHA-256 of the base disk and of the vars (full read).
     pub fn verify_baseline_manifest(
         &mut self,
         id: &BaselineId,
@@ -892,7 +891,7 @@ fn deletion_precheck(tx: &Tx<'_>, kind: TargetKind, id: Option<&str>) -> Result<
             }
             let bid: BaselineId = id
                 .parse()
-                .map_err(|_| StorageError::Constraint("baseline_id non valido".into()))?;
+                .map_err(|_| StorageError::Constraint("invalid baseline_id".into()))?;
             if tx.baseline_referenced(&bid)? {
                 return Err(StorageError::Referenced("baseline_referenced"));
             }
@@ -932,7 +931,7 @@ fn sync_file(p: &Path) -> Result<()> {
     f.sync_all().map_err(|e| StorageError::io(p, e))
 }
 
-/// Rimuove un file o una directory sotto `tmp/`, senza seguire collegamenti.
+/// Removes a file or directory under `tmp/`, without following links.
 pub(crate) fn remove_temp(layout: &CatalogLayout, rel: &ManagedPath) -> Result<()> {
     if !rel.is_under(TMP_DIR) {
         return Err(StorageError::invalid_path(
@@ -953,7 +952,7 @@ pub(crate) fn remove_temp(layout: &CatalogLayout, rel: &ManagedPath) -> Result<(
     }
 }
 
-/// Rimuove un file gestito regolare (mai una directory né un collegamento).
+/// Removes a regular managed file (never a directory or a link).
 pub(crate) fn remove_managed_file(layout: &CatalogLayout, rel: &ManagedPath) -> Result<()> {
     let p = layout.resolve(rel)?;
     match std::fs::symlink_metadata(&p) {
@@ -967,8 +966,8 @@ pub(crate) fn remove_managed_file(layout: &CatalogLayout, rel: &ManagedPath) -> 
     }
 }
 
-/// Dopo la rimozione di una base orfana: rimuove il manifest accanto e la
-/// directory della baseline se vuota. Mai altro.
+/// After removing an orphaned base: removes the manifest next to it and the
+/// baseline directory if empty. Nothing else.
 fn remove_baseline_leftovers(layout: &CatalogLayout, disk_rel: &ManagedPath) -> Result<()> {
     let Some((dir, _)) = disk_rel.as_str().rsplit_once('/') else {
         return Ok(());
@@ -987,8 +986,8 @@ fn remove_baseline_leftovers(layout: &CatalogLayout, disk_rel: &ManagedPath) -> 
 
 #[allow(clippy::permissions_set_readonly_false)]
 fn force_remove_file(p: &Path, meta: std::fs::Metadata) -> Result<()> {
-    // Le basi e i media sono resi di sola lettura (mitigazione F0-02 §8.4):
-    // l'attributo va tolto prima della rimozione di un file gestito orfano.
+    // Bases and media are made read-only (mitigation F0-02 §8.4): the
+    // attribute must be cleared before removing an orphaned managed file.
     let mut perm = meta.permissions();
     if perm.readonly() {
         perm.set_readonly(false);
@@ -1003,8 +1002,8 @@ fn remove_dir_no_links(dir: &Path) -> Result<()> {
         let p = entry.path();
         let m = std::fs::symlink_metadata(&p).map_err(|e| StorageError::io(&p, e))?;
         if is_link(&m) {
-            // Rimuove il collegamento stesso, mai la destinazione
-            // (`remove_dir` per junction e collegamenti a directory).
+            // Removes the link itself, never its target
+            // (`remove_dir` for junctions and directory links).
             if std::fs::remove_file(&p).is_err() {
                 std::fs::remove_dir(&p).map_err(|e| StorageError::io(&p, e))?;
             }

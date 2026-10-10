@@ -1,16 +1,16 @@
-﻿# F1-04: prove manuali su Windows per lightvm-service (non eseguite in CI).
+# F1-04: manual checks on Windows for lightvm-service (not run in CI).
 #
-# 1. Processo a integrita' bassa dello stesso utente verso la named pipe
-#    (stesso approccio di F0-04: copia dell'eseguibile con
-#    `icacls /setintegritylevel Low`). Esito atteso: connessione rifiutata dal
-#    sistema operativo (ERROR_ACCESS_DENIED, os error 5).
-# 2. Controllo a integrita' media: connessione e handshake accettati.
-# 3. Credenziale errata a integrita' media: handshake rifiutato.
-# 4. Kill reale del processo genitore (PowerShell intermedio): il servizio
-#    rileva la chiusura della pipe di vita e termina.
+# 1. Low-integrity process of the same user towards the named pipe
+#    (same approach as F0-04: copy of the executable with
+#    `icacls /setintegritylevel Low`). Expected outcome: connection refused by
+#    the operating system (ERROR_ACCESS_DENIED, os error 5).
+# 2. Medium-integrity control: connection and handshake accepted.
+# 3. Wrong credential at medium integrity: handshake rejected.
+# 4. Real kill of the parent process (intermediate PowerShell): the service
+#    detects the closing of the lifeline pipe and terminates.
 #
-# Uso: powershell -ExecutionPolicy Bypass -File crates/lightvm-service/scripts/f1-04-windows-checks.ps1 [-Bin target\debug]
-# Le credenziali non vengono stampate.
+# Usage: powershell -ExecutionPolicy Bypass -File crates/lightvm-service/scripts/f1-04-windows-checks.ps1 [-Bin target\debug]
+# Credentials are not printed.
 
 param(
     [string]$Bin = "target\debug"
@@ -22,7 +22,7 @@ $binDir = Join-Path $root $Bin
 $svcExe = Join-Path $binDir "lightvm-service.exe"
 $probeExe = Join-Path $binDir "lightvm-ipc-probe.exe"
 foreach ($f in @($svcExe, $probeExe)) {
-    if (-not (Test-Path $f)) { throw "manca $f (eseguire cargo build -p lightvm-service)" }
+    if (-not (Test-Path $f)) { throw "missing $f (run cargo build -p lightvm-service)" }
 }
 
 $work = Join-Path $env:TEMP ("lightvm-f1-04-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
@@ -32,10 +32,10 @@ $medDir = Join-Path $work "med"
 New-Item -ItemType Directory -Force $catalog, $lowDir, $medDir | Out-Null
 
 function Stamp { (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ") }
-Write-Output "=== $(Stamp) F1-04 prove Windows; lavoro in $work"
-Write-Output ("utente: " + [System.Security.Principal.WindowsIdentity]::GetCurrent().Name + " sid=" + [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value)
+Write-Output "=== $(Stamp) F1-04 Windows checks; working in $work"
+Write-Output ("user: " + [System.Security.Principal.WindowsIdentity]::GetCurrent().Name + " sid=" + [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value)
 
-# Copie a integrita' bassa e media.
+# Low- and medium-integrity copies.
 $probeLow = Join-Path $lowDir "probe-low.exe"
 $whoamiLow = Join-Path $lowDir "whoami-low.exe"
 $probeMed = Join-Path $medDir "probe-med.exe"
@@ -46,9 +46,9 @@ Copy-Item (Join-Path $env:SystemRoot "System32\whoami.exe") $whoamiLow
 & icacls $whoamiLow /setintegritylevel Low | Out-Null
 Write-Output "--- icacls probe-low.exe"
 & icacls $probeLow
-Write-Output "--- livello di integrita' osservato dalla copia whoami-low.exe"
+Write-Output "--- integrity level observed by the whoami-low.exe copy"
 & $whoamiLow /groups | Select-String -Pattern "S-1-16-"
-Write-Output "--- livello di integrita' di questa shell"
+Write-Output "--- integrity level of this shell"
 & (Join-Path $env:SystemRoot "System32\whoami.exe") /groups | Select-String -Pattern "S-1-16-"
 
 function Start-Service-Child([string]$catalogDir) {
@@ -83,44 +83,44 @@ function Run-Probe([string]$exe, [string]$endpoint, [string]$credential) {
 $svc = Start-Service-Child $catalog
 $ep = $svc.Ready.endpoint
 $cred = $svc.Ready.credential
-Write-Output "--- servizio pid=$($svc.Ready.pid) endpoint=$ep (credenziale non stampata, lunghezza $($cred.Length))"
+Write-Output "--- service pid=$($svc.Ready.pid) endpoint=$ep (credential not printed, length $($cred.Length))"
 
 $results = @()
 
-Write-Output "--- 1. probe a integrita' bassa, credenziale valida"
+Write-Output "--- 1. low-integrity probe, valid credential"
 $r = Run-Probe $probeLow $ep $cred
-Write-Output "uscita=$($r.Code) $($r.Out)"
-$results += [pscustomobject]@{ prova = "integrita' bassa"; atteso = 10; ottenuto = $r.Code }
+Write-Output "exit=$($r.Code) $($r.Out)"
+$results += [pscustomobject]@{ check = "low integrity"; expected = 10; actual = $r.Code }
 
-Write-Output "--- 2. probe a integrita' media, credenziale valida"
+Write-Output "--- 2. medium-integrity probe, valid credential"
 $r = Run-Probe $probeMed $ep $cred
-Write-Output "uscita=$($r.Code) $($r.Out)"
-$results += [pscustomobject]@{ prova = "integrita' media"; atteso = 0; ottenuto = $r.Code }
+Write-Output "exit=$($r.Code) $($r.Out)"
+$results += [pscustomobject]@{ check = "medium integrity"; expected = 0; actual = $r.Code }
 
-Write-Output "--- 3. probe a integrita' media, credenziale errata"
+Write-Output "--- 3. medium-integrity probe, wrong credential"
 $wrong = -join ((1..64) | ForEach-Object { "0123456789abcdef"[(Get-Random -Maximum 16)] })
 $r = Run-Probe $probeMed $ep $wrong
-Write-Output "uscita=$($r.Code) $($r.Out)"
-$results += [pscustomobject]@{ prova = "credenziale errata"; atteso = 11; ottenuto = $r.Code }
+Write-Output "exit=$($r.Code) $($r.Out)"
+$results += [pscustomobject]@{ check = "wrong credential"; expected = 11; actual = $r.Code }
 
-Write-Output "--- 3b. probe a integrita' media, senza credenziale"
+Write-Output "--- 3b. medium-integrity probe, no credential"
 $r = Run-Probe $probeMed $ep ""
-Write-Output "uscita=$($r.Code) $($r.Out)"
-$results += [pscustomobject]@{ prova = "senza credenziale"; atteso = 11; ottenuto = $r.Code }
+Write-Output "exit=$($r.Code) $($r.Out)"
+$results += [pscustomobject]@{ check = "no credential"; expected = 11; actual = $r.Code }
 
-Write-Output "--- seconda istanza sullo stesso catalogo"
+Write-Output "--- second instance on the same catalog"
 $second = cmd /c "`"$svcExe`" --catalog `"$catalog`" 2>&1"
-Write-Output "uscita=$LASTEXITCODE $second"
-$results += [pscustomobject]@{ prova = "seconda istanza"; atteso = 3; ottenuto = $LASTEXITCODE }
+Write-Output "exit=$LASTEXITCODE $second"
+$results += [pscustomobject]@{ check = "second instance"; expected = 3; actual = $LASTEXITCODE }
 
-Write-Output "--- arresto controllato (riga shutdown sullo stdin)"
+Write-Output "--- controlled shutdown (shutdown line on stdin)"
 $svc.Process.StandardInput.WriteLine("shutdown")
 $svc.Process.StandardInput.Flush()
-if (-not $svc.Process.WaitForExit(10000)) { throw "servizio non terminato" }
-Write-Output "uscita servizio=$($svc.Process.ExitCode) stderr: $($svc.Process.StandardError.ReadToEnd().Trim())"
-$results += [pscustomobject]@{ prova = "shutdown via stdin"; atteso = 0; ottenuto = $svc.Process.ExitCode }
+if (-not $svc.Process.WaitForExit(10000)) { throw "service did not terminate" }
+Write-Output "service exit=$($svc.Process.ExitCode) stderr: $($svc.Process.StandardError.ReadToEnd().Trim())"
+$results += [pscustomobject]@{ check = "shutdown via stdin"; expected = 0; actual = $svc.Process.ExitCode }
 
-Write-Output "--- 4. kill reale del genitore (PowerShell intermedio)"
+Write-Output "--- 4. real kill of the parent (intermediate PowerShell)"
 $catalog2 = Join-Path $work "catalog2"
 New-Item -ItemType Directory -Force $catalog2 | Out-Null
 $readyFile = Join-Path $work "ready2.json"
@@ -144,20 +144,20 @@ $deadline = (Get-Date).AddSeconds(20)
 while (-not (Test-Path $readyFile) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 100 }
 $svcPid = [int](Get-Content $readyFile)
 $child = Get-Process -Id $svcPid
-Write-Output "genitore pid=$($parent.Id) servizio pid=$svcPid"
+Write-Output "parent pid=$($parent.Id) service pid=$svcPid"
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
 Stop-Process -Id $parent.Id -Force
 $exited = $child.WaitForExit(10000)
 $sw.Stop()
-Write-Output "servizio terminato dopo il kill del genitore: $exited in $($sw.ElapsedMilliseconds) ms"
-$results += [pscustomobject]@{ prova = "kill del genitore"; atteso = "True"; ottenuto = "$exited" }
+Write-Output "service terminated after the parent kill: $exited in $($sw.ElapsedMilliseconds) ms"
+$results += [pscustomobject]@{ check = "parent kill"; expected = "True"; actual = "$exited" }
 $orphans = Get-CimInstance Win32_Process -Filter "Name='lightvm-service.exe'" | Where-Object { $_.CommandLine -like "*$work*" }
-Write-Output "processi lightvm-service residui per questa prova: $(@($orphans).Count)"
-$results += [pscustomobject]@{ prova = "processi residui"; atteso = 0; ottenuto = @($orphans).Count }
+Write-Output "leftover lightvm-service processes for this check: $(@($orphans).Count)"
+$results += [pscustomobject]@{ check = "leftover processes"; expected = 0; actual = @($orphans).Count }
 
-Write-Output "=== $(Stamp) riepilogo"
+Write-Output "=== $(Stamp) summary"
 $results | Format-Table -AutoSize | Out-String -Width 200
-$fail = @($results | Where-Object { "$($_.atteso)" -ne "$($_.ottenuto)" })
+$fail = @($results | Where-Object { "$($_.expected)" -ne "$($_.actual)" })
 Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
-if ($fail.Count -gt 0) { Write-Output "ESITO: FALLITO ($($fail.Count))"; exit 1 }
-Write-Output "ESITO: tutte le prove come atteso"
+if ($fail.Count -gt 0) { Write-Output "RESULT: FAILED ($($fail.Count))"; exit 1 }
+Write-Output "RESULT: all checks as expected"

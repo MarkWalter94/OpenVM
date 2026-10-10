@@ -1,6 +1,6 @@
-//! Istanza singola del catalogo sotto concorrenza: due o più `Catalog` sulla
-//! stessa directory (thread concorrenti, grafie diverse del percorso).
-//! Il caso base (seconda apertura sequenziale e da un altro thread) è in
+//! Single catalog instance under concurrency: two or more `Catalog`s on the
+//! same directory (concurrent threads, different spellings of the path).
+//! The basic case (second open, sequential and from another thread) is in
 //! `paths_lock.rs`.
 
 mod common;
@@ -12,7 +12,7 @@ use vm_storage::{Catalog, StorageError};
 #[test]
 fn concurrent_opens_admit_exactly_one_instance() {
     let dir = common::tempdir();
-    // Catalogo già creato: la gara riguarda solo il lock, non le migrazioni.
+    // Catalog already created: the race concerns only the lock, not migrations.
     drop(Catalog::open(dir.path()).unwrap());
     const N: usize = 8;
     let barrier = Arc::new(Barrier::new(N));
@@ -30,10 +30,10 @@ fn concurrent_opens_admit_exactly_one_instance() {
                 tx.send(match &res {
                     Ok(_) => Ok(()),
                     Err(StorageError::CatalogLocked(_)) => Err(true),
-                    Err(e) => panic!("errore inatteso: {e:?}"),
+                    Err(e) => panic!("unexpected error: {e:?}"),
                 })
                 .unwrap();
-                // Tutti tengono il risultato finché il test non ha contato.
+                // Everyone holds the result until the test has counted.
                 release.wait();
                 drop(res);
             })
@@ -45,9 +45,9 @@ fn concurrent_opens_admit_exactly_one_instance() {
         h.join().unwrap();
     }
     let ok = results.iter().filter(|r| r.is_ok()).count();
-    assert_eq!(ok, 1, "una sola istanza: {results:?}");
+    assert_eq!(ok, 1, "exactly one instance: {results:?}");
     assert_eq!(results.iter().filter(|r| r.is_err()).count(), N - 1);
-    // Rilasciate tutte, il catalogo si riapre e non ha intenti aperti.
+    // Once all are released, the catalog reopens and has no open intents.
     let cat = Catalog::open(dir.path()).unwrap();
     assert!(cat.open_intents().unwrap().is_empty());
 }
@@ -56,23 +56,23 @@ fn concurrent_opens_admit_exactly_one_instance() {
 fn other_spellings_of_the_same_directory_are_refused() {
     let dir = common::tempdir();
     let first = Catalog::open(dir.path()).unwrap();
-    // Componente `.` e `sub/..` nel percorso.
+    // `.` and `sub/..` components in the path.
     let dotted = dir.path().join(".");
     let sub = dir.path().join("vms");
     let parent_via_sub = sub.join("..");
     for p in [dotted, parent_via_sub] {
         match Catalog::open(&p) {
             Err(StorageError::CatalogLocked(_)) => {}
-            other => panic!("{} accettato: {other:?}", p.display()),
+            other => panic!("{} accepted: {other:?}", p.display()),
         }
     }
-    // Su Windows anche la grafia con maiuscole diverse è la stessa directory.
+    // On Windows, a spelling with different letter case is also the same directory.
     #[cfg(windows)]
     {
         let upper = std::path::PathBuf::from(dir.path().to_string_lossy().to_uppercase());
         match Catalog::open(&upper) {
             Err(StorageError::CatalogLocked(_)) => {}
-            other => panic!("{} accettato: {other:?}", upper.display()),
+            other => panic!("{} accepted: {other:?}", upper.display()),
         }
     }
     drop(first);
@@ -84,8 +84,8 @@ fn distinct_catalogs_coexist() {
     let b = common::tempdir();
     let mut ca = Catalog::open(a.path()).unwrap();
     let mut cb = Catalog::open(b.path()).unwrap();
-    let va = common::new_vm(&mut ca, "stesso-nome");
-    let vb = common::new_vm(&mut cb, "stesso-nome");
+    let va = common::new_vm(&mut ca, "same-name");
+    let vb = common::new_vm(&mut cb, "same-name");
     assert_ne!(va, vb);
     assert_eq!(ca.read(|tx| tx.vm_ids()).unwrap(), vec![va]);
     assert_eq!(cb.read(|tx| tx.vm_ids()).unwrap(), vec![vb]);

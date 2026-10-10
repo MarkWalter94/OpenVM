@@ -1,17 +1,17 @@
-//! Tipi e codifica dei messaggi RFB usati dal client.
+//! Types and encoding of the RFB messages used by the client.
 //!
-//! Messaggi client-server implementati (RFC 6143, sezione 7.5): soltanto
-//! SetPixelFormat (0), SetEncodings (2) e FramebufferUpdateRequest (3).
+//! Implemented client-to-server messages (RFC 6143, section 7.5): only
+//! SetPixelFormat (0), SetEncodings (2) and FramebufferUpdateRequest (3).
 
 use std::io::Read;
 
 use crate::{Error, MAX_DIMENSION, Rect};
 
-/// Tipi di messaggio client-server che questo crate può emettere dopo
-/// l'handshake. Qualunque altro tipo è assente per costruzione.
+/// Client-to-server message types this crate can emit after the
+/// handshake. Any other type is absent by construction.
 pub const CLIENT_MESSAGE_TYPES_SENT: [u8; 3] = [0, 2, 3];
 
-/// Encoding RFB riconosciuti. I valori negativi sono pseudo-encoding.
+/// Recognized RFB encodings. Negative values are pseudo-encodings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Encoding {
     /// Raw (0).
@@ -22,12 +22,12 @@ pub enum Encoding {
     Hextile,
     /// ZRLE (16).
     Zrle,
-    /// Pseudo-encoding DesktopSize (-223).
+    /// DesktopSize pseudo-encoding (-223).
     DesktopSize,
 }
 
 impl Encoding {
-    /// Codice numerico dell'encoding.
+    /// Numeric code of the encoding.
     pub const fn code(self) -> i32 {
         match self {
             Self::Raw => 0,
@@ -38,7 +38,7 @@ impl Encoding {
         }
     }
 
-    /// Encoding dal codice; `None` per i codici non previsti (rifiutati).
+    /// Encoding from its code; `None` for unexpected codes (rejected).
     pub const fn from_code(code: i32) -> Option<Self> {
         Some(match code {
             0 => Self::Raw,
@@ -51,7 +51,7 @@ impl Encoding {
     }
 }
 
-/// Encoding annunciati al server, in ordine di preferenza.
+/// Encodings announced to the server, in order of preference.
 pub const SUPPORTED_ENCODINGS: [Encoding; 5] = [
     Encoding::Zrle,
     Encoding::Hextile,
@@ -60,33 +60,33 @@ pub const SUPPORTED_ENCODINGS: [Encoding; 5] = [
     Encoding::DesktopSize,
 ];
 
-/// Formato pixel RFB (RFC 6143, 7.4).
+/// RFB pixel format (RFC 6143, 7.4).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PixelFormat {
-    /// Bit per pixel.
+    /// Bits per pixel.
     pub bits_per_pixel: u8,
-    /// Profondità utile.
+    /// Useful depth.
     pub depth: u8,
     /// Big endian.
     pub big_endian: bool,
     /// True colour.
     pub true_colour: bool,
-    /// Valore massimo del rosso.
+    /// Maximum red value.
     pub red_max: u16,
-    /// Valore massimo del verde.
+    /// Maximum green value.
     pub green_max: u16,
-    /// Valore massimo del blu.
+    /// Maximum blue value.
     pub blue_max: u16,
-    /// Shift del rosso.
+    /// Red shift.
     pub red_shift: u8,
-    /// Shift del verde.
+    /// Green shift.
     pub green_shift: u8,
-    /// Shift del blu.
+    /// Blue shift.
     pub blue_shift: u8,
 }
 
 impl PixelFormat {
-    /// 32 bpp, profondità 24, little endian, R<<16 | G<<8 | B: in memoria B, G, R, X.
+    /// 32 bpp, depth 24, little endian, R<<16 | G<<8 | B: in memory B, G, R, X.
     pub const BGRX8888: Self = Self {
         bits_per_pixel: 32,
         depth: 24,
@@ -100,7 +100,7 @@ impl PixelFormat {
         blue_shift: 0,
     };
 
-    /// Serializzazione a 16 byte (incluso il padding).
+    /// 16-byte serialization (padding included).
     pub fn to_bytes(&self) -> [u8; 16] {
         let mut b = [0u8; 16];
         b[0] = self.bits_per_pixel;
@@ -116,7 +116,7 @@ impl PixelFormat {
         b
     }
 
-    /// Lettura da 16 byte.
+    /// Reads from 16 bytes.
     pub fn from_bytes(b: &[u8; 16]) -> Self {
         Self {
             bits_per_pixel: b[0],
@@ -133,41 +133,41 @@ impl PixelFormat {
     }
 }
 
-/// Dati del ServerInit.
+/// ServerInit data.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerInit {
-    /// Larghezza iniziale.
+    /// Initial width.
     pub width: u16,
-    /// Altezza iniziale.
+    /// Initial height.
     pub height: u16,
-    /// Formato pixel proposto dal server (il client poi impone BGRX8888).
+    /// Pixel format proposed by the server (the client then imposes BGRX8888).
     pub pixel_format: PixelFormat,
-    /// Nome del desktop (UTF-8 con sostituzione, troncato a 256 caratteri).
+    /// Desktop name (UTF-8 with replacement, truncated to 256 characters).
     pub name: String,
 }
 
-/// Messaggi client-server che il crate sa costruire. È l'**unico** tipo che
-/// può essere scritto sul trasporto dopo l'handshake.
+/// Client-to-server messages the crate can build. It is the **only** type that
+/// can be written to the transport after the handshake.
 ///
-/// Non esistono varianti per eventi di tastiera, di puntatore o per il testo
-/// degli appunti: non sono implementati (ROADMAP 6.4, display in sola lettura).
+/// There are no variants for keyboard events, pointer events or clipboard
+/// text: they are not implemented (ROADMAP 6.4, read-only display).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClientMessage {
-    /// SetPixelFormat (tipo 0).
+    /// SetPixelFormat (type 0).
     SetPixelFormat(PixelFormat),
-    /// SetEncodings (tipo 2).
+    /// SetEncodings (type 2).
     SetEncodings(Vec<Encoding>),
-    /// FramebufferUpdateRequest (tipo 3).
+    /// FramebufferUpdateRequest (type 3).
     FramebufferUpdateRequest {
-        /// Richiesta incrementale.
+        /// Incremental request.
         incremental: bool,
-        /// Area richiesta.
+        /// Requested area.
         rect: Rect,
     },
 }
 
 impl ClientMessage {
-    /// Tipo di messaggio RFB.
+    /// RFB message type.
     pub const fn message_type(&self) -> u8 {
         match self {
             Self::SetPixelFormat(_) => 0,
@@ -176,7 +176,7 @@ impl ClientMessage {
         }
     }
 
-    /// Codifica in byte. Il primo byte è sempre [`Self::message_type`].
+    /// Encodes to bytes. The first byte is always [`Self::message_type`].
     pub fn encode(&self) -> Vec<u8> {
         let mut v = vec![self.message_type()];
         match self {
@@ -202,7 +202,7 @@ impl ClientMessage {
     }
 }
 
-// ---- lettura ---------------------------------------------------------------
+// ---- reading ---------------------------------------------------------------
 
 pub(crate) fn read_u8(r: &mut impl Read) -> Result<u8, Error> {
     let mut b = [0u8; 1];
@@ -234,7 +234,7 @@ pub(crate) fn read_vec(r: &mut impl Read, n: usize) -> Result<Vec<u8>, Error> {
     Ok(v)
 }
 
-/// Scarta `n` byte senza conservarli.
+/// Discards `n` bytes without keeping them.
 pub(crate) fn skip(r: &mut impl Read, n: u64) -> Result<(), Error> {
     let copied = std::io::copy(&mut r.take(n), &mut std::io::sink())?;
     if copied != n {
@@ -243,12 +243,12 @@ pub(crate) fn skip(r: &mut impl Read, n: u64) -> Result<(), Error> {
     Ok(())
 }
 
-/// Stringa con lunghezza u32, limitata a `max` byte (oltre: errore).
+/// String with a u32 length, limited to `max` bytes (beyond: error).
 pub(crate) fn read_string(r: &mut impl Read, max: u32) -> Result<String, Error> {
     let len = read_u32(r)?;
     if len > max {
         return Err(Error::Protocol(format!(
-            "stringa di {len} byte oltre il limite {max}"
+            "string of {len} bytes over the {max} limit"
         )));
     }
     let v = read_vec(r, len as usize)?;
@@ -263,7 +263,7 @@ pub(crate) fn read_server_init(r: &mut impl Read) -> Result<ServerInit, Error> {
     let name = read_string(r, 4096)?;
     if width > MAX_DIMENSION || height > MAX_DIMENSION {
         return Err(Error::Protocol(format!(
-            "geometria {width}x{height} oltre il limite"
+            "geometry {width}x{height} over the limit"
         )));
     }
     Ok(ServerInit {

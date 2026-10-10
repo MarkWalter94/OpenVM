@@ -1,22 +1,21 @@
-//! Adattatore `vm_core::ports::CatalogStore` → `vm_storage::Catalog` (SQLite).
+//! Adapter `vm_core::ports::CatalogStore` → `vm_storage::Catalog` (SQLite).
 //!
-//! Il core e lo storage usano gli stessi identificativi di `lightvm-proto` ma
-//! record diversi; l'adattatore converte nei due sensi e copre tre lacune
-//! dell'API attuale di `vm-storage` (riportate nel file di verifica F1-04):
+//! The core and the storage use the same identifiers from `lightvm-proto` but
+//! different records; the adapter converts both ways and covers three gaps in
+//! the current `vm-storage` API (reported in the F1-04 verification file):
 //!
-//! 1. `Tx::insert_vm` genera da sé il `VmId`, mentre il core lo sceglie con la
-//!    porta `IdGenerator`: il `VmRecord` del core viene conservato in
-//!    `config_json` (`{"core": VmRecord}`) e l'adattatore mantiene la
-//!    corrispondenza `VmId` del core → `VmId` dello storage, ricostruita
-//!    all'apertura;
-//! 2. le letture di `Catalog` richiedono `&mut self` mentre le letture della
-//!    porta sono `&self`: il catalogo sta in un `RefCell` (un solo thread, il
-//!    supervisor, possiede l'adattatore);
-//! 3. l'operazione dello storage non conserva la sessione e non aggiorna il
-//!    `run_id` dopo l'inserimento; `finish_run` usa l'istante dello storage.
+//! 1. `Tx::insert_vm` generates the `VmId` itself, while the core chooses it
+//!    through the `IdGenerator` port: the core's `VmRecord` is kept in
+//!    `config_json` (`{"core": VmRecord}`) and the adapter maintains the
+//!    mapping core `VmId` → storage `VmId`, rebuilt on open;
+//! 2. `Catalog` reads require `&mut self` while the port's reads are `&self`:
+//!    the catalog lives in a `RefCell` (a single thread, the supervisor, owns
+//!    the adapter);
+//! 3. the storage operation does not keep the session and does not update the
+//!    `run_id` after insertion; `finish_run` uses the storage's timestamp.
 //!
-//! Nessun percorso arriva dai client: i percorsi gestiti dei media sono
-//! validati due volte (`ManagedRelPath` del proto e `ManagedPath` dello storage).
+//! No path comes from clients: the managed media paths are validated twice
+//! (`ManagedRelPath` of the proto and `ManagedPath` of the storage).
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -31,30 +30,30 @@ use serde::{Deserialize, Serialize};
 use vm_core::ports::CatalogStore;
 use vm_storage as st;
 
-/// Versione del formato `config_json` scritto da questo adattatore.
+/// Version of the `config_json` format written by this adapter.
 const CONFIG_VERSION: u32 = 1;
 
 #[derive(Serialize, Deserialize)]
 struct StoredConfig {
-    /// Record completo del core (identificativo, configurazione, revisione).
+    /// Full core record (identifier, configuration, revision).
     core: VmRecord,
 }
 
-/// Converte un errore dello storage in errore pubblico senza percorsi host.
+/// Converts a storage error into a public error without host paths.
 pub fn storage_error(e: &st::StorageError) -> PublicError {
     if let st::StorageError::NotFound { kind, .. } = e {
-        return PublicError::not_found(format!("{kind} inesistente nel catalogo"));
+        return PublicError::not_found(format!("{kind} not found in the catalog"));
     }
     let code = e
         .public_code()
         .and_then(|c| serde_json::from_value::<ErrorCode>(serde_json::Value::String(c.into())).ok())
         .unwrap_or(ErrorCode::InfrastructureError);
-    // Il testo dello storage può contenere percorsi: verso i client va solo il codice.
-    PublicError::new(code, "errore del catalogo")
+    // The storage text may contain paths: only the code goes to clients.
+    PublicError::new(code, "catalog error")
 }
 
 fn infra(what: &str) -> PublicError {
-    PublicError::infrastructure(format!("catalogo: {what}"))
+    PublicError::infrastructure(format!("catalog: {what}"))
 }
 
 fn lifecycle(s: VmState) -> st::Lifecycle {
@@ -113,7 +112,7 @@ fn run_end(reason: RunEndReason) -> (st::RunState, st::TerminationCause) {
 fn snake<T: Serialize>(v: &T) -> Result<String, PublicError> {
     match serde_json::to_value(v) {
         Ok(serde_json::Value::String(s)) => Ok(s),
-        _ => Err(infra("enumerazione non serializzabile")),
+        _ => Err(infra("enumeration not serializable")),
     }
 }
 
@@ -122,20 +121,20 @@ fn from_snake<T: for<'de> Deserialize<'de>>(s: &str) -> Option<T> {
 }
 
 fn ts(s: &str) -> Result<UtcTimestamp, PublicError> {
-    s.parse().map_err(|_| infra("istante non valido"))
+    s.parse().map_err(|_| infra("invalid timestamp"))
 }
 
-/// Catalogo SQLite di `vm-storage` visto dal core.
+/// SQLite catalog of `vm-storage` as seen by the core.
 #[derive(Debug)]
 pub struct SqliteStore {
     cat: RefCell<st::Catalog>,
-    /// `VmId` del core → `VmId` della riga nello storage.
+    /// Core `VmId` → `VmId` of the row in the storage.
     ids: BTreeMap<VmId, VmId>,
 }
 
 impl SqliteStore {
-    /// Apre (o crea) il catalogo in `root`: lock del catalogo, migrazioni,
-    /// riconciliazione del journal (vedi `vm_storage::Catalog::open`).
+    /// Opens (or creates) the catalog in `root`: catalog lock, migrations,
+    /// journal reconciliation (see `vm_storage::Catalog::open`).
     pub fn open(root: &Path) -> Result<Self, st::StorageError> {
         let mut cat = st::Catalog::open(root)?;
         let ids = cat.read(|tx| {
@@ -154,7 +153,7 @@ impl SqliteStore {
         })
     }
 
-    /// Radice del catalogo (per i percorsi gestiti dei media).
+    /// Catalog root (for the managed media paths).
     pub fn root(&self) -> std::path::PathBuf {
         self.cat.borrow().layout().root().to_path_buf()
     }
@@ -163,7 +162,7 @@ impl SqliteStore {
         self.ids
             .get(&id)
             .copied()
-            .ok_or_else(|| PublicError::not_found("VM inesistente nel catalogo"))
+            .ok_or_else(|| PublicError::not_found("VM not found in the catalog"))
     }
 
     fn core_id(&self, sid: VmId) -> Option<VmId> {
@@ -184,8 +183,8 @@ impl SqliteStore {
     }
 
     fn vm_record(row: st::VmRecord) -> Result<VmRecord, PublicError> {
-        let stored: StoredConfig = serde_json::from_value(row.config)
-            .map_err(|_| infra("configurazione VM illeggibile"))?;
+        let stored: StoredConfig =
+            serde_json::from_value(row.config).map_err(|_| infra("unreadable VM configuration"))?;
         let mut vm = stored.core;
         vm.persisted_state = vm_state(row.lifecycle);
         Ok(vm)
@@ -203,15 +202,15 @@ impl SqliteStore {
             record: MediaRecord {
                 id: m.media_id,
                 kind,
-                sha256: Sha256Digest::parse_hex(&m.sha256).map_err(|_| infra("hash non valido"))?,
+                sha256: Sha256Digest::parse_hex(&m.sha256).map_err(|_| infra("invalid hash"))?,
                 size_bytes: m.size_bytes,
                 declared_origin: Label::parse(m.declared_origin)
-                    .map_err(|_| infra("origine non valida"))?,
+                    .map_err(|_| infra("invalid origin"))?,
                 approved_at: ts(&m.approved_at)?,
             },
             managed_path: ManagedRelPath::parse(m.managed_path.as_str())
-                .map_err(|_| infra("percorso gestito non valido"))?,
-            // TODO(F1): lo storage non conserva l'identità OS del file.
+                .map_err(|_| infra("invalid managed path"))?,
+            // TODO(F1): the storage does not keep the OS identity of the file.
             file_identity: None,
         }))
     }
@@ -220,7 +219,7 @@ impl SqliteStore {
 impl CatalogStore for SqliteStore {
     fn insert_vm(&mut self, vm: &VmRecord) -> Result<(), PublicError> {
         let config = serde_json::to_value(StoredConfig { core: vm.clone() })
-            .map_err(|_| infra("configurazione non serializzabile"))?;
+            .map_err(|_| infra("configuration not serializable"))?;
         let new = st::NewVm {
             name: vm.config.name.as_str().to_owned(),
             guest_os: snake(&vm.config.guest_os)?,
@@ -267,9 +266,9 @@ impl CatalogStore for SqliteStore {
     fn update_vm(&mut self, vm: &VmRecord, expected_revision: u64) -> Result<(), PublicError> {
         let sid = self.sid(vm.id)?;
         let config = serde_json::to_value(StoredConfig { core: vm.clone() })
-            .map_err(|_| infra("configurazione non serializzabile"))?;
-        // La revisione del catalogo segue quella del core: entrambe partono
-        // da 1 e crescono di 1 a ogni modifica.
+            .map_err(|_| infra("configuration not serializable"))?;
+        // The catalog revision follows the core's: both start at 1 and grow by
+        // 1 at every change.
         self.write(|tx| {
             tx.update_vm_config(&sid, expected_revision, CONFIG_VERSION, &config)
                 .map(|_| ())
@@ -290,8 +289,8 @@ impl CatalogStore for SqliteStore {
                 .map(|sid| tx.vm(sid))
                 .collect::<st::Result<Vec<_>>>()
         })?;
-        // Come in `open`: una riga illeggibile (formato estraneo o più vecchio)
-        // è segnalata e saltata, senza impedire l'avvio del servizio.
+        // As in `open`: an unreadable row (foreign or older format) is reported
+        // and skipped, without preventing the service from starting.
         Ok(rows
             .into_iter()
             .filter_map(|row| {
@@ -299,7 +298,7 @@ impl CatalogStore for SqliteStore {
                 Self::vm_record(row)
                     .inspect_err(|_| {
                         crate::diag!(
-                            "lightvm-service: VM {id} con configurazione illeggibile: ignorata"
+                            "lightvm-service: VM {id} with unreadable configuration: ignored"
                         );
                     })
                     .ok()
@@ -371,9 +370,9 @@ impl CatalogStore for SqliteStore {
         };
         let vm_id = self
             .core_id(row.vm_id)
-            .ok_or_else(|| infra("operazione di una VM sconosciuta"))?;
+            .ok_or_else(|| infra("operation of an unknown VM"))?;
         let kind: OperationKind =
-            from_snake(&row.kind).ok_or_else(|| infra("tipo di operazione sconosciuto"))?;
+            from_snake(&row.kind).ok_or_else(|| infra("unknown operation kind"))?;
         Ok(Some(OperationRecord {
             id: row.operation_id,
             vm_id,
@@ -392,7 +391,7 @@ impl CatalogStore for SqliteStore {
         let rec = st::RunRecord {
             run_id: run.id,
             vm_id: sid,
-            // Baseline, overlay e firmware per esecuzione arrivano con F3.
+            // Per-run baseline, overlay and firmware arrive with F3.
             baseline_id: None,
             overlay_disk_id: None,
             vars_fw_id: None,
@@ -415,13 +414,13 @@ impl CatalogStore for SqliteStore {
     }
 }
 
-/// Offset del primo descrittore di volume (settore 16 da 2048 byte) più il
-/// byte di tipo: lì ISO 9660 scrive `CD001`, UDF `BEA01` (ADR-0008).
+/// Offset of the first volume descriptor (sector 16 of 2048 bytes) plus the
+/// type byte: there ISO 9660 writes `CD001`, UDF `BEA01` (ADR-0008).
 const VOLUME_DESCRIPTOR_ID_OFFSET: u64 = 16 * 2048 + 1;
 
-/// `true` se il file ha la firma di un'immagine ottica ISO 9660 (anche ibrida
-/// con UDF) o UDF: l'unico formato ammesso per i supporti (CD-ROM in sola
-/// lettura nel guest).
+/// `true` if the file has the signature of an ISO 9660 (also hybrid with UDF)
+/// or UDF optical image: the only format allowed for media (read-only CD-ROM
+/// in the guest).
 pub fn is_optical_image(path: &Path) -> bool {
     use std::io::{Read as _, Seek as _, SeekFrom};
     let Ok(mut f) = std::fs::File::open(path) else {
@@ -433,19 +432,19 @@ pub fn is_optical_image(path: &Path) -> bool {
         && (&id == b"CD001" || &id == b"BEA01")
 }
 
-/// Ispettore delle copie gestite dei media: hash SHA-256 e dimensione letti
-/// dal file nel catalogo; il confronto con il registro è del core.
+/// Inspector of the managed media copies: SHA-256 hash and size read from the
+/// file in the catalog; the comparison with the registry is done by the core.
 ///
-/// TODO(F1-04): l'identità OS del file e l'apertura protetta contro reparse
-/// point spettano allo storage (nessuna API ancora); l'ispezione non avviene
-/// sullo stesso handle consegnato a QEMU.
+/// TODO(F1-04): the OS identity of the file and the open protected against
+/// reparse points belong to the storage (no API yet); the inspection does not
+/// happen on the same handle handed to QEMU.
 #[derive(Debug, Clone)]
 pub struct ManagedMediaInspector {
     root: std::path::PathBuf,
 }
 
 impl ManagedMediaInspector {
-    /// Ispettore per la radice del catalogo.
+    /// Inspector for the catalog root.
     pub fn new(root: std::path::PathBuf) -> Self {
         Self { root }
     }
@@ -462,21 +461,21 @@ impl vm_core::ports::MediaInspector for ManagedMediaInspector {
             .split('/')
             .fold(self.root.clone(), |p, c| p.join(c));
         let meta = std::fs::symlink_metadata(&path)
-            .map_err(|_| PublicError::not_found("copia gestita del supporto assente"))?;
+            .map_err(|_| PublicError::not_found("managed copy of the medium missing"))?;
         if !meta.is_file() {
             return Err(PublicError::permission_denied(
-                "copia gestita del supporto non è un file regolare",
+                "managed copy of the medium is not a regular file",
             ));
         }
         if !is_optical_image(&path) {
             return Err(PublicError::invalid_argument(
-                "il supporto non è un'immagine ISO 9660 o UDF",
+                "the medium is not an ISO 9660 or UDF image",
             ));
         }
         let hex = qemu_backend::probe::sha256_file(&path)
-            .map_err(|_| infra("lettura della copia gestita non riuscita"))?;
+            .map_err(|_| infra("reading the managed copy failed"))?;
         Ok(vm_core::media::ObservedMediaFacts {
-            sha256: Sha256Digest::parse_hex(&hex).map_err(|_| infra("hash non valido"))?,
+            sha256: Sha256Digest::parse_hex(&hex).map_err(|_| infra("invalid hash"))?,
             size_bytes: meta.len(),
             file_identity: None,
             read_only: meta.permissions().readonly(),
@@ -489,30 +488,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn firma_iso_9660_o_udf() {
+    fn iso_9660_or_udf_signature() {
         let d = std::env::temp_dir().join(format!(
-            "lightvm-iso-firma-{}-{}",
+            "lightvm-iso-signature-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_nanos())
         ));
         std::fs::create_dir_all(&d).unwrap();
-        let file = |nome: &str, id: &[u8]| {
+        let file = |name: &str, id: &[u8]| {
             let mut b = vec![0u8; 40 * 1024];
             let o = usize::try_from(VOLUME_DESCRIPTOR_ID_OFFSET).unwrap();
             b[o..o + id.len()].copy_from_slice(id);
-            let p = d.join(nome);
+            let p = d.join(name);
             std::fs::write(&p, b).unwrap();
             p
         };
         assert!(is_optical_image(&file("iso9660.iso", b"CD001")));
         assert!(is_optical_image(&file("udf.iso", b"BEA01")));
         assert!(!is_optical_image(&file("zip.iso", b"PK\x03\x04\x00")));
-        let corto = d.join("corto.iso");
-        std::fs::write(&corto, b"CD001").unwrap();
-        assert!(!is_optical_image(&corto));
-        assert!(!is_optical_image(&d.join("assente.iso")));
+        let short = d.join("short.iso");
+        std::fs::write(&short, b"CD001").unwrap();
+        assert!(!is_optical_image(&short));
+        assert!(!is_optical_image(&d.join("missing.iso")));
         let _ = std::fs::remove_dir_all(&d);
     }
 }

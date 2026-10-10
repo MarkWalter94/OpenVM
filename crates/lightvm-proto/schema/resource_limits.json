@@ -1,35 +1,35 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "ResourceLimits",
-  "description": "Limiti di risorse (globali o per VM). Tutti i campi sono massimi inclusivi.",
+  "description": "Resource limits (global or per VM). All fields are inclusive maxima.",
   "type": "object",
   "properties": {
     "max_agent_sessions": {
-      "description": "Sessioni agente contemporanee (MVP: 1).",
+      "description": "Concurrent agent sessions (MVP: 1).",
       "type": "integer",
       "format": "uint32",
       "minimum": 0
     },
     "max_disk_gib": {
-      "description": "Disco virtuale massimo per VM in GiB.",
+      "description": "Maximum virtual disk per VM in GiB.",
       "type": "integer",
       "format": "uint64",
       "minimum": 0
     },
     "max_memory_mib": {
-      "description": "Memoria guest massima per VM in MiB.",
+      "description": "Maximum guest memory per VM in MiB.",
       "type": "integer",
       "format": "uint64",
       "minimum": 0
     },
     "max_running_vms": {
-      "description": "VM in esecuzione contemporanea (MVP: 1).",
+      "description": "Concurrently running VMs (MVP: 1).",
       "type": "integer",
       "format": "uint32",
       "minimum": 0
     },
     "max_vcpus": {
-      "description": "vCPU massime per VM.",
+      "description": "Maximum vCPUs per VM.",
       "type": "integer",
       "format": "uint32",
       "minimum": 0

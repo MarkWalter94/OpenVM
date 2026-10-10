@@ -1025,8 +1025,8 @@ impl State {
                     self.egui_input.events.push(egui::Event::Copy);
                     return;
                 }
-                // LightVM (F1-13): nessuna lettura degli appunti dell'host sulla
-                // combinazione di incolla; il tasto prosegue come evento `Key`.
+                // LightVM (F1-13): no read of the host clipboard on the paste
+                // shortcut; the key continues as a `Key` event.
             }
 
             self.egui_input.events.push(egui::Event::Key {
@@ -1421,7 +1421,7 @@ fn is_copy_command(modifiers: egui::Modifiers, keycode: egui::Key) -> bool {
         || (cfg!(target_os = "windows") && modifiers.ctrl && keycode == egui::Key::Insert)
 }
 
-#[allow(dead_code)] // LightVM (F1-13): il ramo di incolla è rimosso.
+#[allow(dead_code)] // LightVM (F1-13): the paste branch is removed.
 fn is_paste_command(modifiers: egui::Modifiers, keycode: egui::Key) -> bool {
     keycode == egui::Key::Paste
         || (modifiers.command && keycode == egui::Key::V)

@@ -1,14 +1,14 @@
-//! Preparazione di un'esecuzione sul disco dell'host (F1-05, F1-08, F1-12):
-//! directory dell'esecuzione e directory privata dei socket con ACL esplicita
-//! solo-utente, copia per esecuzione delle variabili UEFI, creazione del disco
-//! principale e dell'overlay con `qemu-img`, risorse dell'host (memoria e
-//! spazio libero) misurate invece che dichiarate.
+//! Preparation of a run on the host disk (F1-05, F1-08, F1-12):
+//! run directory and private socket directory with an explicit
+//! user-only ACL, per-run copy of the UEFI variables, creation of the main
+//! disk and of the overlay with `qemu-img`, host resources (memory and
+//! free space) measured rather than declared.
 //!
-//! Tutti i percorsi sono [`ManagedPath`] forniti dal proprietario dello storage;
-//! nessuna funzione sovrascrive un file esistente. `qemu-img` è eseguito senza
-//! shell, con ambiente ridotto e timeout ([`crate::probe::run_capture`]); il
-//! binario va verificato prima con [`crate::probe::verify_approved_binary`]
-//! (lo fa [`crate::probe::probe_host`]).
+//! All paths are [`ManagedPath`]s supplied by the storage owner;
+//! no function overwrites an existing file. `qemu-img` runs without a
+//! shell, with a reduced environment and a timeout ([`crate::probe::run_capture`]); the
+//! binary must first be verified with [`crate::probe::verify_approved_binary`]
+//! ([`crate::probe::probe_host`] does it).
 
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -19,18 +19,18 @@ use crate::error::{BackendError, Result};
 use crate::paths::ManagedPath;
 use crate::probe::{run_capture, stderr_excerpt};
 
-/// Dimensione minima di un disco creato dal backend.
+/// Minimum size of a disk created by the backend.
 pub const MIN_DISK_MIB: u64 = 16;
-/// Dimensione massima di un disco creato dal backend (2 TiB).
+/// Maximum size of a disk created by the backend (2 TiB).
 pub const MAX_DISK_MIB: u64 = 2 * 1024 * 1024;
 
-/// Timeout predefinito di `qemu-img create`.
+/// Default timeout of `qemu-img create`.
 pub const QEMU_IMG_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn refuse_existing(field: &'static str, p: &ManagedPath) -> Result<()> {
     if std::fs::symlink_metadata(p.as_path()).is_ok() {
         return Err(BackendError::StateConflict(format!(
-            "`{field}` esiste già: il backend non sovrascrive file"
+            "`{field}` already exists: the backend does not overwrite files"
         )));
     }
     Ok(())
@@ -40,7 +40,7 @@ fn qemu_img_create(qemu_img: &ManagedPath, args: &[&str], timeout: Duration) -> 
     let o = run_capture(qemu_img.as_path(), args, timeout)?;
     if o.code != Some(0) {
         return Err(BackendError::Io(std::io::Error::other(format!(
-            "qemu-img create uscito con {:?}: {}",
+            "qemu-img create exited with {:?}: {}",
             o.code,
             stderr_excerpt(&o.stderr)
         ))));
@@ -48,8 +48,8 @@ fn qemu_img_create(qemu_img: &ManagedPath, args: &[&str], timeout: Duration) -> 
     Ok(())
 }
 
-/// Crea il disco principale vuoto (`qemu-img create -f <formato>`), di
-/// `size_mib` MiB. Rifiuta file esistenti e dimensioni fuori da
+/// Creates the empty main disk (`qemu-img create -f <format>`), of
+/// `size_mib` MiB. Rejects existing files and sizes outside
 /// [`MIN_DISK_MIB`]..=[`MAX_DISK_MIB`].
 pub fn create_disk(
     qemu_img: &ManagedPath,
@@ -60,7 +60,7 @@ pub fn create_disk(
 ) -> Result<()> {
     if !(MIN_DISK_MIB..=MAX_DISK_MIB).contains(&size_mib) {
         return Err(BackendError::ResourceLimit(format!(
-            "disco di {size_mib} MiB fuori dall'intervallo {MIN_DISK_MIB}..={MAX_DISK_MIB}"
+            "disk of {size_mib} MiB outside the range {MIN_DISK_MIB}..={MAX_DISK_MIB}"
         )));
     }
     refuse_existing("disk", disk)?;
@@ -79,8 +79,8 @@ pub fn create_disk(
     )
 }
 
-/// Dimensione virtuale in byte di un disco (`qemu-img info --output=json`,
-/// formato esplicito: nessuna rilevazione automatica).
+/// Virtual size in bytes of a disk (`qemu-img info --output=json`,
+/// explicit format: no automatic detection).
 pub fn disk_virtual_size(
     qemu_img: &ManagedPath,
     disk: &ManagedPath,
@@ -100,7 +100,7 @@ pub fn disk_virtual_size(
     )?;
     if o.code != Some(0) {
         return Err(BackendError::Io(std::io::Error::other(format!(
-            "qemu-img info uscito con {:?}: {}",
+            "qemu-img info exited with {:?}: {}",
             o.code,
             stderr_excerpt(&o.stderr)
         ))));
@@ -110,14 +110,14 @@ pub fn disk_virtual_size(
     v.get("virtual-size")
         .and_then(serde_json::Value::as_u64)
         .ok_or_else(|| {
-            BackendError::Io(std::io::Error::other("qemu-img info: virtual-size assente"))
+            BackendError::Io(std::io::Error::other("qemu-img info: virtual-size missing"))
         })
 }
 
-/// Porta il disco a `size_mib` MiB (`qemu-img resize`). Solo ingrandimento:
-/// una dimensione minore di quella attuale è rifiutata (perdita di dati nel
-/// guest); una dimensione uguale non esegue nulla. Restituisce `true` se il
-/// disco è stato ingrandito.
+/// Brings the disk to `size_mib` MiB (`qemu-img resize`). Growing only:
+/// a size smaller than the current one is rejected (data loss in the
+/// guest); an equal size does nothing. Returns `true` if the
+/// disk was grown.
 pub fn grow_disk(
     qemu_img: &ManagedPath,
     disk: &ManagedPath,
@@ -127,18 +127,18 @@ pub fn grow_disk(
 ) -> Result<bool> {
     if !(MIN_DISK_MIB..=MAX_DISK_MIB).contains(&size_mib) {
         return Err(BackendError::ResourceLimit(format!(
-            "disco di {size_mib} MiB fuori dall'intervallo {MIN_DISK_MIB}..={MAX_DISK_MIB}"
+            "disk of {size_mib} MiB outside the range {MIN_DISK_MIB}..={MAX_DISK_MIB}"
         )));
     }
-    let attuale = disk_virtual_size(qemu_img, disk, format, timeout)?;
-    let richiesto = size_mib << 20;
-    if richiesto < attuale {
+    let current = disk_virtual_size(qemu_img, disk, format, timeout)?;
+    let requested = size_mib << 20;
+    if requested < current {
         return Err(BackendError::invalid(
             "disk",
-            "riduzione del disco non supportata: si può solo ingrandire",
+            "shrinking the disk is not supported: it can only grow",
         ));
     }
-    if richiesto == attuale {
+    if requested == current {
         return Ok(false);
     }
     let size = format!("{size_mib}M");
@@ -156,7 +156,7 @@ pub fn grow_disk(
     )?;
     if o.code != Some(0) {
         return Err(BackendError::Io(std::io::Error::other(format!(
-            "qemu-img resize uscito con {:?}: {}",
+            "qemu-img resize exited with {:?}: {}",
             o.code,
             stderr_excerpt(&o.stderr)
         ))));
@@ -164,9 +164,9 @@ pub fn grow_disk(
     Ok(true)
 }
 
-/// Crea un overlay qcow2 su `base` con formato del backing esplicito
-/// (`-F`), senza rilevazione automatica. Il riferimento al backing è il
-/// percorso assoluto di `base`.
+/// Creates a qcow2 overlay on `base` with an explicit backing format
+/// (`-F`), without automatic detection. The backing reference is the
+/// absolute path of `base`.
 pub fn create_overlay(
     qemu_img: &ManagedPath,
     base: &ManagedPath,
@@ -176,7 +176,10 @@ pub fn create_overlay(
 ) -> Result<()> {
     refuse_existing("overlay", overlay)?;
     if !base.as_path().is_file() {
-        return Err(BackendError::invalid("base", "il disco base non esiste"));
+        return Err(BackendError::invalid(
+            "base",
+            "the base disk does not exist",
+        ));
     }
     qemu_img_create(
         qemu_img,
@@ -195,8 +198,8 @@ pub fn create_overlay(
     )
 }
 
-/// Copia per esecuzione delle variabili UEFI dal modello (pflash1). Rifiuta
-/// una destinazione esistente e verifica la dimensione della copia.
+/// Per-run copy of the UEFI variables from the template (pflash1). Rejects
+/// an existing destination and verifies the size of the copy.
 pub fn copy_firmware_vars(template: &ManagedPath, dest: &ManagedPath) -> Result<u64> {
     refuse_existing("firmware_vars", dest)?;
     let expected = std::fs::metadata(template.as_path())?.len();
@@ -204,18 +207,18 @@ pub fn copy_firmware_vars(template: &ManagedPath, dest: &ManagedPath) -> Result<
     if copied != expected {
         let _ = std::fs::remove_file(dest.as_path());
         return Err(BackendError::Io(std::io::Error::other(
-            "copia delle variabili UEFI incompleta",
+            "incomplete copy of the UEFI variables",
         )));
     }
     Ok(copied)
 }
 
-/// Esito della preparazione delle directory.
+/// Outcome of the directory preparation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RunDirs {
-    /// SID dell'utente a cui è riservata la directory privata.
+    /// SID of the user the private directory is reserved to.
     pub owner_sid: String,
-    /// Voci dell'ACL della directory privata dopo la restrizione (attesa 1).
+    /// ACL entries of the private directory after the restriction (expected 1).
     pub private_acl_entries: usize,
 }
 
@@ -224,7 +227,7 @@ fn system32(exe: &str) -> std::path::PathBuf {
     Path::new(&root).join("System32").join(exe)
 }
 
-/// SID dell'utente corrente (`whoami /user`), forma `S-1-...`.
+/// SID of the current user (`whoami /user`), form `S-1-...`.
 fn current_user_sid() -> Result<String> {
     let o = run_capture(
         &system32("whoami.exe"),
@@ -236,25 +239,25 @@ fn current_user_sid() -> Result<String> {
         .map(|f| f.trim().trim_matches('"'))
         .find(|f| f.starts_with("S-1-"))
         .map(str::to_owned)
-        .ok_or_else(|| BackendError::Io(std::io::Error::other("SID dell'utente non rilevato")))
+        .ok_or_else(|| BackendError::Io(std::io::Error::other("user SID not detected")))
 }
 
-/// Crea la directory dell'esecuzione e la directory privata dei socket QMP/VNC
-/// e degli screendump; alla directory privata toglie l'ereditarietà e
-/// concede il controllo completo al solo utente corrente (per SID), come
-/// verificato in F0-02 §4.3, senza elevazione. Restituisce il SID e il numero
-/// di voci dell'ACL risultante; con più di una voce l'operazione fallisce.
+/// Creates the run directory and the private directory for the QMP/VNC sockets
+/// and the screendumps; on the private directory it removes inheritance and
+/// grants full control to the current user only (by SID), as
+/// verified in F0-02 §4.3, without elevation. Returns the SID and the number
+/// of entries of the resulting ACL; with more than one entry the operation fails.
 ///
-/// Usa `icacls.exe` di `%SystemRoot%\System32` (nessuna API `unsafe`
-/// aggiuntiva). Il rifiuto di un altro utente non è provato qui (F0-02: nessun
-/// secondo account disponibile).
+/// Uses `icacls.exe` from `%SystemRoot%\System32` (no additional `unsafe`
+/// API). Refusal of another user is not tested here (F0-02: no
+/// second account available).
 pub fn prepare_run_dirs(run_dir: &ManagedPath, private_dir: &ManagedPath) -> Result<RunDirs> {
     std::fs::create_dir_all(run_dir.as_path())?;
     std::fs::create_dir_all(private_dir.as_path())?;
     if !cfg!(windows) {
         return Err(BackendError::Unsupported {
-            what: "ACL della directory privata su questo sistema".into(),
-            hint: "su Linux usare permessi 0700 (non ancora implementato)".into(),
+            what: "private directory ACL on this system".into(),
+            hint: "on Linux use 0700 permissions (not yet implemented)".into(),
         });
     }
     let sid = current_user_sid()?;
@@ -271,14 +274,14 @@ pub fn prepare_run_dirs(run_dir: &ManagedPath, private_dir: &ManagedPath) -> Res
         .map_err(BackendError::Spawn)?;
     if !st.success() {
         return Err(BackendError::Io(std::io::Error::other(format!(
-            "icacls sulla directory privata uscito con {:?}",
+            "icacls on the private directory exited with {:?}",
             st.code()
         ))));
     }
     let entries = acl_entries(private_dir.as_path())?;
     if entries != 1 {
         return Err(BackendError::StateConflict(format!(
-            "ACL della directory privata con {entries} voci (attesa 1)"
+            "private directory ACL with {entries} entries (expected 1)"
         )));
     }
     Ok(RunDirs {
@@ -287,27 +290,27 @@ pub fn prepare_run_dirs(run_dir: &ManagedPath, private_dir: &ManagedPath) -> Res
     })
 }
 
-/// Numero di voci ACE riportate da `icacls <dir>` (righe con `:(`).
+/// Number of ACE entries reported by `icacls <dir>` (lines with `:(`).
 fn acl_entries(dir: &Path) -> Result<usize> {
     let dir_s = dir
         .to_str()
-        .ok_or_else(|| BackendError::invalid("path", "percorso non UTF-8"))?;
+        .ok_or_else(|| BackendError::invalid("path", "path is not UTF-8"))?;
     let o = run_capture(&system32("icacls.exe"), &[dir_s], Duration::from_secs(10))?;
     Ok(o.stdout.lines().filter(|l| l.contains(":(")).count())
 }
 
-/// Risorse misurate dell'host.
+/// Measured host resources.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HostResources {
-    /// Memoria fisica totale in byte.
+    /// Total physical memory in bytes.
     pub total_memory_bytes: u64,
-    /// Memoria fisica disponibile in byte al momento della misura.
+    /// Physical memory available in bytes at measurement time.
     pub available_memory_bytes: u64,
-    /// Spazio libero disponibile all'utente sul volume della directory indicata.
+    /// Free space available to the user on the volume of the given directory.
     pub free_disk_bytes: u64,
 }
 
-/// Misura memoria fisica e spazio libero sul volume di `storage_dir`.
+/// Measures physical memory and free space on the volume of `storage_dir`.
 pub fn host_resources(storage_dir: &ManagedPath) -> Result<HostResources> {
     #[cfg(windows)]
     {
@@ -323,8 +326,8 @@ pub fn host_resources(storage_dir: &ManagedPath) -> Result<HostResources> {
     {
         let _ = storage_dir;
         Err(BackendError::Unsupported {
-            what: "misura delle risorse dell'host su questo sistema".into(),
-            hint: "implementazione Linux non ancora presente".into(),
+            what: "host resource measurement on this system".into(),
+            hint: "Linux implementation not yet available".into(),
         })
     }
 }
@@ -342,7 +345,7 @@ mod tests {
     }
 
     #[test]
-    fn directory_privata_solo_utente() {
+    fn private_directory_user_only() {
         let base = tmp_dir("dirs");
         let run = base.join_file("run").unwrap();
         let p = base.join_file("priv").unwrap();
@@ -354,7 +357,7 @@ mod tests {
     }
 
     #[test]
-    fn copia_vars_senza_sovrascrivere() {
+    fn copy_vars_without_overwriting() {
         let base = tmp_dir("vars");
         std::fs::create_dir_all(base.as_path()).unwrap();
         let t = base.join_file("template.fd").unwrap();
@@ -369,7 +372,7 @@ mod tests {
     }
 
     #[test]
-    fn risorse_misurate() {
+    fn measured_resources() {
         let d = std::env::temp_dir().join("lightvm-qemu-backend-tests");
         std::fs::create_dir_all(&d).unwrap();
         let r = host_resources(&ManagedPath::verify(d).unwrap()).unwrap();
@@ -379,7 +382,7 @@ mod tests {
     }
 
     #[test]
-    fn dimensione_disco_validata() {
+    fn disk_size_validated() {
         let base = tmp_dir("disk");
         let img = base.join_file("qemu-img.exe").unwrap();
         let d = base.join_file("d.qcow2").unwrap();

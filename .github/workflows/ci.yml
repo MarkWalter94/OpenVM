@@ -1,25 +1,25 @@
-# CI LightVM (ROADMAP sezione 10 F1, sezione 13 "a ogni modifica"; backlog
-# F1-02 in docs/RELEASE_PLAN.md; procedura e limiti in
+# LightVM CI (ROADMAP section 10 F1, section 13 "on every change"; backlog
+# F1-02 in docs/RELEASE_PLAN.md; procedure and limits in
 # docs/verification/F1-08-ci.md).
 #
-# Cosa verifica: formattazione, lint (anche con un solo backend glow o wgpu),
-# build `--locked`, test headless (IPC del servizio, test UI egui_kittest, spike
-# MCP su stdio), meccanismi di processo indipendenti dall'acceleratore (Job
-# Object su Windows; pidfd, gruppi e delega cgroup su Linux), rendering
-# software (llvmpipe su Xvfb, Wayland headless, WARP), messaggio chiaro senza
-# acceleratore (solo parte simulata), schemi JSON, licenze e advisory.
+# What it verifies: formatting, lint (also with a single glow or wgpu backend),
+# `--locked` build, headless tests (service IPC, egui_kittest UI tests, MCP
+# spike over stdio), accelerator-independent process mechanisms (Job
+# Object on Windows; pidfd, groups and cgroup delegation on Linux), software
+# rendering (llvmpipe on Xvfb, headless Wayland, WARP), clear message without
+# an accelerator (simulated part only), JSON schemas, licences and advisories.
 #
-# Cosa NON verifica: nessun runner ha un acceleratore verificabile (WHPX/KVM)
-# né il QEMU approvato (ADR-0010). Boot del guest, QMP reale, console reale,
-# Emergency Stop su QEMU, limiti di risorse sull'albero QEMU e i 20 cicli
-# start/stop del criterio di uscita F1 restano sui runner fisici controllati
-# (docs/verification/F0-07-linux-kvm.md, "Proposta: CI minima per F1"). I test
-# che richiedono QEMU reale sono `#[ignore]`.
+# What it does NOT verify: no runner has a verifiable accelerator (WHPX/KVM)
+# nor the approved QEMU (ADR-0010). Guest boot, real QMP, real console,
+# Emergency Stop on QEMU, resource limits on the QEMU tree and the 20
+# start/stop cycles of the F1 exit criterion remain on the controlled physical
+# runners (docs/verification/F0-07-linux-kvm.md, "Proposta: CI minima per F1").
+# Tests that require a real QEMU are `#[ignore]`.
 #
-# Nessun segreto, nessun accesso al laboratorio: permessi di sola lettura, gira
-# anche sulle PR da fork. Solo azioni fissate a commit SHA; nessuna azione di
-# terze parti oltre a checkout e cache (l'ambiente MSVC si carica con
-# vswhere/vcvars64, già presenti sull'immagine Windows).
+# No secrets, no lab access: read-only permissions, it also runs on PRs
+# from forks. Only actions pinned to a commit SHA; no third-party actions
+# besides checkout and cache (the MSVC environment is loaded with
+# vswhere/vcvars64, already present on the Windows image).
 
 name: CI
 
@@ -41,17 +41,17 @@ env:
   CARGO_INCREMENTAL: "0"
   CARGO_NET_RETRY: "10"
   RUST_BACKTRACE: "1"
-  # Pacchetti apt (Ubuntu). Build: compilatore C per `ring` e SQLite incluso.
+  # apt packages (Ubuntu). Build: C compiler for `ring` and bundled SQLite.
   APT_BUILD: build-essential pkg-config
-  # Librerie caricate con dlopen da eframe/winit/wgpu (F1-14,
-  # docs/verification/F1-07-licenze-packaging.md): senza libxkbcommon-x11-0 il
-  # percorso X11 va in panico (F0-07, D-17).
+  # Libraries loaded with dlopen by eframe/winit/wgpu (F1-14,
+  # docs/verification/F1-07-licences-packaging.md): without libxkbcommon-x11-0
+  # the X11 path panics (F0-07, D-17).
   APT_RUNTIME: >-
     libxkbcommon0 libxkbcommon-x11-0
     libwayland-client0 libwayland-cursor0 libwayland-egl1
     libx11-6 libx11-xcb1 libxcursor1 libxrandr2 libxi6 libxcb1
     libegl1 libgl1 libvulkan1
-  # Rendering software per gli smoke: Mesa llvmpipe/lavapipe, Xvfb, Weston.
+  # Software rendering for the smoke tests: Mesa llvmpipe/lavapipe, Xvfb, Weston.
   APT_SOFTWARE_RENDER: >-
     libegl-mesa0 libgl1-mesa-dri mesa-vulkan-drivers
     xvfb xauth weston
@@ -62,8 +62,8 @@ defaults:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Lint: formattazione e clippy sul workspace e con un solo backend di
-  # rendering (glow o wgpu), per mantenere compilabili i ripieghi (ADR-0014).
+  # Lint: formatting and clippy on the workspace and with a single rendering
+  # backend (glow or wgpu), to keep the fallbacks compilable (ADR-0014).
   lint:
     name: lint (fmt, clippy, glow/wgpu)
     runs-on: ubuntu-latest
@@ -72,12 +72,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Toolchain da rust-toolchain.toml
+      - name: Toolchain from rust-toolchain.toml
         run: |
           channel="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
           rustup toolchain install "$channel" --profile minimal --component rustfmt,clippy --no-self-update
           rustc -Vv
-      - name: Pacchetti apt
+      - name: apt packages
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends $APT_BUILD $APT_RUNTIME
@@ -88,71 +88,71 @@ jobs:
         run: cargo fmt --all --check
       - name: cargo clippy (workspace)
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: cargo clippy (UI solo glow)
+      - name: cargo clippy (UI glow only)
         run: cargo clippy -p lightvm-desktop --no-default-features --features glow --all-targets --locked -- -D warnings
-      - name: cargo clippy (UI solo wgpu)
+      - name: cargo clippy (UI wgpu only)
         run: cargo clippy -p lightvm-desktop --no-default-features --features wgpu --all-targets --locked -- -D warnings
 
   # ---------------------------------------------------------------------------
-  # Windows: ambiente MSVC esplicito (F0-01 §4.1, I-7), build, test, kittest.
+  # Windows: explicit MSVC environment (F0-01 §4.1, I-7), build, test, kittest.
   build-test-windows:
-    name: Windows (MSVC) build e test
+    name: Windows (MSVC) build and test
     runs-on: windows-latest
     timeout-minutes: 75
     defaults:
       run:
-        # pwsh e non bash: in Git Bash `/usr/bin/link` può precedere link.exe
-        # di MSVC nel PATH.
+        # pwsh and not bash: in Git Bash `/usr/bin/link` can precede MSVC's
+        # link.exe in PATH.
         shell: pwsh
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Toolchain da rust-toolchain.toml
+      - name: Toolchain from rust-toolchain.toml
         run: |
           $channel = (Select-String -Path rust-toolchain.toml -Pattern '^channel = "(.*)"').Matches[0].Groups[1].Value
           rustup toolchain install $channel --profile minimal --component rustfmt,clippy --no-self-update
           rustc -Vv
-      - name: Ambiente MSVC esplicito (vcvars64)
+      - name: Explicit MSVC environment (vcvars64)
         run: |
           $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
           $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          if (-not $vs) { throw 'Visual Studio con gli strumenti VC x64 non trovato' }
+          if (-not $vs) { throw 'Visual Studio with the VC x64 tools not found' }
           $vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
           $vars = cmd /c "`"$vcvars`" >nul && set"
-          if ($LASTEXITCODE -ne 0) { throw "vcvars64.bat fallito: $LASTEXITCODE" }
+          if ($LASTEXITCODE -ne 0) { throw "vcvars64.bat failed: $LASTEXITCODE" }
           $keep = '^(PATH|INCLUDE|LIB|LIBPATH|VCINSTALLDIR|VCToolsInstallDir|VCToolsRedistDir|VCToolsVersion|VSINSTALLDIR|VisualStudioVersion|WindowsSdkDir|WindowsSdkBinPath|WindowsSdkVerBinPath|WindowsSDKLibVersion|WindowsSDKVersion|WindowsLibPath|UCRTVersion|UniversalCRTSdkDir|ExtensionSdkDir|Platform|VSCMD_ARG_[A-Z_]+)='
           foreach ($line in $vars) {
             if ($line -match $keep) { Add-Content -Path $env:GITHUB_ENV -Value $line -Encoding utf8 }
           }
-      - name: Verifica del linker MSVC
+      - name: MSVC linker check
         run: |
           $link = (Get-Command link.exe -ErrorAction Stop).Source
           Write-Output "link.exe: $link"
-          if ($link -notmatch '\\VC\\Tools\\MSVC\\') { throw "link.exe non è quello di MSVC: $link" }
+          if ($link -notmatch '\\VC\\Tools\\MSVC\\') { throw "link.exe is not the MSVC one: $link" }
           Write-Output "LIB=$env:LIB"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: windows
-      - name: cargo clippy (codice specifico Windows)
+      - name: cargo clippy (Windows-specific code)
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: cargo build --locked
         run: cargo build --workspace --all-targets --locked
       - name: cargo test
         run: cargo test --workspace --locked --no-fail-fast
-      # Già inclusi sopra; ripetuti per avere un esito distinto nel log.
-      - name: Test UI headless egui_kittest (supervisor simulato)
+      # Already included above; repeated to get a distinct outcome in the log.
+      - name: Headless egui_kittest UI tests (simulated supervisor)
         run: cargo test --locked -p lightvm-desktop --test kittest_ui
-      - name: Spike MCP su stdio (F1-06)
+      - name: MCP spike over stdio (F1-06)
         run: cargo test --locked -p lightvm-mcp
       - name: cargo build --release (UI)
         run: cargo build --release --locked -p lightvm-desktop
 
-  # Job Object e supervisione dei processi su Windows (F0-06, F1-05), senza
-  # acceleratore. I filtri seguono i moduli attuali di qemu-backend; i test
-  # Job Object con figli reali vanno aggiunti qui quando F1-05 li introduce.
-  processi-windows:
-    name: processi Windows (Job Object)
+  # Job Object and process supervision on Windows (F0-06, F1-05), without
+  # an accelerator. The filters follow the current qemu-backend modules; Job
+  # Object tests with real children are to be added here when F1-05 introduces them.
+  processes-windows:
+    name: Windows processes (Job Object)
     runs-on: windows-latest
     timeout-minutes: 45
     defaults:
@@ -162,47 +162,47 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Toolchain da rust-toolchain.toml
+      - name: Toolchain from rust-toolchain.toml
         run: |
           $channel = (Select-String -Path rust-toolchain.toml -Pattern '^channel = "(.*)"').Matches[0].Groups[1].Value
           rustup toolchain install $channel --profile minimal --no-self-update
-      - name: Ambiente MSVC esplicito (vcvars64)
+      - name: Explicit MSVC environment (vcvars64)
         run: |
           $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
           $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          if (-not $vs) { throw 'Visual Studio con gli strumenti VC x64 non trovato' }
+          if (-not $vs) { throw 'Visual Studio with the VC x64 tools not found' }
           $vars = cmd /c "`"$(Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat')`" >nul && set"
-          if ($LASTEXITCODE -ne 0) { throw "vcvars64.bat fallito: $LASTEXITCODE" }
+          if ($LASTEXITCODE -ne 0) { throw "vcvars64.bat failed: $LASTEXITCODE" }
           $keep = '^(PATH|INCLUDE|LIB|LIBPATH|VCINSTALLDIR|VCToolsInstallDir|VCToolsVersion|VSINSTALLDIR|WindowsSdkDir|WindowsSDKLibVersion|WindowsSDKVersion|WindowsLibPath|UCRTVersion|UniversalCRTSdkDir|Platform|VSCMD_ARG_[A-Z_]+)='
           foreach ($line in $vars) {
             if ($line -match $keep) { Add-Content -Path $env:GITHUB_ENV -Value $line -Encoding utf8 }
           }
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: processi-windows
+          shared-key: processes-windows
       - name: Job Object, quoting, share mode (qemu-backend)
         run: "cargo test --locked -p qemu-backend --lib --no-fail-fast -- sys::windows:: process:: storage_guard::"
-      - name: Supervisor, pipe con ACL, morte del genitore (lightvm-service)
+      - name: Supervisor, pipe with ACL, parent death (lightvm-service)
         run: cargo test --locked -p lightvm-service --no-fail-fast
 
   # ---------------------------------------------------------------------------
-  # Ubuntu: toolchain standard (non zig come in WSL, F0-07), build e test.
+  # Ubuntu: standard toolchain (not zig as in WSL, F0-07), build and test.
   build-test-linux:
-    name: Ubuntu build e test
+    name: Ubuntu build and test
     runs-on: ubuntu-latest
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Toolchain da rust-toolchain.toml
+      - name: Toolchain from rust-toolchain.toml
         run: |
           channel="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
           rustup toolchain install "$channel" --profile minimal --no-self-update
           rustc -Vv
-      # Mesa (lavapipe) anche qui: le istantanee egui_kittest usano wgpu e il
-      # runner non ha GPU.
-      - name: Pacchetti apt
+      # Mesa (lavapipe) here too: the egui_kittest snapshots use wgpu and the
+      # runner has no GPU.
+      - name: apt packages
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends $APT_BUILD $APT_RUNTIME $APT_SOFTWARE_RENDER
@@ -213,53 +213,53 @@ jobs:
         run: cargo build --workspace --all-targets --locked
       - name: cargo test
         run: cargo test --workspace --locked --no-fail-fast
-      - name: Test UI headless egui_kittest (supervisor simulato)
+      - name: Headless egui_kittest UI tests (simulated supervisor)
         run: cargo test --locked -p lightvm-desktop --test kittest_ui
-      - name: Spike MCP su stdio (F1-06)
+      - name: MCP spike over stdio (F1-06)
         run: cargo test --locked -p lightvm-mcp
       - name: cargo build --release (UI)
         run: cargo build --release --locked -p lightvm-desktop
 
-  # Meccanismi di processo Linux senza acceleratore (ADR-0015 parte A, F1-15).
-  # La parte cgroup richiede una sessione systemd utente: se manca, il probe
-  # stampa NON_ESEGUITO ed esce 0 (registrato come "non eseguito", non come
-  # superato).
-  processi-linux:
-    name: processi Linux (pidfd, gruppi, cgroup delegato)
+  # Linux process mechanisms without an accelerator (ADR-0015 part A, F1-15).
+  # The cgroup part requires a systemd user session: if missing, the probe
+  # prints NOT_RUN and exits 0 (recorded as "not run", not as
+  # passed).
+  processes-linux:
+    name: Linux processes (pidfd, groups, delegated cgroup)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Toolchain da rust-toolchain.toml
+      - name: Toolchain from rust-toolchain.toml
         run: |
           channel="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
           rustup toolchain install "$channel" --profile minimal --no-self-update
-      - name: Pacchetti apt
+      - name: apt packages
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends $APT_BUILD
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: processi-linux
-      - name: Ambiente (kernel, cgroup, systemd)
+          shared-key: processes-linux
+      - name: Environment (kernel, cgroup, systemd)
         run: |
           uname -r
           stat -fc %T /sys/fs/cgroup
           cat /sys/fs/cgroup/cgroup.controllers
           systemctl --version | head -1
           ls -l /dev/kvm 2>&1 || true
-      - name: Supervisor e morte del genitore con pidfd (lightvm-service)
+      - name: Supervisor and parent death with pidfd (lightvm-service)
         run: cargo test --locked -p lightvm-service --no-fail-fast
-      # Spike F0 (non codice di prodotto): PDEATHSIG, pidfd, kill(-pgid), crash
-      # del supervisor. Da sostituire con i test del supervisor reale.
-      - name: Spike f0-linux-procs processi
-        run: cargo run --locked --release -p f0-linux-procs -- processi --samples 10
-      # Sessione systemd utente: sui runner ospitati il gestore utente parte
-      # solo con il linger. `sudo` serve soltanto a preparare l'ambiente; il
-      # probe gira senza privilegi.
-      - name: Sessione systemd utente (linger)
+      # Spike F0 (not product code): PDEATHSIG, pidfd, kill(-pgid), supervisor
+      # crash. To be replaced by the real supervisor tests.
+      - name: Spike f0-linux-procs processes
+        run: cargo run --locked --release -p f0-linux-procs -- processes --samples 10
+      # systemd user session: on hosted runners the user manager starts
+      # only with linger. `sudo` is only used to prepare the environment; the
+      # probe runs without privileges.
+      - name: systemd user session (linger)
         run: |
           sudo loginctl enable-linger "$USER" || true
           uid="$(id -u)"
@@ -267,19 +267,19 @@ jobs:
           if [ -S "/run/user/$uid/bus" ]; then
             echo "XDG_RUNTIME_DIR=/run/user/$uid" >> "$GITHUB_ENV"
             echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" >> "$GITHUB_ENV"
-            echo "bus utente disponibile"
+            echo "user bus available"
           else
-            echo "::warning::sessione systemd utente non disponibile: parte cgroup non eseguita"
+            echo "::warning::systemd user session not available: cgroup part not run"
           fi
-      # Probe F1-15: scope con Delegate=yes creato via D-Bus StartTransientUnit
-      # (senza systemd-run), sotto-cgroup per la VM, limiti e cgroup.kill.
-      # Figli di prova `sleep`, non QEMU. Stesso testo provato in WSL2
+      # Probe F1-15: scope with Delegate=yes created via D-Bus StartTransientUnit
+      # (without systemd-run), sub-cgroup for the VM, limits and cgroup.kill.
+      # Test children are `sleep`, not QEMU. Same script tried in WSL2
       # (docs/verification/F1-08-ci.md).
-      - name: Probe delega cgroup (StartTransientUnit)
+      - name: cgroup delegation probe (StartTransientUnit)
         run: |
           set -u
           if ! busctl --user status >/dev/null 2>&1; then
-            echo "NON_ESEGUITO: nessun bus utente raggiungibile"
+            echo "NOT_RUN: no reachable user bus"
             exit 0
           fi
           sleep 300 & SUP=$!
@@ -294,76 +294,76 @@ jobs:
             case "$CG" in *"$UNIT") break;; esac
             sleep 0.1
           done
-          case "$CG" in *"$UNIT") ;; *) echo "processo non spostato nello scope: $CG"; exit 1;; esac
+          case "$CG" in *"$UNIT") ;; *) echo "process not moved into the scope: $CG"; exit 1;; esac
           D="/sys/fs/cgroup$CG"
           systemctl --user show -p Delegate -p ActiveState "$UNIT"
           echo "controller: $(cat "$D/cgroup.controllers")"
           mkdir "$D/supervisor" "$D/vm"
           echo "$SUP" > "$D/supervisor/cgroup.procs"
           echo "$VM" > "$D/vm/cgroup.procs"
-          echo "+memory +pids +cpu" > "$D/cgroup.subtree_control" || echo "::warning::controller non tutti delegati: $(cat "$D/cgroup.controllers")"
+          echo "+memory +pids +cpu" > "$D/cgroup.subtree_control" || echo "::warning::not all controllers delegated: $(cat "$D/cgroup.controllers")"
           echo "subtree_control: $(cat "$D/cgroup.subtree_control")"
           [ -f "$D/vm/memory.max" ] && echo 64M > "$D/vm/memory.max"
           [ -f "$D/vm/pids.max" ] && echo 16 > "$D/vm/pids.max"
           echo 1 > "$D/vm/cgroup.kill"
           for _ in $(seq 1 500); do grep -q "populated 0" "$D/vm/cgroup.events" && break; sleep 0.002; done
-          grep -q "populated 0" "$D/vm/cgroup.events" || { echo "vm/ ancora popolato"; exit 1; }
-          if kill -0 "$VM" 2>/dev/null; then echo "vm finta ancora viva"; exit 1; fi
-          kill -0 "$SUP" || { echo "scope perso"; exit 1; }
+          grep -q "populated 0" "$D/vm/cgroup.events" || { echo "vm/ still populated"; exit 1; }
+          if kill -0 "$VM" 2>/dev/null; then echo "fake vm still alive"; exit 1; fi
+          kill -0 "$SUP" || { echo "scope lost"; exit 1; }
           rmdir "$D/vm"
           kill "$SUP"
-          echo "VERIFICATO"
-      # Filtro riservato ai test `#[ignore]` sulla delega cgroup che il flusso
-      # del supervisor aggiungerà (nome con prefisso `cgroup_delegato`). Oggi
-      # non corrisponde ad alcun test: il conteggio lo rende visibile.
-      - name: Test ignorati della delega cgroup (supervisor)
+          echo "VERIFIED"
+      # Filter reserved for the `#[ignore]` cgroup delegation tests that the
+      # supervisor flow will add (name prefixed with `delegated_cgroup`). Today
+      # it matches no test: the count makes this visible.
+      - name: Ignored cgroup delegation tests (supervisor)
         run: |
-          n="$(cargo test --locked --workspace -- --ignored --list cgroup_delegato 2>/dev/null | grep -c ': test$' || true)"
-          echo "test corrispondenti: $n"
+          n="$(cargo test --locked --workspace -- --ignored --list delegated_cgroup 2>/dev/null | grep -c ': test$' || true)"
+          echo "matching tests: $n"
           if [ "$n" = "0" ]; then
-            echo "::warning::nessun test cgroup_delegato: implementazione del supervisor non ancora presente (F1-15)"
+            echo "::warning::no delegated_cgroup tests: supervisor implementation not yet present (F1-15)"
           else
-            cargo test --locked --workspace --no-fail-fast -- --ignored cgroup_delegato
+            cargo test --locked --workspace --no-fail-fast -- --ignored delegated_cgroup
           fi
 
   # ---------------------------------------------------------------------------
-  # Rendering software (F1-14, F1-16; ADR-0014): verifica dipendenze runtime e
-  # ripiego software, non misura prestazioni. X11 con Xvfb e llvmpipe è
-  # bloccante; Wayland headless e WARP restano non bloccanti finché una prima
-  # esecuzione su GitHub non ne conferma la fattibilità (F1-08-ci.md).
+  # Software rendering (F1-14, F1-16; ADR-0014): verifies runtime dependencies
+  # and the software fallback, does not measure performance. X11 with Xvfb and
+  # llvmpipe is blocking; headless Wayland and WARP remain non-blocking until a
+  # first run on GitHub confirms they are feasible (F1-08-ci.md).
   smoke-render-software:
-    name: smoke rendering software (${{ matrix.name }})
+    name: software rendering smoke (${{ matrix.name }})
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: linux-x11-llvmpipe
             os: ubuntu-latest
-            sperimentale: false
+            experimental: false
           - name: linux-wayland-headless
             os: ubuntu-latest
-            sperimentale: true
+            experimental: true
           - name: windows-warp
             os: windows-latest
-            sperimentale: true
+            experimental: true
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.sperimentale }}
+    continue-on-error: ${{ matrix.experimental }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Toolchain da rust-toolchain.toml (Linux)
+      - name: Toolchain from rust-toolchain.toml (Linux)
         if: runner.os == 'Linux'
         run: |
           channel="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
           rustup toolchain install "$channel" --profile minimal --no-self-update
-      - name: Pacchetti apt
+      - name: apt packages
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends $APT_BUILD $APT_RUNTIME $APT_SOFTWARE_RENDER
-      - name: Toolchain e ambiente MSVC (Windows)
+      - name: Toolchain and MSVC environment (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -371,9 +371,9 @@ jobs:
           rustup toolchain install $channel --profile minimal --no-self-update
           $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
           $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          if (-not $vs) { throw 'Visual Studio con gli strumenti VC x64 non trovato' }
+          if (-not $vs) { throw 'Visual Studio with the VC x64 tools not found' }
           $vars = cmd /c "`"$(Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat')`" >nul && set"
-          if ($LASTEXITCODE -ne 0) { throw "vcvars64.bat fallito: $LASTEXITCODE" }
+          if ($LASTEXITCODE -ne 0) { throw "vcvars64.bat failed: $LASTEXITCODE" }
           $keep = '^(PATH|INCLUDE|LIB|LIBPATH|VCINSTALLDIR|VCToolsInstallDir|VCToolsVersion|VSINSTALLDIR|WindowsSdkDir|WindowsSDKLibVersion|WindowsSDKVersion|WindowsLibPath|UCRTVersion|UniversalCRTSdkDir|Platform|VSCMD_ARG_[A-Z_]+)='
           foreach ($line in $vars) {
             if ($line -match $keep) { Add-Content -Path $env:GITHUB_ENV -Value $line -Encoding utf8 }
@@ -381,14 +381,14 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: smoke-${{ runner.os }}
-      - name: Build release della UI (Linux)
+      - name: UI release build (Linux)
         if: runner.os == 'Linux'
         run: cargo build --release --locked -p lightvm-desktop
-      - name: Build release della UI (Windows)
+      - name: UI release build (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: cargo build --release --locked -p lightvm-desktop
-      - name: X11 su Xvfb con llvmpipe (glow, poi wgpu su lavapipe)
+      - name: X11 on Xvfb with llvmpipe (glow, then wgpu on lavapipe)
         if: matrix.name == 'linux-x11-llvmpipe'
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
@@ -396,7 +396,7 @@ jobs:
         run: |
           xvfb-run -a -s "-screen 0 1280x800x24" ./target/release/lightvm-desktop --smoke 5 --renderer glow
           xvfb-run -a -s "-screen 0 1280x800x24" ./target/release/lightvm-desktop --smoke 5 --renderer wgpu --wgpu-adapter cpu
-      - name: Wayland headless (Weston) con llvmpipe
+      - name: Headless Wayland (Weston) with llvmpipe
         if: matrix.name == 'linux-wayland-headless'
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
@@ -411,20 +411,20 @@ jobs:
           rc=$?
           kill "$WESTON" || true
           exit $rc
-      - name: WARP (wgpu su rasterizzatore software DX12)
+      - name: WARP (wgpu on the DX12 software rasterizer)
         if: matrix.name == 'windows-warp'
         shell: pwsh
         run: .\target\release\lightvm-desktop.exe --smoke 5 --renderer warp
 
   # ---------------------------------------------------------------------------
-  # Acceleratore assente (F1-03, criterio di uscita F1): errore chiaro senza
-  # ripiego TCG. Gira solo la parte senza QEMU: classificazione dello stderr di
-  # QEMU da fixture (mock dichiarato) e i test con nome `acceleratore_assente`
-  # (oggi `qemu-backend` `error::tests::acceleratore_assente_errore_chiaro`;
-  # la variante con QEMU reale è `#[ignore]` e non gira). QEMU non è
-  # installato sui runner.
-  acceleratore-assente:
-    name: acceleratore assente (${{ matrix.os }})
+  # Missing accelerator (F1-03, F1 exit criterion): clear error without a
+  # TCG fallback. Only the part without QEMU runs: classification of QEMU's
+  # stderr from fixtures (declared mock) and the tests named `missing_accelerator`
+  # (today `qemu-backend` `error::tests::missing_accelerator_clear_error`;
+  # the variant with a real QEMU is `#[ignore]` and does not run). QEMU is not
+  # installed on the runners.
+  missing-accelerator:
+    name: missing accelerator (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -435,24 +435,24 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Toolchain da rust-toolchain.toml
+      - name: Toolchain from rust-toolchain.toml
         run: |
           channel="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
           rustup toolchain install "$channel" --profile minimal --no-self-update
-      - name: Pacchetti apt
+      - name: apt packages
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends $APT_BUILD
-      - name: Ambiente MSVC esplicito (Windows)
+      - name: Explicit MSVC environment (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
           $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          if (-not $vs) { throw 'Visual Studio con gli strumenti VC x64 non trovato' }
+          if (-not $vs) { throw 'Visual Studio with the VC x64 tools not found' }
           $vars = cmd /c "`"$(Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat')`" >nul && set"
-          if ($LASTEXITCODE -ne 0) { throw "vcvars64.bat fallito: $LASTEXITCODE" }
+          if ($LASTEXITCODE -ne 0) { throw "vcvars64.bat failed: $LASTEXITCODE" }
           $keep = '^(PATH|INCLUDE|LIB|LIBPATH|VCINSTALLDIR|VCToolsInstallDir|VCToolsVersion|VSINSTALLDIR|WindowsSdkDir|WindowsSDKLibVersion|WindowsSDKVersion|WindowsLibPath|UCRTVersion|UniversalCRTSdkDir|Platform|VSCMD_ARG_[A-Z_]+)='
           foreach ($line in $vars) {
             if ($line -match $keep) { Add-Content -Path $env:GITHUB_ENV -Value $line -Encoding utf8 }
@@ -460,85 +460,85 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: accel-${{ runner.os }}
-      # Sui runner Ubuntu ospitati /dev/kvm può esistere: lo stato viene solo
-      # registrato; l'assenza reale si ottiene nei test di F1-03.
-      # pwsh su entrambi i sistemi: su Windows evita `/usr/bin/link` di Git Bash.
-      - name: Stato dell'acceleratore sul runner
+      # On hosted Ubuntu runners /dev/kvm may exist: the state is only
+      # recorded; the real absence is obtained in the F1-03 tests.
+      # pwsh on both systems: on Windows it avoids Git Bash's `/usr/bin/link`.
+      - name: Accelerator state on the runner
         shell: pwsh
         run: |
-          if ($IsLinux) { if (Test-Path /dev/kvm) { Get-Item /dev/kvm | Format-List } else { '/dev/kvm assente' } }
+          if ($IsLinux) { if (Test-Path /dev/kvm) { Get-Item /dev/kvm | Format-List } else { '/dev/kvm missing' } }
           $q = Get-Command qemu-system-x86_64 -ErrorAction SilentlyContinue
-          if ($q) { $q.Source } else { 'QEMU non installato' }
-      - name: Classificazione dell'errore senza acceleratore (fixture, mock dichiarato)
+          if ($q) { $q.Source } else { 'QEMU not installed' }
+      - name: Classification of the no-accelerator error (fixture, declared mock)
         shell: pwsh
-        run: cargo test --locked -p qemu-backend --lib -- probe::tests::diagnosi_stderr --exact
-      - name: Test del rilevamento capacità (filtro acceleratore_assente)
+        run: cargo test --locked -p qemu-backend --lib -- probe::tests::stderr_diagnosis --exact
+      - name: Capability detection tests (missing_accelerator filter)
         shell: pwsh
         run: |
-          $list = cargo test --locked --workspace -- --list acceleratore_assente 2>$null
+          $list = cargo test --locked --workspace -- --list missing_accelerator 2>$null
           $n = @($list | Where-Object { $_ -match ': test$' }).Count
-          "test corrispondenti: $n"
+          "matching tests: $n"
           if ($n -eq 0) {
-            '::warning::nessun test acceleratore_assente: rilevamento capacità di F1-03 non ancora presente'
+            '::warning::no missing_accelerator tests: F1-03 capability detection not yet present'
           } else {
-            cargo test --locked --workspace --no-fail-fast -- acceleratore_assente
+            cargo test --locked --workspace --no-fail-fast -- missing_accelerator
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
 
   # ---------------------------------------------------------------------------
-  # Gli schemi JSON committati in crates/lightvm-proto/schema/ devono coincidere
-  # con quelli generati dai tipi (ROADMAP 6.3, 13 "validazione schema").
-  # Rigenerazione: LIGHTVM_UPDATE_SCHEMAS=1 cargo test -p lightvm-proto --test schema_snapshot
+  # The JSON schemas committed in crates/lightvm-proto/schema/ must match
+  # those generated from the types (ROADMAP 6.3, 13 "schema validation").
+  # Regeneration: LIGHTVM_UPDATE_SCHEMAS=1 cargo test -p lightvm-proto --test schema_snapshot
   schema:
-    name: schemi JSON aggiornati
+    name: JSON schemas up to date
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Toolchain da rust-toolchain.toml
+      - name: Toolchain from rust-toolchain.toml
         run: |
           channel="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
           rustup toolchain install "$channel" --profile minimal --no-self-update
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: schema
-      - name: Snapshot degli schemi
+      - name: Schema snapshot
         run: cargo test --locked -p lightvm-proto --test schema_snapshot
-      - name: Nessuna modifica non committata agli schemi
+      - name: No uncommitted changes to the schemas
         run: git diff --exit-code -- crates/lightvm-proto/schema
 
-  # Licenze, advisory RustSec, sorgenti, crate e feature vietati (deny.toml,
-  # ADR-0023; inventario in docs/verification/F1-07-licenze-packaging.md).
+  # Licences, RustSec advisories, sources, banned crates and features (deny.toml,
+  # ADR-0023; inventory in docs/verification/F1-07-licences-packaging.md).
   cargo-deny:
-    name: cargo-deny (licenze, advisory, sorgenti)
+    name: cargo-deny (licences, advisories, sources)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Toolchain da rust-toolchain.toml
+      - name: Toolchain from rust-toolchain.toml
         run: |
           channel="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
           rustup toolchain install "$channel" --profile minimal --no-self-update
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: cargo-deny
-      # Stessa versione usata in locale; installazione da crates.io con lockfile,
-      # nessuna azione di terze parti.
-      - name: Installazione cargo-deny 0.20.2
+      # Same version used locally; installation from crates.io with lockfile,
+      # no third-party actions.
+      - name: Install cargo-deny 0.20.2
         run: cargo install cargo-deny --version 0.20.2 --locked
       - name: cargo deny check
         run: cargo deny --locked check
 
   # ---------------------------------------------------------------------------
-  # macOS: solo controllo di compilazione, nessun supporto dichiarato
-  # (ROADMAP 10 F1: build macOS entro F2). Non blocca la CI; un fallimento o
-  # l'indisponibilità del runner va registrato come rischio in docs/STATUS.md.
+  # macOS: compile check only, no declared support
+  # (ROADMAP 10 F1: macOS build by F2). It does not block CI; a failure or
+  # the runner being unavailable must be recorded as a risk in docs/STATUS.md.
   macos-check:
-    name: macOS (solo check, nessun supporto dichiarato)
+    name: macOS (check only, no declared support)
     runs-on: macos-latest
     timeout-minutes: 45
     continue-on-error: true
@@ -546,7 +546,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Toolchain da rust-toolchain.toml
+      - name: Toolchain from rust-toolchain.toml
         run: |
           channel="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
           rustup toolchain install "$channel" --profile minimal --component clippy --no-self-update

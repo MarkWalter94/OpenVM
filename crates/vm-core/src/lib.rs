@@ -1,11 +1,11 @@
-//! `vm-core`: casi d'uso, macchina a stati con guardie, coda di mutazioni per
-//! VM, policy effettiva, sessioni, Emergency Stop e audit minimo.
+//! `vm-core`: use cases, state machine with guards, per-VM mutation queue,
+//! effective policy, sessions, Emergency Stop and minimal audit.
 //!
-//! Riferimenti: ROADMAP 6.1, 6.3, 7.3, 7.4, 8, 9; `docs/ARCHITECTURE.md` 4–6.
+//! References: ROADMAP 6.1, 6.3, 7.3, 7.4, 8, 9; `docs/ARCHITECTURE.md` 4–6.
 //!
-//! Nessuna I/O, nessun QEMU, nessun SQLite: le dipendenze esterne sono porte
-//! ([`ports`]). La stessa logica vale per UI e MCP; la UI non è un livello
-//! fidato aggiuntivo. I tipi condivisi stanno in `lightvm-proto`.
+//! No I/O, no QEMU, no SQLite: external dependencies are ports
+//! ([`ports`]). The same logic applies to UI and MCP; the UI is not an
+//! additional trusted layer. Shared types live in `lightvm-proto`.
 
 mod core;
 pub mod media;

@@ -1,32 +1,32 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "ServerMessage",
-  "description": "Messaggi dal servizio al client.",
+  "description": "Messages from the service to the client.",
   "oneOf": [
     {
-      "description": "Handshake accettato.",
+      "description": "Handshake accepted.",
       "type": "object",
       "properties": {
         "connection_id": {
-          "description": "Identificativo assegnato alla connessione.",
+          "description": "Identifier assigned to the connection.",
           "type": "integer",
           "format": "uint64",
           "minimum": 0
         },
         "protocol_version": {
-          "description": "Versione negoziata.",
+          "description": "Negotiated version.",
           "type": "integer",
           "format": "uint32",
           "minimum": 0
         },
         "request_id": {
-          "description": "Richiesta di `hello`.",
+          "description": "Request of `hello`.",
           "type": "integer",
           "format": "uint64",
           "minimum": 0
         },
         "role": {
-          "description": "Ruolo della credenziale.",
+          "description": "Role of the credential.",
           "$ref": "#/$defs/Role"
         },
         "type": {
@@ -43,17 +43,17 @@
       ]
     },
     {
-      "description": "Risposta positiva.",
+      "description": "Positive response.",
       "type": "object",
       "properties": {
         "request_id": {
-          "description": "Richiesta.",
+          "description": "Request.",
           "type": "integer",
           "format": "uint64",
           "minimum": 0
         },
         "result": {
-          "description": "Risultato.",
+          "description": "Result.",
           "$ref": "#/$defs/ResponseBody"
         },
         "type": {
@@ -68,15 +68,15 @@
       ]
     },
     {
-      "description": "Errore; `request_id` assente se il frame non era decodificabile.",
+      "description": "Error; `request_id` absent if the frame was not decodable.",
       "type": "object",
       "properties": {
         "error": {
-          "description": "Errore.",
+          "description": "Error.",
           "$ref": "#/$defs/ReplyError"
         },
         "request_id": {
-          "description": "Richiesta, se nota.",
+          "description": "Request, if known.",
           "type": [
             "integer",
             "null"
@@ -95,11 +95,11 @@
       ]
     },
     {
-      "description": "Evento di stato (dopo `subscribe`).",
+      "description": "State event (after `subscribe`).",
       "type": "object",
       "properties": {
         "event": {
-          "description": "Evento.",
+          "description": "Event.",
           "$ref": "#/$defs/ServiceEvent"
         },
         "type": {
@@ -113,11 +113,11 @@
       ]
     },
     {
-      "description": "Chiusura avviata dal servizio; segue la chiusura del trasporto.",
+      "description": "Close initiated by the service; the transport close follows.",
       "type": "object",
       "properties": {
         "reason": {
-          "description": "Motivo.",
+          "description": "Reason.",
           "$ref": "#/$defs/CloseReason"
         },
         "type": {
@@ -133,19 +133,19 @@
   ],
   "$defs": {
     "Admission": {
-      "description": "Esito dell'accettazione di una richiesta (prima dell'inoltro).",
+      "description": "Outcome of accepting a request (before forwarding).",
       "type": "object",
       "properties": {
         "duplicate": {
-          "description": "`true` se la richiesta ripete un `operation_id` già noto (nessun nuovo effetto).",
+          "description": "`true` if the request repeats an already known `operation_id` (no new effect).",
           "type": "boolean"
         },
         "operation_id": {
-          "description": "Operazione.",
+          "description": "Operation.",
           "$ref": "#/$defs/OperationId"
         },
         "status": {
-          "description": "Stato corrente dell'operazione.",
+          "description": "Current status of the operation.",
           "$ref": "#/$defs/OperationStatus"
         }
       },
@@ -156,35 +156,35 @@
       ]
     },
     "Capabilities": {
-      "description": "Capacità riportate da `get_capabilities`.",
+      "description": "Capabilities reported by `get_capabilities`.",
       "type": "object",
       "properties": {
         "accelerator": {
-          "description": "Acceleratore disponibile, se rilevato.",
+          "description": "Available accelerator, if detected.",
           "type": [
             "string",
             "null"
           ]
         },
         "backend": {
-          "description": "Nome del backend.",
+          "description": "Backend name.",
           "type": "string"
         },
         "max_frame_bytes": {
-          "description": "Limite di byte per frame.",
+          "description": "Byte limit per frame.",
           "type": "integer",
           "format": "uint32",
           "minimum": 0
         },
         "parent_loss_policy": {
-          "description": "Politica attiva alla perdita della UI.",
+          "description": "Active policy on UI loss.",
           "$ref": "#/$defs/ParentLossPolicy",
           "default": {
             "kind": "kill_vms"
           }
         },
         "protocol_versions": {
-          "description": "Versioni del protocollo supportate.",
+          "description": "Supported protocol versions.",
           "type": "array",
           "items": {
             "type": "integer",
@@ -200,39 +200,39 @@
       ]
     },
     "CloseReason": {
-      "description": "Motivo di chiusura della connessione da parte del servizio.",
+      "description": "Reason the service closed the connection.",
       "oneOf": [
         {
-          "description": "Connessione o credenziale revocata.",
+          "description": "Connection or credential revoked.",
           "type": "string",
           "const": "revoked"
         },
         {
-          "description": "Arresto del servizio.",
+          "description": "Service shutting down.",
           "type": "string",
           "const": "service_stopping"
         }
       ]
     },
     "ConnectionInfo": {
-      "description": "Connessione attiva, per `list_connections`.",
+      "description": "Active connection, for `list_connections`.",
       "type": "object",
       "properties": {
         "client_name": {
-          "description": "Nome dichiarato dal client, solo diagnostico.",
+          "description": "Name declared by the client, diagnostic only.",
           "type": [
             "string",
             "null"
           ]
         },
         "connection_id": {
-          "description": "Identificativo della connessione.",
+          "description": "Connection identifier.",
           "type": "integer",
           "format": "uint64",
           "minimum": 0
         },
         "peer_pid": {
-          "description": "PID del peer riportato dal sistema operativo, solo diagnostico.",
+          "description": "Peer PID reported by the operating system, diagnostic only.",
           "type": [
             "integer",
             "null"
@@ -241,7 +241,7 @@
           "minimum": 0
         },
         "role": {
-          "description": "Ruolo della credenziale.",
+          "description": "Role of the credential.",
           "$ref": "#/$defs/Role"
         }
       },
@@ -251,21 +251,21 @@
       ]
     },
     "EmergencyStopReport": {
-      "description": "Esito dell'Emergency Stop riportato al client.",
+      "description": "Outcome of the Emergency Stop reported to the client.",
       "type": "object",
       "properties": {
         "completed": {
-          "description": "Vero solo se la fine di tutti i processi è stata osservata.",
+          "description": "True only if the end of all processes was observed.",
           "type": "boolean"
         },
         "processes_terminated": {
-          "description": "Processi di cui il backend ha osservato la fine.",
+          "description": "Processes whose end the backend observed.",
           "type": "integer",
           "format": "uint32",
           "minimum": 0
         },
         "revoked_connections": {
-          "description": "Connessioni non UI revocate.",
+          "description": "Non-UI connections revoked.",
           "type": "integer",
           "format": "uint32",
           "minimum": 0
@@ -278,168 +278,168 @@
       ]
     },
     "ErrorCode": {
-      "description": "Codice stabile di un errore operativo. I nomi serializzati non cambiano mai;\nnuovi codici si aggiungono soltanto.",
+      "description": "Stable code of an operational error. Serialized names never change;\nnew codes are only ever added.",
       "oneOf": [
         {
-          "description": "Chiamante identificato (credenziale valida) ma non autorizzato all'azione:\nVM fuori allowlist, capability mancante, sessione in pausa, ruolo\ninsufficiente. Credenziali assenti o non valide: [`ErrorCode::Unauthenticated`].",
+          "description": "Caller identified (valid credential) but not authorized for the action:\nVM outside the allowlist, missing capability, paused session, insufficient\nrole. Missing or invalid credentials: [`ErrorCode::Unauthenticated`].",
           "type": "string",
           "const": "permission_denied"
         },
         {
-          "description": "Sessione o lease scaduti: serve una nuova autorizzazione nell'app.",
+          "description": "Session or lease expired: a new authorization in the app is needed.",
           "type": "string",
           "const": "session_expired"
         },
         {
-          "description": "Un'altra mutazione è in corso o in coda sulla stessa VM: ritentabile.",
+          "description": "Another mutation is in progress or queued on the same VM: retryable.",
           "type": "string",
           "const": "vm_busy"
         },
         {
-          "description": "Capacità non disponibile su questo host, build o fase.",
+          "description": "Capability not available on this host, build or phase.",
           "type": "string",
           "const": "unsupported"
         },
         {
-          "description": "L'azione non è ammessa nello stato corrente (o riferisce un `run_id` superato).",
+          "description": "The action is not allowed in the current state (or refers to a superseded `run_id`).",
           "type": "string",
           "const": "state_conflict"
         },
         {
-          "description": "Limite di risorse, quota o dimensione superato.",
+          "description": "Resource, quota or size limit exceeded.",
           "type": "string",
           "const": "resource_limit"
         },
         {
-          "description": "Argomento non valido (formato, intervallo, nome, percorso rifiutato).",
+          "description": "Invalid argument (format, range, name, rejected path).",
           "type": "string",
           "const": "invalid_argument"
         },
         {
-          "description": "Oggetto inesistente o non visibile al chiamante.",
+          "description": "Object does not exist or is not visible to the caller.",
           "type": "string",
           "const": "not_found"
         },
         {
-          "description": "Guasto dell'infrastruttura (QEMU, QMP, storage, OS) non imputabile al chiamante.",
+          "description": "Infrastructure failure (QEMU, QMP, storage, OS) not attributable to the caller.",
           "type": "string",
           "const": "infrastructure_error"
         },
         {
-          "description": "Nessuna credenziale valida: credenziale IPC o token di sessione assente,\nmalformato, sconosciuto, revocato o riusato dopo un riavvio del supervisor.\nServe una nuova autorizzazione nell'app. Aggiunto in coda ai primi nove\ncodici, che restano invariati.",
+          "description": "No valid credential: IPC credential or session token missing,\nmalformed, unknown, revoked or reused after a supervisor restart.\nA new authorization in the app is needed. Appended after the first nine\ncodes, which remain unchanged.",
           "type": "string",
           "const": "unauthenticated"
         }
       ]
     },
     "Firmware": {
-      "description": "Firmware del guest. Nel MVP solo UEFI con stato NVRAM gestito (ROADMAP 8).",
+      "description": "Guest firmware. In the MVP only UEFI with managed NVRAM state (ROADMAP 8).",
       "oneOf": [
         {
-          "description": "UEFI (OVMF) con NVRAM per VM.",
+          "description": "UEFI (OVMF) with per-VM NVRAM.",
           "type": "string",
           "const": "uefi"
         }
       ]
     },
     "GuestOs": {
-      "description": "Sistema operativo guest dichiarato. Nel MVP il riferimento è Ubuntu LTS\nx86_64 con versione e checksum fissati in F0 (ROADMAP 4).",
+      "description": "Declared guest operating system. In the MVP the reference is Ubuntu LTS\nx86_64 with the version and checksum pinned in F0 (ROADMAP 4).",
       "oneOf": [
         {
-          "description": "Ubuntu LTS x86_64 (guest di riferimento del MVP).",
+          "description": "Ubuntu LTS x86_64 (MVP reference guest).",
           "type": "string",
           "const": "ubuntu_lts_x86_64"
         },
         {
-          "description": "Altro Linux x86_64: gestibile manualmente, senza garanzie di compatibilità.",
+          "description": "Other Linux x86_64: manageable manually, without compatibility guarantees.",
           "type": "string",
           "const": "other_linux_x86_64"
         }
       ]
     },
     "MediaId": {
-      "description": "MediaId: UUID versione 7 in minuscolo con trattini.",
+      "description": "MediaId: version 7 UUID, lowercase with hyphens.",
       "type": "string",
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     },
     "NetworkProfile": {
-      "description": "Profilo di rete. Nel MVP l'unico valore ammesso è `offline` (ADR-0004): nessuna\nNIC guest, periferiche di rete predefinite escluse, nessun forwarding.",
+      "description": "Network profile. In the MVP the only allowed value is `offline` (ADR-0004): no\nguest NIC, default network devices excluded, no forwarding.",
       "oneOf": [
         {
-          "description": "Nessuna NIC.",
+          "description": "No NIC.",
           "type": "string",
           "const": "offline"
         }
       ]
     },
     "OperationId": {
-      "description": "OperationId: UUID versione 7 in minuscolo con trattini.",
+      "description": "OperationId: version 7 UUID, lowercase with hyphens.",
       "type": "string",
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     },
     "OperationKind": {
-      "description": "Tipo di operazione della coda per VM.",
+      "description": "Kind of operation of the per-VM queue.",
       "oneOf": [
         {
-          "description": "Creazione della VM nel catalogo.",
+          "description": "Creation of the VM in the catalog.",
           "type": "string",
           "const": "create"
         },
         {
-          "description": "Avvio.",
+          "description": "Start.",
           "type": "string",
           "const": "start"
         },
         {
-          "description": "Arresto ordinario.",
+          "description": "Ordinary stop.",
           "type": "string",
           "const": "stop"
         },
         {
-          "description": "Arresto forzato.",
+          "description": "Forced stop.",
           "type": "string",
           "const": "force_stop"
         },
         {
-          "description": "Reset del guest.",
+          "description": "Guest reset.",
           "type": "string",
           "const": "reset"
         },
         {
-          "description": "Cattura dello schermo.",
+          "description": "Screen capture.",
           "type": "string",
           "const": "screenshot"
         },
         {
-          "description": "Input tipizzato.",
+          "description": "Typed input.",
           "type": "string",
           "const": "input"
         },
         {
-          "description": "Checkpoint a VM spenta (da F3).",
+          "description": "Checkpoint with the VM off (from F3).",
           "type": "string",
           "const": "snapshot"
         },
         {
-          "description": "Ripristino di una baseline a VM spenta (da F3).",
+          "description": "Restore of a baseline with the VM off (from F3).",
           "type": "string",
           "const": "restore"
         },
         {
-          "description": "Emergency Stop (percorso prioritario, fuori coda).",
+          "description": "Emergency Stop (priority path, outside the queue).",
           "type": "string",
           "const": "emergency_stop"
         }
       ]
     },
     "OperationRecord": {
-      "description": "Registro di un'operazione (consultabile per `operation_id`).",
+      "description": "Record of an operation (queryable by `operation_id`).",
       "type": "object",
       "properties": {
         "error": {
-          "description": "Codice d'errore se `failed` o `discarded`.",
+          "description": "Error code if `failed` or `discarded`.",
           "anyOf": [
             {
               "$ref": "#/$defs/ErrorCode"
@@ -450,19 +450,19 @@
           ]
         },
         "id": {
-          "description": "Identificativo (chiave di idempotenza).",
+          "description": "Identifier (idempotency key).",
           "$ref": "#/$defs/OperationId"
         },
         "kind": {
-          "description": "Tipo.",
+          "description": "Kind.",
           "$ref": "#/$defs/OperationKind"
         },
         "requested_at": {
-          "description": "Istante di accettazione.",
+          "description": "Acceptance instant.",
           "$ref": "#/$defs/UtcTimestamp"
         },
         "run_id": {
-          "description": "Esecuzione a cui si riferisce, se pertinente.",
+          "description": "Run it refers to, if relevant.",
           "anyOf": [
             {
               "$ref": "#/$defs/RunId"
@@ -473,7 +473,7 @@
           ]
         },
         "session_id": {
-          "description": "Sessione richiedente, se agente.",
+          "description": "Requesting session, if an agent.",
           "anyOf": [
             {
               "$ref": "#/$defs/SessionId"
@@ -484,11 +484,11 @@
           ]
         },
         "status": {
-          "description": "Stato.",
+          "description": "Status.",
           "$ref": "#/$defs/OperationStatus"
         },
         "updated_at": {
-          "description": "Istante dell'ultimo cambio di stato.",
+          "description": "Instant of the last status change.",
           "$ref": "#/$defs/UtcTimestamp"
         },
         "vm_id": {
@@ -506,40 +506,40 @@
       ]
     },
     "OperationStatus": {
-      "description": "Stato di un'operazione.",
+      "description": "Status of an operation.",
       "oneOf": [
         {
-          "description": "Accettata, in coda, non ancora inoltrata al backend.",
+          "description": "Accepted, queued, not yet forwarded to the backend.",
           "type": "string",
           "const": "queued"
         },
         {
-          "description": "Inoltrata al backend: può produrre effetti anche dopo una revoca.",
+          "description": "Forwarded to the backend: it may produce effects even after a revocation.",
           "type": "string",
           "const": "forwarded"
         },
         {
-          "description": "Completata con successo.",
+          "description": "Completed successfully.",
           "type": "string",
           "const": "succeeded"
         },
         {
-          "description": "Inoltrata e fallita.",
+          "description": "Forwarded and failed.",
           "type": "string",
           "const": "failed"
         },
         {
-          "description": "Scartata prima dell'inoltro (revoca, Emergency Stop, `run_id` superato): nessun effetto.",
+          "description": "Discarded before forwarding (revocation, Emergency Stop, superseded `run_id`): no effect.",
           "type": "string",
           "const": "discarded"
         }
       ]
     },
     "ParentLossPolicy": {
-      "description": "Sorte delle VM quando la UI che ha avviato il servizio termina senza\narresto controllato (crash, terminazione forzata). ADR-0015 parte B.",
+      "description": "Fate of the VMs when the UI that started the service ends without a\ncontrolled shutdown (crash, forced termination). ADR-0015 part B.",
       "oneOf": [
         {
-          "description": "Emergency Stop di tutte le VM, poi arresto del servizio (predefinita).",
+          "description": "Emergency Stop of all VMs, then shutdown of the service (default).",
           "type": "object",
           "properties": {
             "kind": {
@@ -552,7 +552,7 @@
           ]
         },
         {
-          "description": "Spegnimento ordinato (ACPI) con attesa limitata, poi `quit` e\nterminazione; infine arresto del servizio.",
+          "description": "Orderly (ACPI) shutdown with a bounded wait, then `quit` and\ntermination; finally shutdown of the service.",
           "type": "object",
           "properties": {
             "kind": {
@@ -560,7 +560,7 @@
               "const": "shutdown_vms"
             },
             "powerdown_s": {
-              "description": "Attesa dello spegnimento ACPI per VM, in secondi\n([`MIN_PARENT_LOSS_POWERDOWN_S`]..=[`MAX_PARENT_LOSS_POWERDOWN_S`]).",
+              "description": "Wait for the ACPI shutdown per VM, in seconds\n([`MIN_PARENT_LOSS_POWERDOWN_S`]..=[`MAX_PARENT_LOSS_POWERDOWN_S`]).",
               "type": "integer",
               "format": "uint32",
               "minimum": 0
@@ -572,7 +572,7 @@
           ]
         },
         {
-          "description": "Le VM restano accese e il servizio resta attivo senza UI.",
+          "description": "The VMs stay on and the service stays active without a UI.",
           "type": "object",
           "properties": {
             "kind": {
@@ -587,15 +587,15 @@
       ]
     },
     "ProtocolError": {
-      "description": "Errore di protocollo: distinto dagli errori operativi (ROADMAP 9).",
+      "description": "Protocol error: distinct from operational errors (ROADMAP 9).",
       "type": "object",
       "properties": {
         "code": {
-          "description": "Codice stabile.",
+          "description": "Stable code.",
           "$ref": "#/$defs/ProtocolErrorCode"
         },
         "message": {
-          "description": "Messaggio per persone, senza segreti.",
+          "description": "Message for humans, without secrets.",
           "type": "string"
         }
       },
@@ -605,45 +605,45 @@
       ]
     },
     "ProtocolErrorCode": {
-      "description": "Codice di un errore di protocollo (richiesta non compresa, nessun effetto tentato).",
+      "description": "Code of a protocol error (request not understood, no effect attempted).",
       "oneOf": [
         {
-          "description": "Messaggio non decodificabile o non conforme allo schema.",
+          "description": "Message not decodable or not conforming to the schema.",
           "type": "string",
           "const": "malformed_message"
         },
         {
-          "description": "Versione di protocollo non supportata.",
+          "description": "Unsupported protocol version.",
           "type": "string",
           "const": "unsupported_version"
         },
         {
-          "description": "Metodo o tipo di richiesta sconosciuto.",
+          "description": "Unknown method or request type.",
           "type": "string",
           "const": "unknown_method"
         },
         {
-          "description": "Messaggio oltre la dimensione massima ammessa.",
+          "description": "Message exceeds the maximum allowed size.",
           "type": "string",
           "const": "message_too_large"
         },
         {
-          "description": "Mantenuto per compatibilità del contratto ma **non emesso**: una credenziale\nassente o non valida produce l'errore operativo [`ErrorCode::Unauthenticated`]\n(vedi la documentazione del modulo).",
+          "description": "Kept for contract compatibility but **not emitted**: a missing or invalid\ncredential produces the operational error [`ErrorCode::Unauthenticated`]\n(see the module documentation).",
           "type": "string",
           "const": "unauthenticated"
         }
       ]
     },
     "PublicError": {
-      "description": "Errore operativo pubblico.\n\nForma JSON: `{\"code\": \"...\", \"message\": \"...\", \"details\": {..}?, \"retryable\": bool}`.",
+      "description": "Public operational error.\n\nJSON shape: `{\"code\": \"...\", \"message\": \"...\", \"details\": {..}?, \"retryable\": bool}`.",
       "type": "object",
       "properties": {
         "code": {
-          "description": "Codice stabile.",
+          "description": "Stable code.",
           "$ref": "#/$defs/ErrorCode"
         },
         "details": {
-          "description": "Dettagli strutturati opzionali (chiavi e valori testuali, senza segreti).",
+          "description": "Optional structured details (textual keys and values, without secrets).",
           "type": [
             "object",
             "null"
@@ -653,11 +653,11 @@
           }
         },
         "message": {
-          "description": "Messaggio per persone, senza segreti né percorsi host.",
+          "description": "Message for humans, without secrets or host paths.",
           "type": "string"
         },
         "retryable": {
-          "description": "`true` se ritentare la stessa richiesta idempotente può riuscire.",
+          "description": "`true` if retrying the same idempotent request may succeed.",
           "type": "boolean"
         }
       },
@@ -668,10 +668,10 @@
       ]
     },
     "ReplyError": {
-      "description": "Errore di risposta: operativo oppure di protocollo, mai confusi.\n\nForma JSON: `{\"kind\": \"operational\", ...PublicError}` oppure\n`{\"kind\": \"protocol\", ...ProtocolError}`.",
+      "description": "Reply error: either operational or protocol, never mixed up.\n\nJSON shape: `{\"kind\": \"operational\", ...PublicError}` or\n`{\"kind\": \"protocol\", ...ProtocolError}`.",
       "oneOf": [
         {
-          "description": "Richiesta compresa ma rifiutata o fallita.",
+          "description": "Request understood but rejected or failed.",
           "type": "object",
           "properties": {
             "kind": {
@@ -685,7 +685,7 @@
           ]
         },
         {
-          "description": "Richiesta non compresa: nessun effetto tentato.",
+          "description": "Request not understood: no effect attempted.",
           "type": "object",
           "properties": {
             "kind": {
@@ -701,10 +701,10 @@
       ]
     },
     "ResponseBody": {
-      "description": "Risultati delle operazioni.",
+      "description": "Results of the operations.",
       "oneOf": [
         {
-          "description": "Risposta a `ping`.",
+          "description": "Response to `ping`.",
           "type": "object",
           "properties": {
             "kind": {
@@ -717,7 +717,7 @@
           ]
         },
         {
-          "description": "Risposta a `get_capabilities`.",
+          "description": "Response to `get_capabilities`.",
           "type": "object",
           "properties": {
             "kind": {
@@ -731,7 +731,7 @@
           ]
         },
         {
-          "description": "Risposta a `list_vms`.",
+          "description": "Response to `list_vms`.",
           "type": "object",
           "properties": {
             "kind": {
@@ -739,7 +739,7 @@
               "const": "vm_list"
             },
             "vms": {
-              "description": "VM visibili.",
+              "description": "Visible VMs.",
               "type": "array",
               "items": {
                 "$ref": "#/$defs/VmSummary"
@@ -752,7 +752,7 @@
           ]
         },
         {
-          "description": "Risposta a `vm_status`.",
+          "description": "Response to `vm_status`.",
           "type": "object",
           "properties": {
             "kind": {
@@ -760,7 +760,7 @@
               "const": "vm"
             },
             "vm": {
-              "description": "Stato della VM.",
+              "description": "Status of the VM.",
               "$ref": "#/$defs/VmSummary"
             }
           },
@@ -770,7 +770,7 @@
           ]
         },
         {
-          "description": "Risposta a `create_vm`.",
+          "description": "Response to `create_vm`.",
           "type": "object",
           "properties": {
             "kind": {
@@ -778,7 +778,7 @@
               "const": "vm_created"
             },
             "vm": {
-              "description": "VM creata, con identificativo assegnato dal core.",
+              "description": "Created VM, with identifier assigned by the core.",
               "$ref": "#/$defs/VmRecord"
             }
           },
@@ -788,7 +788,7 @@
           ]
         },
         {
-          "description": "Risposta a `update_vm`: VM con la nuova revisione.",
+          "description": "Response to `update_vm`: VM with the new revision.",
           "type": "object",
           "properties": {
             "kind": {
@@ -796,7 +796,7 @@
               "const": "vm_updated"
             },
             "vm": {
-              "description": "VM aggiornata.",
+              "description": "Updated VM.",
               "$ref": "#/$defs/VmRecord"
             }
           },
@@ -806,11 +806,11 @@
           ]
         },
         {
-          "description": "Risposta a `submit_vm`: accettazione ed esito registrato.",
+          "description": "Response to `submit_vm`: acceptance and recorded outcome.",
           "type": "object",
           "properties": {
             "admission": {
-              "description": "Accettazione (o duplicato idempotente).",
+              "description": "Acceptance (or idempotent duplicate).",
               "$ref": "#/$defs/Admission"
             },
             "kind": {
@@ -818,7 +818,7 @@
               "const": "operation"
             },
             "operation": {
-              "description": "Registro dell'operazione dopo l'esecuzione, se disponibile.",
+              "description": "Record of the operation after execution, if available.",
               "anyOf": [
                 {
                   "$ref": "#/$defs/OperationRecord"
@@ -835,7 +835,7 @@
           ]
         },
         {
-          "description": "Iscrizione accettata.",
+          "description": "Subscription accepted.",
           "type": "object",
           "properties": {
             "kind": {
@@ -848,11 +848,11 @@
           ]
         },
         {
-          "description": "Risposta a `list_connections`.",
+          "description": "Response to `list_connections`.",
           "type": "object",
           "properties": {
             "connections": {
-              "description": "Connessioni attive.",
+              "description": "Active connections.",
               "type": "array",
               "items": {
                 "$ref": "#/$defs/ConnectionInfo"
@@ -869,11 +869,11 @@
           ]
         },
         {
-          "description": "Connessione revocata.",
+          "description": "Connection revoked.",
           "type": "object",
           "properties": {
             "connection_id": {
-              "description": "Connessione revocata.",
+              "description": "Revoked connection.",
               "type": "integer",
               "format": "uint64",
               "minimum": 0
@@ -889,16 +889,16 @@
           ]
         },
         {
-          "description": "Credenziale di pairing emessa: va consegnata fuori banda, mai registrata.",
+          "description": "Pairing credential issued: it must be delivered out of band, never recorded.",
           "type": "object",
           "properties": {
             "credential": {
-              "description": "Credenziale in esadecimale.",
+              "description": "Credential in hexadecimal.",
               "type": "string",
               "writeOnly": true
             },
             "expires_in_s": {
-              "description": "Scadenza in secondi.",
+              "description": "Expiry in seconds.",
               "type": "integer",
               "format": "uint64",
               "minimum": 0
@@ -915,7 +915,7 @@
           ]
         },
         {
-          "description": "Esito dell'Emergency Stop.",
+          "description": "Outcome of the Emergency Stop.",
           "type": "object",
           "properties": {
             "kind": {
@@ -929,7 +929,7 @@
           ]
         },
         {
-          "description": "Politica alla perdita della UI in vigore dopo `set_parent_loss_policy`.",
+          "description": "UI loss policy in force after `set_parent_loss_policy`.",
           "type": "object",
           "properties": {
             "kind": {
@@ -937,7 +937,7 @@
               "const": "parent_loss_policy"
             },
             "policy": {
-              "description": "Politica attiva.",
+              "description": "Active policy.",
               "$ref": "#/$defs/ParentLossPolicy"
             }
           },
@@ -947,7 +947,7 @@
           ]
         },
         {
-          "description": "Arresto accettato.",
+          "description": "Shutdown accepted.",
           "type": "object",
           "properties": {
             "kind": {
@@ -962,31 +962,31 @@
       ]
     },
     "Role": {
-      "description": "Ruolo associato alla credenziale del canale.\n\n`ui` corrisponde a [`crate::Caller::User`] verso il core; `pairing` non\nconferisce permessi sulle VM (ADR-0006): il grant di sessione agente arriva\nin F4 ([`crate::Grant`], [`crate::SessionToken`]).",
+      "description": "Role associated with the channel credential.\n\n`ui` corresponds to [`crate::Caller::User`] towards the core; `pairing` does not\ngrant permissions on VMs (ADR-0006): the agent session grant arrives\nin F4 ([`crate::Grant`], [`crate::SessionToken`]).",
       "oneOf": [
         {
-          "description": "Interfaccia desktop che ha avviato il servizio.",
+          "description": "Desktop interface that started the service.",
           "type": "string",
           "const": "ui"
         },
         {
-          "description": "Client in attesa di pairing (adapter MCP): nessun permesso VM.",
+          "description": "Client waiting for pairing (MCP adapter): no VM permissions.",
           "type": "string",
           "const": "pairing"
         }
       ]
     },
     "RunId": {
-      "description": "RunId: UUID versione 7 in minuscolo con trattini.",
+      "description": "RunId: version 7 UUID, lowercase with hyphens.",
       "type": "string",
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     },
     "ServiceEvent": {
-      "description": "Eventi pubblicati sul canale di stato.",
+      "description": "Events published on the state channel.",
       "oneOf": [
         {
-          "description": "Cambio di stato del servizio.",
+          "description": "Change of the service state.",
           "type": "object",
           "properties": {
             "kind": {
@@ -994,7 +994,7 @@
               "const": "service_state"
             },
             "state": {
-              "description": "Nuovo stato.",
+              "description": "New state.",
               "$ref": "#/$defs/ServiceState"
             }
           },
@@ -1004,7 +1004,7 @@
           ]
         },
         {
-          "description": "Cambio di stato di una VM.",
+          "description": "Change of a VM's state.",
           "type": "object",
           "properties": {
             "kind": {
@@ -1012,7 +1012,7 @@
               "const": "vm_state"
             },
             "state": {
-              "description": "Nuovo stato.",
+              "description": "New state.",
               "$ref": "#/$defs/VmState"
             },
             "vm_id": {
@@ -1027,11 +1027,11 @@
           ]
         },
         {
-          "description": "Una connessione è stata revocata.",
+          "description": "A connection was revoked.",
           "type": "object",
           "properties": {
             "connection_id": {
-              "description": "Connessione revocata.",
+              "description": "Revoked connection.",
               "type": "integer",
               "format": "uint64",
               "minimum": 0
@@ -1047,7 +1047,7 @@
           ]
         },
         {
-          "description": "Le sessioni agente sono state arrestate.",
+          "description": "The agent sessions were stopped.",
           "type": "object",
           "properties": {
             "kind": {
@@ -1055,7 +1055,7 @@
               "const": "agent_sessions_stopped"
             },
             "reason": {
-              "description": "Motivo.",
+              "description": "Reason.",
               "$ref": "#/$defs/StopReason"
             }
           },
@@ -1065,11 +1065,11 @@
           ]
         },
         {
-          "description": "Eventi persi per lentezza del client.",
+          "description": "Events lost because the client was too slow.",
           "type": "object",
           "properties": {
             "count": {
-              "description": "Numero di eventi persi.",
+              "description": "Number of lost events.",
               "type": "integer",
               "format": "uint64",
               "minimum": 0
@@ -1087,31 +1087,31 @@
       ]
     },
     "ServiceState": {
-      "description": "Stato del servizio.",
+      "description": "State of the service.",
       "oneOf": [
         {
-          "description": "In servizio.",
+          "description": "In service.",
           "type": "string",
           "const": "running"
         },
         {
-          "description": "Arresto controllato in corso.",
+          "description": "Controlled shutdown in progress.",
           "type": "string",
           "const": "stopping"
         }
       ]
     },
     "SessionId": {
-      "description": "SessionId: UUID versione 7 in minuscolo con trattini.",
+      "description": "SessionId: version 7 UUID, lowercase with hyphens.",
       "type": "string",
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     },
     "StopReason": {
-      "description": "Motivo dell'arresto delle sessioni agente.",
+      "description": "Reason the agent sessions were stopped.",
       "oneOf": [
         {
-          "description": "Processo genitore (UI) terminato.",
+          "description": "Parent process (UI) terminated.",
           "type": "string",
           "const": "parent_lost"
         },
@@ -1121,23 +1121,23 @@
           "const": "emergency_stop"
         },
         {
-          "description": "Arresto controllato del servizio.",
+          "description": "Controlled shutdown of the service.",
           "type": "string",
           "const": "shutdown"
         }
       ]
     },
     "UtcTimestamp": {
-      "description": "Istante UTC RFC 3339 con suffisso Z, precisione al millisecondo.",
+      "description": "RFC 3339 UTC instant with Z suffix, millisecond precision.",
       "type": "string",
       "format": "date-time"
     },
     "VmConfig": {
-      "description": "Configurazione di una VM richiesta dall'utente. Nessun campo è un percorso o\nun'opzione QEMU: i media sono riferiti per [`MediaId`] del registro approvato.",
+      "description": "VM configuration requested by the user. No field is a path or\na QEMU option: media are referenced by [`MediaId`] of the approved registry.",
       "type": "object",
       "properties": {
         "data_media": {
-          "description": "Supporto dati opzionale in sola lettura (tipo `data_iso`), montato a VM spenta.",
+          "description": "Optional read-only data media (kind `data_iso`), attached with the VM off.",
           "anyOf": [
             {
               "$ref": "#/$defs/MediaId"
@@ -1148,22 +1148,22 @@
           ]
         },
         "disk_gib": {
-          "description": "Dimensione virtuale del disco principale QCOW2 in GiB.",
+          "description": "Virtual size of the main QCOW2 disk in GiB.",
           "type": "integer",
           "format": "uint64",
           "minimum": 0
         },
         "firmware": {
-          "description": "Firmware; nel MVP solo `uefi`.",
+          "description": "Firmware; in the MVP only `uefi`.",
           "$ref": "#/$defs/Firmware",
           "default": "uefi"
         },
         "guest_os": {
-          "description": "Sistema operativo guest dichiarato.",
+          "description": "Declared guest operating system.",
           "$ref": "#/$defs/GuestOs"
         },
         "install_media": {
-          "description": "Supporto di installazione dal registro media (tipo `install_iso`).",
+          "description": "Installation media from the media registry (kind `install_iso`).",
           "anyOf": [
             {
               "$ref": "#/$defs/MediaId"
@@ -1174,7 +1174,7 @@
           ]
         },
         "limits": {
-          "description": "Limiti di esecuzione applicati dal supervisor al processo QEMU\n(ADR-0017); assenti nei cataloghi precedenti → valori predefiniti.",
+          "description": "Execution limits applied by the supervisor to the QEMU process\n(ADR-0017); missing in older catalogs → default values.",
           "$ref": "#/$defs/VmLimits",
           "default": {
             "cpu_max_percent": 100,
@@ -1182,22 +1182,22 @@
           }
         },
         "memory_mib": {
-          "description": "Memoria guest in MiB (non è il limite dell'intero processo QEMU).",
+          "description": "Guest memory in MiB (not the limit of the whole QEMU process).",
           "type": "integer",
           "format": "uint64",
           "minimum": 0
         },
         "name": {
-          "description": "Nome visibile.",
+          "description": "Visible name.",
           "$ref": "#/$defs/VmName"
         },
         "network": {
-          "description": "Profilo di rete; nel MVP solo `offline`.",
+          "description": "Network profile; in the MVP only `offline`.",
           "$ref": "#/$defs/NetworkProfile",
           "default": "offline"
         },
         "vcpus": {
-          "description": "Numero di vCPU (non è un limite percentuale di CPU: ROADMAP 7.2).",
+          "description": "Number of vCPUs (not a CPU percentage limit: ROADMAP 7.2).",
           "type": "integer",
           "format": "uint32",
           "minimum": 0
@@ -1213,17 +1213,17 @@
       ]
     },
     "VmId": {
-      "description": "VmId: UUID versione 7 in minuscolo con trattini.",
+      "description": "VmId: version 7 UUID, lowercase with hyphens.",
       "type": "string",
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     },
     "VmLimits": {
-      "description": "Limiti di esecuzione di una VM (ADR-0017), impostati dall'utente nelle\nimpostazioni della VM e applicati dal supervisor, mai dal client.",
+      "description": "Execution limits of a VM (ADR-0017), set by the user in the\nVM settings and applied by the supervisor, never by the client.",
       "type": "object",
       "properties": {
         "cpu_max_percent": {
-          "description": "Tetto di CPU in percentuale della capacità dei vCPU assegnati\n([`MIN_CPU_MAX_PERCENT`]..=100; 100 = nessun tetto). Applicato dal\nsistema operativo all'intero processo QEMU.",
+          "description": "CPU cap as a percentage of the capacity of the assigned vCPUs\n([`MIN_CPU_MAX_PERCENT`]..=100; 100 = no cap). Applied by the\noperating system to the whole QEMU process.",
           "type": "integer",
           "format": "uint8",
           "default": 100,
@@ -1231,14 +1231,14 @@
           "minimum": 0
         },
         "memory_margin_mib": {
-          "description": "Memoria concessa al processo QEMU oltre la RAM del guest, in MiB\n([`MIN_MEMORY_MARGIN_MIB`]..=[`MAX_MEMORY_MARGIN_MIB`]). Superato il\nlimite, QEMU è terminato e l'uscita è classificata come limite di risorse.",
+          "description": "Memory granted to the QEMU process beyond the guest RAM, in MiB\n([`MIN_MEMORY_MARGIN_MIB`]..=[`MAX_MEMORY_MARGIN_MIB`]). When the\nlimit is exceeded, QEMU is terminated and the exit is classified as a resource limit.",
           "type": "integer",
           "format": "uint32",
           "default": 1024,
           "minimum": 0
         },
         "storage_budget_gib": {
-          "description": "Spazio massimo in GiB per i file della VM oltre al disco principale\n(overlay, baseline, variabili firmware); `None` = nessun budget dedicato.\nVerificato a ogni avvio.",
+          "description": "Maximum space in GiB for the VM's files beyond the main disk\n(overlays, baselines, firmware variables); `None` = no dedicated budget.\nChecked at every start.",
           "type": [
             "integer",
             "null"
@@ -1250,36 +1250,36 @@
       "additionalProperties": false
     },
     "VmName": {
-      "description": "Nome VM: etichetta ASCII, non un percorso.",
+      "description": "VM name: ASCII label, not a path.",
       "type": "string",
       "maxLength": 64,
       "minLength": 1,
       "pattern": "^[A-Za-z0-9_][A-Za-z0-9 ._-]*$"
     },
     "VmRecord": {
-      "description": "VM del catalogo con revisione della configurazione e ultimo stato persistito.",
+      "description": "Catalog VM with configuration revision and last persisted state.",
       "type": "object",
       "properties": {
         "config": {
-          "description": "Configurazione corrente.",
+          "description": "Current configuration.",
           "$ref": "#/$defs/VmConfig"
         },
         "config_revision": {
-          "description": "Revisione della configurazione, incrementata a ogni modifica (controllo delle revisioni).",
+          "description": "Configuration revision, incremented on every change (revision check).",
           "type": "integer",
           "format": "uint64",
           "minimum": 0
         },
         "created_at": {
-          "description": "Istante di creazione.",
+          "description": "Creation instant.",
           "$ref": "#/$defs/UtcTimestamp"
         },
         "id": {
-          "description": "Identificativo.",
+          "description": "Identifier.",
           "$ref": "#/$defs/VmId"
         },
         "persisted_state": {
-          "description": "Ultimo stato persistito: indicativo, lo stato osservato prevale.",
+          "description": "Last persisted state: a hint, the observed state takes precedence.",
           "$ref": "#/$defs/VmState"
         }
       },
@@ -1292,60 +1292,60 @@
       ]
     },
     "VmState": {
-      "description": "Stato del ciclo di vita di una VM.",
+      "description": "Lifecycle state of a VM.",
       "oneOf": [
         {
-          "description": "Processo assente e file rilasciati. Unico stato per operazioni su dischi, NVRAM e media.",
+          "description": "Process absent and files released. The only state for operations on disks, NVRAM and media.",
           "type": "string",
           "const": "stopped"
         },
         {
-          "description": "Spawn avviato, nuovo `run_id` assegnato, QMP non ancora pronto.",
+          "description": "Spawn started, new `run_id` assigned, QMP not ready yet.",
           "type": "string",
           "const": "starting"
         },
         {
-          "description": "Processo vivo e QMP pronto.",
+          "description": "Process alive and QMP ready.",
           "type": "string",
           "const": "running"
         },
         {
-          "description": "Arresto richiesto; completo solo a fine processo osservata.",
+          "description": "Stop requested; complete only once the process end is observed.",
           "type": "string",
           "const": "stopping"
         },
         {
-          "description": "Errore di avvio o uscita inattesa. Nessuna promozione automatica a baseline.",
+          "description": "Start error or unexpected exit. No automatic promotion to baseline.",
           "type": "string",
           "const": "failed"
         },
         {
-          "description": "Riconciliazione dopo crash (journal, file, processi): nessuna mutazione esterna.",
+          "description": "Reconciliation after a crash (journal, files, processes): no external mutation.",
           "type": "string",
           "const": "recovering"
         }
       ]
     },
     "VmSummary": {
-      "description": "Riepilogo di una VM per elenco e stato.",
+      "description": "Summary of a VM for list and status.",
       "type": "object",
       "properties": {
         "config": {
-          "description": "Configurazione corrente (risorse e limiti), per le impostazioni della VM.",
+          "description": "Current configuration (resources and limits), for the VM settings.",
           "$ref": "#/$defs/VmConfig"
         },
         "config_revision": {
-          "description": "Revisione della configurazione, da indicare in `update_vm`.",
+          "description": "Configuration revision, to be given in `update_vm`.",
           "type": "integer",
           "format": "uint64",
           "minimum": 0
         },
         "name": {
-          "description": "Nome mostrato.",
+          "description": "Displayed name.",
           "$ref": "#/$defs/VmName"
         },
         "run_id": {
-          "description": "Esecuzione corrente, se esiste un processo o l'ultima conclusa.",
+          "description": "Current run, if a process exists, or the last finished one.",
           "anyOf": [
             {
               "$ref": "#/$defs/RunId"
@@ -1356,7 +1356,7 @@
           ]
         },
         "state": {
-          "description": "Stato corrente come visto dal core (derivato da processo e QMP).",
+          "description": "Current state as seen by the core (derived from the process and QMP).",
           "$ref": "#/$defs/VmState"
         },
         "vm_id": {

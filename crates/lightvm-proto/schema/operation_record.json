@@ -1,11 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "OperationRecord",
-  "description": "Registro di un'operazione (consultabile per `operation_id`).",
+  "description": "Record of an operation (queryable by `operation_id`).",
   "type": "object",
   "properties": {
     "error": {
-      "description": "Codice d'errore se `failed` o `discarded`.",
+      "description": "Error code if `failed` or `discarded`.",
       "anyOf": [
         {
           "$ref": "#/$defs/ErrorCode"
@@ -16,19 +16,19 @@
       ]
     },
     "id": {
-      "description": "Identificativo (chiave di idempotenza).",
+      "description": "Identifier (idempotency key).",
       "$ref": "#/$defs/OperationId"
     },
     "kind": {
-      "description": "Tipo.",
+      "description": "Kind.",
       "$ref": "#/$defs/OperationKind"
     },
     "requested_at": {
-      "description": "Istante di accettazione.",
+      "description": "Acceptance instant.",
       "$ref": "#/$defs/UtcTimestamp"
     },
     "run_id": {
-      "description": "Esecuzione a cui si riferisce, se pertinente.",
+      "description": "Run it refers to, if relevant.",
       "anyOf": [
         {
           "$ref": "#/$defs/RunId"
@@ -39,7 +39,7 @@
       ]
     },
     "session_id": {
-      "description": "Sessione richiedente, se agente.",
+      "description": "Requesting session, if an agent.",
       "anyOf": [
         {
           "$ref": "#/$defs/SessionId"
@@ -50,11 +50,11 @@
       ]
     },
     "status": {
-      "description": "Stato.",
+      "description": "Status.",
       "$ref": "#/$defs/OperationStatus"
     },
     "updated_at": {
-      "description": "Istante dell'ultimo cambio di stato.",
+      "description": "Instant of the last status change.",
       "$ref": "#/$defs/UtcTimestamp"
     },
     "vm_id": {
@@ -72,170 +72,170 @@
   ],
   "$defs": {
     "ErrorCode": {
-      "description": "Codice stabile di un errore operativo. I nomi serializzati non cambiano mai;\nnuovi codici si aggiungono soltanto.",
+      "description": "Stable code of an operational error. Serialized names never change;\nnew codes are only ever added.",
       "oneOf": [
         {
-          "description": "Chiamante identificato (credenziale valida) ma non autorizzato all'azione:\nVM fuori allowlist, capability mancante, sessione in pausa, ruolo\ninsufficiente. Credenziali assenti o non valide: [`ErrorCode::Unauthenticated`].",
+          "description": "Caller identified (valid credential) but not authorized for the action:\nVM outside the allowlist, missing capability, paused session, insufficient\nrole. Missing or invalid credentials: [`ErrorCode::Unauthenticated`].",
           "type": "string",
           "const": "permission_denied"
         },
         {
-          "description": "Sessione o lease scaduti: serve una nuova autorizzazione nell'app.",
+          "description": "Session or lease expired: a new authorization in the app is needed.",
           "type": "string",
           "const": "session_expired"
         },
         {
-          "description": "Un'altra mutazione è in corso o in coda sulla stessa VM: ritentabile.",
+          "description": "Another mutation is in progress or queued on the same VM: retryable.",
           "type": "string",
           "const": "vm_busy"
         },
         {
-          "description": "Capacità non disponibile su questo host, build o fase.",
+          "description": "Capability not available on this host, build or phase.",
           "type": "string",
           "const": "unsupported"
         },
         {
-          "description": "L'azione non è ammessa nello stato corrente (o riferisce un `run_id` superato).",
+          "description": "The action is not allowed in the current state (or refers to a superseded `run_id`).",
           "type": "string",
           "const": "state_conflict"
         },
         {
-          "description": "Limite di risorse, quota o dimensione superato.",
+          "description": "Resource, quota or size limit exceeded.",
           "type": "string",
           "const": "resource_limit"
         },
         {
-          "description": "Argomento non valido (formato, intervallo, nome, percorso rifiutato).",
+          "description": "Invalid argument (format, range, name, rejected path).",
           "type": "string",
           "const": "invalid_argument"
         },
         {
-          "description": "Oggetto inesistente o non visibile al chiamante.",
+          "description": "Object does not exist or is not visible to the caller.",
           "type": "string",
           "const": "not_found"
         },
         {
-          "description": "Guasto dell'infrastruttura (QEMU, QMP, storage, OS) non imputabile al chiamante.",
+          "description": "Infrastructure failure (QEMU, QMP, storage, OS) not attributable to the caller.",
           "type": "string",
           "const": "infrastructure_error"
         },
         {
-          "description": "Nessuna credenziale valida: credenziale IPC o token di sessione assente,\nmalformato, sconosciuto, revocato o riusato dopo un riavvio del supervisor.\nServe una nuova autorizzazione nell'app. Aggiunto in coda ai primi nove\ncodici, che restano invariati.",
+          "description": "No valid credential: IPC credential or session token missing,\nmalformed, unknown, revoked or reused after a supervisor restart.\nA new authorization in the app is needed. Appended after the first nine\ncodes, which remain unchanged.",
           "type": "string",
           "const": "unauthenticated"
         }
       ]
     },
     "OperationId": {
-      "description": "OperationId: UUID versione 7 in minuscolo con trattini.",
+      "description": "OperationId: version 7 UUID, lowercase with hyphens.",
       "type": "string",
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     },
     "OperationKind": {
-      "description": "Tipo di operazione della coda per VM.",
+      "description": "Kind of operation of the per-VM queue.",
       "oneOf": [
         {
-          "description": "Creazione della VM nel catalogo.",
+          "description": "Creation of the VM in the catalog.",
           "type": "string",
           "const": "create"
         },
         {
-          "description": "Avvio.",
+          "description": "Start.",
           "type": "string",
           "const": "start"
         },
         {
-          "description": "Arresto ordinario.",
+          "description": "Ordinary stop.",
           "type": "string",
           "const": "stop"
         },
         {
-          "description": "Arresto forzato.",
+          "description": "Forced stop.",
           "type": "string",
           "const": "force_stop"
         },
         {
-          "description": "Reset del guest.",
+          "description": "Guest reset.",
           "type": "string",
           "const": "reset"
         },
         {
-          "description": "Cattura dello schermo.",
+          "description": "Screen capture.",
           "type": "string",
           "const": "screenshot"
         },
         {
-          "description": "Input tipizzato.",
+          "description": "Typed input.",
           "type": "string",
           "const": "input"
         },
         {
-          "description": "Checkpoint a VM spenta (da F3).",
+          "description": "Checkpoint with the VM off (from F3).",
           "type": "string",
           "const": "snapshot"
         },
         {
-          "description": "Ripristino di una baseline a VM spenta (da F3).",
+          "description": "Restore of a baseline with the VM off (from F3).",
           "type": "string",
           "const": "restore"
         },
         {
-          "description": "Emergency Stop (percorso prioritario, fuori coda).",
+          "description": "Emergency Stop (priority path, outside the queue).",
           "type": "string",
           "const": "emergency_stop"
         }
       ]
     },
     "OperationStatus": {
-      "description": "Stato di un'operazione.",
+      "description": "Status of an operation.",
       "oneOf": [
         {
-          "description": "Accettata, in coda, non ancora inoltrata al backend.",
+          "description": "Accepted, queued, not yet forwarded to the backend.",
           "type": "string",
           "const": "queued"
         },
         {
-          "description": "Inoltrata al backend: può produrre effetti anche dopo una revoca.",
+          "description": "Forwarded to the backend: it may produce effects even after a revocation.",
           "type": "string",
           "const": "forwarded"
         },
         {
-          "description": "Completata con successo.",
+          "description": "Completed successfully.",
           "type": "string",
           "const": "succeeded"
         },
         {
-          "description": "Inoltrata e fallita.",
+          "description": "Forwarded and failed.",
           "type": "string",
           "const": "failed"
         },
         {
-          "description": "Scartata prima dell'inoltro (revoca, Emergency Stop, `run_id` superato): nessun effetto.",
+          "description": "Discarded before forwarding (revocation, Emergency Stop, superseded `run_id`): no effect.",
           "type": "string",
           "const": "discarded"
         }
       ]
     },
     "RunId": {
-      "description": "RunId: UUID versione 7 in minuscolo con trattini.",
+      "description": "RunId: version 7 UUID, lowercase with hyphens.",
       "type": "string",
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     },
     "SessionId": {
-      "description": "SessionId: UUID versione 7 in minuscolo con trattini.",
+      "description": "SessionId: version 7 UUID, lowercase with hyphens.",
       "type": "string",
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     },
     "UtcTimestamp": {
-      "description": "Istante UTC RFC 3339 con suffisso Z, precisione al millisecondo.",
+      "description": "RFC 3339 UTC instant with Z suffix, millisecond precision.",
       "type": "string",
       "format": "date-time"
     },
     "VmId": {
-      "description": "VmId: UUID versione 7 in minuscolo con trattini.",
+      "description": "VmId: version 7 UUID, lowercase with hyphens.",
       "type": "string",
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"

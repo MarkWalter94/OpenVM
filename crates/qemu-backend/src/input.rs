@@ -1,15 +1,15 @@
-//! Input tipizzato verso il guest (ROADMAP 6.4; F0-04 §4).
+//! Typed input to the guest (ROADMAP 6.4; F0-04 §4).
 //!
-//! I tipi sono quelli di `lightvm-proto` ([`InputEvent`], [`KeyAction`],
-//! [`lightvm_proto::PointerMove`] in coordinate assolute 0..=32767,
-//! [`PointerButton`]). Qui restano soltanto le parti specifiche del backend:
+//! The types are those of `lightvm-proto` ([`InputEvent`], [`KeyAction`],
+//! [`lightvm_proto::PointerMove`] in absolute coordinates 0..=32767,
+//! [`PointerButton`]). Only the backend-specific parts remain here:
 //!
-//! - l'allowlist dei qcode QEMU accettati (il proto valida solo la grammatica
+//! - the allowlist of accepted QEMU qcodes (the proto only validates the grammar
 //!   `[a-z0-9_]{1,32}`);
-//! - la validazione di un lotto rispetto alla geometria corrente;
-//! - la traduzione in JSON per QMP `input-send-event`;
-//! - il registro dei tasti e pulsanti premuti, per il rilascio esplicito in caso
-//!   di perdita di focus, disconnessione o cambio proprietario dell'input
+//! - validation of a batch against the current geometry;
+//! - translation to JSON for QMP `input-send-event`;
+//! - the register of pressed keys and buttons, for explicit release on
+//!   focus loss, disconnection or change of input owner
 //!   (ROADMAP 6.4).
 
 use std::collections::BTreeSet;
@@ -22,11 +22,11 @@ use serde_json::{Value, json};
 
 use crate::error::{BackendError, Result};
 
-/// Codici tasto QEMU ammessi (`QKeyCode`, QAPI `ui.json`).
+/// Allowed QEMU key codes (`QKeyCode`, QAPI `ui.json`).
 ///
-/// Esclusi di proposito: `unmapped` e i tasti di alimentazione `power`,
-/// `sleep`, `wake` (il controllo dell'alimentazione ha comandi dedicati e non
-/// passa dall'input).
+/// Deliberately excluded: `unmapped` and the power keys `power`,
+/// `sleep`, `wake` (power control has dedicated commands and does not
+/// go through input).
 const QKEYCODES: &[&str] = &[
     "shift",
     "shift_r",
@@ -187,17 +187,17 @@ const QKEYCODES: &[&str] = &[
     "f24",
 ];
 
-/// `true` se il qcode appartiene all'allowlist del backend.
+/// `true` if the qcode belongs to the backend allowlist.
 pub fn is_supported_qcode(qcode: &QCode) -> bool {
     QKEYCODES.contains(&qcode.as_str())
 }
 
-/// Tutti i qcode ammessi dal backend.
+/// All qcodes allowed by the backend.
 pub fn supported_qcodes() -> impl Iterator<Item = &'static str> {
     QKEYCODES.iter().copied()
 }
 
-/// Nome QAPI di un pulsante del puntatore.
+/// QAPI name of a pointer button.
 pub(crate) fn button_qapi_name(b: MouseButton) -> &'static str {
     match b {
         MouseButton::Left => "left",
@@ -208,13 +208,13 @@ pub(crate) fn button_qapi_name(b: MouseButton) -> &'static str {
     }
 }
 
-/// Valida un lotto di eventi rispetto alla geometria dichiarata: numero di
-/// eventi, coordinate assolute nell'intervallo QEMU, qcode in allowlist.
+/// Validates a batch of events against the declared geometry: number of
+/// events, absolute coordinates within the QEMU range, qcodes in the allowlist.
 pub fn validate_events(geometry: DisplayGeometry, events: &[InputEvent]) -> Result<()> {
     geometry.validate()?;
     if events.len() > MAX_INPUT_EVENTS_PER_REQUEST {
         return Err(BackendError::ResourceLimit(format!(
-            "{} eventi di input in una richiesta (massimo {MAX_INPUT_EVENTS_PER_REQUEST})",
+            "{} input events in one request (maximum {MAX_INPUT_EVENTS_PER_REQUEST})",
             events.len()
         )));
     }
@@ -224,7 +224,7 @@ pub fn validate_events(geometry: DisplayGeometry, events: &[InputEvent]) -> Resu
                 if !is_supported_qcode(&k.qcode) {
                     return Err(BackendError::invalid(
                         "qcode",
-                        format!("tasto `{}` non ammesso", k.qcode),
+                        format!("key `{}` not allowed", k.qcode),
                     ));
                 }
             }
@@ -235,7 +235,7 @@ pub fn validate_events(geometry: DisplayGeometry, events: &[InputEvent]) -> Resu
     Ok(())
 }
 
-/// Eventi QMP `input-send-event` (le coordinate sono già assolute).
+/// QMP `input-send-event` events (coordinates are already absolute).
 pub(crate) fn events_json(events: &[InputEvent]) -> Vec<Value> {
     let mut list = Vec::with_capacity(events.len() * 2);
     for e in events {
@@ -262,11 +262,11 @@ pub(crate) fn events_json(events: &[InputEvent]) -> Vec<Value> {
     list
 }
 
-/// Tasti e pulsanti premuti secondo gli eventi inoltrati.
+/// Keys and buttons pressed according to the forwarded events.
 ///
-/// Il registro è aggiornato **prima** dell'invio: se il comando QMP scade, il
-/// tasto potrebbe essere premuto nel guest e va comunque rilasciato. Rilasciare
-/// un tasto non premuto è innocuo.
+/// The register is updated **before** sending: if the QMP command times out, the
+/// key might be pressed in the guest and must be released anyway. Releasing
+/// a key that is not pressed is harmless.
 #[derive(Debug, Default)]
 pub(crate) struct PressedInput {
     keys: BTreeSet<String>,
@@ -301,7 +301,7 @@ impl PressedInput {
         self.keys.is_empty() && self.buttons.is_empty()
     }
 
-    /// Eventi di rilascio per tutto ciò che risulta premuto; svuota il registro.
+    /// Release events for everything that is pressed; empties the register.
     pub(crate) fn take_release_events(&mut self) -> Vec<InputEvent> {
         let mut out = Vec::with_capacity(self.keys.len() + self.buttons.len());
         for k in std::mem::take(&mut self.keys) {
@@ -342,22 +342,19 @@ mod tests {
         let n = v.len();
         v.sort_unstable();
         v.dedup();
-        assert_eq!(v.len(), n, "qcode duplicati");
+        assert_eq!(v.len(), n, "duplicate qcodes");
         for q in supported_qcodes() {
-            assert!(
-                QCode::parse(q).is_ok(),
-                "{q} fuori dalla grammatica del proto"
-            );
+            assert!(QCode::parse(q).is_ok(), "{q} outside the proto grammar");
         }
     }
 
     #[test]
-    fn validazione_lotto() {
+    fn batch_validation() {
         let g = DisplayGeometry::new(10, 5).unwrap();
         assert!(validate_events(g, &[key("a", true), key("a", false)]).is_ok());
         assert!(validate_events(g, &[key("power", true)]).is_err());
-        let fuori = InputEvent::PointerMove(PointerMove { x: 40000, y: 0 });
-        assert!(validate_events(g, &[fuori]).is_err());
+        let outside = InputEvent::PointerMove(PointerMove { x: 40000, y: 0 });
+        assert!(validate_events(g, &[outside]).is_err());
         let many = vec![key("a", true); MAX_INPUT_EVENTS_PER_REQUEST + 1];
         assert!(matches!(
             validate_events(g, &many),
@@ -371,7 +368,7 @@ mod tests {
     }
 
     #[test]
-    fn json_degli_eventi() {
+    fn events_json_shape() {
         let g = DisplayGeometry::new(1280, 800).unwrap();
         let v = events_json(&[
             key("a", true),
@@ -391,7 +388,7 @@ mod tests {
     }
 
     #[test]
-    fn rilascio_tasti_premuti() {
+    fn release_pressed_keys() {
         let mut p = PressedInput::default();
         p.apply(&[
             key("shift", true),

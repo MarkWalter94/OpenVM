@@ -1,33 +1,33 @@
-//! `vm-storage`: catalogo SQLite, migrazioni, manifest, journal e riconciliazione.
+//! `vm-storage`: SQLite catalog, migrations, manifests, journal and reconciliation.
 //!
-//! Responsabilità (ROADMAP 6.3, 8; ARCHITECTURE §1): metadati in SQLite, dischi e
-//! artefatti su file, manifest JSON versionati, baseline a VM spenta con overlay
-//! QCOW2 e stato firmware, journal a intenti e riconciliazione per operazioni
-//! che attraversano database e filesystem, registro dei media approvati,
-//! contabilità del budget storage, protezione dei dischi durante l'esecuzione.
+//! Responsibilities (ROADMAP 6.3, 8; ARCHITECTURE §1): metadata in SQLite, disks
+//! and artifacts in files, versioned JSON manifests, baselines taken with the VM
+//! off with QCOW2 overlays and firmware state, intent journal and reconciliation
+//! for operations that span database and filesystem, registry of approved media,
+//! storage budget accounting, protection of disks while running.
 //!
-//! Punti fermi:
-//! - SQLite incorporato (`rusqlite` con `bundled`), WAL, `foreign_keys=ON`,
-//!   `busy_timeout`; migrazioni versionate incorporate, rifiuto dei downgrade,
-//!   backup prima di migrare ([`migrate`]).
-//! - Un'istanza per catalogo, garantita da un lock su file ([`CatalogLock`]).
-//! - Percorsi sempre relativi alla radice e validati ([`ManagedPath`]); rifiuto
-//!   di collegamenti, junction e percorsi fuori dalla radice.
-//! - Una transazione SQL non rende atomico uno spostamento di file: ogni
-//!   operazione DB + filesystem passa dal journal (`begin_intent` →
-//!   `mark_applied` → `commit`/`abort`) e [`Catalog::recover`] la riconcilia;
-//!   ciò che la riconciliazione non risolve resta "da verificare"
+//! Fixed points:
+//! - Embedded SQLite (`rusqlite` with `bundled`), WAL, `foreign_keys=ON`,
+//!   `busy_timeout`; embedded versioned migrations, downgrades rejected,
+//!   backup before migrating ([`migrate`]).
+//! - One instance per catalog, guaranteed by a file lock ([`CatalogLock`]).
+//! - Paths always relative to the root and validated ([`ManagedPath`]); links,
+//!   junctions and paths outside the root are rejected.
+//! - An SQL transaction does not make a file move atomic: every
+//!   DB + filesystem operation goes through the journal (`begin_intent` →
+//!   `mark_applied` → `commit`/`abort`) and [`Catalog::recover`] reconciles it;
+//!   whatever reconciliation cannot resolve stays "needs review"
 //!   ([`IntentState::NeedsReview`]).
-//! - File nuovi creati con `CREATE_NEW` e pubblicati senza sovrascrittura.
-//! - Baseline aperta con il solo `FILE_SHARE_READ` durante preparazione ed
-//!   esecuzione, hash verificato attraverso l'handle prima di ogni avvio
+//! - New files created with `CREATE_NEW` and published without overwriting.
+//! - Baseline opened with `FILE_SHARE_READ` only during preparation and
+//!   execution, hash verified through the handle before every start
 //!   ([`Catalog::guard_run`], ADR-0025).
-//! - Lo storage non avvia processi e non interpreta configurazioni come
-//!   opzioni host: i dischi sono prodotti dal chiamante (`qemu-backend`).
+//! - Storage does not start processes and does not interpret configurations as
+//!   host options: disks are produced by the caller (`qemu-backend`).
 //!
-//! Identificativi: quelli del protocollo vengono da `lightvm-proto` e sono
-//! riesportati qui; [`DiskId`], [`FirmwareId`] e [`ArtifactId`] sono propri
-//! dello storage. Il crate non contiene codice `unsafe`.
+//! Identifiers: protocol ones come from `lightvm-proto` and are re-exported
+//! here; [`DiskId`], [`FirmwareId`] and [`ArtifactId`] belong to storage.
+//! The crate contains no `unsafe` code.
 
 mod budget;
 mod catalog;
@@ -77,7 +77,7 @@ pub use records::{
 pub use recover::{IntegrityIssue, IntentRecovery, RecoveryOutcome, RecoveryReport};
 pub use time::{UtcMillis, now_rfc3339};
 
-/// Esadecimale minuscolo.
+/// Lowercase hexadecimal.
 pub(crate) fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut s = String::with_capacity(bytes.len() * 2);

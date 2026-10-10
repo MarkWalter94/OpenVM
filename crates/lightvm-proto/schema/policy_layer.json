@@ -1,11 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "PolicyLayer",
-  "description": "Un livello di policy: capability ammesse e quote. Usato per limiti globali,\npolicy VM, grant di sessione e capacità host; la policy effettiva è\nl'intersezione dei quattro livelli (ROADMAP 6.3, calcolata in `vm-core`).",
+  "description": "A policy layer: allowed capabilities and quotas. Used for global limits,\nVM policy, session grant and host capacity; the effective policy is\nthe intersection of the four layers (ROADMAP 6.3, computed in `vm-core`).",
   "type": "object",
   "properties": {
     "capabilities": {
-      "description": "Capability ammesse da questo livello.",
+      "description": "Capabilities allowed by this layer.",
       "type": "array",
       "items": {
         "$ref": "#/$defs/Capability"
@@ -13,7 +13,7 @@
       "uniqueItems": true
     },
     "quotas": {
-      "description": "Quote di questo livello.",
+      "description": "Quotas of this layer.",
       "$ref": "#/$defs/Quotas"
     }
   },
@@ -23,30 +23,30 @@
   ],
   "$defs": {
     "Capability": {
-      "description": "Azione autorizzabile su una VM. I nomi serializzati seguono il catalogo MCP\n(ROADMAP 9); `vm.input` copre mouse e tastiera.",
+      "description": "Authorizable action on a VM. Serialized names follow the MCP catalog\n(ROADMAP 9); `vm.input` covers mouse and keyboard.",
       "oneOf": [
         {
-          "description": "Elenco filtrato dal grant.",
+          "description": "List filtered by the grant.",
           "type": "string",
           "const": "vm.list"
         },
         {
-          "description": "Stato.",
+          "description": "Status.",
           "type": "string",
           "const": "vm.status"
         },
         {
-          "description": "Avvio.",
+          "description": "Start.",
           "type": "string",
           "const": "vm.start"
         },
         {
-          "description": "Arresto (ordinario o forzato).",
+          "description": "Stop (ordinary or forced).",
           "type": "string",
           "const": "vm.stop"
         },
         {
-          "description": "Reset: richiede capability esplicita.",
+          "description": "Reset: requires an explicit capability.",
           "type": "string",
           "const": "vm.reset"
         },
@@ -56,57 +56,57 @@
           "const": "vm.screenshot"
         },
         {
-          "description": "Mouse e tastiera.",
+          "description": "Mouse and keyboard.",
           "type": "string",
           "const": "vm.input"
         },
         {
-          "description": "Checkpoint a VM spenta: richiede capability esplicita.",
+          "description": "Checkpoint with the VM off: requires an explicit capability.",
           "type": "string",
           "const": "vm.snapshot"
         },
         {
-          "description": "Ripristino a VM spenta.",
+          "description": "Restore with the VM off.",
           "type": "string",
           "const": "vm.restore"
         },
         {
-          "description": "Eventi LightVM e log QEMU autorizzati.",
+          "description": "Authorized LightVM events and QEMU logs.",
           "type": "string",
           "const": "vm.logs"
         }
       ]
     },
     "Quotas": {
-      "description": "Quote di una sessione o di un livello di policy. Ogni campo è un massimo\ninclusivo; l'intersezione prende il minimo.",
+      "description": "Quotas of a session or of a policy layer. Each field is an inclusive\nmaximum; the intersection takes the minimum.",
       "type": "object",
       "properties": {
         "max_input_events": {
-          "description": "Eventi di input totali ammessi nella sessione.",
+          "description": "Total input events allowed in the session.",
           "type": "integer",
           "format": "uint32",
           "minimum": 0
         },
         "max_operations": {
-          "description": "Operazioni totali ammesse nella sessione.",
+          "description": "Total operations allowed in the session.",
           "type": "integer",
           "format": "uint32",
           "minimum": 0
         },
         "max_queued_operations": {
-          "description": "Operazioni in coda per VM non ancora inoltrate.",
+          "description": "Operations queued per VM and not yet forwarded.",
           "type": "integer",
           "format": "uint32",
           "minimum": 0
         },
         "max_screenshot_bytes": {
-          "description": "Dimensione massima di un singolo screenshot in byte.",
+          "description": "Maximum size of a single screenshot in bytes.",
           "type": "integer",
           "format": "uint64",
           "minimum": 0
         },
         "max_screenshots": {
-          "description": "Screenshot totali ammessi nella sessione.",
+          "description": "Total screenshots allowed in the session.",
           "type": "integer",
           "format": "uint32",
           "minimum": 0

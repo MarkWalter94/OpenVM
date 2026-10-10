@@ -1,5 +1,5 @@
-//! Client IPC minimo: usato dai test, dal probe e, in seguito, dalla UI e
-//! dall'adapter MCP (F5).
+//! Minimal IPC client: used by the tests, the probe and, later, by the UI and
+//! the MCP adapter (F5).
 
 use std::collections::VecDeque;
 use std::io;
@@ -11,7 +11,7 @@ use crate::frame::{self, FrameError};
 use crate::transport::{self, BoxedStream};
 use lightvm_proto::ipc::{ClientMessage, Request, RequestId, ServerMessage, ServiceEvent};
 
-/// Connessione client.
+/// Client connection.
 pub struct Client {
     rd: ReadHalf<BoxedStream>,
     wr: WriteHalf<BoxedStream>,
@@ -29,7 +29,7 @@ impl std::fmt::Debug for Client {
 }
 
 impl Client {
-    /// Connessione all'endpoint.
+    /// Connects to the endpoint.
     pub async fn connect(endpoint: &str) -> io::Result<Self> {
         let s = transport::connect(endpoint).await?;
         let (rd, wr) = tokio::io::split(s);
@@ -48,23 +48,23 @@ impl Client {
         id
     }
 
-    /// Invia un messaggio arbitrario.
+    /// Sends an arbitrary message.
     pub async fn send(&mut self, m: &ClientMessage) -> io::Result<()> {
         frame::write_frame(&mut self.wr, m, u32::MAX).await
     }
 
-    /// Invia byte grezzi (per i test di protocollo).
+    /// Sends raw bytes (for protocol tests).
     pub async fn send_raw(&mut self, bytes: &[u8]) -> io::Result<()> {
         tokio::io::AsyncWriteExt::write_all(&mut self.wr, bytes).await?;
         tokio::io::AsyncWriteExt::flush(&mut self.wr).await
     }
 
-    /// Riceve il prossimo messaggio dal servizio.
+    /// Receives the next message from the service.
     pub async fn recv(&mut self) -> Result<ServerMessage, FrameError> {
         frame::read_frame(&mut self.rd, self.max_frame).await
     }
 
-    /// Handshake con le versioni indicate e la credenziale opzionale.
+    /// Handshake with the given versions and the optional credential.
     pub async fn hello_with(
         &mut self,
         versions: Vec<u32>,
@@ -82,13 +82,13 @@ impl Client {
         self.recv().await
     }
 
-    /// Handshake con la versione 1 e la credenziale.
+    /// Handshake with version 1 and the credential.
     pub async fn hello(&mut self, credential: &Credential) -> Result<ServerMessage, FrameError> {
         self.hello_with(vec![1], Some(credential.to_hex())).await
     }
 
-    /// Invia una richiesta e attende la risposta con lo stesso `request_id`;
-    /// gli eventi ricevuti nel frattempo restano in coda per [`Self::next_event`].
+    /// Sends a request and waits for the response with the same `request_id`;
+    /// events received in the meantime stay queued for [`Self::next_event`].
     pub async fn request(&mut self, body: Request) -> Result<ServerMessage, FrameError> {
         let request_id = self.take_id();
         self.send(&ClientMessage::Request { request_id, body })
@@ -109,8 +109,8 @@ impl Client {
         }
     }
 
-    /// Prossimo evento (dalla coda o dal flusso). Altri messaggi sono restituiti
-    /// come errore di protocollo per il chiamante.
+    /// Next event (from the queue or the stream). Other messages are returned
+    /// as a protocol error for the caller.
     pub async fn next_event(&mut self) -> Result<Result<ServiceEvent, ServerMessage>, FrameError> {
         if let Some(e) = self.events.pop_front() {
             return Ok(Ok(e));

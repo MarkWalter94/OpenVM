@@ -1,65 +1,65 @@
-# F0-07 — Linux/KVM: inventario, portabilità della build e meccanismi di processo
+# F0-07 — Linux/KVM: inventory, build portability and process mechanisms
 
-- Data di esecuzione (UTC): 2026-10-09
-- Esecutore: agente di sviluppo (ruolo: ingegnere sistemi Linux/Rust), sessione su host Windows
-- Passo della roadmap: sezione 15, passo 5 ("Smoke test Linux/KVM e controlli risorse"); sezione 10, F0 (paragrafo "Laboratorio Linux assente")
-- ADR collegati: ADR-0015, ADR-0016, ADR-0014, ADR-0017, ADR-0009
-- Esito complessivo: **parziale**. Smoke test Linux/KVM su host fisico: **non eseguito** (nessun host Linux fisico disponibile). Portabilità della build e meccanismi di processo in WSL2: eseguiti, con la validità limitata dichiarata qui sotto.
+- Execution date (UTC): 2026-10-09
+- Executed by: development agent (role: Linux/Rust systems engineer), session on a Windows host
+- Roadmap step: section 15, step 5 ("Linux/KVM smoke test and resource controls"); section 10, F0 (paragraph "No Linux lab")
+- Related ADRs: ADR-0015, ADR-0016, ADR-0014, ADR-0017, ADR-0009
+- Overall outcome: **partial**. Linux/KVM smoke test on a physical host: **not executed** (no physical Linux host available). Build portability and process mechanisms in WSL2: executed, with the limited validity declared below.
 
-## Scopo
+## Purpose
 
-Stabilire quale ambiente Linux è disponibile su questa macchina e usarlo **solo** entro il limite fissato dalla roadmap (sezione 10, F0): "WSL2, macchine virtuali annidate o runner senza accelerazione verificabile non sostituiscono l'host fisico per questa prova; servono soltanto per build e test indipendenti dall'acceleratore".
+Establish which Linux environment is available on this machine and use it **only** within the limit set by the roadmap (section 10, F0): "WSL2, nested virtual machines or runners without verifiable acceleration do not replace the physical host for this test; they serve only for builds and accelerator-independent tests".
 
-Ogni prova di questo file ha una delle tre validità seguenti, indicate a ogni risultato:
+Each test in this file has one of the following three validities, indicated on every result:
 
-| Etichetta | Significato |
+| Label | Meaning |
 | --- | --- |
-| **[build]** | Portabilità della build e dei test headless su Linux. Non certifica l'host Linux. |
-| **[processi]** | Meccanismi del kernel Linux per il ciclo di vita dei processi (ADR-0015, ammesso da ADR-0015 "in un ambiente Linux non accelerato, purché il file dichiari che la prova riguarda solo il ciclo di vita dei processi"). Il figlio di prova è `sleep`, non QEMU. |
-| **[annidato]** | Qualunque cosa riguardi KVM dentro WSL2: virtualizzazione annidata, **NON valida per la matrice** (roadmap, "Laboratorio Linux assente"). |
+| **[build]** | Portability of the build and of the headless tests on Linux. It does not certify the Linux host. |
+| **[processes]** | Linux kernel mechanisms for the process lifecycle (ADR-0015, allowed by ADR-0015 "in a non-accelerated Linux environment, provided the file declares that the test concerns only the process lifecycle"). The test child is `sleep`, not QEMU. |
+| **[nested]** | Anything concerning KVM inside WSL2: nested virtualization, **NOT valid for the matrix** (roadmap, "No Linux lab"). |
 
-Che cosa questo file **non** dimostra: boot accelerato KVM, funzionamento di QEMU su Linux, comportamento dei limiti cgroup su un processo QEMU con KVM, rendering eframe con GPU su Linux, supporto di Ubuntu LTS come host. La cella Ubuntu della matrice (sezione 5) resta **non verificato**.
+What this file does **not** demonstrate: KVM-accelerated boot, QEMU working on Linux, behaviour of cgroup limits on a QEMU process with KVM, eframe rendering with a GPU on Linux, support for Ubuntu LTS as a host. The Ubuntu cell of the matrix (section 5) remains **not verified**.
 
-## Ambiente
+## Environment
 
-| Voce | Valore |
+| Item | Value |
 | --- | --- |
-| Host fisico (modello, CPU, RAM, storage) | HP ZBook Fury 16 G9, Intel Core i7-12800HX (16 core, 24 processori logici), 31,6 GiB RAM (dati da F0-01); volume `E:` NTFS locale |
-| OS host e build | Windows 11 Pro 10.0.26200 (build 26200.9457 secondo `wsl --version`) |
-| Hypervisor host | `HypervisorPresent=True` (`Win32_ComputerSystem`); Docker Desktop 4.92.0 installato (distribuzione `docker-desktop`, ferma, non usata) |
+| Physical host (model, CPU, RAM, storage) | HP ZBook Fury 16 G9, Intel Core i7-12800HX (16 cores, 24 logical processors), 31.6 GiB RAM (data from F0-01); local NTFS volume `E:` |
+| Host OS and build | Windows 11 Pro 10.0.26200 (build 26200.9457 according to `wsl --version`) |
+| Host hypervisor | `HypervisorPresent=True` (`Win32_ComputerSystem`); Docker Desktop 4.92.0 installed (distribution `docker-desktop`, stopped, not used) |
 | WSL | WSL 2.7.8.0, kernel `6.18.33.1-microsoft-standard-WSL2`, WSLg 1.0.73.2, MSRDC 1.2.6676, Direct3D 1.611.1, DXCore 10.0.26100.1 |
-| `.wslconfig` utente | **assente** (`Test-Path $env:USERPROFILE\.wslconfig` → `False`): impostazioni predefinite, quindi nessuna impostazione esplicita di `nestedVirtualization` |
-| Distribuzioni WSL | `Ubuntu` (predefinita, versione 2), `docker-desktop` (versione 2) |
-| Distribuzione usata | Ubuntu 26.04 LTS "Resolute Raccoon", glibc 2.43, systemd 259 attivo (`/etc/wsl.conf`: `[boot] systemd=true`) |
-| Risorse visibili nella VM WSL | 24 CPU, 15 791 MiB RAM, 4 GiB swap; `/` 1007 GiB (955 GiB liberi) |
-| Utente nella distro | `mortali` (uid 1000), gruppi `adm cdrom sudo dip plugdev users`; **non** nel gruppo `kvm`; `sudo -n true` → "interactive authentication is required" (nessun sudo senza password) |
-| Acceleratore e stato | **[annidato]** `/dev/kvm` presente (`crw-rw---- root kvm 10,232`), moduli `kvm_intel` e `kvm` caricati, `kvm_intel.nested=Y`, flag CPU `vmx` e `hypervisor` visibili. `/dev/kvm` **non accessibile** all'utente (non nel gruppo `kvm`). Virtualizzazione annidata: non valida per la matrice |
-| cgroup | cgroup v2 unificato (`nsdelegate`); controller radice `cpuset cpu io memory hugetlb pids rdma`; `user@1000.service` delegato con `cpu memory pids` |
-| Toolchain Rust | rustup 1.29.1, rustc 1.99.0 (b940084d7 2026-09-28), cargo 1.99.0 (5f94df478 2026-08-27), host `x86_64-unknown-linux-gnu`, selezionata da `rust-toolchain.toml` |
-| Driver C / linker | **non standard**: zig 0.14.1 (`zig cc -target x86_64-linux-gnu.2.39`) tramite wrapper `lab/wsl/bin/cc`; vedi "Installazioni eseguite" |
-| Binario QEMU | **assente** nella distro (`command -v qemu-system-x86_64` vuoto; `apt-cache policy qemu-system-x86`: Installed `(none)`, Candidate `1:10.2.1+ds-1ubuntu3`). Non installato, per regola del compito |
-| Firmware / guest | non applicabile (nessun boot eseguito) |
-| Sessione grafica | WSLg: `WAYLAND_DISPLAY=wayland-0`, `DISPLAY=:0`; `/dev/dxg` presente; Mesa 26.0.3, nessuna ICD Vulkan "dozen" installata |
-| Altre condizioni | sorgenti compilati direttamente da `/mnt/e/OpenVM` (9p), `CARGO_TARGET_DIR=/mnt/e/OpenVM/lab/wsl/target` separata dal `target/` Windows; altri agenti modificavano in parallelo `apps/desktop`, `crates/rfb-client` e `spikes/*` |
+| User `.wslconfig` | **absent** (`Test-Path $env:USERPROFILE\.wslconfig` → `False`): default settings, hence no explicit `nestedVirtualization` setting |
+| WSL distributions | `Ubuntu` (default, version 2), `docker-desktop` (version 2) |
+| Distribution used | Ubuntu 26.04 LTS "Resolute Raccoon", glibc 2.43, systemd 259 active (`/etc/wsl.conf`: `[boot] systemd=true`) |
+| Resources visible in the WSL VM | 24 CPUs, 15 791 MiB RAM, 4 GiB swap; `/` 1007 GiB (955 GiB free) |
+| User in the distro | `mortali` (uid 1000), groups `adm cdrom sudo dip plugdev users`; **not** in the `kvm` group; `sudo -n true` → "interactive authentication is required" (no passwordless sudo) |
+| Accelerator and state | **[nested]** `/dev/kvm` present (`crw-rw---- root kvm 10,232`), modules `kvm_intel` and `kvm` loaded, `kvm_intel.nested=Y`, CPU flags `vmx` and `hypervisor` visible. `/dev/kvm` **not accessible** to the user (not in the `kvm` group). Nested virtualization: not valid for the matrix |
+| cgroup | unified cgroup v2 (`nsdelegate`); root controllers `cpuset cpu io memory hugetlb pids rdma`; `user@1000.service` delegated with `cpu memory pids` |
+| Rust toolchain | rustup 1.29.1, rustc 1.99.0 (b940084d7 2026-09-28), cargo 1.99.0 (5f94df478 2026-08-27), host `x86_64-unknown-linux-gnu`, selected by `rust-toolchain.toml` |
+| C driver / linker | **non-standard**: zig 0.14.1 (`zig cc -target x86_64-linux-gnu.2.39`) via the wrapper `lab/wsl/bin/cc`; see "Installations performed" |
+| QEMU binary | **absent** in the distro (`command -v qemu-system-x86_64` empty; `apt-cache policy qemu-system-x86`: Installed `(none)`, Candidate `1:10.2.1+ds-1ubuntu3`). Not installed, per the task rules |
+| Firmware / guest | not applicable (no boot performed) |
+| Graphics session | WSLg: `WAYLAND_DISPLAY=wayland-0`, `DISPLAY=:0`; `/dev/dxg` present; Mesa 26.0.3, no "dozen" Vulkan ICD installed |
+| Other conditions | sources built directly from `/mnt/e/OpenVM` (9p), `CARGO_TARGET_DIR=/mnt/e/OpenVM/lab/wsl/target` separate from the Windows `target/`; other agents were modifying `apps/desktop`, `crates/rfb-client` and `spikes/*` in parallel |
 
-### Installazioni eseguite (solo profilo utente WSL, nessun sudo)
+### Installations performed (WSL user profile only, no sudo)
 
-| Componente | Dove | Provenienza e verifica | Motivo |
+| Component | Where | Provenance and verification | Reason |
 | --- | --- | --- | --- |
-| rustup 1.29.1 | `~/.rustup` (617 MiB), `~/.cargo` (278 MiB, include registro crate) | `https://sh.rustup.rs`, SHA-256 dello script scaricato `7d0ea0f8eba7fa1ebfe998091cd7ec4501e33ec5ca6b884eb4d894d7da5170af`; opzioni `-y --default-toolchain none --profile minimal --no-modify-path` | nessun Rust nella distro |
-| toolchain 1.99.0-x86_64-unknown-linux-gnu | `~/.rustup/toolchains` | installata automaticamente da rustup alla prima invocazione in `/mnt/e/OpenVM` (`rust-toolchain.toml`) | versione fissata dal workspace |
-| zig 0.14.1 | `~/.local/opt/zig-x86_64-linux-0.14.1` (340 MiB) + cache `~/.cache/zig` (50 MiB) | `https://ziglang.org/download/0.14.1/zig-x86_64-linux-0.14.1.tar.xz`, SHA-256 `24aeeec8af16c381934a6cd7d95c807a8cb2cf7df9fa40d359aa884195c4716c`, uguale al valore pubblicato in `https://ziglang.org/download/index.json` | la distro non ha `gcc`/`cc`, `libc6-dev` (`crt1.o`, `libc.so`, header) né `pkg-config`; senza sudo non si possono installare `build-essential` e affini. `zig cc` fornisce driver C e stub glibc senza privilegi |
+| rustup 1.29.1 | `~/.rustup` (617 MiB), `~/.cargo` (278 MiB, includes the crate registry) | `https://sh.rustup.rs`, SHA-256 of the downloaded script `7d0ea0f8eba7fa1ebfe998091cd7ec4501e33ec5ca6b884eb4d894d7da5170af`; options `-y --default-toolchain none --profile minimal --no-modify-path` | no Rust in the distro |
+| toolchain 1.99.0-x86_64-unknown-linux-gnu | `~/.rustup/toolchains` | installed automatically by rustup on the first invocation in `/mnt/e/OpenVM` (`rust-toolchain.toml`) | version pinned by the workspace |
+| zig 0.14.1 | `~/.local/opt/zig-x86_64-linux-0.14.1` (340 MiB) + cache `~/.cache/zig` (50 MiB) | `https://ziglang.org/download/0.14.1/zig-x86_64-linux-0.14.1.tar.xz`, SHA-256 `24aeeec8af16c381934a6cd7d95c807a8cb2cf7df9fa40d359aa884195c4716c`, equal to the value published in `https://ziglang.org/download/index.json` | the distro has no `gcc`/`cc`, `libc6-dev` (`crt1.o`, `libc.so`, headers) nor `pkg-config`; without sudo `build-essential` and the like cannot be installed. `zig cc` provides a C driver and glibc stubs without privileges |
 
-Nessun pacchetto apt, nessuna distribuzione WSL, nessuna feature Windows installata. Per rimuovere: `rm -rf ~/.rustup ~/.cargo ~/.local/opt/zig-x86_64-linux-0.14.1 ~/.cache/zig` nella distro.
+No apt package, no WSL distribution, no Windows feature installed. To remove: `rm -rf ~/.rustup ~/.cargo ~/.local/opt/zig-x86_64-linux-0.14.1 ~/.cache/zig` in the distro.
 
-## Procedura
+## Procedure
 
-Tutti gli script sono in `lab/wsl/` (directory ignorata da git); i log grezzi in `lab/logs/f0-07-*`. Comandi lanciati da Git Bash con `MSYS_NO_PATHCONV=1 wsl -d Ubuntu -- ...`.
+All scripts are in `lab/wsl/` (directory ignored by git); raw logs in `lab/logs/f0-07-*`. Commands launched from Git Bash with `MSYS_NO_PATHCONV=1 wsl -d Ubuntu -- ...`.
 
-1. Inventario Windows: `wsl --status`, `wsl -l -v`, `wsl --version`, `Test-Path $env:USERPROFILE\.wslconfig`, `(Get-CimInstance Win32_ComputerSystem).HypervisorPresent`.
-2. Inventario distro: `lab/wsl/inventory.sh`, `lab/wsl/inventory2.sh` (kernel, `/dev/kvm`, gruppi, sudo, cgroup, systemd, toolchain, librerie, WSLg, `systemd-run --user --scope`). Log: `lab/logs/f0-07-inventory.txt`, `f0-07-inventory2.txt`, `f0-07-kvm-check.txt`.
-3. Installazioni utente: `lab/wsl/install-user-tools.sh` (log `f0-07-install-user-tools.txt`).
-4. Ambiente di build: `lab/wsl/env.sh`:
+1. Windows inventory: `wsl --status`, `wsl -l -v`, `wsl --version`, `Test-Path $env:USERPROFILE\.wslconfig`, `(Get-CimInstance Win32_ComputerSystem).HypervisorPresent`.
+2. Distro inventory: `lab/wsl/inventory.sh`, `lab/wsl/inventory2.sh` (kernel, `/dev/kvm`, groups, sudo, cgroup, systemd, toolchain, libraries, WSLg, `systemd-run --user --scope`). Logs: `lab/logs/f0-07-inventory.txt`, `f0-07-inventory2.txt`, `f0-07-kvm-check.txt`.
+3. User installations: `lab/wsl/install-user-tools.sh` (log `f0-07-install-user-tools.txt`).
+4. Build environment: `lab/wsl/env.sh`:
    ```sh
    export PATH="$HOME/.cargo/bin:/mnt/e/OpenVM/lab/wsl/bin:$PATH"
    export CC=/mnt/e/OpenVM/lab/wsl/bin/cc CXX=/mnt/e/OpenVM/lab/wsl/bin/c++ AR=ar
@@ -67,180 +67,180 @@ Tutti gli script sono in `lab/wsl/` (directory ignorata da git); i log grezzi in
    export CARGO_TARGET_DIR=/mnt/e/OpenVM/lab/wsl/target
    export RUSTUP_AUTO_INSTALL=0
    ```
-   Il wrapper `lab/wsl/bin/cc` esegue `zig cc -target x86_64-linux-gnu.2.39` scartando `--target=*`, `-Wl,--no-undefined-version` e `-Wl,-O1` (quest'ultimo produceva l'avviso del linker "ignoring deprecated linker optimization setting '1'").
-5. Build e test **[build]**: `lab/wsl/build-desktop.sh` (`cargo build -p lightvm-desktop`), `lab/wsl/build-all.sh` (`cargo build --release -p lightvm-desktop`, `cargo build --release -p f0-linux-procs`, `cargo clippy -p f0-linux-procs --all-targets -- -D warnings`, `cargo test --workspace`), poi `lab/wsl/run.sh cargo test --workspace` ripetuto.
-6. Smoke eframe sotto WSLg **[build]**: `lab/wsl/smoke.sh <binario> [opzioni]` avvia `lightvm-desktop --smoke 16`, legge `VmRSS`/`RssAnon`/`RssFile` da `/proc/<pid>/status` a 3 s e la CPU (`utime+stime` da `/proc/<pid>/stat`) tra 3 e 13 s; `lab/wsl/primo-frame.sh` esegue 20 avvii a caldo con `--smoke 0.5`.
-7. Spike `spikes/f0-linux-procs` **[processi]**:
+   The wrapper `lab/wsl/bin/cc` runs `zig cc -target x86_64-linux-gnu.2.39` discarding `--target=*`, `-Wl,--no-undefined-version` and `-Wl,-O1` (the latter produced the linker warning "ignoring deprecated linker optimization setting '1'").
+5. Build and test **[build]**: `lab/wsl/build-desktop.sh` (`cargo build -p lightvm-desktop`), `lab/wsl/build-all.sh` (`cargo build --release -p lightvm-desktop`, `cargo build --release -p f0-linux-procs`, `cargo clippy -p f0-linux-procs --all-targets -- -D warnings`, `cargo test --workspace`), then `lab/wsl/run.sh cargo test --workspace` repeated.
+6. eframe smoke under WSLg **[build]**: `lab/wsl/smoke.sh <binary> [options]` starts `lightvm-desktop --smoke 16`, reads `VmRSS`/`RssAnon`/`RssFile` from `/proc/<pid>/status` at 3 s and the CPU (`utime+stime` from `/proc/<pid>/stat`) between 3 and 13 s; `lab/wsl/primo-frame.sh` runs 20 warm starts with `--smoke 0.5`.
+7. Spike `spikes/f0-linux-procs` **[processes]**:
    ```sh
    f0-linux-procs processi --samples 30
-   f0-linux-procs cgroup --samples 30                                   # dal cgroup di avvio di `wsl --`
+   f0-linux-procs cgroup --samples 30                                   # from the startup cgroup of `wsl --`
    systemd-run --user --scope -p Delegate=yes --quiet -- f0-linux-procs cgroup --samples 30
    ```
-8. Verifica su Windows che lo spike non rompa il workspace: `cargo check -p f0-linux-procs` e `cargo clippy -p f0-linux-procs -- -D warnings` (target dir temporanea in `lab/wsl/`, poi rimossa); `cargo +stable-x86_64-pc-windows-gnu run -p f0-linux-procs` stampa `f0-linux-procs: non applicabile su questo sistema operativo (spike solo Linux)` ed esce normalmente.
+8. Check on Windows that the spike does not break the workspace: `cargo check -p f0-linux-procs` and `cargo clippy -p f0-linux-procs -- -D warnings` (temporary target dir in `lab/wsl/`, then removed); `cargo +stable-x86_64-pc-windows-gnu run -p f0-linux-procs` prints `f0-linux-procs: non applicabile su questo sistema operativo (spike solo Linux)` and exits normally.
 
-## Risultati
+## Results
 
-### 1. Inventario
+### 1. Inventory
 
-| Voce | Esito | Evidenza |
+| Item | Outcome | Evidence |
 | --- | --- | --- |
-| Distribuzione WSL presente | verificato | `Ubuntu` (WSL2, predefinita), `docker-desktop` |
-| Host Linux fisico con KVM | **non eseguito** (non disponibile) | nessun host Linux fisico in questa sessione |
-| `/dev/kvm` nella distro | verificato **[annidato]** | presente, `root:kvm 0660`, `kvm_intel.nested=Y`; utente non nel gruppo `kvm` → non apribile |
-| QEMU nella distro | non presente | `qemu-system-x86_64` assente |
-| Probe `-accel kvm -S` + `query-accelerators` | **non eseguito** | QEMU assente (non installato per regola) e `/dev/kvm` non accessibile all'utente. Anche se eseguito, sarebbe stato "WSL2 annidato, NON valido per la matrice" |
-| systemd e delega cgroup utente | verificato | systemd 259 PID 1; `systemd-run --user --scope -p MemoryMax=64M -p CPUQuota=20% true` → `SCOPE_OK` |
+| WSL distribution present | verified | `Ubuntu` (WSL2, default), `docker-desktop` |
+| Physical Linux host with KVM | **not executed** (not available) | no physical Linux host in this session |
+| `/dev/kvm` in the distro | verified **[nested]** | present, `root:kvm 0660`, `kvm_intel.nested=Y`; user not in the `kvm` group → cannot be opened |
+| QEMU in the distro | not present | `qemu-system-x86_64` absent |
+| Probe `-accel kvm -S` + `query-accelerators` | **not executed** | QEMU absent (not installed per the rules) and `/dev/kvm` not accessible to the user. Even if run, it would have been "nested WSL2, NOT valid for the matrix" |
+| systemd and user cgroup delegation | verified | systemd 259 PID 1; `systemd-run --user --scope -p MemoryMax=64M -p CPUQuota=20% true` → `SCOPE_OK` |
 
-### 2. Build e test su Linux **[build]**
+### 2. Build and tests on Linux **[build]**
 
-| Voce | Esito | Evidenza |
+| Item | Outcome | Evidence |
 | --- | --- | --- |
-| `cargo build -p lightvm-desktop` (debug) | verificato, con linker zig | `Finished dev profile ... in 2m 50s`, `EXIT=0 durata_s=171` (log `f0-07-build-desktop.txt`) |
-| `cargo build --release -p lightvm-desktop` | verificato, con linker zig | `EXIT=0 durata_s=231`; binario 134 019 080 byte, SHA-256 `f0368ddd3b6bfdcd44a9b02590bccb0155a2e3b3ffd71c5ebdd2a92484e90ca2`, 2026-10-09 11:12:40 UTC |
-| Librerie collegate staticamente nel binario | osservato | `ldd`: solo `libc.so.6`, `libm.so.6`, `ld-linux-x86-64.so.2`; X11, Wayland, xkbcommon, EGL e Vulkan sono caricati con `dlopen` a runtime, per questo la build non richiede pacchetti `-dev` |
-| `cargo test --workspace`, primo tentativo (11:12 UTC) | **fallito**, causa esterna | `apps/desktop/src/console.rs`: `unresolved import rfb_client`, `cannot find module or crate f0_console`: modifica in corso di un altro agente su `apps/desktop`, non un problema di portabilità |
-| `cargo test --workspace --exclude lightvm-desktop` | verificato | tutti i test superati (f0_console 6, rfb_client 10, `sola_lettura` 3, altri 0 test) |
-| `cargo test --workspace`, secondo tentativo (completato 11:21 UTC) | verificato | `EXIT=0`, nessun warning; inclusi `lightvm_desktop` lib 5 test e `kittest_ui` 4 test (egui_kittest headless con AccessKit) |
-| `cargo clippy -p f0-linux-procs --all-targets -- -D warnings` (Linux) | verificato | `EXIT=0` |
-| `cargo check`/`clippy -p f0-linux-procs` (Windows) | verificato | nessun warning; esecuzione su Windows: messaggio "non applicabile" |
+| `cargo build -p lightvm-desktop` (debug) | verified, with zig linker | `Finished dev profile ... in 2m 50s`, `EXIT=0 durata_s=171` (log `f0-07-build-desktop.txt`) |
+| `cargo build --release -p lightvm-desktop` | verified, with zig linker | `EXIT=0 durata_s=231`; binary 134 019 080 bytes, SHA-256 `f0368ddd3b6bfdcd44a9b02590bccb0155a2e3b3ffd71c5ebdd2a92484e90ca2`, 2026-10-09 11:12:40 UTC |
+| Libraries statically linked into the binary | observed | `ldd`: only `libc.so.6`, `libm.so.6`, `ld-linux-x86-64.so.2`; X11, Wayland, xkbcommon, EGL and Vulkan are loaded with `dlopen` at runtime, which is why the build does not require `-dev` packages |
+| `cargo test --workspace`, first attempt (11:12 UTC) | **failed**, external cause | `apps/desktop/src/console.rs`: `unresolved import rfb_client`, `cannot find module or crate f0_console`: change in progress by another agent on `apps/desktop`, not a portability problem |
+| `cargo test --workspace --exclude lightvm-desktop` | verified | all tests passed (f0_console 6, rfb_client 10, `sola_lettura` 3, others 0 tests) |
+| `cargo test --workspace`, second attempt (completed 11:21 UTC) | verified | `EXIT=0`, no warnings; including `lightvm_desktop` lib 5 tests and `kittest_ui` 4 tests (headless egui_kittest with AccessKit) |
+| `cargo clippy -p f0-linux-procs --all-targets -- -D warnings` (Linux) | verified | `EXIT=0` |
+| `cargo check`/`clippy -p f0-linux-procs` (Windows) | verified | no warnings; run on Windows: "not applicable" message |
 
-Validità: la build è riuscita con un driver C non standard (zig). La stessa build con `build-essential` di Ubuntu **non è stata eseguita**; vedi Azioni richieste.
+Validity: the build succeeded with a non-standard C driver (zig). The same build with Ubuntu's `build-essential` **was not run**; see Required actions.
 
-### 3. Smoke eframe sotto WSLg **[build]**
+### 3. eframe smoke under WSLg **[build]**
 
-Binario release del punto 2. Metriche Linux, **non confrontabili** con working set/private bytes di Windows (sezione 13): `VmRSS` = memoria residente totale; `RssAnon` = residente anonima (la più vicina ai private bytes); `RssFile` = pagine di file mappate residenti.
+Release binary from point 2. Linux metrics, **not comparable** with Windows working set/private bytes (section 13): `VmRSS` = total resident memory; `RssAnon` = anonymous resident memory (the closest to private bytes); `RssFile` = resident mapped file pages.
 
-| Configurazione | Adattatore riportato | Primo frame (ms) | VmRSS / RssAnon / RssFile a 3 s | CPU 3–13 s (% di un core) | Frame / aggiornamenti fb in 16 s |
+| Configuration | Adapter reported | First frame (ms) | VmRSS / RssAnon / RssFile at 3 s | CPU 3–13 s (% of one core) | Frames / fb updates in 16 s |
 | --- | --- | --- | --- | --- | --- |
-| wgpu predefinito, Wayland | `backend=Vulkan adapter="llvmpipe (LLVM 21.1.8, 256 bits)" tipo=Cpu driver_info="Mesa 26.0.3-1ubuntu1 (LLVM 21.1.8)"` | 366 | 173,8 / 46,2 / 96,2 MiB | 56,8% | 126 / 125 |
-| wgpu, `--static` | stesso | 149 | 150,9 / 37,9 / 93,4 MiB | 0,80% | 6 / 1 |
-| wgpu, `WGPU_BACKEND=gl` | `backend=Gl adapter="llvmpipe (LLVM 21.1.8, 256 bits)" tipo=Cpu driver_info="4.5 (Core Profile) Mesa 26.0.3-1ubuntu1"` | 265 | 165,0 / 65,4 / 89,8 MiB | 52,6% | 139 / 136 |
-| wgpu, X11 (`env -u WAYLAND_DISPLAY`) | — | — | — | — | **fallito**: panico `xkbcommon-dl-0.4.2/src/x11.rs:59:28: Library libxkbcommon-x11.so could not be loaded.`, uscita 101 |
-| Build debug, wgpu predefinito | llvmpipe Vulkan | 509 | 201,0 / 53,9 / 115,7 MiB | 50,7% | 156 / 155 |
+| default wgpu, Wayland | `backend=Vulkan adapter="llvmpipe (LLVM 21.1.8, 256 bits)" tipo=Cpu driver_info="Mesa 26.0.3-1ubuntu1 (LLVM 21.1.8)"` | 366 | 173.8 / 46.2 / 96.2 MiB | 56.8% | 126 / 125 |
+| wgpu, `--static` | same | 149 | 150.9 / 37.9 / 93.4 MiB | 0.80% | 6 / 1 |
+| wgpu, `WGPU_BACKEND=gl` | `backend=Gl adapter="llvmpipe (LLVM 21.1.8, 256 bits)" tipo=Cpu driver_info="4.5 (Core Profile) Mesa 26.0.3-1ubuntu1"` | 265 | 165.0 / 65.4 / 89.8 MiB | 52.6% | 139 / 136 |
+| wgpu, X11 (`env -u WAYLAND_DISPLAY`) | — | — | — | — | **failed**: panic `xkbcommon-dl-0.4.2/src/x11.rs:59:28: Library libxkbcommon-x11.so could not be loaded.`, exit 101 |
+| Debug build, default wgpu | llvmpipe Vulkan | 509 | 201.0 / 53.9 / 115.7 MiB | 50.7% | 156 / 155 |
 
-Primo frame, 20 avvii a caldo (wgpu predefinito, release, `--smoke 0.5`): p50 251 ms, p95 424 ms, max 499 ms (log `f0-07-primo-frame-20.txt`).
+First frame, 20 warm starts (default wgpu, release, `--smoke 0.5`): p50 251 ms, p95 424 ms, max 499 ms (log `f0-07-primo-frame-20.txt`).
 
-Osservazioni:
-- Adattatori disponibili (`--wgpu-adapter cpu` li elenca): solo `Vulkan "llvmpipe"` e `Gl "llvmpipe"`, entrambi di tipo Cpu. L'accelerazione GPU di WSLg (Mesa d3d12 su `/dev/dxg`) non è stata raggiunta: stderr `libEGL warning: failed to get driver name for fd -1`, `MESA: error: ZINK: failed to choose pdev`, `egl: failed to create dri2 screen`. Causa non indagata oltre. In pratica è una prova di **rendering software su Linux**, utile per la voce "host senza accelerazione grafica" di F0, non per le prestazioni con GPU.
-- Con animazione a 10 Hz llvmpipe non mantiene il ritmo: 125 aggiornamenti in 16 s (circa 7,8/s) contro 152 su Windows/NVIDIA (F0-01). CPU circa 53–57% di un core, contro il 7% su Windows con GPU e 786% con WARP (F0-01). Il costo della composizione WSLg/RDP sul lato Windows non è incluso.
-- Su X11 manca `libxkbcommon-x11.so` (pacchetto Ubuntu `libxkbcommon-x11-0`): requisito runtime da dichiarare nel packaging Linux. L'app va in panico invece di dare un errore utilizzabile: da correggere entro F1 ("errori utilizzabili dall'utente").
+Observations:
+- Available adapters (`--wgpu-adapter cpu` lists them): only `Vulkan "llvmpipe"` and `Gl "llvmpipe"`, both of type Cpu. WSLg GPU acceleration (Mesa d3d12 on `/dev/dxg`) was not reached: stderr `libEGL warning: failed to get driver name for fd -1`, `MESA: error: ZINK: failed to choose pdev`, `egl: failed to create dri2 screen`. Cause not investigated further. In practice it is a test of **software rendering on Linux**, useful for the F0 item "host without graphics acceleration", not for performance with a GPU.
+- With 10 Hz animation llvmpipe does not keep up: 125 updates in 16 s (about 7.8/s) versus 152 on Windows/NVIDIA (F0-01). CPU about 53–57% of one core, versus 7% on Windows with a GPU and 786% with WARP (F0-01). The cost of WSLg/RDP composition on the Windows side is not included.
+- On X11 `libxkbcommon-x11.so` is missing (Ubuntu package `libxkbcommon-x11-0`): runtime requirement to declare in the Linux packaging. The app panics instead of giving a usable error: to be fixed within F1 ("errors usable by the user").
 
-### 4. Spike `spikes/f0-linux-procs` **[processi]**
+### 4. Spike `spikes/f0-linux-procs` **[processes]**
 
-Kernel `6.18.33.1-microsoft-standard-WSL2`. Binario release del workspace, SHA-256 `6e19036c4ad76c3177ecefe846f7474816ed64f531b389ef4f4e8f0486867eb0`, esecuzione 2026-10-09 11:21 UTC (log `lab/logs/f0-07-procs-run2.txt`). 30 campioni per serie, timeout 5 s per campione. Tempo misurato con `Instant` (CLOCK_MONOTONIC) dall'invio del segnale fino a quando i pidfd di **tutti** i processi osservati diventano leggibili (uscita del processo). Figlio di prova: `sleep 1000` (QEMU assente).
+Kernel `6.18.33.1-microsoft-standard-WSL2`. Workspace release binary, SHA-256 `6e19036c4ad76c3177ecefe846f7474816ed64f531b389ef4f4e8f0486867eb0`, run 2026-10-09 11:21 UTC (log `lab/logs/f0-07-procs-run2.txt`). 30 samples per series, 5 s timeout per sample. Time measured with `Instant` (CLOCK_MONOTONIC) from sending the signal until the pidfds of **all** observed processes become readable (process exit). Test child: `sleep 1000` (QEMU absent).
 
-| Scenario | Meccanismo | Esito | p50 / p95 / max (ms) | Timeout / errori / orfani |
+| Scenario | Mechanism | Outcome | p50 / p95 / max (ms) | Timeouts / errors / orphans |
 | --- | --- | --- | --- | --- |
-| a. SIGKILL al supervisor, fine del figlio diretto | `PR_SET_PDEATHSIG(SIGKILL)` in `pre_exec` + controllo `getppid()` | verificato | 0,700 / 1,142 / 3,820 | 0 / 0 / 0 |
-| a2. Stesso, figlio che crea un nipote (`sh -c 'sleep 1000 & ...; exec sleep 1000'`) | PDEATHSIG non ereditato dopo `fork` | verificato il **limite** | figlio diretto terminato = sì; **nipote sopravvissuto = sì** (poi ucciso dallo spike) | — |
-| b. Segnale e raccolta via pidfd | `pidfd_open`, `pidfd_send_signal(SIGKILL)`, `waitid(P_PIDFD, WEXITED)` | verificato | 0,080 / 0,161 / 0,191 | 0 / 0 / 0 |
-| b. Identità senza riuso del PID | `si_code=CLD_KILLED`, `si_status=SIGKILL`; `pidfd_send_signal(fd, 0)` dopo la raccolta; `pidfd_open` su PID già raccolto | verificato | 30/30 `CLD_KILLED`+`SIGKILL`; 30/30 `ESRCH` sul pidfd vecchio; `pidfd_open` su PID raccolto → `ESRCH` | — |
-| c. Arresto di gruppo | figlio capogruppo (`process_group(0)`) con 2 nipoti, `kill(-pgid, SIGKILL)` | verificato | 0,215 / 0,313 / 0,315 | 0 / 0 / 0 |
-| c2. Nipote che esegue `setsid` | uscita dal gruppo e dalla sessione | verificato il **limite** | membri `pgid=8294,sid=8078`, `pgid=8295,sid=8295` (fuggito), `pgid=8294,sid=8078`; **1 sopravvissuto** a `kill(-pgid)` (poi ucciso dallo spike) | — |
-| Crash della UI | il supervisor sorveglia la UI con un pidfd; alla morte (SIGKILL) invia SIGTERM alla VM, attende 2 s, poi SIGKILL, ed esce | verificato | 0,629 / 1,769 / 1,916 (fino alla fine di VM **e** supervisor) | 0 / 0 / 0 |
-| Controllo finale | processi `sleep 1000` dell'utente rimasti | verificato | 0 | — |
+| a. SIGKILL to the supervisor, end of the direct child | `PR_SET_PDEATHSIG(SIGKILL)` in `pre_exec` + `getppid()` check | verified | 0.700 / 1.142 / 3.820 | 0 / 0 / 0 |
+| a2. Same, child that creates a grandchild (`sh -c 'sleep 1000 & ...; exec sleep 1000'`) | PDEATHSIG not inherited after `fork` | **limit** verified | direct child terminated = yes; **grandchild survived = yes** (then killed by the spike) | — |
+| b. Signal and reaping via pidfd | `pidfd_open`, `pidfd_send_signal(SIGKILL)`, `waitid(P_PIDFD, WEXITED)` | verified | 0.080 / 0.161 / 0.191 | 0 / 0 / 0 |
+| b. Identity without PID reuse | `si_code=CLD_KILLED`, `si_status=SIGKILL`; `pidfd_send_signal(fd, 0)` after reaping; `pidfd_open` on an already reaped PID | verified | 30/30 `CLD_KILLED`+`SIGKILL`; 30/30 `ESRCH` on the old pidfd; `pidfd_open` on reaped PID → `ESRCH` | — |
+| c. Group stop | group-leader child (`process_group(0)`) with 2 grandchildren, `kill(-pgid, SIGKILL)` | verified | 0.215 / 0.313 / 0.315 | 0 / 0 / 0 |
+| c2. Grandchild that runs `setsid` | leaves the group and the session | **limit** verified | members `pgid=8294,sid=8078`, `pgid=8295,sid=8295` (escaped), `pgid=8294,sid=8078`; **1 survivor** of `kill(-pgid)` (then killed by the spike) | — |
+| UI crash | the supervisor watches the UI with a pidfd; on its death (SIGKILL) it sends SIGTERM to the VM, waits 2 s, then SIGKILL, and exits | verified | 0.629 / 1.769 / 1.916 (until the end of VM **and** supervisor) | 0 / 0 / 0 |
+| Final check | user `sleep 1000` processes left | verified | 0 | — |
 
-cgroup v2 (stessa esecuzione):
+cgroup v2 (same run):
 
-| Scenario | Esito | Evidenza |
+| Scenario | Outcome | Evidence |
 | --- | --- | --- |
-| d. Sotto-cgroup dal cgroup di avvio di `wsl --` (`/init.scope`) | **non disponibile** | `mkdir /sys/fs/cgroup/init.scope/supervisor: Permission denied (os error 13)` |
-| d. Sotto-cgroup in uno scope utente delegato (`systemd-run --user --scope -p Delegate=yes`) | verificato | base `/user.slice/user-1000.slice/user@1000.service/app.slice/run-p8389-i24777.scope`, controller `cpu memory pids`; il supervisor si sposta in una foglia `supervisor/` (regola "nessun processo interno") e abilita `+cpu +memory +pids` |
-| d. `memory.max=128 MiB`, `memory.swap.max=0`, processo che alloca 512 MiB | verificato | processo terminato con segnale 9, `memory.events oom_kill=1`, `memory.peak=134217728` |
-| d. `cpu.max="20000 100000"` (0,2 CPU), 4 thread occupati per 3 s | verificato | `core_medi=0.206`, `cpu_usata_s=0.623` su 3,031 s, `nr_throttled=31`, `throttled_usec=11424258` |
-| d. Controllo senza limite (`cpu.max="max 100000"`) | verificato | `core_medi=3.965`, `nr_throttled=0` |
-| d. `pids.max=4` | verificato | 3 `sleep` su 8 avviati (la shell conta come 1), `sh: 0: Cannot fork`, `pids.events max=1` |
-| d. `cgroup.kill` su albero con nipote `setsid` (3 membri) — fine di tutti i membri (pidfd) | verificato | 30 campioni: p50 0,203 / p95 0,420 / max 0,511 ms; timeout 0, errori 0, orfani 0 |
-| d. `cgroup.kill` — `populated 0` in `cgroup.events` | verificato | 30 campioni: p50 0,213 / p95 0,434 / max 0,526 ms; timeout 0 |
+| d. Sub-cgroup from the startup cgroup of `wsl --` (`/init.scope`) | **not available** | `mkdir /sys/fs/cgroup/init.scope/supervisor: Permission denied (os error 13)` |
+| d. Sub-cgroup in a delegated user scope (`systemd-run --user --scope -p Delegate=yes`) | verified | base `/user.slice/user-1000.slice/user@1000.service/app.slice/run-p8389-i24777.scope`, controllers `cpu memory pids`; the supervisor moves into a leaf `supervisor/` ("no internal processes" rule) and enables `+cpu +memory +pids` |
+| d. `memory.max=128 MiB`, `memory.swap.max=0`, process allocating 512 MiB | verified | process terminated with signal 9, `memory.events oom_kill=1`, `memory.peak=134217728` |
+| d. `cpu.max="20000 100000"` (0.2 CPU), 4 busy threads for 3 s | verified | `core_medi=0.206`, `cpu_usata_s=0.623` over 3.031 s, `nr_throttled=31`, `throttled_usec=11424258` |
+| d. Control without limit (`cpu.max="max 100000"`) | verified | `core_medi=3.965`, `nr_throttled=0` |
+| d. `pids.max=4` | verified | 3 `sleep` out of 8 started (the shell counts as 1), `sh: 0: Cannot fork`, `pids.events max=1` |
+| d. `cgroup.kill` on a tree with a `setsid` grandchild (3 members) — end of all members (pidfd) | verified | 30 samples: p50 0.203 / p95 0.420 / max 0.511 ms; timeouts 0, errors 0, orphans 0 |
+| d. `cgroup.kill` — `populated 0` in `cgroup.events` | verified | 30 samples: p50 0.213 / p95 0.434 / max 0.526 ms; timeouts 0 |
 
-Una prima esecuzione completa (2026-10-09 11:08 UTC, stessa sorgente compilata fuori dal workspace in `lab/wsl/standalone/` mentre un altro membro `spikes/*` non era ancora caricabile; log `f0-07-procs-processi.txt`, `f0-07-procs-cgroup.txt`) ha dato valori dello stesso ordine: a 0,409/0,809/3,317; b 0,072/0,165/0,187; c 0,215/0,457/0,563; crash UI 0,557/2,870/3,047; `cgroup.kill` 0,239/0,549/0,641 ms; nessun timeout, errore o orfano.
+A first complete run (2026-10-09 11:08 UTC, same source built outside the workspace in `lab/wsl/standalone/` while another `spikes/*` member was not yet loadable; logs `f0-07-procs-processi.txt`, `f0-07-procs-cgroup.txt`) gave values of the same order: a 0.409/0.809/3.317; b 0.072/0.165/0.187; c 0.215/0.457/0.563; UI crash 0.557/2.870/3.047; `cgroup.kill` 0.239/0.549/0.641 ms; no timeouts, errors or orphans.
 
-Nota sul metodo: in una versione intermedia la lettura di `cgroup.events` aspettava `POLLPRI` con timeout di 10 ms e restituiva circa 10,6 ms per campione; con timeout di 1 ms e la misura separata sui pidfd il valore scende sotto 1 ms. La misura di riferimento è quella sui pidfd.
+Note on the method: in an intermediate version reading `cgroup.events` waited for `POLLPRI` with a 10 ms timeout and returned about 10.6 ms per sample; with a 1 ms timeout and the separate measurement on the pidfds the value drops below 1 ms. The reference measurement is the one on the pidfds.
 
-## Limiti
+## Limits
 
-- **Nessun host Linux fisico.** Tutto è stato eseguito in WSL2 (VM Hyper-V su Windows). Lo smoke test Linux/KVM della sezione 10 F0 e della cella Ubuntu (sezione 5) non è stato eseguito.
-- **KVM annidato non provato e comunque non valido.** `/dev/kvm` esiste ma non è accessibile all'utente; QEMU non è installato. Nessun numero KVM in questo file.
-- **Toolchain non standard.** La build Linux usa zig 0.14.1 come driver C/linker (stub glibc 2.39) invece di gcc/binutils di Ubuntu. Il binario risultante non collega `libgcc_s`. Una build con `build-essential` può differire (linker, unwinding, flag) e va ripetuta.
-- **Rendering solo software.** Sotto WSLg l'app ha usato llvmpipe; WSLg passa da un compositor Weston e RDP verso Windows: latenze e CPU non sono rappresentative né di un desktop Linux con GPU né di una sessione X11/Wayland nativa. Il percorso X11 è fallito per una libreria mancante.
-- **Figlio di prova `sleep`, non QEMU.** QEMU è multi-thread, alloca la RAM del guest, usa KVM e può avere processi ausiliari. In particolare non sono verificati: contabilizzazione della memoria del guest e delle allocazioni KVM nel cgroup, effetto di `cpu.max` sui vCPU thread KVM, tempi di terminazione di un QEMU con guest in esecuzione (Emergency Stop p95 ≤ 2 s della sezione 13), comportamento di SIGTERM su QEMU.
-- **Arresto controllato simulato.** Nello scenario "crash della UI" l'arresto controllato è SIGTERM → attesa 2 s → SIGKILL; con QEMU l'arresto controllato passerebbe da QMP (`system_powerdown`) e non è provato. Il ricollegamento di una nuova UI al supervisor (ADR-0015, parte B, seconda alternativa) **non è stato provato**: richiede l'IPC autenticato.
-- **PDEATHSIG è legato al thread.** Per `prctl(2)` il segnale parte alla morte del *thread* che ha creato il figlio, non del processo. Lo spike crea i figli dal thread principale; un supervisor che lanciasse QEMU da un thread di un pool (per esempio un runtime asincrono) potrebbe uccidere la VM alla terminazione di quel thread. Comportamento documentato, non riprodotto qui.
-- **Delega cgroup dipendente da systemd.** Il sotto-cgroup è stato creato solo dentro uno scope utente con `Delegate=yes` ottenuto con `systemd-run --user`. Senza sessione systemd utente (distribuzioni senza systemd, container, alcuni runner CI) il meccanismo non è disponibile. Non provato: creazione dello scope via D-Bus (`StartTransientUnit`) dal supervisor stesso.
-- **Riuso del PID non forzato.** È verificato che il pidfd restituisce `ESRCH` dopo la raccolta del processo; un vero riuso dello stesso numero di PID non è stato provocato (con `pid_max` elevato richiederebbe moltissimi processi). La garanzia deriva dalla semantica documentata di pidfd.
-- **Campioni.** 30 campioni per serie (il compito chiedeva almeno 20); la sezione 13 chiede 100 campioni per le latenze di stop e revoca su hardware dichiarato: queste misure su `sleep` in WSL2 non sostituiscono quella misura.
-- **Concorrenza con altri agenti.** `apps/desktop` è cambiato durante la prova: il binario release smoke (11:12 UTC) precede le modifiche che hanno fatto fallire il primo `cargo test`; il secondo `cargo test --workspace` (11:21 UTC) riguarda lo stato successivo. L'aggiunta del membro `spikes/f0-linux-procs` registra il pacchetto in `Cargo.lock` (dipendenza `libc 0.2.190` già presente nel lockfile).
+- **No physical Linux host.** Everything was run in WSL2 (Hyper-V VM on Windows). The Linux/KVM smoke test of section 10 F0 and of the Ubuntu cell (section 5) was not executed.
+- **Nested KVM not tested and in any case not valid.** `/dev/kvm` exists but is not accessible to the user; QEMU is not installed. No KVM numbers in this file.
+- **Non-standard toolchain.** The Linux build uses zig 0.14.1 as C driver/linker (glibc 2.39 stubs) instead of Ubuntu's gcc/binutils. The resulting binary does not link `libgcc_s`. A build with `build-essential` may differ (linker, unwinding, flags) and must be repeated.
+- **Software rendering only.** Under WSLg the app used llvmpipe; WSLg goes through a Weston compositor and RDP to Windows: latencies and CPU are representative neither of a Linux desktop with a GPU nor of a native X11/Wayland session. The X11 path failed because of a missing library.
+- **Test child `sleep`, not QEMU.** QEMU is multi-threaded, allocates the guest RAM, uses KVM and may have helper processes. In particular the following are not verified: accounting of guest memory and KVM allocations in the cgroup, effect of `cpu.max` on KVM vCPU threads, termination times of a QEMU with a running guest (Emergency Stop p95 ≤ 2 s of section 13), behaviour of SIGTERM on QEMU.
+- **Simulated controlled shutdown.** In the "UI crash" scenario the controlled shutdown is SIGTERM → 2 s wait → SIGKILL; with QEMU the controlled shutdown would go through QMP (`system_powerdown`) and is not tested. Reattaching a new UI to the supervisor (ADR-0015, part B, second alternative) **was not tested**: it requires authenticated IPC.
+- **PDEATHSIG is tied to the thread.** Per `prctl(2)` the signal fires on the death of the *thread* that created the child, not of the process. The spike creates children from the main thread; a supervisor that launched QEMU from a pool thread (for example an async runtime) could kill the VM when that thread terminates. Documented behaviour, not reproduced here.
+- **cgroup delegation dependent on systemd.** The sub-cgroup was created only inside a user scope with `Delegate=yes` obtained with `systemd-run --user`. Without a systemd user session (distributions without systemd, containers, some CI runners) the mechanism is not available. Not tested: creation of the scope via D-Bus (`StartTransientUnit`) by the supervisor itself.
+- **PID reuse not forced.** It is verified that the pidfd returns `ESRCH` after the process is reaped; a real reuse of the same PID number was not provoked (with a high `pid_max` it would require a very large number of processes). The guarantee comes from the documented semantics of pidfd.
+- **Samples.** 30 samples per series (the task asked for at least 20); section 13 requires 100 samples for stop and revocation latencies on declared hardware: these measurements on `sleep` in WSL2 do not replace that measurement.
+- **Concurrency with other agents.** `apps/desktop` changed during the test: the smoke release binary (11:12 UTC) predates the changes that made the first `cargo test` fail; the second `cargo test --workspace` (11:21 UTC) concerns the subsequent state. Adding the member `spikes/f0-linux-procs` records the package in `Cargo.lock` (dependency `libc 0.2.190` already present in the lockfile).
 
-## Azioni richieste
+## Required actions
 
-Azioni dell'utente (nessuna eseguita da questa prova):
+User actions (none performed by this test):
 
-1. **Host Linux fisico con KVM** (Ubuntu LTS x86_64, sezione 5) per chiudere la cella Ubuntu della matrice e, in seguito, R2a. Requisiti minimi della prova: accesso a `/dev/kvm` per l'utente non privilegiato, QEMU con provenienza verificata, guest e firmware con checksum come per Windows (F0-02/F0-03), sessione grafica locale con GPU. Se non disponibile in F0, registrare l'esito "verificato solo Windows" (vedi Decisioni proposte).
-2. Nella distro WSL, per una build Linux con toolchain standard: `sudo apt install build-essential pkg-config` (eventualmente `libxkbcommon-x11-0` per provare il percorso X11). Dopo l'installazione ripetere `lab/wsl/build-all.sh` senza `CC`/linker zig (rimuovere le righe relative da `lab/wsl/env.sh`).
-3. Facoltativo e **non valido per la matrice**: per un probe KVM annidato in WSL2, `sudo usermod -aG kvm mortali` e `sudo apt install qemu-system-x86` (oppure usare il binario QEMU con provenienza verificata scelto in ADR-0010), poi `-accel kvm -S` + `query-accelerators` via QMP su socket Unix. Serve solo a scoprire problemi di integrazione, non a qualificare l'host.
-4. Aggiornare l'indice di `docs/verification/README.md` con questo file e lo stato in `docs/STATUS.md`/`docs/COMPATIBILITY.md` (file fuori dal perimetro di questa prova).
+1. **Physical Linux host with KVM** (Ubuntu LTS x86_64, section 5) to close the Ubuntu cell of the matrix and, later, R2a. Minimum requirements of the test: access to `/dev/kvm` for the unprivileged user, QEMU with verified provenance, guest and firmware with checksums as for Windows (F0-02/F0-03), local graphics session with a GPU. If not available in F0, record the outcome "verified on Windows only" (see Proposed decisions).
+2. In the WSL distro, for a Linux build with the standard toolchain: `sudo apt install build-essential pkg-config` (possibly `libxkbcommon-x11-0` to test the X11 path). After installing, repeat `lab/wsl/build-all.sh` without `CC`/zig linker (remove the relevant lines from `lab/wsl/env.sh`).
+3. Optional and **not valid for the matrix**: for a nested KVM probe in WSL2, `sudo usermod -aG kvm mortali` and `sudo apt install qemu-system-x86` (or use the QEMU binary with verified provenance chosen in ADR-0010), then `-accel kvm -S` + `query-accelerators` via QMP over Unix socket. It only serves to uncover integration problems, not to qualify the host.
+4. Update the index of `docs/verification/README.md` with this file and the status in `docs/STATUS.md`/`docs/COMPATIBILITY.md` (files outside the scope of this test).
 
-Attività tecniche da riportare nel backlog (`docs/RELEASE_PLAN.md`):
+Technical activities to carry over into the backlog (`docs/RELEASE_PLAN.md`):
 
-5. Dichiarare nel packaging Linux le dipendenze runtime caricate con `dlopen` (almeno `libxkbcommon0`, `libxkbcommon-x11-0` per X11, `libwayland-client0`, `libEGL`/`libGL` o `libvulkan1` con Mesa) e trasformare il panico di `xkbcommon-dl` in un errore utilizzabile (F1, "diagnostica con errori utilizzabili").
-6. Ripetere lo spike `f0-linux-procs` sull'host fisico con QEMU reale come figlio (ADR-0015), misurando 100 campioni di Emergency Stop con guest in esecuzione e i limiti cgroup sul processo QEMU con KVM (ADR-0017).
-7. Verificare la creazione dello scope delegato senza `systemd-run` esterno (D-Bus) e il comportamento senza systemd utente.
+5. Declare in the Linux packaging the runtime dependencies loaded with `dlopen` (at least `libxkbcommon0`, `libxkbcommon-x11-0` for X11, `libwayland-client0`, `libEGL`/`libGL` or `libvulkan1` with Mesa) and turn the `xkbcommon-dl` panic into a usable error (F1, "diagnostics with usable errors").
+6. Repeat the `f0-linux-procs` spike on the physical host with real QEMU as the child (ADR-0015), measuring 100 Emergency Stop samples with a running guest and the cgroup limits on the QEMU process with KVM (ADR-0017).
+7. Verify the creation of the delegated scope without an external `systemd-run` (D-Bus) and the behaviour without a systemd user session.
 
-## Decisioni proposte
+## Proposed decisions
 
-Proposte per gli ADR collegati; non sono decisioni finché gli ADR non sono aggiornati.
+Proposals for the related ADRs; they are not decisions until the ADRs are updated.
 
-### ADR-0015, parte A (meccanismo Linux)
+### ADR-0015, part A (Linux mechanism)
 
-Le prove **[processi]** indicano che nessun meccanismo da solo soddisfa i quattro criteri dell'ADR; la combinazione seguente li copre tutti in WSL2 con `sleep`:
+The **[processes]** tests indicate that no single mechanism satisfies the four criteria of the ADR; the following combination covers them all in WSL2 with `sleep`:
 
-1. **Ogni QEMU con `PR_SET_PDEATHSIG(SIGKILL)`** impostato in `pre_exec` con controllo `getppid()` contro la corsa "padre già morto". Copre il criterio 1 per il figlio diretto anche con `SIGKILL` al supervisor (p95 1,1 ms, nessun orfano su 30). Vincolo: i processi QEMU vanno creati da un thread che vive quanto il supervisor (thread dedicato allo spawn), non da thread di pool.
-2. **Identità tramite pidfd** (`pidfd_open`, `pidfd_send_signal`, `waitid(P_PIDFD)`, `poll` per la fine del processo): criterio 2 verificato (30/30 `ESRCH` dopo la raccolta). Requisiti kernel: `pidfd_open` ≥ 5.3, `P_PIDFD` ≥ 5.4.
-3. **Un cgroup v2 per VM** dentro uno scope utente systemd con `Delegate=yes`, con `memory.max`, `cpu.max`, `pids.max` e **`cgroup.kill`** (kernel ≥ 5.14) per l'Emergency Stop e per il recupero dopo un crash del supervisor: è l'unico meccanismo provato che termina anche i discendenti fuggiti con `setsid` (casi a2 e c2 falliscono con PDEATHSIG e `kill(-pgid)`). Funziona senza privilegi (criterio 3) ed è lo stesso strumento dei limiti di ADR-0017 (criterio 4).
-4. **Gruppo di processi** per VM come ripiego quando la delega cgroup non è disponibile: utile per `kill(-pgid)`, ma non contiene discendenti che cambiano gruppo.
+1. **Every QEMU with `PR_SET_PDEATHSIG(SIGKILL)`** set in `pre_exec` with a `getppid()` check against the "parent already dead" race. Covers criterion 1 for the direct child even with `SIGKILL` to the supervisor (p95 1.1 ms, no orphans out of 30). Constraint: QEMU processes must be created from a thread that lives as long as the supervisor (thread dedicated to spawning), not from pool threads.
+2. **Identity via pidfd** (`pidfd_open`, `pidfd_send_signal`, `waitid(P_PIDFD)`, `poll` for the end of the process): criterion 2 verified (30/30 `ESRCH` after reaping). Kernel requirements: `pidfd_open` ≥ 5.3, `P_PIDFD` ≥ 5.4.
+3. **One cgroup v2 per VM** inside a systemd user scope with `Delegate=yes`, with `memory.max`, `cpu.max`, `pids.max` and **`cgroup.kill`** (kernel ≥ 5.14) for the Emergency Stop and for recovery after a supervisor crash: it is the only tested mechanism that also terminates descendants that escaped with `setsid` (cases a2 and c2 fail with PDEATHSIG and `kill(-pgid)`). It works without privileges (criterion 3) and is the same tool as the limits of ADR-0017 (criterion 4).
+4. **Process group** per VM as a fallback when cgroup delegation is not available: useful for `kill(-pgid)`, but it does not contain descendants that change group.
 
-Conseguenza per la sezione 7.2 punto 8: dove la delega cgroup non è disponibile, i limiti CPU/memoria sull'albero QEMU mancano; per la regola "un controllo obbligatorio assente blocca AI Mode" l'AI Mode su quell'host resta disabilitato, mentre la gestione manuale può usare PDEATHSIG + gruppo di processi dichiarandone il limite. Da confermare in ADR-0017 e ADR-0009.
+Consequence for section 7.2 point 8: where cgroup delegation is not available, the CPU/memory limits on the QEMU tree are missing; under the rule "a missing mandatory control blocks AI Mode", AI Mode on that host stays disabled, while manual management can use PDEATHSIG + process group, declaring its limit. To be confirmed in ADR-0017 and ADR-0009.
 
-Da decidere ancora: come il supervisor ottiene lo scope delegato (avvio da parte della UI con `systemd-run --user --scope -p Delegate=yes`, oppure chiamata D-Bus `StartTransientUnit` dal supervisor) e se ogni VM ha un proprio scope systemd oppure un sotto-cgroup dello scope del supervisor (quest'ultimo è ciò che è stato provato).
+Still to decide: how the supervisor obtains the delegated scope (started by the UI with `systemd-run --user --scope -p Delegate=yes`, or a D-Bus `StartTransientUnit` call from the supervisor) and whether each VM has its own systemd scope or a sub-cgroup of the supervisor's scope (the latter is what was tested).
 
-### ADR-0015, parte B (VM manuali dopo crash della UI)
+### ADR-0015, part B (manual VMs after a UI crash)
 
-Provato solo l'**arresto controllato**: il supervisor rileva la morte della UI con un pidfd (indipendente dal PID, nessun polling) e arresta la VM; p95 1,8 ms fino alla fine di VM e supervisor con `sleep` e SIGTERM. Proposta: arresto controllato come comportamento iniziale (con QMP `system_powerdown` e timeout prima di SIGTERM/SIGKILL, da provare con QEMU), perché verificabile senza IPC; il ricollegamento resta un'alternativa da provare quando esiste l'IPC autenticato. La scelta finale spetta al responsabile dell'ADR, coerentemente con F0-06 su Windows.
+Only the **controlled shutdown** was tested: the supervisor detects the death of the UI with a pidfd (independent of the PID, no polling) and stops the VM; p95 1.8 ms until the end of VM and supervisor with `sleep` and SIGTERM. Proposal: controlled shutdown as the initial behaviour (with QMP `system_powerdown` and a timeout before SIGTERM/SIGKILL, to be tested with QEMU), because it is verifiable without IPC; reattaching remains an alternative to be tested when authenticated IPC exists. The final choice is up to the ADR owner, consistently with F0-06 on Windows.
 
-### ADR-0016 (esito del laboratorio Linux)
+### ADR-0016 (outcome of the Linux lab)
 
-- Su questa macchina **non esiste un host Linux fisico con KVM**: c'è soltanto WSL2 con KVM annidato, che la roadmap esclude esplicitamente come prova.
-- **Giudizio:** F0 **può** chiudersi con l'esito "verificato solo Windows" secondo il paragrafo "Laboratorio Linux assente", **a condizione che**: (a) l'utente confermi che in F0 non è disponibile un host Linux fisico con KVM (in caso contrario la prova va fatta e l'esito sarebbe "Windows e Linux verificati" o un blocco esplicito); (b) Windows superi da solo tutti i controlli del criterio di uscita di F0 (F0-02…F0-06, fuori da questo file e qui non giudicati); (c) l'esito sia registrato in `docs/STATUS.md` e `docs/COMPATIBILITY.md`, con Windows unico target del MVP e la cella Ubuntu "non verificato". Questo file non chiude F0: fornisce la parte Linux ammessa (build e test indipendenti dall'acceleratore), come richiesto dalle conseguenze di ADR-0016.
-- **Prove che restano pendenti** con quell'esito (rinviate a R2a, che non si chiude senza di esse):
-  1. smoke test reale su host Linux fisico con KVM: QEMU con provenienza verificata, boot accelerato del guest, QMP privato su socket Unix, console e input, arresto forzato;
-  2. ADR-0015 sull'host fisico con QEMU reale: crash della UI, crash del supervisor, Emergency Stop con 100 campioni, nessun orfano;
-  3. limiti cgroup applicati a QEMU con KVM (memoria del guest e allocazioni del kernel, vCPU, `cgroup.kill`);
-  4. build eframe con toolchain standard Ubuntu e smoke con GPU reale, Wayland e X11 nativi;
-  5. pacchetti Linux e policy host (sezione 5, righe Ubuntu e Debian/Fedora).
+- On this machine **there is no physical Linux host with KVM**: there is only WSL2 with nested KVM, which the roadmap explicitly excludes as a test.
+- **Assessment:** F0 **can** close with the outcome "verified on Windows only" according to the paragraph "No Linux lab", **provided that**: (a) the user confirms that no physical Linux host with KVM is available in F0 (otherwise the test must be done and the outcome would be "Windows and Linux verified" or an explicit blocker); (b) Windows on its own passes all the checks of the F0 exit criterion (F0-02…F0-06, outside this file and not assessed here); (c) the outcome is recorded in `docs/STATUS.md` and `docs/COMPATIBILITY.md`, with Windows as the only MVP target and the Ubuntu cell "not verified". This file does not close F0: it provides the allowed Linux part (accelerator-independent builds and tests), as required by the consequences of ADR-0016.
+- **Tests that remain pending** with that outcome (deferred to R2a, which does not close without them):
+  1. real smoke test on a physical Linux host with KVM: QEMU with verified provenance, accelerated guest boot, private QMP over Unix socket, console and input, forced stop;
+  2. ADR-0015 on the physical host with real QEMU: UI crash, supervisor crash, Emergency Stop with 100 samples, no orphans;
+  3. cgroup limits applied to QEMU with KVM (guest memory and kernel allocations, vCPUs, `cgroup.kill`);
+  4. eframe build with the standard Ubuntu toolchain and smoke with a real GPU, native Wayland and X11;
+  5. Linux packages and host policy (section 5, Ubuntu and Debian/Fedora rows).
 
-## Proposta: CI minima per F1
+## Proposal: minimal CI for F1
 
-Roadmap sezione 10, F1: "CI Windows/Linux; build macOS su runner adeguato entro F2". Sezione 13: a ogni modifica unit test, validazione schema, lint e build; boot accelerato, QMP, console e ripristino su runner fisici controllati. Il provider non è scelto qui.
+Roadmap section 10, F1: "Windows/Linux CI; macOS build on a suitable runner within F2". Section 13: on every change unit tests, schema validation, lint and build; accelerated boot, QMP, console and restore on controlled physical runners. The provider is not chosen here.
 
-| Job | Runner | Contenuto | Note |
+| Job | Runner | Content | Notes |
 | --- | --- | --- | --- |
-| `lint` | Linux x86_64 qualsiasi | `cargo fmt --all --check`; `cargo clippy --workspace --all-targets --locked -- -D warnings` | senza acceleratore |
-| `build-test-linux` | Ubuntu LTS x86_64, senza acceleratore | `apt install build-essential pkg-config`; `cargo build --workspace --locked`; `cargo test --workspace --locked` (inclusi test headless egui_kittest) | toolchain standard, non zig |
-| `build-test-windows` | Windows 11 x86_64, senza acceleratore | ambiente MSVC esplicito (Build Tools, vedi F0-01 §4.1); `cargo build --workspace --locked`; `cargo test --workspace --locked` | il problema `LNK1104 msvcrt.lib` di F0-01 va riprodotto o escluso sul runner |
-| `clippy-features` | Linux e Windows | clippy con `--no-default-features --features glow` per `lightvm-desktop` | mantiene compilabile il backend alternativo |
-| `processi-linux` | Ubuntu LTS, senza acceleratore | `f0-linux-procs processi` (poi i test del supervisor reale): PDEATHSIG, pidfd, gruppi; parte cgroup solo se il runner offre una sessione systemd utente con delega, altrimenti registrata come "non eseguito" | indipendente dall'acceleratore |
-| `processi-windows` | Windows, senza acceleratore | test Job Object del supervisor (F0-06) | indipendente dall'acceleratore |
-| `smoke-render-software` | Linux con display virtuale (per esempio Weston headless o Xvfb + Mesa llvmpipe) e Windows con WARP (`--wgpu-adapter cpu`) | `lightvm-desktop --smoke 5`, inclusi Wayland e X11 su Linux | verifica il ripiego software e le dipendenze runtime (`libxkbcommon-x11-0`); non misura prestazioni |
-| `acceleratore-assente` | Linux senza `/dev/kvm`, Windows senza WHPX | il rilevamento capacità deve produrre l'errore chiaro richiesto dal criterio di uscita F1, senza ripiego TCG | sfrutta proprio l'assenza di acceleratore |
-| `licenze-dipendenze` | Linux | inventario licenze e advisory delle dipendenze (strumento da scegliere in ADR-0023) | chiusura attività F0 non bloccante entro F1 |
-| `build-macos` | macOS Apple Silicon | `cargo build --workspace --locked` | entro F2; solo assunzioni di portabilità, nessun supporto dichiarato; se manca, rischio in `STATUS.md` |
-| `lab-fisico-windows` / `lab-fisico-linux` | runner fisici controllati (Windows/WHPX; Linux/KVM quando disponibile) | probe acceleratore, boot accelerato, QMP, console, 20 cicli start/stop senza orfani, Emergency Stop | senza credenziali di produzione; non attivati automaticamente da PR non fidate; unici job che possono produrre prove di boot |
+| `lint` | any Linux x86_64 | `cargo fmt --all --check`; `cargo clippy --workspace --all-targets --locked -- -D warnings` | without accelerator |
+| `build-test-linux` | Ubuntu LTS x86_64, without accelerator | `apt install build-essential pkg-config`; `cargo build --workspace --locked`; `cargo test --workspace --locked` (including headless egui_kittest tests) | standard toolchain, not zig |
+| `build-test-windows` | Windows 11 x86_64, without accelerator | explicit MSVC environment (Build Tools, see F0-01 §4.1); `cargo build --workspace --locked`; `cargo test --workspace --locked` | the `LNK1104 msvcrt.lib` problem of F0-01 must be reproduced or ruled out on the runner |
+| `clippy-features` | Linux and Windows | clippy with `--no-default-features --features glow` for `lightvm-desktop` | keeps the alternative backend compilable |
+| `processi-linux` | Ubuntu LTS, without accelerator | `f0-linux-procs processi` (then the real supervisor tests): PDEATHSIG, pidfd, groups; cgroup part only if the runner offers a systemd user session with delegation, otherwise recorded as "not executed" | accelerator-independent |
+| `processi-windows` | Windows, without accelerator | supervisor Job Object tests (F0-06) | accelerator-independent |
+| `smoke-render-software` | Linux with a virtual display (for example headless Weston or Xvfb + Mesa llvmpipe) and Windows with WARP (`--wgpu-adapter cpu`) | `lightvm-desktop --smoke 5`, including Wayland and X11 on Linux | verifies the software fallback and the runtime dependencies (`libxkbcommon-x11-0`); does not measure performance |
+| `acceleratore-assente` | Linux without `/dev/kvm`, Windows without WHPX | capability detection must produce the clear error required by the F1 exit criterion, without TCG fallback | relies precisely on the absence of an accelerator |
+| `licenze-dipendenze` | Linux | licence inventory and dependency advisories (tool to be chosen in ADR-0023) | completion of a non-blocking F0 activity within F1 |
+| `build-macos` | macOS Apple Silicon | `cargo build --workspace --locked` | within F2; portability assumptions only, no declared support; if missing, risk in `STATUS.md` |
+| `lab-fisico-windows` / `lab-fisico-linux` | controlled physical runners (Windows/WHPX; Linux/KVM when available) | accelerator probe, accelerated boot, QMP, console, 20 start/stop cycles without orphans, Emergency Stop | without production credentials; not triggered automatically by untrusted PRs; the only jobs that can produce boot evidence |
 
-Non possono girare su runner senza accelerazione verificabile, né essere sostituiti con TCG: boot del guest, misure di Emergency Stop su QEMU reale, limiti di risorse sull'albero QEMU con acceleratore, console reale. Test di protocollo QMP/RFB contro server simulati sono ammessi (sezione 10 F1) e vanno registrati come mock.
+The following cannot run on runners without verifiable acceleration, nor be replaced with TCG: guest boot, Emergency Stop measurements on real QEMU, resource limits on the QEMU tree with an accelerator, real console. QMP/RFB protocol tests against simulated servers are allowed (section 10 F1) and must be recorded as mocks.
 
-## File prodotti
+## Files produced
 
-- `docs/verification/F0-07-linux-kvm.md` (questo file)
+- `docs/verification/F0-07-linux-kvm.md` (this file)
 - `spikes/f0-linux-procs/Cargo.toml`, `spikes/f0-linux-procs/src/main.rs`, `spikes/f0-linux-procs/src/linux.rs`
-- `lab/wsl/` (ignorata da git): `env.sh`, `bin/cc`, `bin/c++`, `inventory.sh`, `inventory2.sh`, `install-user-tools.sh`, `build-desktop.sh`, `build-all.sh`, `run.sh`, `smoke.sh`, `primo-frame.sh`, `standalone/Cargo.toml`, `target/`
-- `lab/logs/f0-07-*` (ignorati da git): inventari, installazioni, build, test, smoke, misure dello spike
+- `lab/wsl/` (ignored by git): `env.sh`, `bin/cc`, `bin/c++`, `inventory.sh`, `inventory2.sh`, `install-user-tools.sh`, `build-desktop.sh`, `build-all.sh`, `run.sh`, `smoke.sh`, `primo-frame.sh`, `standalone/Cargo.toml`, `target/`
+- `lab/logs/f0-07-*` (ignored by git): inventories, installations, builds, tests, smoke, spike measurements

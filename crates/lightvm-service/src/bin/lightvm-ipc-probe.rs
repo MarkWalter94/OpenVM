@@ -1,12 +1,12 @@
-//! `lightvm-ipc-probe`: client di prova per l'IPC del servizio.
+//! `lightvm-ipc-probe`: test client for the service IPC.
 //!
-//! Uso: `lightvm-ipc-probe --endpoint <endpoint>`; la credenziale (64 caratteri
-//! esadecimali) si legge dalla prima riga dello stdin, mai dagli argomenti. Una
-//! riga vuota prova l'handshake senza credenziale.
+//! Usage: `lightvm-ipc-probe --endpoint <endpoint>`; the credential (64
+//! hexadecimal characters) is read from the first line of stdin, never from
+//! the arguments. An empty line tries the handshake without a credential.
 //!
-//! Stampa una riga `PROBE ...` e termina con: 0 connesso, handshake accettato e
-//! `ping` riuscito; 10 connessione rifiutata dal sistema operativo; 11
-//! handshake rifiutato; 12 altro errore.
+//! Prints a `PROBE ...` line and exits with: 0 connected, handshake accepted
+//! and `ping` succeeded; 10 connection refused by the operating system; 11
+//! handshake rejected; 12 other error.
 
 use std::io::BufRead;
 use std::process::ExitCode;
@@ -19,7 +19,7 @@ fn main() -> ExitCode {
     let endpoint = match (args.next().as_deref(), args.next()) {
         (Some("--endpoint"), Some(e)) => e,
         _ => {
-            eprintln!("uso: lightvm-ipc-probe --endpoint <endpoint> (credenziale su stdin)");
+            eprintln!("usage: lightvm-ipc-probe --endpoint <endpoint> (credential on stdin)");
             return ExitCode::from(12);
         }
     };
@@ -32,7 +32,7 @@ fn main() -> ExitCode {
     {
         Ok(rt) => rt,
         Err(e) => {
-            println!("PROBE errore=runtime:{e}");
+            println!("PROBE error=runtime:{e}");
             return ExitCode::from(12);
         }
     };
@@ -41,7 +41,7 @@ fn main() -> ExitCode {
             Ok(c) => c,
             Err(e) => {
                 println!(
-                    "PROBE connessione=rifiutata errore_os={:?} messaggio=\"{e}\"",
+                    "PROBE connection=refused os_error={:?} message=\"{e}\"",
                     e.raw_os_error()
                 );
                 return ExitCode::from(10);
@@ -59,22 +59,22 @@ fn main() -> ExitCode {
                         ..
                     }) => {
                         println!(
-                            "PROBE connessione=ok handshake=ok connection_id={connection_id} ruolo={role:?} ping=pong"
+                            "PROBE connection=ok handshake=ok connection_id={connection_id} role={role:?} ping=pong"
                         );
                         ExitCode::SUCCESS
                     }
                     other => {
-                        println!("PROBE connessione=ok handshake=ok ping={other:?}");
+                        println!("PROBE connection=ok handshake=ok ping={other:?}");
                         ExitCode::from(12)
                     }
                 }
             }
             Ok(other) => {
-                println!("PROBE connessione=ok handshake=rifiutato risposta={other:?}");
+                println!("PROBE connection=ok handshake=rejected response={other:?}");
                 ExitCode::from(11)
             }
             Err(e) => {
-                println!("PROBE connessione=ok handshake=errore:{e}");
+                println!("PROBE connection=ok handshake=error:{e}");
                 ExitCode::from(12)
             }
         }

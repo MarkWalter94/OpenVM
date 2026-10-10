@@ -1,8 +1,8 @@
-//! Involucri minimi sulle API Win32 usate dallo spike.
+//! Minimal wrappers over the Win32 APIs used by the spike.
 //!
-//! Tutto il codice `unsafe` del crate vive in questo modulo: ogni blocco ha un
-//! commento `SAFETY:` e le funzioni pubbliche espongono un'interfaccia sicura
-//! (handle posseduti tramite `OwnedHandle`, errori come `io::Error`).
+//! All of the crate's `unsafe` code lives in this module: every block has a
+//! `SAFETY:` comment and the public functions expose a safe interface
+//! (handles owned through `OwnedHandle`, errors as `io::Error`).
 
 use std::ffi::{OsStr, OsString};
 use std::io;
@@ -47,13 +47,13 @@ use windows_sys::Win32::System::Threading::{
     STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
 };
 
-/// Converte un `HANDLE` grezzo in un handle posseduto, verificando gli errori.
+/// Converts a raw `HANDLE` into an owned handle, checking for errors.
 fn owned(h: HANDLE) -> io::Result<OwnedHandle> {
     if h.is_null() || h == INVALID_HANDLE_VALUE {
         return Err(io::Error::last_os_error());
     }
-    // SAFETY: `h` è un handle valido appena restituito da un'API Win32 e non è
-    // posseduto da nessun altro oggetto; da qui in poi lo chiude `OwnedHandle`.
+    // SAFETY: `h` is a valid handle just returned by a Win32 API and is not
+    // owned by any other object; from here on `OwnedHandle` closes it.
     Ok(unsafe { OwnedHandle::from_raw_handle(h as RawHandle) })
 }
 
@@ -81,15 +81,15 @@ fn filetime_u64(ft: FILETIME) -> u64 {
 // Job Object
 // ---------------------------------------------------------------------------
 
-/// Limiti applicati al Job Object. `KILL_ON_JOB_CLOSE` è sempre attivo e
-/// `BREAKAWAY_OK`/`SILENT_BREAKAWAY_OK` sono sempre disattivati.
+/// Limits applied to the Job Object. `KILL_ON_JOB_CLOSE` is always on and
+/// `BREAKAWAY_OK`/`SILENT_BREAKAWAY_OK` are always off.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct JobLimits {
     pub process_memory: Option<usize>,
     pub job_memory: Option<usize>,
 }
 
-/// Contabilità del job (tempi in unità da 100 ns).
+/// Job accounting (times in 100 ns units).
 #[derive(Debug, Clone, Copy)]
 pub struct JobAccounting {
     pub user_100ns: u64,
@@ -99,7 +99,7 @@ pub struct JobAccounting {
     pub terminated_processes: u32,
 }
 
-/// Limiti estesi letti dal job.
+/// Extended limits read from the job.
 #[derive(Debug, Clone, Copy)]
 pub struct JobExtended {
     pub limit_flags: u32,
@@ -109,11 +109,11 @@ pub struct JobExtended {
     pub peak_job_memory: usize,
 }
 
-/// Messaggio ricevuto dalla porta di completamento associata al job.
+/// Message received from the completion port associated with the job.
 #[derive(Debug, Clone, Copy)]
 pub struct JobMessage {
     pub code: u32,
-    /// Per i messaggi di processo è il PID.
+    /// For process messages it is the PID.
     pub value: usize,
 }
 
@@ -131,12 +131,12 @@ impl JobMessage {
             10 => "JOB_MEMORY_LIMIT",
             11 => "NOTIFICATION_LIMIT",
             12 => "JOB_CYCLE_TIME_LIMIT",
-            _ => "ALTRO",
+            _ => "OTHER",
         }
     }
 }
 
-/// Job Object anonimo posseduto dal supervisor.
+/// Anonymous Job Object owned by the supervisor.
 #[derive(Debug)]
 pub struct Job {
     handle: OwnedHandle,
@@ -144,11 +144,11 @@ pub struct Job {
 }
 
 impl Job {
-    /// Crea un job anonimo (nessun nome nel namespace degli oggetti, quindi
-    /// nessun altro processo può aprirlo per nome) con `KILL_ON_JOB_CLOSE`.
+    /// Creates an anonymous job (no name in the object namespace, so
+    /// no other process can open it by name) with `KILL_ON_JOB_CLOSE`.
     pub fn create(limits: JobLimits) -> io::Result<Job> {
-        // SAFETY: attributi di sicurezza nulli (handle non ereditabile) e nome
-        // nullo sono valori ammessi da CreateJobObjectW.
+        // SAFETY: null security attributes (non-inheritable handle) and a null
+        // name are values accepted by CreateJobObjectW.
         let h = unsafe { CreateJobObjectW(null(), null()) };
         let job = Job {
             handle: owned(h)?,
@@ -163,7 +163,7 @@ impl Job {
     }
 
     pub fn set_limits(&self, limits: JobLimits) -> io::Result<()> {
-        // SAFETY: struttura POD di soli interi; lo zero è un valore valido.
+        // SAFETY: POD structure of integers only; zero is a valid value.
         let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
         let mut flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
         if let Some(m) = limits.process_memory {
@@ -179,8 +179,8 @@ impl Job {
     }
 
     fn set_info<T>(&self, class: i32, info: &T) -> io::Result<()> {
-        // SAFETY: `info` punta a una struttura valida di dimensione esatta
-        // `size_of::<T>()` corrispondente alla classe richiesta.
+        // SAFETY: `info` points to a valid structure of exact size
+        // `size_of::<T>()` matching the requested class.
         check(unsafe {
             SetInformationJobObject(
                 raw(&self.handle),
@@ -192,10 +192,10 @@ impl Job {
     }
 
     fn query_info<T>(&self, class: i32) -> io::Result<T> {
-        // SAFETY: strutture POD di soli interi/puntatori; lo zero è valido e il
-        // buffer ha la dimensione esatta della struttura della classe.
+        // SAFETY: POD structures of integers/pointers only; zero is valid and the
+        // buffer has the exact size of the class's structure.
         let mut info: T = unsafe { zeroed() };
-        // SAFETY: vedi sopra; il puntatore resta valido per tutta la chiamata.
+        // SAFETY: see above; the pointer stays valid for the whole call.
         check(unsafe {
             QueryInformationJobObject(
                 raw(&self.handle),
@@ -208,11 +208,11 @@ impl Job {
         Ok(info)
     }
 
-    /// Hard cap CPU in percentuale dei cicli dell'intero sistema (tutti i
-    /// processori logici), come definito da `JOBOBJECT_CPU_RATE_CONTROL_INFORMATION`.
-    /// `rate` è in centesimi di punto percentuale (2500 = 25%). `None` lo rimuove.
+    /// CPU hard cap as a percentage of the cycles of the whole system (all
+    /// logical processors), as defined by `JOBOBJECT_CPU_RATE_CONTROL_INFORMATION`.
+    /// `rate` is in hundredths of a percentage point (2500 = 25%). `None` removes it.
     pub fn set_cpu_hard_cap(&self, rate: Option<u32>) -> io::Result<()> {
-        // SAFETY: struttura POD; lo zero è valido.
+        // SAFETY: POD structure; zero is valid.
         let mut info: JOBOBJECT_CPU_RATE_CONTROL_INFORMATION = unsafe { zeroed() };
         if let Some(r) = rate {
             info.ControlFlags =
@@ -222,9 +222,9 @@ impl Job {
         self.set_info(JobObjectCpuRateControlInformation, &info)
     }
 
-    /// Associa una porta di completamento per ricevere le notifiche del job.
+    /// Associates a completion port to receive the job's notifications.
     pub fn attach_port(&mut self) -> io::Result<()> {
-        // SAFETY: crea una nuova porta non associata a file (INVALID_HANDLE_VALUE).
+        // SAFETY: creates a new port not associated with a file (INVALID_HANDLE_VALUE).
         let port =
             owned(unsafe { CreateIoCompletionPort(INVALID_HANDLE_VALUE, null_mut(), 0, 1) })?;
         let info = JOBOBJECT_ASSOCIATE_COMPLETION_PORT {
@@ -236,8 +236,8 @@ impl Job {
         Ok(())
     }
 
-    /// Legge i messaggi in coda sulla porta, attendendo al massimo `timeout_ms`
-    /// per il primo e 0 ms per i successivi.
+    /// Reads the messages queued on the port, waiting at most `timeout_ms`
+    /// for the first one and 0 ms for the following ones.
     pub fn drain_messages(&self, timeout_ms: u32) -> Vec<JobMessage> {
         let mut out = Vec::new();
         let Some(port) = &self.port else {
@@ -248,7 +248,7 @@ impl Job {
             let mut code = 0u32;
             let mut key = 0usize;
             let mut ov: *mut OVERLAPPED = null_mut();
-            // SAFETY: puntatori a variabili locali valide; la porta è viva.
+            // SAFETY: pointers to valid local variables; the port is alive.
             let ok =
                 unsafe { GetQueuedCompletionStatus(raw(port), &mut code, &mut key, &mut ov, wait) };
             if ok == 0 {
@@ -264,7 +264,7 @@ impl Job {
     }
 
     pub fn terminate(&self, exit_code: u32) -> io::Result<()> {
-        // SAFETY: handle di job valido posseduto da `self`.
+        // SAFETY: valid job handle owned by `self`.
         check(unsafe { TerminateJobObject(raw(&self.handle), exit_code) })
     }
 
@@ -292,11 +292,11 @@ impl Job {
         })
     }
 
-    /// PID dei processi attualmente nel job.
+    /// PIDs of the processes currently in the job.
     pub fn pids(&self) -> io::Result<Vec<u32>> {
-        // Buffer per intestazione (2 x u32) più fino a 64 PID (usize).
+        // Buffer for the header (2 x u32) plus up to 64 PIDs (usize).
         let mut buf = [0usize; 66];
-        // SAFETY: il buffer è allineato a usize e lungo quanto dichiarato.
+        // SAFETY: the buffer is usize-aligned and as long as declared.
         check(unsafe {
             QueryInformationJobObject(
                 raw(&self.handle),
@@ -313,12 +313,12 @@ impl Job {
             .collect())
     }
 
-    /// Prova a impostare limiti che potrebbero richiedere privilegi.
-    /// Restituisce l'esito di ciascun tentativo (nome, risultato).
+    /// Tries to set limits that might require privileges.
+    /// Returns the outcome of each attempt (name, result).
     pub fn probe_privileged_limits(&self) -> Vec<(&'static str, Result<(), String>)> {
         let mut out = Vec::new();
-        // Working set minimo/massimo.
-        // SAFETY: struttura POD; lo zero è valido.
+        // Minimum/maximum working set.
+        // SAFETY: POD structure; zero is valid.
         let mut ws: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
         ws.BasicLimitInformation.LimitFlags =
             JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_WORKINGSET;
@@ -329,8 +329,8 @@ impl Job {
             self.set_info(JobObjectExtendedLimitInformation, &ws)
                 .map_err(|e| e.to_string()),
         ));
-        // Classe di priorità realtime.
-        // SAFETY: struttura POD; lo zero è valido.
+        // Realtime priority class.
+        // SAFETY: POD structure; zero is valid.
         let mut pr: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
         pr.BasicLimitInformation.LimitFlags =
             JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_PRIORITY_CLASS;
@@ -340,7 +340,7 @@ impl Job {
             self.set_info(JobObjectExtendedLimitInformation, &pr)
                 .map_err(|e| e.to_string()),
         ));
-        // Controllo del tasso di I/O (bandwidth 10 MB/s su tutti i volumi).
+        // I/O rate control (bandwidth 10 MB/s on all volumes).
         let io = JOBOBJECT_IO_RATE_CONTROL_INFORMATION {
             MaxIops: 0,
             MaxBandwidth: 10_000_000,
@@ -349,7 +349,7 @@ impl Job {
             BaseIoSize: 0,
             ControlFlags: 1, // JOB_OBJECT_IO_RATE_CONTROL_ENABLE
         };
-        // SAFETY: puntatore a struttura locale valida; VolumeName nullo = tutti i volumi.
+        // SAFETY: pointer to a valid local structure; null VolumeName = all volumes.
         let r = unsafe { SetIoRateControlInformationJobObject(raw(&self.handle), &io) };
         out.push((
             "SetIoRateControlInformationJobObject (10 MB/s)",
@@ -359,7 +359,7 @@ impl Job {
                 Ok(())
             },
         ));
-        // Controllo del tasso di rete.
+        // Network rate control.
         let net = JOBOBJECT_NET_RATE_CONTROL_INFORMATION {
             MaxBandwidth: 1_000_000,
             ControlFlags: 1 | 2, // ENABLE | MAX_BANDWIDTH
@@ -375,24 +375,24 @@ impl Job {
 }
 
 // ---------------------------------------------------------------------------
-// Processi
+// Processes
 // ---------------------------------------------------------------------------
 
-/// Modalità console del processo figlio.
+/// Console mode of the child process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConsoleMode {
-    /// Console senza finestra: Windows crea un `conhost.exe` per il figlio.
+    /// Console without a window: Windows creates a `conhost.exe` for the child.
     NoWindow,
-    /// Nessuna console: nessun `conhost.exe`.
+    /// No console: no `conhost.exe`.
     Detached,
 }
 
-/// Parametri di creazione di un processo senza shell.
+/// Parameters for creating a process without a shell.
 #[derive(Debug)]
 pub struct SpawnSpec<'a> {
     pub exe: &'a Path,
     pub args: &'a [OsString],
-    /// Ambiente completo del figlio (nessuna eredità dal supervisor).
+    /// Complete environment of the child (no inheritance from the supervisor).
     pub env: &'a [(OsString, OsString)],
     pub stdout: &'a Path,
     pub stderr: &'a Path,
@@ -401,14 +401,14 @@ pub struct SpawnSpec<'a> {
     pub cwd: Option<&'a Path>,
 }
 
-/// Processo creato: handle posseduto (identità) più PID informativo.
+/// Created process: owned handle (identity) plus informational PID.
 #[derive(Debug)]
 pub struct Spawned {
     pub process: OwnedHandle,
     pub pid: u32,
 }
 
-/// Quoting di un argomento secondo le regole di `CommandLineToArgvW`/CRT MSVC.
+/// Quoting of an argument according to the `CommandLineToArgvW`/MSVC CRT rules.
 pub fn quote_arg(arg: &OsStr, out: &mut Vec<u16>) {
     let a: Vec<u16> = arg.encode_wide().collect();
     let needs = a.is_empty()
@@ -437,8 +437,8 @@ pub fn quote_arg(arg: &OsStr, out: &mut Vec<u16>) {
 
 fn inheritable_dup(h: &OwnedHandle) -> io::Result<OwnedHandle> {
     let mut dup: HANDLE = null_mut();
-    // SAFETY: duplica un handle valido nello stesso processo; `dup` riceve il
-    // nuovo handle ereditabile, posseduto subito da `OwnedHandle`.
+    // SAFETY: duplicates a valid handle within the same process; `dup` receives the
+    // new inheritable handle, immediately owned by `OwnedHandle`.
     check(unsafe {
         DuplicateHandle(
             GetCurrentProcess(),
@@ -453,12 +453,12 @@ fn inheritable_dup(h: &OwnedHandle) -> io::Result<OwnedHandle> {
     owned(dup)
 }
 
-/// Crea un processo con:
-/// - argomenti strutturati (nessuna shell), percorso eseguibile esplicito;
-/// - ambiente completo fornito dal chiamante;
-/// - eredità limitata ai soli tre handle standard (`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`);
-/// - assegnazione al job già alla creazione (`PROC_THREAD_ATTRIBUTE_JOB_LIST`),
-///   senza finestra temporale in cui il processo è fuori dal job.
+/// Creates a process with:
+/// - structured arguments (no shell), explicit executable path;
+/// - complete environment supplied by the caller;
+/// - inheritance limited to the three standard handles only (`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`);
+/// - assignment to the job already at creation (`PROC_THREAD_ATTRIBUTE_JOB_LIST`),
+///   with no time window in which the process is outside the job.
 pub fn spawn(spec: &SpawnSpec<'_>) -> io::Result<Spawned> {
     let stdin = std::fs::File::open("NUL")?;
     let stdout = std::fs::File::create(spec.stdout)?;
@@ -494,16 +494,16 @@ pub fn spawn(spec: &SpawnSpec<'_>) -> io::Result<Spawned> {
 
     let n_attr = if spec.job.is_some() { 2 } else { 1 };
     let mut size = 0usize;
-    // SAFETY: prima chiamata con lista nulla per ottenere la dimensione richiesta;
-    // il fallimento con ERROR_INSUFFICIENT_BUFFER è atteso.
+    // SAFETY: first call with a null list to get the required size;
+    // failure with ERROR_INSUFFICIENT_BUFFER is expected.
     unsafe { InitializeProcThreadAttributeList(null_mut(), n_attr, 0, &mut size) };
     let mut attr_buf = vec![0u64; size.div_ceil(8)];
     let attr: LPPROC_THREAD_ATTRIBUTE_LIST = attr_buf.as_mut_ptr().cast();
-    // SAFETY: `attr` punta a un buffer allineato di almeno `size` byte.
+    // SAFETY: `attr` points to an aligned buffer of at least `size` bytes.
     check(unsafe { InitializeProcThreadAttributeList(attr, n_attr, 0, &mut size) })?;
     let job_handle: [HANDLE; 1] = [spec.job.map(|j| j.raw_handle()).unwrap_or(null_mut())];
     let result = (|| {
-        // SAFETY: `handles` vive fino alla fine di questa funzione, oltre CreateProcessW.
+        // SAFETY: `handles` lives until the end of this function, beyond CreateProcessW.
         check(unsafe {
             UpdateProcThreadAttribute(
                 attr,
@@ -516,7 +516,7 @@ pub fn spawn(spec: &SpawnSpec<'_>) -> io::Result<Spawned> {
             )
         })?;
         if spec.job.is_some() {
-            // SAFETY: `job_handle` vive fino alla fine di questa funzione.
+            // SAFETY: `job_handle` lives until the end of this function.
             check(unsafe {
                 UpdateProcThreadAttribute(
                     attr,
@@ -529,7 +529,7 @@ pub fn spawn(spec: &SpawnSpec<'_>) -> io::Result<Spawned> {
                 )
             })?;
         }
-        // SAFETY: struttura POD; lo zero è valido.
+        // SAFETY: POD structure; zero is valid.
         let mut si: STARTUPINFOEXW = unsafe { zeroed() };
         si.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
         si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
@@ -537,16 +537,16 @@ pub fn spawn(spec: &SpawnSpec<'_>) -> io::Result<Spawned> {
         si.StartupInfo.hStdOutput = handles[1];
         si.StartupInfo.hStdError = handles[2];
         si.lpAttributeList = attr;
-        // SAFETY: struttura POD; lo zero è valido.
+        // SAFETY: POD structure; zero is valid.
         let mut pi: PROCESS_INFORMATION = unsafe { zeroed() };
         let console = match spec.console {
             ConsoleMode::NoWindow => CREATE_NO_WINDOW,
             ConsoleMode::Detached => DETACHED_PROCESS,
         };
         let flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | console;
-        // SAFETY: tutte le stringhe sono terminate da zero e vivono oltre la
-        // chiamata; `cmdline` è un buffer modificabile come richiesto; il blocco
-        // d'ambiente è UTF-16 terminato da doppio zero.
+        // SAFETY: all strings are zero-terminated and outlive the
+        // call; `cmdline` is a mutable buffer as required; the environment
+        // block is UTF-16 terminated by a double zero.
         check(unsafe {
             CreateProcessW(
                 app.as_ptr(),
@@ -561,26 +561,26 @@ pub fn spawn(spec: &SpawnSpec<'_>) -> io::Result<Spawned> {
                 &mut pi,
             )
         })?;
-        // SAFETY: l'handle del thread primario non serve: lo chiudiamo subito.
+        // SAFETY: the primary thread handle is not needed: we close it right away.
         unsafe { CloseHandle(pi.hThread) };
         Ok(Spawned {
             process: owned(pi.hProcess)?,
             pid: pi.dwProcessId,
         })
     })();
-    // SAFETY: lista inizializzata con successo sopra.
+    // SAFETY: list successfully initialised above.
     unsafe { DeleteProcThreadAttributeList(attr) };
     drop((h_in, h_out, h_err));
     result
 }
 
-/// Attende la fine di un processo. `Some(codice)` se è terminato entro il timeout.
+/// Waits for a process to end. `Some(code)` if it terminated within the timeout.
 pub fn wait_process(h: &OwnedHandle, timeout_ms: u32) -> io::Result<Option<u32>> {
-    // SAFETY: handle valido con diritto SYNCHRONIZE.
+    // SAFETY: valid handle with the SYNCHRONIZE right.
     let r = unsafe { WaitForSingleObject(raw(h), timeout_ms) };
     if r == WAIT_OBJECT_0 {
         let mut code = 0u32;
-        // SAFETY: handle valido con diritto di query; `code` è locale.
+        // SAFETY: valid handle with the query right; `code` is local.
         check(unsafe { GetExitCodeProcess(raw(h), &mut code) })?;
         Ok(Some(code))
     } else if r == WAIT_TIMEOUT {
@@ -591,44 +591,44 @@ pub fn wait_process(h: &OwnedHandle, timeout_ms: u32) -> io::Result<Option<u32>>
 }
 
 pub fn terminate_process(h: &OwnedHandle, code: u32) -> io::Result<()> {
-    // SAFETY: handle valido con diritto PROCESS_TERMINATE.
+    // SAFETY: valid handle with the PROCESS_TERMINATE right.
     check(unsafe { TerminateProcess(raw(h), code) })
 }
 
-/// Apre un processo per PID con diritti di attesa, query e (opzionale) terminazione.
+/// Opens a process by PID with wait, query and (optional) terminate rights.
 pub fn open_process(pid: u32, terminate: bool) -> io::Result<OwnedHandle> {
     let mut access = PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE;
     if terminate {
         access |= PROCESS_TERMINATE;
     }
-    // SAFETY: OpenProcess non ha precondizioni oltre ai parametri.
+    // SAFETY: OpenProcess has no preconditions beyond its parameters.
     owned(unsafe { OpenProcess(access, 0, pid) })
 }
 
-/// Tempi del processo: (creazione FILETIME, kernel 100 ns, user 100 ns).
+/// Process times: (creation FILETIME, kernel 100 ns, user 100 ns).
 pub fn process_times(h: &OwnedHandle) -> io::Result<(u64, u64, u64)> {
     let z = FILETIME {
         dwLowDateTime: 0,
         dwHighDateTime: 0,
     };
     let (mut c, mut e, mut k, mut u) = (z, z, z, z);
-    // SAFETY: puntatori a variabili locali; handle con diritto di query.
+    // SAFETY: pointers to local variables; handle with the query right.
     check(unsafe { GetProcessTimes(raw(h), &mut c, &mut e, &mut k, &mut u) })?;
     Ok((filetime_u64(c), filetime_u64(k), filetime_u64(u)))
 }
 
-/// Memoria del processo: (working set, picco working set, private bytes).
+/// Process memory: (working set, peak working set, private bytes).
 pub fn process_memory(h: &OwnedHandle) -> io::Result<(usize, usize, usize)> {
-    // PROCESS_MEMORY_COUNTERS_EX: PROCESS_MEMORY_COUNTERS seguito da PrivateUsage.
+    // PROCESS_MEMORY_COUNTERS_EX: PROCESS_MEMORY_COUNTERS followed by PrivateUsage.
     #[repr(C)]
     struct Ex {
         base: PROCESS_MEMORY_COUNTERS,
         private_usage: usize,
     }
-    // SAFETY: struttura POD; lo zero è valido.
+    // SAFETY: POD structure; zero is valid.
     let mut m: Ex = unsafe { zeroed() };
     m.base.cb = size_of::<Ex>() as u32;
-    // SAFETY: buffer locale della dimensione dichiarata.
+    // SAFETY: local buffer of the declared size.
     check(unsafe {
         K32GetProcessMemoryInfo(raw(h), (&mut m as *mut Ex).cast(), size_of::<Ex>() as u32)
     })?;
@@ -639,10 +639,10 @@ pub fn process_memory(h: &OwnedHandle) -> io::Result<(usize, usize, usize)> {
     ))
 }
 
-/// `true` se il processo appartiene al job (o a un job qualsiasi con `job = None`).
+/// `true` if the process belongs to the job (or to any job with `job = None`).
 pub fn is_in_job(h: &OwnedHandle, job: Option<&Job>) -> io::Result<bool> {
     let mut r = 0;
-    // SAFETY: handle di processo valido; job valido o nullo.
+    // SAFETY: valid process handle; valid or null job.
     check(unsafe {
         IsProcessInJob(
             raw(h),
@@ -653,15 +653,15 @@ pub fn is_in_job(h: &OwnedHandle, job: Option<&Job>) -> io::Result<bool> {
     Ok(r != 0)
 }
 
-/// `true` se il processo corrente appartiene già a un job.
+/// `true` if the current process already belongs to a job.
 pub fn current_in_job() -> io::Result<bool> {
     let mut r = 0;
-    // SAFETY: pseudo-handle del processo corrente; job nullo = qualunque job.
+    // SAFETY: pseudo-handle of the current process; null job = any job.
     check(unsafe { IsProcessInJob(GetCurrentProcess(), null_mut(), &mut r) })?;
     Ok(r != 0)
 }
 
-/// Voce della lista processi.
+/// Entry of the process list.
 #[derive(Debug, Clone)]
 pub struct ProcEntry {
     pub pid: u32,
@@ -669,15 +669,15 @@ pub struct ProcEntry {
     pub name: String,
 }
 
-/// Elenco dei processi del sistema (Toolhelp, equivalente a `Get-Process`).
+/// List of the system's processes (Toolhelp, equivalent to `Get-Process`).
 pub fn list_processes() -> io::Result<Vec<ProcEntry>> {
-    // SAFETY: nessuna precondizione.
+    // SAFETY: no preconditions.
     let snap = owned(unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) })?;
     let mut out = Vec::new();
-    // SAFETY: struttura POD; lo zero è valido; `dwSize` impostato come richiesto.
+    // SAFETY: POD structure; zero is valid; `dwSize` set as required.
     let mut e: PROCESSENTRY32W = unsafe { zeroed() };
     e.dwSize = size_of::<PROCESSENTRY32W>() as u32;
-    // SAFETY: snapshot valido e struttura inizializzata.
+    // SAFETY: valid snapshot and initialised structure.
     let mut ok = unsafe { Process32FirstW(raw(&snap), &mut e) };
     while ok != 0 {
         let len = e
@@ -690,7 +690,7 @@ pub fn list_processes() -> io::Result<Vec<ProcEntry>> {
             ppid: e.th32ParentProcessID,
             name: String::from_utf16_lossy(&e.szExeFile[..len]),
         });
-        // SAFETY: come sopra.
+        // SAFETY: as above.
         ok = unsafe { Process32NextW(raw(&snap), &mut e) };
     }
     Ok(out)

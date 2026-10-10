@@ -1,7 +1,7 @@
-# Aggiornamenti delle dipendenze (ROADMAP 6.3: versioni fissate e lockfile;
-# ADR-0023). Le PR di Dependabot passano dalla stessa CI senza segreti.
-# Le versioni esatte (`=`) nei Cargo.toml vengono aggiornate da Dependabot
-# insieme al lockfile; ogni aggiornamento resta soggetto a revisione umana.
+# Dependency updates (ROADMAP 6.3: pinned versions and lockfile;
+# ADR-0023). Dependabot PRs go through the same CI without secrets.
+# Exact versions (`=`) in the Cargo.toml files are updated by Dependabot
+# together with the lockfile; every update remains subject to human review.
 version: 2
 updates:
   - package-ecosystem: cargo
@@ -11,7 +11,7 @@ updates:
       day: monday
     open-pull-requests-limit: 5
     groups:
-      # UI: egui/eframe e famiglia si aggiornano insieme (ADR-0014).
+      # UI: egui/eframe and family are updated together (ADR-0014).
       ui:
         patterns:
           - "egui*"

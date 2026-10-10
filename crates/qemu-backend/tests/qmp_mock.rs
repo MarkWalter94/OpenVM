@@ -1,6 +1,6 @@
-//! Test sintetici del protocollo QMP contro un server simulato su socket Unix
-//! (ammessi per errori e protocollo dal criterio di uscita F1; non sostituiscono
-//! le prove con QEMU reale in `real_qemu.rs`).
+//! Synthetic tests of the QMP protocol against a simulated server on a Unix socket
+//! (allowed for errors and protocol by the F1 exit criterion; they do not replace
+//! the tests with real QEMU in `real_qemu.rs`).
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -70,13 +70,13 @@ fn rt() -> tokio::runtime::Runtime {
 }
 
 #[test]
-fn risposte_fuori_ordine_eventi_e_errori() {
-    let path = socket_path("ordine");
+fn out_of_order_responses_events_and_errors() {
+    let path = socket_path("order");
     let server = serve(&path, |mut c| {
         let a = c.recv().unwrap();
         let b = c.recv().unwrap();
         assert!(a["id"].is_u64() && b["id"].is_u64() && a["id"] != b["id"]);
-        // evento prima delle risposte, risposte in ordine inverso
+        // event before the responses, responses in reverse order
         c.send(json!({"timestamp": {"seconds": 1, "microseconds": 2}, "event": "POWERDOWN"}));
         let (status, accel) = if a["execute"] == "query-status" {
             (a, b)
@@ -90,7 +90,7 @@ fn risposte_fuori_ordine_eventi_e_errori() {
         let r = c.recv().unwrap();
         assert_eq!(r["execute"], "system_reset");
         c.send(json!({"error": {"class": "GenericError", "desc": "no"}, "id": r["id"]}));
-        // risposta senza id e id sconosciuto: scartate
+        // response without id and unknown id: discarded
         c.send(json!({"return": {}}));
         c.send(json!({"return": {}, "id": 999_999}));
         let q = c.recv().unwrap();
@@ -128,15 +128,15 @@ fn risposte_fuori_ordine_eventi_e_errori() {
 }
 
 #[test]
-fn timeout_per_comando_e_disconnessione() {
+fn per_command_timeout_and_disconnection() {
     let path = socket_path("timeout");
     let server = serve(&path, |mut c| {
-        // non risponde al primo comando
+        // does not answer the first command
         let _ignored = c.recv().unwrap();
-        // risponde al secondo
+        // answers the second
         let b = c.recv().unwrap();
         c.send(json!({"return": {"qemu": {"major": 11, "minor": 1, "micro": 0}, "package": "p"}, "id": b["id"]}));
-        // terzo comando: chiude la connessione senza rispondere
+        // third command: closes the connection without answering
         let _ = c.recv();
         drop(c);
     });
@@ -171,7 +171,7 @@ fn timeout_per_comando_e_disconnessione() {
 }
 
 #[test]
-fn greeting_non_valido_rifiutato() {
+fn invalid_greeting_rejected() {
     let path = socket_path("greeting");
     let l = Socket::new(Domain::UNIX, Type::STREAM, None).unwrap();
     l.bind(&SockAddr::unix(path.as_path()).unwrap()).unwrap();
@@ -191,10 +191,10 @@ fn greeting_non_valido_rifiutato() {
 }
 
 #[test]
-fn chiusura_locale() {
-    let path = socket_path("chiusura");
+fn local_close() {
+    let path = socket_path("close");
     let server = serve(&path, |mut c| {
-        // risponde a qualunque comando finché il client non chiude
+        // answers any command until the client closes
         while let Some(v) = c.recv() {
             c.send(json!({"return": {"status": "running", "running": true}, "id": v["id"]}));
         }

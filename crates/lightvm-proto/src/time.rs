@@ -1,4 +1,4 @@
-//! Istanti UTC con precisione al millisecondo (ROADMAP 9: "timestamp UTC").
+//! UTC instants with millisecond precision (ROADMAP 9: "UTC timestamp").
 
 use std::borrow::Cow;
 use std::fmt;
@@ -7,42 +7,42 @@ use std::str::FromStr;
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-/// Istante UTC, troncato al millisecondo.
+/// UTC instant, truncated to the millisecond.
 ///
-/// In JSON è una stringa RFC 3339 con suffisso `Z` (per esempio
-/// `2026-10-09T10:00:00.123Z`); per SQLite è disponibile la forma intera in
-/// millisecondi Unix ([`UtcTimestamp::as_unix_millis`]). La troncatura al
-/// millisecondo rende stabile il round-trip tra le due forme.
+/// In JSON it is an RFC 3339 string with a `Z` suffix (for example
+/// `2026-10-09T10:00:00.123Z`); for SQLite the integer form in Unix
+/// milliseconds is available ([`UtcTimestamp::as_unix_millis`]). Truncating to
+/// the millisecond makes the round-trip between the two forms stable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct UtcTimestamp(jiff::Timestamp);
 
-/// Errore di costruzione o analisi di un [`UtcTimestamp`].
+/// Error constructing or parsing a [`UtcTimestamp`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TimestampError;
 
 impl fmt::Display for TimestampError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("istante UTC non valido o fuori intervallo")
+        f.write_str("invalid or out-of-range UTC instant")
     }
 }
 
 impl std::error::Error for TimestampError {}
 
 impl UtcTimestamp {
-    /// Istante da millisecondi Unix.
+    /// Instant from Unix milliseconds.
     pub fn from_unix_millis(millis: i64) -> Result<Self, TimestampError> {
         jiff::Timestamp::from_millisecond(millis)
             .map(Self)
             .map_err(|_| TimestampError)
     }
 
-    /// Millisecondi Unix.
+    /// Unix milliseconds.
     #[must_use]
     pub fn as_unix_millis(&self) -> i64 {
         self.0.as_millisecond()
     }
 
-    /// Istante spostato di `millis` (anche negativo); `None` se fuori intervallo.
+    /// Instant shifted by `millis` (may be negative); `None` if out of range.
     #[must_use]
     pub fn checked_add_millis(&self, millis: i64) -> Option<Self> {
         self.as_unix_millis()
@@ -50,19 +50,19 @@ impl UtcTimestamp {
             .and_then(|m| Self::from_unix_millis(m).ok())
     }
 
-    /// Millisecondi trascorsi da `earlier` a `self` (negativo se `earlier` è successivo).
+    /// Milliseconds elapsed from `earlier` to `self` (negative if `earlier` is later).
     #[must_use]
     pub fn millis_since(&self, earlier: UtcTimestamp) -> i64 {
         self.as_unix_millis()
             .saturating_sub(earlier.as_unix_millis())
     }
 
-    /// Istante corrente dall'orologio di sistema (solo supervisor; il core usa la porta `Clock`).
+    /// Current instant from the system clock (supervisor only; the core uses the `Clock` port).
     #[cfg(feature = "system-clock")]
     #[must_use]
     pub fn now() -> Self {
         let now = jiff::Timestamp::now();
-        // La troncatura al millisecondo non può uscire dall'intervallo.
+        // Truncating to the millisecond cannot go out of range.
         Self::from_unix_millis(now.as_millisecond()).unwrap_or(Self(now))
     }
 }
@@ -102,7 +102,7 @@ impl JsonSchema for UtcTimestamp {
         json_schema!({
             "type": "string",
             "format": "date-time",
-            "description": "Istante UTC RFC 3339 con suffisso Z, precisione al millisecondo."
+            "description": "RFC 3339 UTC instant with Z suffix, millisecond precision."
         })
     }
 }

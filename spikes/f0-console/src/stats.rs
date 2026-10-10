@@ -1,23 +1,23 @@
-//! Percentili per le misure della sezione 13 (metodo nearest-rank).
+//! Percentiles for the section 13 measurements (nearest-rank method).
 
-/// Riepilogo di un campione.
+/// Summary of a sample.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Summary {
-    /// Numero di campioni.
+    /// Number of samples.
     pub n: usize,
-    /// Minimo.
+    /// Minimum.
     pub min: f64,
-    /// Mediana (p50).
+    /// Median (p50).
     pub p50: f64,
-    /// 95° percentile.
+    /// 95th percentile.
     pub p95: f64,
-    /// Massimo.
+    /// Maximum.
     pub max: f64,
-    /// Media.
+    /// Mean.
     pub mean: f64,
 }
 
-/// Percentile nearest-rank su campione ordinato.
+/// Nearest-rank percentile on a sorted sample.
 pub fn percentile(sorted: &[f64], p: f64) -> f64 {
     if sorted.is_empty() {
         return f64::NAN;
@@ -26,7 +26,7 @@ pub fn percentile(sorted: &[f64], p: f64) -> f64 {
     sorted[rank.min(sorted.len()) - 1]
 }
 
-/// Calcola il riepilogo.
+/// Computes the summary.
 pub fn summarize(samples: &[f64]) -> Summary {
     let mut s = samples.to_vec();
     s.sort_by(f64::total_cmp);

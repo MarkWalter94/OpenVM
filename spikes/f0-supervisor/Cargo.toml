@@ -1,6 +1,6 @@
 [package]
 name = "f0-supervisor"
-description = "Spike F0-06/F0-08: QEMU figlio del supervisor in un Job Object, crash, Emergency Stop, limiti OS"
+description = "Spike F0-06/F0-08: QEMU as a child of the supervisor in a Job Object, crash, Emergency Stop, OS limits"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

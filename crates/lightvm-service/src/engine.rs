@@ -1,17 +1,17 @@
-//! Motore delle VM del supervisor: `vm_core::Core` con le porte reali o finte.
+//! Supervisor VM engine: `vm_core::Core` with the real or fake ports.
 //!
-//! Il thread del supervisor ([`crate::supervisor`]) possiede un
-//! `Box<dyn VmEngine>` e lo serve in ordine. [`CoreEngine`] collega il core
-//! (macchina a stati, coda per VM, policy, audit) a un catalogo
-//! ([`vm_core::ports::CatalogStore`]), a un backend ([`BackendPort`]) e a un
-//! ispettore dei media ([`vm_core::ports::MediaInspector`]). Gli effetti del
-//! backend avvengono solo tramite il core: ogni creazione, avvio, arresto,
-//! Emergency Stop e diniego produce eventi di audit nella destinazione del core.
+//! The supervisor thread ([`crate::supervisor`]) owns a `Box<dyn VmEngine>`
+//! and serves it in order. [`CoreEngine`] connects the core (state machine,
+//! per-VM queue, policy, audit) to a catalog ([`vm_core::ports::CatalogStore`]),
+//! a backend ([`BackendPort`]) and a media inspector
+//! ([`vm_core::ports::MediaInspector`]). Backend effects happen only through
+//! the core: every creation, start, stop, Emergency Stop and denial produces
+//! audit events in the core's sink.
 //!
-//! L'Emergency Stop non passa da qui: il percorso prioritario termina i
-//! processi con il gestore del backend ([`crate::supervisor::EmergencyStop`]);
-//! dopo, [`VmEngine::after_emergency_stop`] registra l'arresto nel core
-//! (revoca delle sessioni, coda scartata, audit, fine processo osservata).
+//! The Emergency Stop does not go through here: the priority path terminates
+//! the processes with the backend handler ([`crate::supervisor::EmergencyStop`]);
+//! afterwards, [`VmEngine::after_emergency_stop`] records the stop in the core
+//! (session revocation, queue discarded, audit, observed process end).
 
 use std::collections::BTreeMap;
 
@@ -25,18 +25,18 @@ use vm_core::{Core, CoreConfig, VmStatus};
 
 use crate::adapters::{SystemClock, SystemIds};
 
-/// Esito di `submit_vm`: accettazione ed eventuale registro dopo l'esecuzione.
+/// Outcome of `submit_vm`: admission and optional record after execution.
 pub type SubmitOutcome = (Admission, Option<OperationRecord>);
 
-/// Operazioni sulle VM servite dal thread del supervisor.
+/// VM operations served by the supervisor thread.
 pub trait VmEngine: Send + 'static {
-    /// Elenco delle VM visibili al chiamante.
+    /// List of the VMs visible to the caller.
     fn list_vms(&mut self, caller: &Caller) -> Result<Vec<VmSummary>, PublicError>;
-    /// Stato di una VM.
+    /// Status of a VM.
     fn vm_status(&mut self, caller: &Caller, vm_id: VmId) -> Result<VmSummary, PublicError>;
-    /// Creazione di una VM.
+    /// Creation of a VM.
     fn create_vm(&mut self, caller: &Caller, config: VmConfig) -> Result<VmRecord, PublicError>;
-    /// Modifica della configurazione di una VM spenta.
+    /// Change of the configuration of a powered-off VM.
     fn update_vm(
         &mut self,
         caller: &Caller,
@@ -44,31 +44,31 @@ pub trait VmEngine: Send + 'static {
         expected_revision: u64,
         config: VmConfig,
     ) -> Result<VmRecord, PublicError>;
-    /// Azione su una VM: accettazione nella coda del core ed esecuzione.
+    /// Action on a VM: admission into the core queue and execution.
     fn submit(&mut self, caller: &Caller, req: VmRequest) -> Result<SubmitOutcome, PublicError>;
-    /// Registra nel core un Emergency Stop già eseguito dal percorso
-    /// prioritario; `actor` è chi l'ha deciso (utente, o il supervisor alla
-    /// perdita della UI).
+    /// Records in the core an Emergency Stop already executed by the priority
+    /// path; `actor` is who decided it (the user, or the supervisor when the UI
+    /// is lost).
     fn after_emergency_stop(&mut self, actor: Actor);
-    /// Applica al core le osservazioni del backend (uscite non richieste dei
-    /// processi), così che gli eventi `vm_state` arrivino anche senza richieste.
+    /// Applies the backend observations to the core (unrequested process exits),
+    /// so that `vm_state` events arrive even without requests.
     fn observe(&mut self);
-    /// VM con un processo (avvio, esecuzione, arresto), secondo l'ultimo stato noto.
+    /// VMs with a process (starting, running, stopping), according to the last known state.
     fn vms_with_process(&self) -> usize;
-    /// Arresto delle VM in esecuzione (arresto controllato del servizio).
+    /// Stops the running VMs (controlled service shutdown).
     fn stop_all(&mut self);
-    /// Cambi di stato dall'ultima chiamata, per gli eventi `vm_state`.
+    /// State changes since the last call, for the `vm_state` events.
     fn state_changes(&mut self) -> Vec<(VmId, VmState)>;
 }
 
-/// Backend delle VM visto dal motore: porta `VmBackend` del core più le
-/// osservazioni asincrone (uscita del processo non richiesta dal core).
+/// VM backend as seen by the engine: the core's `VmBackend` port plus the
+/// asynchronous observations (process exit not requested by the core).
 pub trait BackendPort: VmBackend + Send + 'static {
-    /// Osservazioni accumulate da applicare al core con `Core::observe`.
+    /// Accumulated observations to apply to the core with `Core::observe`.
     fn drain_observations(&mut self) -> Vec<(VmId, BackendObservation)>;
 }
 
-/// Configurazione del core per il servizio.
+/// Core configuration for the service.
 pub fn core_config(host: lightvm_proto::HostCapacity) -> CoreConfig {
     CoreConfig {
         global_limits: ResourceLimits::MVP_DEFAULT,
@@ -88,7 +88,7 @@ fn summary(s: VmStatus) -> VmSummary {
     }
 }
 
-/// Motore su `vm_core::Core` con orologio e identificativi di sistema.
+/// Engine over `vm_core::Core` with the system clock and identifiers.
 pub struct CoreEngine<S, A, B, M>
 where
     S: CatalogStore,
@@ -120,8 +120,8 @@ where
     B: BackendPort,
     M: MediaInspector + Send + 'static,
 {
-    /// Costruisce il core e carica il catalogo (le VM con processo nello stato
-    /// persistito entrano in `recovering`).
+    /// Builds the core and loads the catalog (VMs with a process in the persisted
+    /// state enter `recovering`).
     pub fn new(
         store: S,
         audit: A,
@@ -131,13 +131,13 @@ where
     ) -> Result<Self, PublicError> {
         let mut core = Core::new(store, SystemClock, SystemIds::default(), audit, config);
         core.load_catalog()?;
-        // Un supervisor appena avviato non possiede processi: quelli di un
-        // supervisor precedente sono terminati con il suo Job Object (ADR-0009).
-        let riconciliate = core.reconcile_after_restart()?;
-        if !riconciliate.is_empty() {
+        // A freshly started supervisor owns no processes: those of a previous
+        // supervisor terminated with its Job Object (ADR-0009).
+        let reconciled = core.reconcile_after_restart()?;
+        if !reconciled.is_empty() {
             crate::diag!(
-                "lightvm-service: {} VM riportate a stopped dopo il riavvio (nessun processo né intento aperto)",
-                riconciliate.len()
+                "lightvm-service: {} VMs brought back to stopped after the restart (no process or open intent)",
+                reconciled.len()
             );
         }
         let mut e = Self {
@@ -151,7 +151,7 @@ where
         Ok(e)
     }
 
-    /// Core (sola lettura, per test e diagnostica).
+    /// Core (read-only, for tests and diagnostics).
     pub fn core(&self) -> &Core<S, SystemClock, SystemIds, A> {
         &self.core
     }
@@ -215,22 +215,22 @@ where
         let vm_id = req.vm_id;
         let op = req.operation_id;
         let admission = self.core.submit(caller, req)?;
-        // L'esecuzione è sincrona sul thread del supervisor: un solo
-        // proprietario del core e del backend (ARCHITECTURE 5).
+        // Execution is synchronous on the supervisor thread: a single owner of
+        // the core and the backend (ARCHITECTURE 5).
         self.run_queue(vm_id)?;
         let record = self.core.operation(caller, op).ok();
         Ok((admission, record))
     }
 
     fn after_emergency_stop(&mut self, actor: Actor) {
-        // Prima la registrazione dell'Emergency Stop, poi le altre osservazioni:
-        // un'uscita già osservata non deve trasformarsi in un arresto ordinario.
+        // First record the Emergency Stop, then the other observations: an exit
+        // already observed must not turn into an ordinary stop.
         let Ok(vms) = self.core.list_vms(&Caller::User) else {
             return;
         };
         for vm in vms.into_iter().filter(|v| v.state.has_process()) {
-            // Il processo è già terminato dal percorso prioritario: `force_stop`
-            // conferma la fine osservata e il core registra l'esito.
+            // The process was already terminated by the priority path: `force_stop`
+            // confirms the observed end and the core records the outcome.
             let _ = self
                 .core
                 .emergency_stop_with(actor, vm.vm_id, &mut self.backend);

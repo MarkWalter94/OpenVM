@@ -1,25 +1,25 @@
-//! Riconciliazione dopo un'interruzione (ROADMAP 6.3, 7.4 riga "Crash", 8).
+//! Reconciliation after an interruption (ROADMAP 6.3, 7.4 "Crash" row, 8).
 //!
-//! Eseguita all'apertura del catalogo (sotto il lock) e invocabile con
-//! [`Catalog::recover`]. Regole per gli intenti non conclusi:
+//! Run when the catalog is opened (under the lock) and callable through
+//! [`Catalog::recover`]. Rules for unfinished intents:
 //!
-//! | Tipo | Situazione trovata | Azione |
+//! | Kind | Situation found | Action |
 //! | --- | --- | --- |
-//! | creazione | riga DB assente | rimuove temporaneo e file finale orfano → `aborted` |
-//! | creazione | riga presente, file finale presente | completa → `committed` |
-//! | creazione | riga presente, file solo nel temporaneo | completa la rinomina → `committed` |
-//! | creazione | riga presente, nessun file | VM `recovering`, overlay `missing`, esecuzioni `failed`; baseline intatta → `aborted` |
-//! | cancellazione | file ancora al suo posto | annulla, disco di nuovo `ready` → `aborted` |
-//! | cancellazione | file nel temporaneo, riga presente | completa la cancellazione della riga; se un riferimento la impedisce ripristina il file → `committed`/`aborted` |
-//! | cancellazione | nessun file, riga presente | come "riga presente, nessun file" della creazione → `aborted` |
-//! | export | qualunque | rimuove il temporaneo → `aborted` (la destinazione esterna non è mai toccata) |
-//! | qualunque | errore durante la riconciliazione (file in uso, collegamento, I/O) | intento `needs_review` ("da verificare"), VM `recovering` e occupata; nuovo tentativo alla prossima riconciliazione |
+//! | creation | DB row missing | removes the temporary and the orphaned final file → `aborted` |
+//! | creation | row present, final file present | completes → `committed` |
+//! | creation | row present, file only in the temporary | completes the rename → `committed` |
+//! | creation | row present, no file | VM `recovering`, overlay `missing`, runs `failed`; baseline untouched → `aborted` |
+//! | deletion | file still in place | rolls back, disk `ready` again → `aborted` |
+//! | deletion | file in the temporary, row present | completes the row deletion; if a reference prevents it, restores the file → `committed`/`aborted` |
+//! | deletion | no file, row present | same as creation's "row present, no file" → `aborted` |
+//! | export | any | removes the temporary → `aborted` (the external destination is never touched) |
+//! | any | error during reconciliation (file in use, link, I/O) | intent `needs_review`, VM `recovering` and busy; retried at the next reconciliation |
 //!
-//! Poi rimuove i temporanei rimasti di cancellazioni ed export già confermati
-//! e verifica che i file di dischi, firmware e media registrati esistano (un
-//! percorso non verificabile è segnalato come [`IntegrityIssue::Unverifiable`]).
-//! Un file di base mancante viene solo segnalato: la riconciliazione non
-//! modifica mai righe o file di una baseline.
+//! It then removes leftover temporaries of already committed deletions and
+//! exports, and checks that the registered disk, firmware and media files
+//! exist (a path that cannot be verified is reported as
+//! [`IntegrityIssue::Unverifiable`]). A missing base file is only reported:
+//! reconciliation never modifies a baseline's rows or files.
 
 use rusqlite::params;
 
@@ -31,96 +31,96 @@ use crate::ids::{ArtifactId, BaselineId, DiskId, FirmwareId, MediaId, VmId, pars
 use crate::records::Tx;
 use crate::time::now_rfc3339;
 
-/// Esito complessivo della riconciliazione.
+/// Overall outcome of reconciliation.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RecoveryReport {
-    /// Intenti non conclusi trovati e risolti.
+    /// Unfinished intents found and resolved.
     pub intents: Vec<IntentRecovery>,
-    /// Intenti già confermati di cui è stato rimosso il temporaneo residuo.
+    /// Already committed intents whose leftover temporary was removed.
     pub leftover_temps_removed: Vec<i64>,
-    /// Incoerenze tra DB e filesystem fuori dal journal.
+    /// Inconsistencies between DB and filesystem outside the journal.
     pub integrity: Vec<IntegrityIssue>,
 }
 
-/// Esito per un intento.
+/// Outcome for a single intent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IntentRecovery {
-    /// Intento.
+    /// Intent.
     pub intent_id: i64,
-    /// Tipo.
+    /// Kind.
     pub kind: IntentKind,
-    /// Stato trovato.
+    /// State found.
     pub prior_state: IntentState,
-    /// Classe dell'azione.
+    /// Class of action.
     pub outcome: RecoveryOutcome,
-    /// Dettaglio registrato in `journal.resolution`.
+    /// Detail recorded in `journal.resolution`.
     pub detail: String,
 }
 
-/// Classe dell'azione di riconciliazione.
+/// Class of reconciliation action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecoveryOutcome {
-    /// Annullato, filesystem riportato allo stato precedente.
+    /// Aborted, filesystem restored to the previous state.
     RolledBack,
-    /// Completato.
+    /// Completed.
     RolledForward,
-    /// DB presente e file assente: VM in `recovering`, nessuna modifica alla baseline.
+    /// DB present and file missing: VM in `recovering`, no change to the baseline.
     MarkedRecovering,
-    /// Riconciliazione non riuscita (errore di I/O, file in uso, percorso
-    /// rifiutato): intento `needs_review`, VM `recovering` e occupata; nuovo
-    /// tentativo alla prossima riconciliazione.
+    /// Reconciliation failed (I/O error, file in use, path rejected):
+    /// intent `needs_review`, VM `recovering` and busy; retried at the next
+    /// reconciliation.
     NeedsReview,
 }
 
-/// Incoerenza rilevata dalla verifica di integrità.
+/// Inconsistency detected by the integrity check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IntegrityIssue {
-    /// File di un disco non di baseline mancante: disco `missing`, VM `recovering`.
+    /// File of a non-baseline disk missing: disk `missing`, VM `recovering`.
     DiskMissing {
-        /// Disco.
+        /// Disk.
         disk_id: String,
-        /// Percorso gestito.
+        /// Managed path.
         path: String,
     },
-    /// File di una base mancante: solo segnalato, VM `recovering`.
+    /// File of a base missing: only reported, VM `recovering`.
     BaseDiskMissing {
-        /// Disco.
+        /// Disk.
         disk_id: String,
-        /// Percorso gestito.
+        /// Managed path.
         path: String,
     },
-    /// File di uno stato firmware mancante: VM `recovering`.
+    /// File of a firmware state missing: VM `recovering`.
     FirmwareMissing {
-        /// Stato firmware.
+        /// Firmware state.
         fw_id: String,
-        /// Percorso gestito.
+        /// Managed path.
         path: String,
     },
-    /// Copia gestita di un media mancante: media `missing`.
+    /// Managed copy of a media missing: media `missing`.
     MediaMissing {
         /// Media.
         media_id: String,
     },
-    /// Presenza non verificabile (percorso dietro un collegamento o errore di
-    /// I/O): da verificare, VM in `recovering` se il file è di una VM.
+    /// Presence cannot be verified (path behind a link or I/O error):
+    /// needs review, VM in `recovering` if the file belongs to a VM.
     Unverifiable {
-        /// Percorso gestito.
+        /// Managed path.
         path: String,
-        /// Errore osservato.
+        /// Observed error.
         detail: String,
     },
 }
 
 impl Catalog {
-    /// Riconcilia gli intenti non conclusi e verifica l'integrità dei file
-    /// registrati. Idempotente.
+    /// Reconciles unfinished intents and checks the integrity of the
+    /// registered files. Idempotent.
     pub fn recover(&mut self) -> Result<RecoveryReport> {
         let mut report = RecoveryReport::default();
         for id in self.intent_ids_in("'pending','applied','needs_review'")? {
             let prior = self.intent_state(id)?;
             let kind = self.intent_kind(id)?;
-            // Un errore su un intento non blocca l'apertura del catalogo:
-            // l'intento resta "da verificare" e la VM occupata.
+            // An error on one intent does not block opening the catalog:
+            // the intent stays "needs review" and the VM busy.
             let attempt = self
                 .intent_row(id)
                 .and_then(|intent| self.recover_one(&intent, prior));
@@ -158,7 +158,7 @@ impl Catalog {
             .db()
     }
 
-    /// Intento non risolto: stato `needs_review` e VM in `recovering`.
+    /// Unresolved intent: state `needs_review` and VM in `recovering`.
     fn mark_needs_review(&mut self, id: i64, detail: &str) -> Result<()> {
         self.with_tx(|tx| {
             tx.conn()
@@ -284,9 +284,9 @@ impl Catalog {
         }
     }
 
-    /// DB presente e file assente: VM in `recovering`; un disco non di base
-    /// diventa `missing` e le esecuzioni aperte che lo usano `failed`.
-    /// Nessuna modifica a righe o file di baseline.
+    /// DB present and file missing: VM in `recovering`; a non-base disk
+    /// becomes `missing` and the open runs using it become `failed`.
+    /// No change to baseline rows or files.
     fn mark_db_without_file(&mut self, i: &Intent) -> Result<()> {
         let vm = i.vm_id.clone();
         let tk = i.target_kind;
@@ -337,8 +337,8 @@ impl Catalog {
         };
         let mut removed = Vec::new();
         for id in ids {
-            // Un temporaneo non rimovibile (in uso, dietro un collegamento) resta
-            // e sarà ritentato: non impedisce l'apertura del catalogo.
+            // A temporary that cannot be removed (in use, behind a link) stays
+            // and will be retried: it does not prevent opening the catalog.
             let Ok(i) = self.intent_row(id) else { continue };
             let removed_now = match exists_no_follow(&i.temp_path) {
                 Ok(true) => match remove_temp(&self.layout, &i.temp_rel) {
@@ -428,8 +428,8 @@ impl Catalog {
     }
 }
 
-/// Presenza di un file gestito: `None` se il percorso non è verificabile
-/// (collegamento rifiutato, errore di I/O), con l'incoerenza registrata.
+/// Presence of a managed file: `None` if the path cannot be verified
+/// (link rejected, I/O error), with the inconsistency recorded.
 fn presence(
     layout: &crate::layout::CatalogLayout,
     rel: &crate::paths::ManagedPath,
@@ -476,9 +476,9 @@ fn delete_target_rows(tx: &Tx<'_>, kind: TargetKind, id: &str) -> Result<()> {
     }
 }
 
-/// Dopo un completamento in avanti: i file che nascono in sola lettura (basi,
-/// vars delle baseline, copie dei media) riprendono l'attributo, che la
-/// rimozione di un temporaneo collegato allo stesso file può aver tolto.
+/// After a roll-forward: files that are created read-only (bases, baseline
+/// vars, media copies) get the attribute back, since removing a temporary
+/// hard-linked to the same file may have cleared it.
 fn restore_readonly(i: &Intent) -> Result<()> {
     let readonly = match i.kind {
         IntentKind::PromoteBaseline | IntentKind::ImportMedia => true,

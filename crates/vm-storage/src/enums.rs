@@ -1,4 +1,4 @@
-//! Enumerazioni persistite come testo, con gli stessi valori dei CHECK SQL.
+//! Enumerations persisted as text, with the same values as the SQL CHECK constraints.
 
 macro_rules! str_enum {
     ($(#[$doc:meta])* $name:ident { $($(#[$vdoc:meta])* $variant:ident => $text:literal),+ $(,)? }) => {
@@ -9,12 +9,12 @@ macro_rules! str_enum {
         }
 
         impl $name {
-            /// Valore testuale persistito.
+            /// Persisted text value.
             pub fn as_str(self) -> &'static str {
                 match self { $(Self::$variant => $text),+ }
             }
 
-            /// Lettura dal valore testuale.
+            /// Parses the text value.
             pub fn parse(s: &str) -> Option<Self> {
                 match s { $($text => Some(Self::$variant),)+ _ => None }
             }
@@ -39,7 +39,7 @@ macro_rules! str_enum {
                 let s = v.as_str()?;
                 Self::parse(s).ok_or_else(|| {
                     rusqlite::types::FromSqlError::Other(
-                        format!("valore {s:?} non valido per {}", stringify!($name)).into(),
+                        format!("invalid value {s:?} for {}", stringify!($name)).into(),
                     )
                 })
             }
@@ -48,184 +48,184 @@ macro_rules! str_enum {
 }
 
 str_enum!(
-    /// Ultimo stato persistito del ciclo di vita. Lo stato osservato deriva da
-    /// processo e QMP (sezione 6.3); questo valore serve alla riconciliazione.
+    /// Last persisted lifecycle state. The observed state is derived from the
+    /// process and QMP (section 6.3); this value is used for reconciliation.
     Lifecycle {
-        /// Spenta.
+        /// Powered off.
         Stopped => "stopped",
-        /// In avvio.
+        /// Starting.
         Starting => "starting",
-        /// In esecuzione.
+        /// Running.
         Running => "running",
-        /// In arresto.
+        /// Stopping.
         Stopping => "stopping",
-        /// Fallita.
+        /// Failed.
         Failed => "failed",
-        /// In riconciliazione.
+        /// Under reconciliation.
         Recovering => "recovering",
     }
 );
 
 str_enum!(
-    /// Tipo di media del registro.
+    /// Kind of a registry media.
     MediaKind {
-        /// ISO di installazione.
+        /// Installation ISO.
         Iso => "iso",
-        /// ISO dati in sola lettura (ADR-0008).
+        /// Read-only data ISO (ADR-0008).
         Data => "data",
     }
 );
 
 str_enum!(
-    /// Stato di un media del registro.
+    /// Status of a registry media.
     MediaStatus {
-        /// Approvato.
+        /// Approved.
         Approved => "approved",
-        /// Revocato.
+        /// Revoked.
         Revoked => "revoked",
-        /// File gestito mancante.
+        /// Managed file missing.
         Missing => "missing",
     }
 );
 
 str_enum!(
-    /// Slot di collegamento di un media a una VM.
+    /// Slot through which a media is attached to a VM.
     MediaSlot {
-        /// Supporto di installazione.
+        /// Installation media.
         Install => "install",
-        /// Supporto dati.
+        /// Data media.
         Data => "data",
     }
 );
 
 str_enum!(
-    /// Ruolo di un disco gestito.
+    /// Role of a managed disk.
     DiskRole {
-        /// Disco di lavoro della VM.
+        /// Working disk of the VM.
         Primary => "primary",
-        /// Disco immutabile di una baseline.
+        /// Immutable disk of a baseline.
         Base => "base",
-        /// Overlay di un'esecuzione con backing su una base.
+        /// Overlay of a run, backed by a base.
         Overlay => "overlay",
     }
 );
 
 str_enum!(
-    /// Stato di un disco gestito.
+    /// Status of a managed disk.
     DiskStatus {
-        /// Pronto.
+        /// Ready.
         Ready => "ready",
-        /// Cancellazione con journal in corso.
+        /// Journaled deletion in progress.
         Deleting => "deleting",
-        /// File mancante rilevato dalla riconciliazione.
+        /// File missing, detected by reconciliation.
         Missing => "missing",
-        /// Fallito.
+        /// Failed.
         Failed => "failed",
     }
 );
 
 str_enum!(
-    /// Ambito di uno stato firmware.
+    /// Scope of a firmware state.
     FirmwareScope {
-        /// Della VM (disco di lavoro).
+        /// Of the VM (working disk).
         Vm => "vm",
-        /// Di una baseline (immutabile).
+        /// Of a baseline (immutable).
         Baseline => "baseline",
-        /// Di un'esecuzione.
+        /// Of a run.
         Run => "run",
     }
 );
 
 str_enum!(
-    /// Stato di un'esecuzione.
+    /// State of a run.
     RunState {
-        /// In avvio.
+        /// Starting.
         Starting => "starting",
-        /// In esecuzione.
+        /// Running.
         Running => "running",
-        /// In arresto.
+        /// Stopping.
         Stopping => "stopping",
-        /// Terminata.
+        /// Terminated.
         Stopped => "stopped",
-        /// Fallita.
+        /// Failed.
         Failed => "failed",
-        /// In riconciliazione.
+        /// Under reconciliation.
         Recovering => "recovering",
     }
 );
 
 str_enum!(
-    /// Causa di terminazione di un'esecuzione.
+    /// Termination cause of a run.
     TerminationCause {
-        /// Arresto gentile.
+        /// Graceful shutdown.
         Shutdown => "shutdown",
-        /// Arresto forzato.
+        /// Forced stop.
         ForceStop => "force_stop",
         /// Emergency Stop.
         EmergencyStop => "emergency_stop",
-        /// Uscita del guest.
+        /// Guest exit.
         GuestExit => "guest_exit",
-        /// Crash di QEMU.
+        /// QEMU crash.
         Crash => "crash",
-        /// Perdita del supervisor.
+        /// Supervisor lost.
         SupervisorLost => "supervisor_lost",
-        /// Avvio fallito.
+        /// Start failed.
         StartFailed => "start_failed",
-        /// Chiusa dalla riconciliazione.
+        /// Closed by reconciliation.
         Recovered => "recovered",
     }
 );
 
 str_enum!(
-    /// Stato di un'operazione.
+    /// State of an operation.
     OperationState {
-        /// In coda.
+        /// Queued.
         Queued => "queued",
-        /// In corso.
+        /// In progress.
         Running => "running",
-        /// Riuscita.
+        /// Succeeded.
         Succeeded => "succeeded",
-        /// Fallita.
+        /// Failed.
         Failed => "failed",
-        /// Annullata.
+        /// Cancelled.
         Cancelled => "cancelled",
     }
 );
 
 str_enum!(
-    /// Stato di una sessione agente.
+    /// State of an agent session.
     SessionState {
-        /// In attesa di approvazione.
+        /// Awaiting approval.
         Pending => "pending",
-        /// Attiva.
+        /// Active.
         Active => "active",
-        /// In pausa.
+        /// Paused.
         Paused => "paused",
-        /// Revocata.
+        /// Revoked.
         Revoked => "revoked",
-        /// Scaduta.
+        /// Expired.
         Expired => "expired",
-        /// Chiusa.
+        /// Closed.
         Closed => "closed",
     }
 );
 
 str_enum!(
-    /// Esito registrato nell'audit.
+    /// Outcome recorded in the audit log.
     AuditOutcome {
-        /// Autorizzata.
+        /// Allowed.
         Allowed => "allowed",
-        /// Negata.
+        /// Denied.
         Denied => "denied",
-        /// Riuscita.
+        /// Succeeded.
         Succeeded => "succeeded",
-        /// Fallita.
+        /// Failed.
         Failed => "failed",
     }
 );
 
 str_enum!(
-    /// Tipo di artefatto.
+    /// Kind of artifact.
     ArtifactKind {
         /// Screenshot.
         Screenshot => "screenshot",
@@ -237,27 +237,27 @@ str_enum!(
 );
 
 str_enum!(
-    /// Tipo di intento del journal.
+    /// Kind of journal intent.
     IntentKind {
-        /// Creazione di un disco di lavoro (`qemu-img create`).
+        /// Creation of a working disk (`qemu-img create`).
         CreateDisk => "create_disk",
-        /// Creazione di un overlay da una base.
+        /// Creation of an overlay from a base.
         CreateOverlay => "create_overlay",
-        /// Copia di uno stato firmware.
+        /// Copy of a firmware state.
         CopyVars => "copy_vars",
-        /// Materializzazione di una nuova base di baseline.
+        /// Materialization of a new baseline base.
         PromoteBaseline => "promote_baseline",
-        /// Copia gestita di un media approvato.
+        /// Managed copy of an approved media.
         ImportMedia => "import_media",
-        /// Cancellazione di un file o di una directory gestiti.
+        /// Deletion of a managed file or directory.
         DeleteFile => "delete_file",
-        /// Export verso una destinazione scelta dall'utente (fuori dal catalogo).
+        /// Export to a user-chosen destination (outside the catalog).
         Export => "export",
     }
 );
 
 impl IntentKind {
-    /// `true` per gli intenti che creano un file in una posizione gestita.
+    /// `true` for intents that create a file in a managed location.
     pub fn is_create(self) -> bool {
         matches!(
             self,
@@ -271,36 +271,36 @@ impl IntentKind {
 }
 
 str_enum!(
-    /// Stato di un intento del journal.
+    /// State of a journal intent.
     IntentState {
-        /// Registrato, filesystem non ancora completato.
+        /// Recorded, filesystem work not yet completed.
         Pending => "pending",
-        /// Filesystem completato, DB non ancora aggiornato.
+        /// Filesystem work completed, DB not yet updated.
         Applied => "applied",
-        /// DB aggiornato nella stessa transazione del journal.
+        /// DB updated in the same transaction as the journal.
         Committed => "committed",
-        /// Annullato (dall'applicazione o dalla riconciliazione).
+        /// Aborted (by the application or by reconciliation).
         Aborted => "aborted",
-        /// Riconciliazione non riuscita: da verificare. La VM resta occupata e
-        /// la riconciliazione ritenta a ogni apertura o chiamata di `recover`.
+        /// Reconciliation failed: needs review. The VM stays busy and
+        /// reconciliation retries on every open or call to `recover`.
         NeedsReview => "needs_review",
     }
 );
 
 str_enum!(
-    /// Oggetto del catalogo coinvolto da un intento.
+    /// Catalog object involved in an intent.
     TargetKind {
-        /// Riga di `disks`.
+        /// Row of `disks`.
         Disk => "disk",
-        /// Riga di `firmware_state`.
+        /// Row of `firmware_state`.
         Firmware => "firmware",
-        /// Riga di `baselines`.
+        /// Row of `baselines`.
         Baseline => "baseline",
-        /// Riga di `artifacts`.
+        /// Row of `artifacts`.
         Artifact => "artifact",
-        /// Riga di `media`.
+        /// Row of `media`.
         Media => "media",
-        /// Nessuna riga (export).
+        /// No row (export).
         None => "none",
     }
 );

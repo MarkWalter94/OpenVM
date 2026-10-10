@@ -1,14 +1,14 @@
-//! Adattatori reali delle porte di `vm-core` (composition root, ROADMAP 6.1):
+//! Real adapters for the `vm-core` ports (composition root, ROADMAP 6.1):
 //!
-//! - [`catalog::SqliteStore`]: `CatalogStore` su `vm_storage::Catalog`;
-//! - [`backend::QemuHost`] / [`backend::QemuVmBackend`]: `VmBackend` e
-//!   percorso prioritario dell'Emergency Stop su `qemu-backend`;
-//! - [`audit::FileAuditSink`]: `AuditSink` su file JSON Lines nel profilo utente;
-//! - [`SystemClock`] e [`SystemIds`]: orologio e identificativi UUID v7 reali.
+//! - [`catalog::SqliteStore`]: `CatalogStore` over `vm_storage::Catalog`;
+//! - [`backend::QemuHost`] / [`backend::QemuVmBackend`]: `VmBackend` and the
+//!   Emergency Stop priority path over `qemu-backend`;
+//! - [`audit::FileAuditSink`]: `AuditSink` on a JSON Lines file in the user profile;
+//! - [`SystemClock`] and [`SystemIds`]: real clock and UUID v7 identifiers.
 //!
-//! Gli adattatori sono il più sottili possibile: dove l'API di un altro crate
-//! non combacia, la lacuna è indicata nel commento del modulo e nel file di
-//! verifica `docs/verification/F1-04-service-ipc-ci.md`.
+//! The adapters are as thin as possible: where another crate's API does not
+//! match, the gap is noted in the module comment and in the verification
+//! file `docs/verification/F1-04-service-ipc-ci.md`.
 
 pub mod audit;
 pub mod backend;
@@ -17,7 +17,7 @@ pub mod catalog;
 use lightvm_proto::UtcTimestamp;
 use vm_core::ports::{Clock, IdGenerator};
 
-/// Orologio UTC di sistema.
+/// System UTC clock.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SystemClock;
 
@@ -27,9 +27,9 @@ impl Clock for SystemClock {
     }
 }
 
-/// Identificativi UUID v7: millisecondi Unix e 10 byte dal generatore casuale
-/// del sistema operativo. Nello stesso millisecondo l'ordine non è garantito
-/// (non serve: gli identificativi sono opachi).
+/// UUID v7 identifiers: Unix milliseconds and 10 bytes from the operating
+/// system random generator. Within the same millisecond the order is not
+/// guaranteed (not needed: identifiers are opaque).
 #[derive(Debug, Clone, Default)]
 pub struct SystemIds {
     counter: u64,
@@ -41,7 +41,7 @@ impl IdGenerator for SystemIds {
         let mut r = [0u8; 10];
         self.counter = self.counter.wrapping_add(1);
         if getrandom::fill(&mut r).is_err() {
-            // Ripiego senza casualità: identificativi distinti nel processo.
+            // Fallback without randomness: identifiers distinct within the process.
             r[2..].copy_from_slice(&self.counter.to_be_bytes());
         }
         (millis, r)

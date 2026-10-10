@@ -1,20 +1,20 @@
-//! Casi d'uso del core: catalogo, coda di mutazioni per VM, sessioni, Emergency
+//! Core use cases: catalog, per-VM mutation queue, sessions, Emergency
 //! Stop, audit (ROADMAP 6.3, 7.3, 9; `docs/ARCHITECTURE.md` 4–6).
 //!
-//! Flusso di una richiesta:
-//! 1. [`Core::submit`]: verifica al ricevimento (sessione, allowlist, policy
-//!    effettiva, quote), idempotenza per `operation_id`, `run_id`, stato e
-//!    occupazione della VM; poi accodamento.
-//! 2. [`Core::begin_dispatch`]: nuova verifica **subito prima dell'inoltro**;
-//!    se la sessione è revocata, scaduta o in pausa l'operazione è scartata senza
-//!    effetto. Altrimenti l'operazione diventa `forwarded` e il supervisor chiama
-//!    il backend senza trattenere il core.
-//! 3. [`Core::finish_dispatch`] registra l'esito; [`Core::observe`] applica le
-//!    osservazioni di processo e QMP, che prevalgono sullo stato persistito.
+//! Flow of a request:
+//! 1. [`Core::submit`]: check on receipt (session, allowlist, effective
+//!    policy, quotas), idempotency by `operation_id`, `run_id`, state and
+//!    VM occupancy; then enqueueing.
+//! 2. [`Core::begin_dispatch`]: new check **right before forwarding**;
+//!    if the session is revoked, expired or paused the operation is discarded without
+//!    effect. Otherwise the operation becomes `forwarded` and the supervisor calls
+//!    the backend without holding the core.
+//! 3. [`Core::finish_dispatch`] records the outcome; [`Core::observe`] applies the
+//!    process and QMP observations, which take precedence over the persisted state.
 //!
-//! L'Emergency Stop ([`Core::emergency_stop`]) non passa dalla coda: revoca le
-//! sessioni, scarta la coda, identifica le richieste già inoltrate e chiede la
-//! terminazione dell'esecuzione.
+//! The Emergency Stop ([`Core::emergency_stop`]) does not go through the queue: it revokes the
+//! sessions, discards the queue, identifies the requests already forwarded and asks for the
+//! termination of the run.
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -36,21 +36,21 @@ use crate::ports::{AuditSink, CatalogStore, Clock, IdGenerator, MediaInspector, 
 use crate::resources::{existing_disk_limits, validate_config};
 use crate::session::{SessionRegistry, SessionSpec, discard_code_for};
 
-/// Limite rigido di operazioni in coda per VM, indipendente dalle quote.
+/// Hard limit of queued operations per VM, independent of quotas.
 pub const MAX_QUEUE_LEN: usize = 256;
-/// Operazioni terminate ricordate per VM ai fini dell'idempotenza.
+/// Finished operations remembered per VM for idempotency purposes.
 pub const IDEMPOTENCY_WINDOW: usize = 1024;
 
-/// `true` se un'operazione del tipo dato è ammessa nello stato dato (guardia pura).
+/// `true` if an operation of the given kind is allowed in the given state (pure guard).
 ///
-/// | Operazione | Stati ammessi |
+/// | Operation | Allowed states |
 /// | --- | --- |
 /// | `start` | `stopped` |
 /// | `stop` | `running` |
 /// | `force_stop` | `starting`, `running`, `stopping` |
 /// | `reset`, `screenshot`, `input` | `running` |
 /// | `create`, `snapshot`, `restore` | `stopped` |
-/// | `emergency_stop` | qualunque (percorso prioritario) |
+/// | `emergency_stop` | any (priority path) |
 #[must_use]
 pub fn action_allowed_in(kind: OperationKind, state: VmState) -> bool {
     match kind {
@@ -67,116 +67,116 @@ pub fn action_allowed_in(kind: OperationKind, state: VmState) -> bool {
     }
 }
 
-/// Configurazione del core.
+/// Core configuration.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CoreConfig {
-    /// Limiti di risorse globali.
+    /// Global resource limits.
     pub global_limits: ResourceLimits,
-    /// Livello di policy globale (capability e quote massime).
+    /// Global policy layer (maximum capabilities and quotas).
     pub global_policy: PolicyLayer,
-    /// Capacità host rilevate dal probe.
+    /// Host capacity detected by the probe.
     pub host: HostCapacity,
 }
 
-/// Stato di una VM come visto dal core.
+/// State of a VM as seen by the core.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VmStatus {
     /// VM.
     pub vm_id: VmId,
-    /// Nome.
+    /// Name.
     pub name: lightvm_proto::VmName,
-    /// Stato corrente (derivato dalle osservazioni).
+    /// Current state (derived from observations).
     pub state: VmState,
-    /// Esecuzione corrente.
+    /// Current run.
     pub run_id: Option<RunId>,
-    /// Configurazione corrente.
+    /// Current configuration.
     pub config: VmConfig,
-    /// Revisione della configurazione.
+    /// Configuration revision.
     pub config_revision: u64,
-    /// Geometria corrente del display, se nota.
+    /// Current display geometry, if known.
     pub geometry: Option<DisplayGeometry>,
-    /// Operazioni in coda non inoltrate.
+    /// Queued operations not yet forwarded.
     pub queued: usize,
-    /// Operazioni inoltrate in attesa di esito.
+    /// Forwarded operations awaiting an outcome.
     pub in_flight: Vec<OperationId>,
 }
 
-/// Dati per l'avvio di un'esecuzione.
+/// Data for starting a run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StartPlan {
-    /// VM con configurazione corrente.
+    /// VM with current configuration.
     pub vm: VmRecord,
-    /// Voci del registro media da verificare con [`verify_media`] prima dell'uso.
+    /// Media registry entries to verify with [`verify_media`] before use.
     pub media: Vec<MediaEntry>,
 }
 
-/// Operazione pronta per l'inoltro al backend.
+/// Operation ready to be forwarded to the backend.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Dispatch {
-    /// Operazione.
+    /// Operation.
     pub operation_id: OperationId,
     /// VM.
     pub vm_id: VmId,
-    /// Esecuzione di destinazione (nuova per `start`).
+    /// Target run (new for `start`).
     pub run_id: RunId,
-    /// Azione.
+    /// Action.
     pub action: VmAction,
-    /// Presente solo per `start`.
+    /// Present only for `start`.
     pub start: Option<StartPlan>,
-    /// Dimensione massima ammessa per uno screenshot.
+    /// Maximum allowed size for a screenshot.
     pub max_screenshot_bytes: u64,
 }
 
-/// Esito positivo riportato dal backend.
+/// Successful outcome reported by the backend.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DispatchOutcome {
-    /// Operazione completata.
+    /// Operation completed.
     Done,
-    /// Screenshot prodotto.
+    /// Screenshot produced.
     Screenshot(Screenshot),
 }
 
-/// Piano di Emergency Stop: il supervisor termina l'esecuzione con primitive OS
-/// e conferma con [`Core::observe`] (`process_exited`).
+/// Emergency Stop plan: the supervisor terminates the run with OS primitives
+/// and confirms with [`Core::observe`] (`process_exited`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EmergencyStopPlan {
     /// VM.
     pub vm_id: VmId,
-    /// Esecuzione da terminare, se esiste un processo.
+    /// Run to terminate, if a process exists.
     pub run_id: Option<RunId>,
-    /// Coda scartata e richieste già inoltrate.
+    /// Discarded queue and requests already forwarded.
     pub report: RevocationReport,
-    /// Sessioni terminate.
+    /// Terminated sessions.
     pub terminated_sessions: Vec<SessionId>,
 }
 
-/// Esito della terminazione di una sessione.
+/// Outcome of a session termination.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionTermination {
-    /// Sessione.
+    /// Session.
     pub session_id: SessionId,
-    /// Causa.
+    /// Cause.
     pub cause: TerminationCause,
-    /// Coda scartata e richieste già inoltrate della sessione.
+    /// Discarded queue and already forwarded requests of the session.
     pub report: RevocationReport,
-    /// Emergency Stop richiesti (scadenza, perdita del client, chiusura UI...).
+    /// Requested Emergency Stops (expiry, client loss, UI close...).
     pub emergency_stops: Vec<EmergencyStopPlan>,
 }
 
-/// Dati per registrare un supporto approvato (copia gestita già creata dallo storage).
+/// Data to register an approved medium (managed copy already created by storage).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MediaRegistration {
-    /// Tipo.
+    /// Kind.
     pub kind: MediaKind,
-    /// SHA-256 della copia gestita.
+    /// SHA-256 of the managed copy.
     pub sha256: Sha256Digest,
-    /// Dimensione in byte.
+    /// Size in bytes.
     pub size_bytes: u64,
-    /// Origine dichiarata.
+    /// Declared origin.
     pub declared_origin: Label,
-    /// Percorso relativo della copia gestita.
+    /// Relative path of the managed copy.
     pub managed_path: ManagedRelPath,
-    /// Identità OS della copia gestita.
+    /// OS identity of the managed copy.
     pub file_identity: Option<FileIdentity>,
 }
 
@@ -268,7 +268,7 @@ fn audit_action_for(kind: OperationKind) -> AuditAction {
     }
 }
 
-/// Bozza di evento di audit (il core assegna `seq` e `at`).
+/// Draft audit event (the core assigns `seq` and `at`).
 #[derive(Default)]
 struct Ev {
     vm_id: Option<VmId>,
@@ -280,7 +280,7 @@ struct Ev {
     termination: Option<TerminationCause>,
 }
 
-/// Core del supervisor, generico sulle porte.
+/// Supervisor core, generic over the ports.
 #[derive(Debug)]
 pub struct Core<S, C, I, A> {
     store: S,
@@ -292,10 +292,10 @@ pub struct Core<S, C, I, A> {
     revision: PolicyRevision,
     sessions: SessionRegistry,
     vms: BTreeMap<VmId, VmRuntime>,
-    /// VM di ogni `operation_id` mai accettato. Non si riduce con la storia
-    /// delle operazioni: un id uscito dalla finestra di idempotenza resta
-    /// riservato e non può essere riusato per un'altra richiesta (32 byte
-    /// per operazione per la vita del supervisor).
+    /// VM of every `operation_id` ever accepted. It does not shrink with the
+    /// operation history: an id that left the idempotency window stays
+    /// reserved and cannot be reused for another request (32 bytes
+    /// per operation for the lifetime of the supervisor).
     op_index: BTreeMap<OperationId, VmId>,
     audit_seq: u64,
     audit_failures: u64,
@@ -308,7 +308,7 @@ where
     I: IdGenerator,
     A: AuditSink,
 {
-    /// Nuovo core. Chiamare [`Core::load_catalog`] all'avvio del supervisor.
+    /// New core. Call [`Core::load_catalog`] when the supervisor starts.
     pub fn new(store: S, clock: C, ids: I, audit: A, config: CoreConfig) -> Self {
         Self {
             store,
@@ -326,44 +326,44 @@ where
         }
     }
 
-    // ----- accessori -------------------------------------------------------
+    // ----- accessors -------------------------------------------------------
 
-    /// Catalogo.
+    /// Catalog.
     pub fn store(&self) -> &S {
         &self.store
     }
-    /// Destinazione dell'audit.
+    /// Audit destination.
     pub fn audit_sink(&self) -> &A {
         &self.audit
     }
-    /// Orologio.
+    /// Clock.
     pub fn clock(&self) -> &C {
         &self.clock
     }
-    /// Registro delle sessioni (sola lettura).
+    /// Session registry (read-only).
     pub fn sessions(&self) -> &SessionRegistry {
         &self.sessions
     }
-    /// Revisione corrente della policy.
+    /// Current policy revision.
     pub fn policy_revision(&self) -> PolicyRevision {
         self.revision
     }
-    /// Eventi di audit non registrati per errore della destinazione.
+    /// Audit events not recorded because of a destination error.
     pub fn audit_failures(&self) -> u64 {
         self.audit_failures
     }
-    /// Configurazione.
+    /// Configuration.
     pub fn config(&self) -> &CoreConfig {
         &self.config
     }
 
-    /// Aggiorna la capacità host (nuovo probe). Incrementa la revisione della policy.
+    /// Updates the host capacity (new probe). Increments the policy revision.
     pub fn set_host_capacity(&mut self, host: HostCapacity) {
         self.config.host = host;
         self.revision = PolicyRevision(self.revision.0 + 1);
     }
 
-    /// Imposta la policy di una VM. Incrementa la revisione della policy.
+    /// Sets the policy of a VM. Increments the policy revision.
     pub fn set_vm_policy(&mut self, vm_id: VmId, layer: PolicyLayer) {
         self.vm_policies.insert(vm_id, layer);
         self.revision = PolicyRevision(self.revision.0 + 1);
@@ -400,7 +400,7 @@ where
         r
     }
 
-    /// Evento dopo un effetto già avvenuto: un errore della destinazione è contato, non propagato.
+    /// Event after an effect that already happened: a destination error is counted, not propagated.
     fn emit_after(&mut self, actor: Actor, action: AuditAction, outcome: AuditOutcome, ev: Ev) {
         let _ = self.emit(actor, action, outcome, ev);
     }
@@ -417,7 +417,7 @@ where
         err
     }
 
-    // ----- autorizzazione --------------------------------------------------
+    // ----- authorization ---------------------------------------------------
 
     fn vm_layer(&self, vm_id: Option<VmId>) -> PolicyLayer {
         vm_id
@@ -425,7 +425,7 @@ where
             .unwrap_or_else(PolicyLayer::permissive)
     }
 
-    /// Verifica pura (nessun effetto) di una chiamata e policy effettiva risultante.
+    /// Pure check (no effect) of a call and resulting effective policy.
     fn authorize(
         &self,
         caller: &Caller,
@@ -460,12 +460,12 @@ where
             Ok(effective)
         } else if !host.capabilities.contains(&capability) {
             Err(
-                PublicError::unsupported("capacità non disponibile su questo host")
+                PublicError::unsupported("capability not available on this host")
                     .with_detail("capability", capability.as_str()),
             )
         } else {
             Err(
-                PublicError::permission_denied("azione non autorizzata dalla policy effettiva")
+                PublicError::permission_denied("action not authorized by the effective policy")
                     .with_detail("capability", capability.as_str()),
             )
         }
@@ -475,11 +475,11 @@ where
         effective_resource_limits(&self.config.global_limits, None, &self.config.host)
     }
 
-    // ----- catalogo --------------------------------------------------------
+    // ----- catalog ---------------------------------------------------------
 
-    /// Carica il catalogo all'avvio. Uno stato persistito con processo
-    /// (`starting`/`running`/`stopping`) non è confermato da processo né QMP
-    /// dopo un riavvio del supervisor: la VM entra in `recovering`.
+    /// Loads the catalog at startup. A persisted state with a process
+    /// (`starting`/`running`/`stopping`) is confirmed by neither process nor QMP
+    /// after a supervisor restart: the VM enters `recovering`.
     pub fn load_catalog(&mut self) -> Result<(), PublicError> {
         for record in self.store.list_vms()? {
             let state = if record.persisted_state.has_process() {
@@ -495,14 +495,14 @@ where
         Ok(())
     }
 
-    /// Registra un supporto approvato nel registro media (azione dell'utente nell'app).
+    /// Registers an approved medium in the media registry (user action in the app).
     pub fn register_media(&mut self, reg: MediaRegistration) -> Result<MediaRecord, PublicError> {
         if reg.size_bytes == 0 {
-            return Err(PublicError::invalid_argument("supporto vuoto"));
+            return Err(PublicError::invalid_argument("empty medium"));
         }
         if reg.size_bytes > reg.kind.max_bytes() {
             return Err(
-                PublicError::resource_limit("supporto oltre la dimensione massima")
+                PublicError::resource_limit("medium exceeds the maximum size")
                     .with_detail("size_bytes", reg.size_bytes.to_string())
                     .with_detail("max_bytes", reg.kind.max_bytes().to_string()),
             );
@@ -533,14 +533,14 @@ where
                 let entry = self
                     .store
                     .get_media(id)?
-                    .ok_or_else(|| PublicError::not_found("supporto non presente nel registro"))?;
+                    .ok_or_else(|| PublicError::not_found("medium not present in the registry"))?;
                 check_media_kind(&entry, kind)?;
             }
         }
         Ok(())
     }
 
-    /// Crea una VM nel catalogo. Solo l'utente: nessuna creazione da MCP nel MVP.
+    /// Creates a VM in the catalog. User only: no creation from MCP in the MVP.
     pub fn create_vm(
         &mut self,
         caller: &Caller,
@@ -555,8 +555,7 @@ where
             ..Ev::default()
         };
         if matches!(caller, Caller::Agent { .. }) {
-            let err =
-                PublicError::permission_denied("creazione VM non disponibile alle sessioni agente");
+            let err = PublicError::permission_denied("VM creation not available to agent sessions");
             return Err(self.deny(actor, AuditAction::VmCreate, ev(), err));
         }
         let checks = validate_config(&config, &self.effective_limits())
@@ -586,12 +585,12 @@ where
         Ok(record)
     }
 
-    /// Modifica la configurazione di una VM spenta (risorse e limiti,
-    /// ADR-0017). Solo l'utente: le sessioni agente non modificano le VM in
-    /// F1 (gli strumenti MCP, F5, resteranno entro i limiti dell'utente).
-    /// Rifiuta VM non spente o con operazioni in corso (`state_conflict`),
-    /// revisione diversa (`state_conflict`), disco ridotto
-    /// (`invalid_argument`) e risorse oltre i limiti effettivi.
+    /// Modifies the configuration of a stopped VM (resources and limits,
+    /// ADR-0017). User only: agent sessions do not modify VMs in
+    /// F1 (the MCP tools, F5, will stay within the user's limits).
+    /// Rejects VMs not stopped or with operations in progress (`state_conflict`),
+    /// a different revision (`state_conflict`), a reduced disk
+    /// (`invalid_argument`) and resources beyond the effective limits.
     pub fn update_vm_config(
         &mut self,
         caller: &Caller,
@@ -609,29 +608,28 @@ where
             ..Ev::default()
         };
         if matches!(caller, Caller::Agent { .. }) {
-            let err = PublicError::permission_denied(
-                "modifica della VM non disponibile alle sessioni agente",
-            );
+            let err =
+                PublicError::permission_denied("VM modification not available to agent sessions");
             return Err(self.deny(actor, AuditAction::VmConfigure, ev, err));
         }
         let Some(rt) = self.vms.get(&vm_id) else {
-            let err = PublicError::not_found("VM inesistente");
+            let err = PublicError::not_found("VM does not exist");
             return Err(self.deny(actor, AuditAction::VmConfigure, ev, err));
         };
         let current = rt.record.clone();
         let check = if rt.state != VmState::Stopped || rt.lifecycle_pending() {
-            Err(
-                PublicError::state_conflict("la VM deve essere spenta e senza operazioni in corso")
-                    .with_detail("state", rt.state.as_str()),
+            Err(PublicError::state_conflict(
+                "the VM must be stopped with no operations in progress",
             )
+            .with_detail("state", rt.state.as_str()))
         } else if current.config_revision != expected_revision {
             Err(
-                PublicError::state_conflict("configurazione modificata nel frattempo")
+                PublicError::state_conflict("configuration modified in the meantime")
                     .with_detail("revision", current.config_revision.to_string()),
             )
         } else if config.disk_gib < current.config.disk_gib {
             Err(PublicError::invalid_argument(
-                "riduzione del disco non supportata: si può solo ingrandire",
+                "shrinking the disk is not supported: it can only be enlarged",
             ))
         } else {
             validate_config(
@@ -670,7 +668,7 @@ where
         }
     }
 
-    /// Elenco delle VM visibili al chiamante (filtrato dal grant per gli agenti).
+    /// List of the VMs visible to the caller (filtered by the grant for agents).
     pub fn list_vms(&mut self, caller: &Caller) -> Result<Vec<VmStatus>, PublicError> {
         let now = self.clock.now();
         if let Err(err) = self.authorize(caller, None, Capability::VmList, now) {
@@ -696,8 +694,8 @@ where
             .collect())
     }
 
-    /// Stato di una VM, se il chiamante è autorizzato. Per un agente una VM fuori
-    /// allowlist dà `permission_denied` anche se non esiste (nessun dato di altre VM).
+    /// State of a VM, if the caller is authorized. For an agent a VM outside the
+    /// allowlist gives `permission_denied` even if it does not exist (no data about other VMs).
     pub fn vm_status(&mut self, caller: &Caller, vm_id: VmId) -> Result<VmStatus, PublicError> {
         let now = self.clock.now();
         if let Err(err) = self.authorize(caller, Some(vm_id), Capability::VmStatus, now) {
@@ -711,10 +709,10 @@ where
         self.vms
             .get(&vm_id)
             .map(Self::status_of)
-            .ok_or_else(|| PublicError::not_found("VM inesistente"))
+            .ok_or_else(|| PublicError::not_found("VM does not exist"))
     }
 
-    /// Operazione per id: l'utente vede tutto, un agente solo le proprie.
+    /// Operation by id: the user sees everything, an agent only its own.
     pub fn operation(
         &self,
         caller: &Caller,
@@ -735,11 +733,11 @@ where
             (Some(r), Caller::Agent { session_id, .. }) if r.session_id == Some(*session_id) => {
                 Ok(r)
             }
-            _ => Err(PublicError::not_found("operazione inesistente")),
+            _ => Err(PublicError::not_found("operation does not exist")),
         }
     }
 
-    // ----- coda di mutazioni ----------------------------------------------
+    // ----- mutation queue -------------------------------------------------
 
     fn running_vm_count(&self, except: VmId) -> u32 {
         let n = self
@@ -753,25 +751,25 @@ where
     fn check_start_resources(&self, vm_id: VmId) -> Result<(), PublicError> {
         let limits = self.effective_limits();
         if self.running_vm_count(vm_id) >= limits.max_running_vms {
-            return Err(PublicError::resource_limit(
-                "numero massimo di VM in esecuzione raggiunto",
-            )
-            .with_detail("limit", limits.max_running_vms.to_string()));
+            return Err(
+                PublicError::resource_limit("maximum number of running VMs reached")
+                    .with_detail("limit", limits.max_running_vms.to_string()),
+            );
         }
         let rt = self
             .vms
             .get(&vm_id)
-            .ok_or_else(|| PublicError::not_found("VM inesistente"))?;
-        // Limiti per VM ricalcolati all'avvio: la capacità host può essere cambiata
-        // dopo la creazione (nuovo probe, riserva aumentata). Il disco esiste
-        // già: lo spazio libero conta solo per crearlo o ingrandirlo.
+            .ok_or_else(|| PublicError::not_found("VM does not exist"))?;
+        // Per-VM limits recomputed at start: host capacity may have changed
+        // after creation (new probe, increased reserve). The disk already
+        // exists: free space only matters to create or enlarge it.
         validate_config(
             &rt.record.config,
             &existing_disk_limits(limits, &rt.record.config),
         )?;
-        // Memoria guest complessiva delle VM con processo, più quella richiesta,
-        // entro la memoria host meno la riserva. Le vCPU possono essere
-        // sovrallocate tra VM diverse e non sono sommate.
+        // Total guest memory of the VMs with a process, plus the requested one,
+        // within host memory minus the reserve. vCPUs may be
+        // overcommitted across different VMs and are not summed.
         let host_memory = self.config.host.as_limits().max_memory_mib;
         let committed: u64 = self
             .vms
@@ -782,7 +780,7 @@ where
         let requested = committed.saturating_add(rt.record.config.memory_mib);
         if requested > host_memory {
             return Err(PublicError::resource_limit(
-                "memoria host insufficiente per le VM in esecuzione",
+                "insufficient host memory for the running VMs",
             )
             .with_detail("field", "memory_mib_total")
             .with_detail("requested", requested.to_string())
@@ -791,7 +789,7 @@ where
         Ok(())
     }
 
-    /// Accetta una richiesta e la accoda (verifica al ricevimento).
+    /// Accepts a request and enqueues it (check on receipt).
     pub fn submit(&mut self, caller: &Caller, req: VmRequest) -> Result<Admission, PublicError> {
         let now = self.clock.now();
         let kind = req.action.kind();
@@ -811,7 +809,7 @@ where
         };
         let audit_action = audit_action_for(kind);
 
-        // 1. Autorizzazione (prima di rivelare l'esistenza della VM).
+        // 1. Authorization (before revealing whether the VM exists).
         let effective = match self.authorize(caller, Some(req.vm_id), capability, now) {
             Ok(e) => e,
             Err(err) => return Err(self.deny(actor, audit_action, ev(req.expected_run_id), err)),
@@ -830,7 +828,7 @@ where
                     requested_at: now,
                     updated_at: now,
                 };
-                // L'audit di accettazione precede l'effetto: se fallisce, nessun accodamento.
+                // The acceptance audit precedes the effect: if it fails, nothing is enqueued.
                 self.emit(
                     actor,
                     audit_action,
@@ -847,7 +845,7 @@ where
                 let rt = self
                     .vms
                     .get_mut(&req.vm_id)
-                    .ok_or_else(|| PublicError::not_found("VM inesistente"))?;
+                    .ok_or_else(|| PublicError::not_found("VM does not exist"))?;
                 if kind == OperationKind::ForceStop {
                     rt.queue.push_front(pending);
                 } else {
@@ -864,7 +862,7 @@ where
         }
     }
 
-    /// Guardie di ammissione. `Ok(Some)` = duplicato idempotente; `Ok(None)` = da accodare.
+    /// Admission guards. `Ok(Some)` = idempotent duplicate; `Ok(None)` = to be enqueued.
     fn admit(
         &self,
         caller: &Caller,
@@ -875,9 +873,9 @@ where
         let rt = self
             .vms
             .get(&req.vm_id)
-            .ok_or_else(|| PublicError::not_found("VM inesistente"))?;
+            .ok_or_else(|| PublicError::not_found("VM does not exist"))?;
 
-        // Idempotenza: stesso operation_id, stessa VM, stessa azione, stesso attore.
+        // Idempotency: same operation_id, same VM, same action, same actor.
         if let Some(vm_of_op) = self.op_index.get(&req.operation_id) {
             let same = (*vm_of_op == req.vm_id)
                 .then(|| rt.find(req.operation_id))
@@ -890,26 +888,26 @@ where
                     duplicate: true,
                 })),
                 None => Err(PublicError::invalid_argument(
-                    "operation_id già usato per una richiesta diversa",
+                    "operation_id already used for a different request",
                 )),
             };
         }
 
-        // Validazione strutturale e run_id.
+        // Structural validation and run_id.
         let needs_run = matches!(
             kind,
             OperationKind::Reset | OperationKind::Screenshot | OperationKind::Input
         );
         if needs_run && req.expected_run_id.is_none() {
             return Err(PublicError::invalid_argument(
-                "expected_run_id obbligatorio per questa azione",
+                "expected_run_id required for this action",
             ));
         }
         if let VmAction::Input(batch) = &req.action {
             batch.validate()?;
             if batch.vm_id != req.vm_id || Some(batch.run_id) != req.expected_run_id {
                 return Err(PublicError::invalid_argument(
-                    "vm_id o run_id del lotto diversi dalla richiesta",
+                    "batch vm_id or run_id differ from the request",
                 ));
             }
         }
@@ -917,7 +915,7 @@ where
             && rt.run_id != Some(expected)
         {
             return Err(PublicError::state_conflict(
-                "la richiesta si riferisce a un'esecuzione non corrente",
+                "the request refers to a run that is not current",
             )
             .with_detail("reason", "stale_run_id"));
         }
@@ -928,38 +926,38 @@ where
                 .any(|e| matches!(e, InputEvent::PointerMove(_)));
             if has_pointer && rt.geometry != Some(batch.geometry) {
                 return Err(PublicError::state_conflict(
-                    "geometria del display non corrente: acquisire uno screenshot",
+                    "display geometry not current: take a screenshot",
                 )
                 .with_detail("reason", "stale_geometry"));
             }
         }
 
-        // Stato.
+        // State.
         if !action_allowed_in(kind, rt.state) {
             return Err(
-                PublicError::state_conflict("azione non ammessa nello stato corrente")
+                PublicError::state_conflict("action not allowed in the current state")
                     .with_detail("state", rt.state.as_str()),
             );
         }
 
-        // Occupazione: una mutazione del ciclo di vita alla volta.
+        // Occupancy: one lifecycle mutation at a time.
         if kind == OperationKind::ForceStop {
             if rt.force_stop_pending() {
-                return Err(PublicError::vm_busy("arresto forzato già in corso"));
+                return Err(PublicError::vm_busy("forced stop already in progress"));
             }
         } else if rt.lifecycle_pending() {
             return Err(PublicError::vm_busy(
-                "un'altra mutazione è in corso sulla VM",
+                "another mutation is in progress on the VM",
             ));
         }
 
-        // Limiti di coda e quote.
+        // Queue limits and quotas.
         let quotas = effective.quotas;
         let queue_cap = usize::try_from(quotas.max_queued_operations)
             .unwrap_or(usize::MAX)
             .min(MAX_QUEUE_LEN);
         if rt.queue.len() >= queue_cap {
-            return Err(PublicError::resource_limit("coda della VM piena"));
+            return Err(PublicError::resource_limit("VM queue full"));
         }
         if let Caller::Agent { session_id, .. } = caller
             && let Some(s) = self.sessions.get(*session_id)
@@ -967,16 +965,16 @@ where
             let u = s.usage;
             let over = |used: u32, add: u32, max: u32| used.saturating_add(add) > max;
             if over(u.operations, 1, quotas.max_operations) {
-                return Err(PublicError::resource_limit("quota di operazioni esaurita"));
+                return Err(PublicError::resource_limit("operation quota exhausted"));
             }
             if let VmAction::Input(batch) = &req.action {
                 let n = u32::try_from(batch.events.len()).unwrap_or(u32::MAX);
                 if over(u.input_events, n, quotas.max_input_events) {
-                    return Err(PublicError::resource_limit("quota di input esaurita"));
+                    return Err(PublicError::resource_limit("input quota exhausted"));
                 }
             }
             if kind == OperationKind::Screenshot && over(u.screenshots, 1, quotas.max_screenshots) {
-                return Err(PublicError::resource_limit("quota di screenshot esaurita"));
+                return Err(PublicError::resource_limit("screenshot quota exhausted"));
             }
         }
         if kind == OperationKind::Start {
@@ -1055,7 +1053,7 @@ where
         true
     }
 
-    /// Chiude l'esecuzione corrente: stato `stopped` (o `failed`), coda scartata.
+    /// Closes the current run: state `stopped` (or `failed`), queue discarded.
     fn end_run(&mut self, vm_id: VmId, final_state: VmState, default_reason: RunEndReason) {
         let now = self.clock.now();
         let Some(rt) = self.vms.get_mut(&vm_id) else {
@@ -1081,17 +1079,17 @@ where
         }
     }
 
-    /// Prossima operazione da inoltrare per la VM, dopo la seconda verifica.
-    /// `None` se la coda è vuota o un'altra operazione è già inoltrata (un
-    /// arresto forzato può essere inoltrato anche mentre un'altra operazione è in
-    /// corso, per non restare bloccato dietro uno shutdown che non termina).
+    /// Next operation to forward for the VM, after the second check.
+    /// `None` if the queue is empty or another operation is already forwarded (a
+    /// forced stop can be forwarded even while another operation is in
+    /// progress, so as not to stay stuck behind a shutdown that never ends).
     pub fn begin_dispatch(&mut self, vm_id: VmId) -> Result<Option<Dispatch>, PublicError> {
         loop {
             let now = self.clock.now();
             let rt = self
                 .vms
                 .get_mut(&vm_id)
-                .ok_or_else(|| PublicError::not_found("VM inesistente"))?;
+                .ok_or_else(|| PublicError::not_found("VM does not exist"))?;
             let front_is_force = rt
                 .queue
                 .front()
@@ -1107,7 +1105,7 @@ where
             let current_run = rt.run_id;
             let current_end = rt.pending_end;
 
-            // Seconda verifica, immediatamente prima dell'inoltro.
+            // Second check, immediately before forwarding.
             let effective = match self.authorize(&p.caller, Some(vm_id), p.action.capability(), now)
             {
                 Ok(e) => e,
@@ -1134,7 +1132,7 @@ where
                     .vms
                     .get(&vm_id)
                     .map(|rt| rt.record.clone())
-                    .ok_or_else(|| PublicError::not_found("VM inesistente"))?;
+                    .ok_or_else(|| PublicError::not_found("VM does not exist"))?;
                 let mut media = Vec::new();
                 let mut missing = false;
                 for id in [vm.config.install_media, vm.config.data_media]
@@ -1145,7 +1143,7 @@ where
                         Ok(Some(e)) => media.push(e),
                         Ok(None) => missing = true,
                         Err(err) => {
-                            // L'operazione non resta persa: scartata con l'errore.
+                            // The operation is not lost: discarded with the error.
                             self.discard(vm_id, p, err.code);
                             return Err(err);
                         }
@@ -1204,9 +1202,9 @@ where
             p.record.run_id = Some(run_id);
             p.record.updated_at = now;
             if let Err(err) = self.store.upsert_operation(&p.record) {
-                // Nessun inoltro: la VM torna allo stato precedente invece di
-                // restare in `starting`/`stopping` senza operazioni, e
-                // l'operazione è scartata con l'errore.
+                // No forwarding: the VM goes back to the previous state instead of
+                // staying in `starting`/`stopping` without operations, and
+                // the operation is discarded with the error.
                 if let Some(rt) = self.vms.get_mut(&vm_id) {
                     rt.run_id = current_run;
                     rt.pending_end = current_end;
@@ -1245,7 +1243,7 @@ where
         }
     }
 
-    /// Registra l'esito di un'operazione inoltrata.
+    /// Records the outcome of a forwarded operation.
     pub fn finish_dispatch(
         &mut self,
         vm_id: VmId,
@@ -1256,12 +1254,12 @@ where
         let rt = self
             .vms
             .get_mut(&vm_id)
-            .ok_or_else(|| PublicError::not_found("VM inesistente"))?;
+            .ok_or_else(|| PublicError::not_found("VM does not exist"))?;
         let idx = rt
             .in_flight
             .iter()
             .position(|p| p.record.id == operation_id)
-            .ok_or_else(|| PublicError::not_found("operazione non inoltrata"))?;
+            .ok_or_else(|| PublicError::not_found("operation not forwarded"))?;
         let mut p = rt.in_flight.remove(idx);
         let kind = p.record.kind;
         let op_run = p.record.run_id;
@@ -1279,15 +1277,15 @@ where
                     Ok(())
                 } else {
                     Err(PublicError::infrastructure(
-                        "screenshot non coerente con la richiesta",
+                        "screenshot inconsistent with the request",
                     ))
                 }
             }
             (Ok(DispatchOutcome::Screenshot(_)), _) => Err(PublicError::infrastructure(
-                "esito del backend non coerente con l'operazione",
+                "backend outcome inconsistent with the operation",
             )),
             (Ok(DispatchOutcome::Done), OperationKind::Screenshot) => Err(
-                PublicError::infrastructure("screenshot mancante nell'esito del backend"),
+                PublicError::infrastructure("screenshot missing from the backend outcome"),
             ),
             (Ok(DispatchOutcome::Done), _) => Ok(()),
             (Err(e), _) => Err(e),
@@ -1300,9 +1298,9 @@ where
         };
         p.record.error = result.as_ref().err().map(|e| e.code);
         p.record.updated_at = now;
-        // Un errore del catalogo qui non annulla ciò che il backend ha già
-        // fatto: lo stato in memoria segue l'esito e l'errore è restituito
-        // dopo.
+        // A catalog error here does not undo what the backend has already
+        // done: the in-memory state follows the outcome and the error is returned
+        // afterwards.
         let persisted = self.store.upsert_operation(&p.record);
         let record = p.record.clone();
         let actor = p.caller.actor();
@@ -1323,7 +1321,7 @@ where
                     self.end_run(vm_id, VmState::Stopped, RunEndReason::Stopped);
                 }
                 (OperationKind::ForceStop, Err(_)) => {
-                    // Fine processo non confermata: la riconciliazione decide.
+                    // Process end not confirmed: reconciliation decides.
                     self.set_state(vm_id, VmState::Failed);
                 }
                 _ => {}
@@ -1347,8 +1345,8 @@ where
         Ok(record)
     }
 
-    /// Helper sincrono: inoltra la prossima operazione al backend e ne registra
-    /// l'esito. Per `start` ispeziona e verifica i media prima dell'uso.
+    /// Synchronous helper: forwards the next operation to the backend and records
+    /// its outcome. For `start` it inspects and verifies the media before use.
     pub fn execute_next<B: VmBackend, M: MediaInspector>(
         &mut self,
         vm_id: VmId,
@@ -1373,7 +1371,7 @@ where
                         .start(&plan.vm, d.run_id, &v)
                         .map(|()| DispatchOutcome::Done),
                     (Err(e), _) => Err(e),
-                    (Ok(_), None) => Err(PublicError::infrastructure("piano di avvio mancante")),
+                    (Ok(_), None) => Err(PublicError::infrastructure("start plan missing")),
                 }
             }
             VmAction::Stop => backend
@@ -1390,7 +1388,7 @@ where
                 .and_then(|s| {
                     if s.byte_len > d.max_screenshot_bytes {
                         Err(PublicError::resource_limit(
-                            "screenshot oltre il limite di byte",
+                            "screenshot exceeds the byte limit",
                         ))
                     } else {
                         Ok(DispatchOutcome::Screenshot(s))
@@ -1404,15 +1402,15 @@ where
             .map(Some)
     }
 
-    // ----- osservazioni e riconciliazione ---------------------------------
+    // ----- observations and reconciliation --------------------------------
 
-    /// Applica un'osservazione del backend. Le osservazioni riferite a
-    /// un'esecuzione non corrente sono ignorate (`Ok(false)`).
+    /// Applies a backend observation. Observations referring to
+    /// a run that is not current are ignored (`Ok(false)`).
     pub fn observe(&mut self, vm_id: VmId, obs: BackendObservation) -> Result<bool, PublicError> {
         let rt = self
             .vms
             .get(&vm_id)
-            .ok_or_else(|| PublicError::not_found("VM inesistente"))?;
+            .ok_or_else(|| PublicError::not_found("VM does not exist"))?;
         if rt.run_id != Some(obs.run_id()) {
             return Ok(false);
         }
@@ -1439,7 +1437,7 @@ where
         Ok(true)
     }
 
-    /// Registra la geometria corrente del display (per esempio dal client RFB).
+    /// Records the current display geometry (for example from the RFB client).
     pub fn observe_geometry(
         &mut self,
         vm_id: VmId,
@@ -1450,7 +1448,7 @@ where
         let rt = self
             .vms
             .get_mut(&vm_id)
-            .ok_or_else(|| PublicError::not_found("VM inesistente"))?;
+            .ok_or_else(|| PublicError::not_found("VM does not exist"))?;
         if rt.run_id != Some(run_id) {
             return Ok(false);
         }
@@ -1458,28 +1456,28 @@ where
         Ok(true)
     }
 
-    /// `failed → recovering`: avvio della riconciliazione.
+    /// `failed → recovering`: start of reconciliation.
     pub fn begin_recovery(&mut self, vm_id: VmId) -> Result<(), PublicError> {
-        let state =
-            rt_state(&self.vms, vm_id).ok_or_else(|| PublicError::not_found("VM inesistente"))?;
+        let state = rt_state(&self.vms, vm_id)
+            .ok_or_else(|| PublicError::not_found("VM does not exist"))?;
         if state == VmState::Recovering {
             return Ok(());
         }
         if !self.set_state(vm_id, VmState::Recovering) {
             return Err(PublicError::state_conflict(
-                "riconciliazione non ammessa nello stato corrente",
+                "reconciliation not allowed in the current state",
             )
             .with_detail("state", state.as_str()));
         }
         Ok(())
     }
 
-    /// Riconciliazione all'avvio di un supervisor nuovo, quando il chiamante
-    /// garantisce che nessun processo di un'esecuzione precedente sia vivo
-    /// (Windows: il Job Object del supervisor precedente è chiuso e i suoi
-    /// processi terminati). Le VM in `recovering` senza intenti aperti nel
-    /// journal tornano `stopped`; le altre restano in riconciliazione.
-    /// Restituisce le VM riportate a `stopped`.
+    /// Reconciliation at the start of a new supervisor, when the caller
+    /// guarantees that no process of a previous run is alive
+    /// (Windows: the Job Object of the previous supervisor is closed and its
+    /// processes terminated). VMs in `recovering` with no open intents in the
+    /// journal go back to `stopped`; the others stay in reconciliation.
+    /// Returns the VMs brought back to `stopped`.
     pub fn reconcile_after_restart(&mut self) -> Result<Vec<VmId>, PublicError> {
         let candidates: Vec<VmId> = self
             .vms
@@ -1499,13 +1497,13 @@ where
         Ok(done)
     }
 
-    /// `recovering → stopped`: riconciliazione completata dal supervisor
-    /// (processi assenti verificati, journal applicato).
+    /// `recovering → stopped`: reconciliation completed by the supervisor
+    /// (absence of processes verified, journal applied).
     pub fn finish_recovery(&mut self, vm_id: VmId) -> Result<(), PublicError> {
-        let state =
-            rt_state(&self.vms, vm_id).ok_or_else(|| PublicError::not_found("VM inesistente"))?;
+        let state = rt_state(&self.vms, vm_id)
+            .ok_or_else(|| PublicError::not_found("VM does not exist"))?;
         if state != VmState::Recovering {
-            return Err(PublicError::state_conflict("VM non in riconciliazione"));
+            return Err(PublicError::state_conflict("VM not in reconciliation"));
         }
         if let Some(rt) = self.vms.get_mut(&vm_id)
             && rt.run_id.is_some()
@@ -1516,9 +1514,9 @@ where
         Ok(())
     }
 
-    // ----- sessioni --------------------------------------------------------
+    // ----- sessions --------------------------------------------------------
 
-    /// Crea una sessione agente approvata dall'utente e ne emette grant e lease.
+    /// Creates an agent session approved by the user and issues its grant and lease.
     pub fn create_session(
         &mut self,
         spec: SessionSpec,
@@ -1530,20 +1528,18 @@ where
         let result = (|| {
             if live >= limits.max_agent_sessions {
                 return Err(PublicError::resource_limit(
-                    "numero massimo di sessioni agente raggiunto",
+                    "maximum number of agent sessions reached",
                 ));
             }
             if spec.expires_at <= now {
-                return Err(PublicError::invalid_argument(
-                    "scadenza del grant nel passato",
-                ));
+                return Err(PublicError::invalid_argument("grant expiry in the past"));
             }
             if spec.vm_allowlist.is_empty() {
-                return Err(PublicError::invalid_argument("allowlist VM vuota"));
+                return Err(PublicError::invalid_argument("empty VM allowlist"));
             }
             for vm in &spec.vm_allowlist {
                 if !self.vms.contains_key(vm) {
-                    return Err(PublicError::not_found("VM dell'allowlist inesistente"));
+                    return Err(PublicError::not_found("allowlist VM does not exist"));
                 }
             }
             Ok(())
@@ -1576,7 +1572,7 @@ where
         Ok((grant, lease))
     }
 
-    /// Rinnova il lease (verificato dal supervisor, non dal client).
+    /// Renews the lease (checked by the supervisor, not by the client).
     pub fn renew_lease(
         &mut self,
         session_id: SessionId,
@@ -1587,14 +1583,14 @@ where
         self.sessions.renew(session_id, token, lease_millis, now)
     }
 
-    /// Pausa agente: blocca l'inoltro di nuove mutazioni (la VM continua).
+    /// Agent pause: blocks forwarding of new mutations (the VM keeps running).
     pub fn pause_session(&mut self, session_id: SessionId) -> Result<(), PublicError> {
         let s = self
             .sessions
             .get_mut(session_id)
-            .ok_or_else(|| PublicError::not_found("sessione inesistente"))?;
+            .ok_or_else(|| PublicError::not_found("session does not exist"))?;
         if s.state != SessionState::Active {
-            return Err(PublicError::state_conflict("sessione non attiva"));
+            return Err(PublicError::state_conflict("session not active"));
         }
         s.state = SessionState::Paused;
         self.emit_after(
@@ -1609,18 +1605,18 @@ where
         Ok(())
     }
 
-    /// Ripresa dopo una pausa (non dopo revoca o scadenza).
+    /// Resume after a pause (not after revocation or expiry).
     pub fn resume_session(&mut self, session_id: SessionId) -> Result<(), PublicError> {
         let now = self.clock.now();
         let s = self
             .sessions
             .get_mut(session_id)
-            .ok_or_else(|| PublicError::not_found("sessione inesistente"))?;
+            .ok_or_else(|| PublicError::not_found("session does not exist"))?;
         if s.state != SessionState::Paused {
-            return Err(PublicError::state_conflict("sessione non in pausa"));
+            return Err(PublicError::state_conflict("session not paused"));
         }
         if s.expiry_at(now).is_some() {
-            return Err(PublicError::session_expired("sessione scaduta"));
+            return Err(PublicError::session_expired("session expired"));
         }
         s.state = SessionState::Active;
         self.emit_after(
@@ -1675,15 +1671,15 @@ where
         report
     }
 
-    /// Revoca: invalida la sessione e scarta le sue operazioni non inoltrate. Le
-    /// operazioni già inoltrate sono elencate, non annullate. Nessun arresto VM.
+    /// Revocation: invalidates the session and discards its non-forwarded operations. The
+    /// operations already forwarded are listed, not cancelled. No VM stop.
     pub fn revoke_session(
         &mut self,
         session_id: SessionId,
         cause: TerminationCause,
     ) -> Result<SessionTermination, PublicError> {
         if self.sessions.get(session_id).is_none() {
-            return Err(PublicError::not_found("sessione inesistente"));
+            return Err(PublicError::not_found("session does not exist"));
         }
         let report = self.revoke_inner(session_id, cause);
         Ok(SessionTermination {
@@ -1694,8 +1690,8 @@ where
         })
     }
 
-    /// Terminazione con arresto di emergenza delle VM della sessione: usata per
-    /// scadenza, perdita del client, chiusura UI e ripresa da sospensione (ROADMAP 7.3).
+    /// Termination with emergency stop of the session's VMs: used for
+    /// expiry, client loss, UI close and resume from sleep (ROADMAP 7.3).
     pub fn terminate_session_with_stop(
         &mut self,
         session_id: SessionId,
@@ -1705,7 +1701,7 @@ where
             .sessions
             .get(session_id)
             .map(|s| s.grant.vm_allowlist.clone())
-            .ok_or_else(|| PublicError::not_found("sessione inesistente"))?;
+            .ok_or_else(|| PublicError::not_found("session does not exist"))?;
         let report = self.revoke_inner(session_id, cause);
         let mut emergency_stops = Vec::new();
         for vm_id in allow {
@@ -1721,7 +1717,7 @@ where
         })
     }
 
-    /// Controllo periodico delle scadenze di grant e lease.
+    /// Periodic check of grant and lease expiries.
     pub fn tick(&mut self) -> Result<Vec<SessionTermination>, PublicError> {
         let now = self.clock.now();
         let due = self.sessions.due_expirations(now);
@@ -1732,10 +1728,10 @@ where
 
     // ----- Emergency Stop --------------------------------------------------
 
-    /// Emergency Stop: percorso prioritario fuori coda. Revoca le sessioni che
-    /// controllano la VM, scarta l'intera coda, elenca le richieste già inoltrate
-    /// e porta la VM in `stopping`. Il supervisor termina l'albero QEMU con
-    /// primitive OS e conferma con `observe(process_exited)`: solo allora la VM è
+    /// Emergency Stop: priority path outside the queue. Revokes the sessions that
+    /// control the VM, discards the whole queue, lists the requests already forwarded
+    /// and moves the VM to `stopping`. The supervisor terminates the QEMU tree with
+    /// OS primitives and confirms with `observe(process_exited)`: only then is the VM
     /// `stopped`.
     pub fn emergency_stop(
         &mut self,
@@ -1743,7 +1739,7 @@ where
         vm_id: VmId,
     ) -> Result<EmergencyStopPlan, PublicError> {
         if !self.vms.contains_key(&vm_id) {
-            return Err(PublicError::not_found("VM inesistente"));
+            return Err(PublicError::not_found("VM does not exist"));
         }
         let mut report = RevocationReport::default();
         let terminated = self.sessions.live_for_vm(vm_id);
@@ -1755,7 +1751,7 @@ where
         let rt = self
             .vms
             .get_mut(&vm_id)
-            .ok_or_else(|| PublicError::not_found("VM inesistente"))?;
+            .ok_or_else(|| PublicError::not_found("VM does not exist"))?;
         let queued: Vec<Pending> = rt.queue.drain(..).collect();
         for p in &rt.in_flight {
             if !report.already_forwarded.contains(&p.record.id) {
@@ -1770,8 +1766,8 @@ where
         if run_id.is_some() {
             rt.pending_end = Some(RunEndReason::EmergencyStop);
         }
-        // Operazioni rimaste (dell'utente o di sessioni non legate alla VM): la VM
-        // va in arresto, quindi `state_conflict` come per la fine di un'esecuzione.
+        // Remaining operations (from the user or from sessions not bound to the VM): the VM
+        // is stopping, hence `state_conflict` as for the end of a run.
         for p in queued {
             report
                 .discarded
@@ -1798,8 +1794,8 @@ where
         })
     }
 
-    /// Helper sincrono: Emergency Stop con terminazione tramite `backend.force_stop`.
-    /// Il completamento è dichiarato solo se la fine del processo è confermata.
+    /// Synchronous helper: Emergency Stop with termination via `backend.force_stop`.
+    /// Completion is declared only if the end of the process is confirmed.
     pub fn emergency_stop_with<B: VmBackend>(
         &mut self,
         actor: Actor,

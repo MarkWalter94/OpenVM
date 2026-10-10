@@ -1,24 +1,24 @@
-//! Istanza singola per catalogo (ROADMAP 6.1): lock esclusivo su un file nella
-//! directory del catalogo. Il lock è del sistema operativo (`LockFileEx` su
-//! Windows, `flock` su Unix, tramite `std::fs::File::try_lock`) e si rilascia
-//! alla chiusura dell'handle, anche se il processo muore.
+//! Single instance per catalog (ROADMAP 6.1): exclusive lock on a file in the
+//! catalog directory. The lock belongs to the operating system (`LockFileEx` on
+//! Windows, `flock` on Unix, through `std::fs::File::try_lock`) and is released
+//! when the handle is closed, even if the process dies.
 
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// Nome del file di lock nella directory del catalogo.
+/// Name of the lock file in the catalog directory.
 pub const LOCK_FILE_NAME: &str = ".lightvm-service.lock";
 
-/// Errore di acquisizione del lock.
+/// Lock acquisition error.
 #[derive(Debug)]
 pub enum LockError {
-    /// Un'altra istanza possiede già il catalogo.
+    /// Another instance already owns the catalog.
     AlreadyRunning {
-        /// File di lock.
+        /// Lock file.
         path: PathBuf,
     },
-    /// Directory del catalogo non utilizzabile.
+    /// Catalog directory not usable.
     Io(io::Error),
 }
 
@@ -27,17 +27,17 @@ impl std::fmt::Display for LockError {
         match self {
             Self::AlreadyRunning { path } => write!(
                 f,
-                "un'altra istanza di lightvm-service sta già usando questo catalogo (lock: {})",
+                "another instance of lightvm-service is already using this catalog (lock: {})",
                 path.display()
             ),
-            Self::Io(e) => write!(f, "impossibile creare il lock del catalogo: {e}"),
+            Self::Io(e) => write!(f, "cannot create the catalog lock: {e}"),
         }
     }
 }
 
 impl std::error::Error for LockError {}
 
-/// Lock posseduto; rilasciato al drop o alla morte del processo.
+/// Held lock; released on drop or when the process dies.
 #[derive(Debug)]
 pub struct InstanceLock {
     _file: File,
@@ -45,13 +45,13 @@ pub struct InstanceLock {
 }
 
 impl InstanceLock {
-    /// Acquisisce il lock senza attendere.
+    /// Acquires the lock without waiting.
     pub fn acquire(catalog_dir: &Path) -> Result<Self, LockError> {
         let meta = std::fs::symlink_metadata(catalog_dir).map_err(LockError::Io)?;
         if !meta.is_dir() {
             return Err(LockError::Io(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "il percorso del catalogo non è una directory",
+                "the catalog path is not a directory",
             )));
         }
         let path = catalog_dir.join(LOCK_FILE_NAME);
@@ -69,7 +69,7 @@ impl InstanceLock {
         }
     }
 
-    /// Percorso del file di lock.
+    /// Path of the lock file.
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -85,7 +85,7 @@ mod tests {
         let a = InstanceLock::acquire(&dir).unwrap();
         match InstanceLock::acquire(&dir) {
             Err(LockError::AlreadyRunning { .. }) => {}
-            other => panic!("atteso AlreadyRunning: {other:?}"),
+            other => panic!("expected AlreadyRunning: {other:?}"),
         }
         drop(a);
         InstanceLock::acquire(&dir).unwrap();

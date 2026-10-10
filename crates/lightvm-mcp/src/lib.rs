@@ -1,18 +1,18 @@
-//! Spike F1-19: prova dell'SDK Rust ufficiale MCP (`rmcp`) con trasporto stdio.
+//! Spike F1-19: trial of the official MCP Rust SDK (`rmcp`) with stdio transport.
 //!
-//! Il server espone due tool **finti** (`vm_list`, `vm_status`) su un catalogo
-//! statico in memoria: nessuna VM reale, nessun supervisor, nessun IPC, nessuna
-//! rete. Serve solo a verificare che l'SDK scelto in ADR-0021:
+//! The server exposes two **fake** tools (`vm_list`, `vm_status`) over a static
+//! in-memory catalog: no real VM, no supervisor, no IPC, no network. It only
+//! serves to verify that the SDK chosen in ADR-0021:
 //!
-//! - negozi la revisione di protocollo 2025-11-25 e nessun'altra;
-//! - pubblichi i tool con JSON Schema di ingresso e di uscita;
-//! - restituisca risultati strutturati e distingua gli errori operativi
-//!   (`isError: true` nel risultato del tool) dagli errori di protocollo
-//!   (errore JSON-RPC);
-//! - scriva su stdout soltanto messaggi MCP (diagnostica su stderr).
+//! - negotiates protocol revision 2025-11-25 and no other;
+//! - publishes the tools with input and output JSON Schema;
+//! - returns structured results and distinguishes operational errors
+//!   (`isError: true` in the tool result) from protocol errors (JSON-RPC
+//!   error);
+//! - writes only MCP messages to stdout (diagnostics on stderr).
 //!
-//! L'adapter di prodotto (`mcp-server`, ROADMAP 6.2) nasce in F5 e si collega
-//! al supervisor; questo crate non ne anticipa l'API.
+//! The product adapter (`mcp-server`, ROADMAP 6.2) is born in F5 and connects
+//! to the supervisor; this crate does not anticipate its API.
 
 use std::borrow::Cow;
 
@@ -25,68 +25,68 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// Unica revisione MCP accettata (ROADMAP sezione 9; ADR-0021).
+/// Only accepted MCP revision (ROADMAP section 9; ADR-0021).
 pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::V_2025_11_25;
 
-/// Elenco delle revisioni supportate: soltanto la baseline.
+/// List of supported revisions: only the baseline.
 const SUPPORTED_VERSIONS: &[ProtocolVersion] = &[ProtocolVersion::V_2025_11_25];
 
-/// Nome del server annunciato in `serverInfo`.
+/// Server name announced in `serverInfo`.
 pub const SERVER_NAME: &str = "lightvm-mcp-spike";
 
-/// Stato finto di una VM nel catalogo statico dello spike.
+/// Fake state of a VM in the spike's static catalog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum FakeVmState {
-    /// VM spenta.
+    /// VM powered off.
     Stopped,
-    /// VM in esecuzione.
+    /// VM running.
     Running,
 }
 
-/// Riepilogo di una VM restituito da `vm_list`.
+/// Summary of a VM returned by `vm_list`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct VmSummary {
-    /// Identificativo stabile della VM.
+    /// Stable identifier of the VM.
     pub vm_id: String,
-    /// Nome leggibile.
+    /// Human-readable name.
     pub name: String,
-    /// Stato corrente.
+    /// Current state.
     pub state: FakeVmState,
 }
 
-/// Risultato strutturato di `vm_list`.
+/// Structured result of `vm_list`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct VmListResult {
-    /// VM visibili alla sessione (catalogo finto).
+    /// VMs visible to the session (fake catalog).
     pub vms: Vec<VmSummary>,
 }
 
-/// Parametri di `vm_status`.
+/// Parameters of `vm_status`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct VmStatusParams {
-    /// Identificativo della VM, come restituito da `vm_list`.
+    /// Identifier of the VM, as returned by `vm_list`.
     #[schemars(length(min = 1, max = 64))]
     pub vm_id: String,
 }
 
-/// Risultato strutturato di `vm_status`.
+/// Structured result of `vm_status`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct VmStatusResult {
-    /// Identificativo della VM.
+    /// Identifier of the VM.
     pub vm_id: String,
-    /// Stato corrente.
+    /// Current state.
     pub state: FakeVmState,
-    /// Numero di vCPU configurate.
+    /// Number of configured vCPUs.
     pub vcpus: u32,
-    /// Memoria configurata in MiB.
+    /// Configured memory in MiB.
     pub memory_mib: u32,
-    /// Sempre `true`: i dati vengono da un catalogo finto.
+    /// Always `true`: the data come from a fake catalog.
     pub simulated: bool,
 }
 
-/// Catalogo statico dello spike: dati finti dichiarati come tali.
+/// Static catalog of the spike: fake data declared as such.
 fn fake_catalog() -> Vec<VmStatusResult> {
     vec![
         VmStatusResult {
@@ -106,7 +106,7 @@ fn fake_catalog() -> Vec<VmStatusResult> {
     ]
 }
 
-/// Server MCP dello spike.
+/// MCP server of the spike.
 #[derive(Debug, Clone)]
 pub struct SpikeServer {
     tool_router: ToolRouter<Self>,
@@ -120,17 +120,17 @@ impl Default for SpikeServer {
 
 #[tool_router(router = tool_router)]
 impl SpikeServer {
-    /// Crea il server con il router dei tool.
+    /// Creates the server with the tool router.
     pub fn new() -> Self {
         Self {
             tool_router: Self::tool_router(),
         }
     }
 
-    /// Elenca le VM del catalogo finto.
+    /// Lists the VMs of the fake catalog.
     #[tool(
         name = "vm_list",
-        description = "Elenca le VM visibili (catalogo finto dello spike, nessuna VM reale)."
+        description = "Lists the visible VMs (fake spike catalog, no real VM)."
     )]
     pub async fn vm_list(&self) -> Json<VmListResult> {
         let vms = fake_catalog()
@@ -145,14 +145,14 @@ impl SpikeServer {
         Json(VmListResult { vms })
     }
 
-    /// Restituisce lo stato di una VM del catalogo finto.
+    /// Returns the state of a VM of the fake catalog.
     ///
-    /// Una VM sconosciuta è un errore operativo: risultato con `isError: true`,
-    /// non un errore JSON-RPC (ROADMAP sezione 9, "errori operativi distinti da
-    /// errori del protocollo").
+    /// An unknown VM is an operational error: a result with `isError: true`,
+    /// not a JSON-RPC error (ROADMAP section 9, "operational errors distinct
+    /// from protocol errors").
     #[tool(
         name = "vm_status",
-        description = "Stato di una VM del catalogo finto dello spike."
+        description = "State of a VM of the fake spike catalog."
     )]
     pub async fn vm_status(
         &self,
@@ -162,7 +162,7 @@ impl SpikeServer {
             .into_iter()
             .find(|vm| vm.vm_id == params.vm_id)
             .map(Json)
-            .ok_or_else(|| "vm_not_found: nessuna VM con questo identificativo".to_owned())
+            .ok_or_else(|| "vm_not_found: no VM with this identifier".to_owned())
     }
 }
 
@@ -171,7 +171,7 @@ impl ServerHandler for SpikeServer {
     fn get_info(&self) -> ServerConfig {
         let mut info = ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new(SERVER_NAME, env!("CARGO_PKG_VERSION")))
-            .with_instructions("Spike LightVM: tool finti, nessuna VM reale.");
+            .with_instructions("LightVM spike: fake tools, no real VM.");
         info.protocol_version = PROTOCOL_VERSION;
         info
     }
@@ -186,7 +186,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn solo_la_baseline_e_supportata() {
+    fn only_the_baseline_is_supported() {
         let server = SpikeServer::new();
         let versions = server.supported_protocol_versions();
         assert_eq!(versions.as_ref(), &[ProtocolVersion::V_2025_11_25]);
@@ -194,7 +194,7 @@ mod tests {
     }
 
     #[test]
-    fn catalogo_dichiarato_simulato() {
+    fn catalog_declared_simulated() {
         assert!(fake_catalog().iter().all(|vm| vm.simulated));
     }
 }

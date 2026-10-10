@@ -1,35 +1,34 @@
-//! Rilevamento della morte del processo genitore (UI).
+//! Detection of the parent process (UI) death.
 //!
-//! Meccanismo principale, identico su Windows e Linux: **pipe di vita** sullo
-//! stdin. La UI avvia il servizio con stdin collegato a una pipe anonima di cui
-//! possiede l'unica estremità di scrittura; quando la UI termina (anche per
-//! crash o kill) il sistema operativo chiude quell'handle e il servizio legge
-//! EOF. Non dipende dal PID (nessun riuso possibile) e non richiede `unsafe`.
-//! Lo stesso canale accetta il comando testuale `shutdown` per l'arresto
-//! controllato richiesto dalla UI.
+//! Main mechanism, identical on Windows and Linux: **lifeline pipe** on stdin.
+//! The UI starts the service with stdin connected to an anonymous pipe whose
+//! only write end it owns; when the UI terminates (even through a crash or a
+//! kill) the operating system closes that handle and the service reads EOF.
+//! It does not depend on the PID (no reuse possible) and requires no `unsafe`.
+//! The same channel accepts the text command `shutdown` for the controlled
+//! shutdown requested by the UI.
 //!
-//! Su Linux si aggiunge un `pidfd` sul genitore (F0-07: `pidfd_open` + `poll`),
-//! aperto all'avvio dopo aver verificato `getppid()`: copre il caso in cui
-//! l'estremità di scrittura dello stdin sia stata ereditata per errore da un
-//! altro processo.
+//! On Linux a `pidfd` on the parent is added (F0-07: `pidfd_open` + `poll`),
+//! opened at startup after checking `getppid()`: it covers the case where the
+//! write end of stdin was inherited by mistake by another process.
 //!
-//! Su Windows l'attesa su un handle del genitore (`OpenProcess` +
-//! `WaitForSingleObject`) richiederebbe FFI `unsafe` nel crate; la pipe di vita
-//! offre la stessa semantica legata alla vita del processo. Vedi
+//! On Windows, waiting on a parent handle (`OpenProcess` +
+//! `WaitForSingleObject`) would require `unsafe` FFI in the crate; the lifeline
+//! pipe offers the same semantics tied to the process lifetime. See
 //! `docs/verification/F1-04-service-ipc-ci.md`.
 
 use std::io::BufRead;
 
-/// Evento dal canale del genitore.
+/// Event from the parent channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParentSignal {
-    /// Il genitore chiede l'arresto controllato.
+    /// The parent requests the controlled shutdown.
     Shutdown,
-    /// Il genitore è terminato (EOF o errore sullo stdin, o pidfd leggibile).
+    /// The parent terminated (EOF or error on stdin, or readable pidfd).
     Lost,
 }
 
-/// Avvia il thread che legge lo stdin fino a EOF e chiama `notify`.
+/// Starts the thread that reads stdin until EOF and calls `notify`.
 pub fn watch_stdin(notify: impl Fn(ParentSignal) + Send + 'static) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("lightvm-parent-stdin".into())
@@ -48,7 +47,7 @@ pub fn watch_stdin(notify: impl Fn(ParentSignal) + Send + 'static) -> std::io::R
                         if buf.trim() == "shutdown" {
                             notify(ParentSignal::Shutdown);
                         }
-                        // Il canale non trasporta altro: righe diverse ignorate.
+                        // The channel carries nothing else: other lines are ignored.
                         if buf.len() > 4096 {
                             buf = String::new();
                         }
@@ -59,7 +58,7 @@ pub fn watch_stdin(notify: impl Fn(ParentSignal) + Send + 'static) -> std::io::R
         .map(|_| ())
 }
 
-/// Linux: sorveglia il genitore con un pidfd.
+/// Linux: watches the parent with a pidfd.
 #[cfg(target_os = "linux")]
 pub fn watch_parent_pidfd(notify: impl Fn(ParentSignal) + Send + 'static) -> std::io::Result<()> {
     use rustix::event::{PollFd, PollFlags, poll};
@@ -70,8 +69,8 @@ pub fn watch_parent_pidfd(notify: impl Fn(ParentSignal) + Send + 'static) -> std
         return Ok(());
     };
     let fd = pidfd_open(ppid, PidfdFlags::empty())?;
-    // Se il genitore è morto tra getppid e pidfd_open il processo è stato
-    // riassegnato: il pidfd potrebbe riferirsi a un PID riusato.
+    // If the parent died between getppid and pidfd_open the process has been
+    // reparented: the pidfd might refer to a reused PID.
     if getppid() != Some(ppid) {
         notify(ParentSignal::Lost);
         return Ok(());

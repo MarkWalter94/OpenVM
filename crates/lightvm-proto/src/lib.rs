@@ -1,22 +1,22 @@
-//! `lightvm-proto`: tipi condivisi IPC/MCP e JSON Schema generati da fonte unica.
+//! `lightvm-proto`: shared IPC/MCP types and JSON Schemas generated from a single source.
 //!
-//! Riferimenti: ROADMAP 6.3 (regole di implementazione), 7.2–7.3 (profilo e
-//! autorizzazione), 8 (baseline), 9 (sessioni e report); `docs/ARCHITECTURE.md`.
+//! References: ROADMAP 6.3 (implementation rules), 7.2–7.3 (profile and
+//! authorization), 8 (baselines), 9 (sessions and reports); `docs/ARCHITECTURE.md`.
 //!
-//! Contenuto:
-//! - identificativi tipizzati su UUID v7 ([`VmId`], [`RunId`], [`OperationId`],
+//! Contents:
+//! - typed identifiers over UUID v7 ([`VmId`], [`RunId`], [`OperationId`],
 //!   [`SessionId`], [`BaselineId`], [`MediaId`], [`GrantId`]);
-//! - macchina a stati [`VmState`] con tabella delle transizioni pura e stato
-//!   osservato [`ObservedState`] distinto da quello persistito;
-//! - errori pubblici stabili [`PublicError`] / [`ErrorCode`], separati dagli
-//!   errori di protocollo [`ProtocolError`];
-//! - modelli del catalogo, input tipizzato, screenshot, sessioni, grant, lease,
-//!   capability, quote, esiti dei test, audit;
-//! - [`schema::public_schemas`] per i JSON Schema committati in `schema/`.
+//! - state machine [`VmState`] with a pure transition table and an observed
+//!   state [`ObservedState`] distinct from the persisted one;
+//! - stable public errors [`PublicError`] / [`ErrorCode`], separate from
+//!   protocol errors [`ProtocolError`];
+//! - catalog models, typed input, screenshots, sessions, grants, leases,
+//!   capabilities, quotas, test outcomes, audit;
+//! - [`schema::public_schemas`] for the JSON Schemas committed in `schema/`.
 //!
-//! Nessun campo ricevuto dai client è interpretato come percorso o opzione host.
-//! Il crate non esegue I/O, salvo la generazione di identificativi e istanti
-//! dall'orologio di sistema dietro la feature `system-clock`.
+//! No field received from clients is interpreted as a host path or option.
+//! The crate performs no I/O, except generating identifiers and instants
+//! from the system clock behind the `system-clock` feature.
 
 mod audit;
 mod error;
@@ -55,6 +55,6 @@ pub use state::{BackendObservation, ObservationSource, ObservedState, VmState};
 pub use text::{Label, ManagedRelPath, QCode, Sha256Digest, TextError, VmName};
 pub use time::{TimestampError, UtcTimestamp};
 
-/// Versione del protocollo IPC/MCP interno descritto da questi tipi. Cambia solo
-/// con modifiche incompatibili degli schemi.
+/// Version of the internal IPC/MCP protocol described by these types. It changes only
+/// with incompatible schema changes.
 pub const PROTOCOL_VERSION: u32 = 1;

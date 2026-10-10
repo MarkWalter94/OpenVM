@@ -1,14 +1,14 @@
-//! Percorsi gestiti, sempre relativi alla radice del catalogo.
+//! Managed paths, always relative to the catalog root.
 //!
-//! Regole (ROADMAP 6.3 e 7.4, riga "Host"): rifiuto di percorsi assoluti, `..`,
-//! UNC, device path, nomi riservati di Windows, flussi alternativi (`:`) e, al
-//! momento della risoluzione, di qualunque componente esistente che sia un
-//! collegamento simbolico o un reparse point (junction inclusa).
+//! Rules (ROADMAP 6.3 and 7.4, row "Host"): rejection of absolute paths, `..`,
+//! UNC, device paths, Windows reserved names, alternate data streams (`:`)
+//! and, at resolution time, of any existing component that is a symbolic link
+//! or a reparse point (junctions included).
 //!
-//! Limite dichiarato: il controllo dei collegamenti avviene prima dell'uso; una
-//! sostituzione tra controllo e apertura da parte di un processo dello stesso
-//! utente resta possibile (TOCTOU). La difesa principale è che le directory del
-//! catalogo sono scritte solo dal supervisor.
+//! Declared limit: the link check happens before use; a substitution between
+//! check and open by a process of the same user remains possible (TOCTOU).
+//! The main defense is that the catalog directories are written only by the
+//! supervisor.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -22,15 +22,15 @@ const RESERVED: &[&str] = &[
     "LPT9", "LPT¹", "LPT²", "LPT³", "CONIN$", "CONOUT$",
 ];
 
-/// Percorso relativo alla radice del catalogo, validato sintatticamente.
+/// Path relative to the catalog root, syntactically validated.
 ///
-/// Forma canonica: componenti separati da `/`, senza componenti vuoti.
+/// Canonical form: components separated by `/`, with no empty components.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ManagedPath(String);
 
 impl ManagedPath {
-    /// Valida una stringa proposta. Accetta `/` come separatore; la barra
-    /// rovesciata è rifiutata per evitare ambiguità tra piattaforme.
+    /// Validates a proposed string. Accepts `/` as separator; the backslash
+    /// is rejected to avoid cross-platform ambiguity.
     pub fn parse(raw: &str) -> Result<Self> {
         let reject = |r| Err(StorageError::invalid_path(raw, r));
         if raw.is_empty() {
@@ -72,24 +72,24 @@ impl ManagedPath {
         Ok(Self(raw.to_owned()))
     }
 
-    /// Unione con componenti aggiuntivi, ciascuno validato.
+    /// Joins additional components, each one validated.
     pub fn join(&self, tail: &str) -> Result<Self> {
         Self::parse(&format!("{}/{}", self.0, tail))
     }
 
-    /// Forma testuale canonica.
+    /// Canonical text form.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
-    /// `true` se il percorso è sotto `area` (per esempio `tmp`).
+    /// `true` if the path is under `area` (for example `tmp`).
     pub fn is_under(&self, area: &str) -> bool {
         self.0
             .strip_prefix(area)
             .is_some_and(|rest| rest.starts_with('/'))
     }
 
-    /// Componenti.
+    /// Components.
     pub fn components(&self) -> impl Iterator<Item = &str> {
         self.0.split('/')
     }
@@ -101,8 +101,8 @@ impl fmt::Display for ManagedPath {
     }
 }
 
-/// `true` se i metadati (senza seguire collegamenti) indicano un collegamento
-/// simbolico o un reparse point (junction, mount point, ecc.).
+/// `true` if the metadata (without following links) indicate a symbolic link
+/// or a reparse point (junction, mount point, etc.).
 pub(crate) fn is_link(meta: &std::fs::Metadata) -> bool {
     if meta.file_type().is_symlink() {
         return true;
@@ -118,9 +118,9 @@ pub(crate) fn is_link(meta: &std::fs::Metadata) -> bool {
     false
 }
 
-/// Risolve un percorso gestito sotto `root`, verificando che nessun componente
-/// esistente (radice inclusa) sia un collegamento o un reparse point.
-/// I componenti non ancora esistenti sono ammessi (creazione successiva).
+/// Resolves a managed path under `root`, checking that no existing component
+/// (root included) is a link or a reparse point.
+/// Components that do not exist yet are allowed (created later).
 pub(crate) fn resolve_checked(root: &Path, rel: &ManagedPath) -> Result<PathBuf> {
     check_not_link(root, rel.as_str())?;
     let mut cur = root.to_path_buf();
@@ -199,7 +199,7 @@ mod tests {
                 Err(StorageError::InvalidPath { reason, .. }) => {
                     assert_eq!(reason, *want, "{raw:?}");
                 }
-                other => panic!("{raw:?} accettato: {other:?}"),
+                other => panic!("{raw:?} accepted: {other:?}"),
             }
         }
         let long = "a/".repeat(200) + "b";

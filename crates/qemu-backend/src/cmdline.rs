@@ -1,23 +1,23 @@
-//! Costruzione del comando QEMU da opzioni controllate (ROADMAP 6.3, 7.2).
+//! Construction of the QEMU command from controlled options (ROADMAP 6.3, 7.2).
 //!
-//! [`VmLaunchSpec`] descrive la VM con tipi chiusi; [`VmLaunchSpec::build`]
-//! produce gli argomenti come `Vec<OsString>` passati direttamente al processo,
-//! senza shell. Proprietà garantite per costruzione:
+//! [`VmLaunchSpec`] describes the VM with closed types; [`VmLaunchSpec::build`]
+//! produces the arguments as a `Vec<OsString>` passed directly to the process,
+//! without a shell. Properties guaranteed by construction:
 //!
-//! - opzioni sempre presenti: `-no-user-config -nodefaults -nic none`,
-//!   `-display none`, `-S` (il guest parte solo dopo le verifiche post-avvio,
-//!   vedi [`crate::run`]);
-//! - acceleratore esplicito, mai TCG (il tipo [`Accelerator`] non ha una
-//!   variante TCG: ADR-0007);
-//! - macchina q35 **versionata** (`pc-q35-X.Y`) scelta dal probe;
-//! - modello CPU nominale (rifiutati `host` e `max`, F0-02 9.1);
-//! - firmware pflash: codice in sola lettura, variabili per esecuzione;
-//! - dischi con `-blockdev` strutturato (`driver`, `node-name`,
-//!   `file.driver=file`, `file.filename`), formato esplicito e solo protocollo
-//!   `file`;
-//! - ISO di installazione e supporto dati in sola lettura su `ide-cd`;
-//! - display VNC su socket Unix e QMP su socket Unix nella directory privata;
-//! - dispositivi HID da allowlist (`virtio-tablet-pci`, `virtio-keyboard-pci`).
+//! - options always present: `-no-user-config -nodefaults -nic none`,
+//!   `-display none`, `-S` (the guest starts only after the post-launch checks,
+//!   see [`crate::run`]);
+//! - explicit accelerator, never TCG (the [`Accelerator`] type has no
+//!   TCG variant: ADR-0007);
+//! - **versioned** q35 machine (`pc-q35-X.Y`) chosen by the probe;
+//! - nominal CPU model (`host` and `max` rejected, F0-02 9.1);
+//! - pflash firmware: read-only code, per-run variables;
+//! - disks with structured `-blockdev` (`driver`, `node-name`,
+//!   `file.driver=file`, `file.filename`), explicit format and only the `file`
+//!   protocol;
+//! - installation ISO and data medium read-only on `ide-cd`;
+//! - VNC display on a Unix socket and QMP on a Unix socket in the private directory;
+//! - HID devices from an allowlist (`virtio-tablet-pci`, `virtio-keyboard-pci`).
 
 use std::ffi::OsString;
 
@@ -26,7 +26,7 @@ use crate::paths::{ManagedPath, ManagedPaths, names};
 use crate::validate::{check_block_protocol, check_token};
 use lightvm_proto::{MediaId, RunId};
 
-/// Acceleratore hardware. Non esiste una variante TCG (ADR-0007).
+/// Hardware accelerator. There is no TCG variant (ADR-0007).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Accelerator {
     /// Windows Hypervisor Platform.
@@ -38,7 +38,7 @@ pub enum Accelerator {
 }
 
 impl Accelerator {
-    /// Nome usato da QEMU (`-accel`, `query-accelerators`).
+    /// Name used by QEMU (`-accel`, `query-accelerators`).
     pub fn qemu_name(self) -> &'static str {
         match self {
             Self::Whpx => "whpx",
@@ -47,7 +47,7 @@ impl Accelerator {
         }
     }
 
-    /// Acceleratore previsto per l'host corrente (ROADMAP sezione 5).
+    /// Accelerator expected for the current host (ROADMAP section 5).
     pub fn for_current_host() -> Self {
         if cfg!(windows) {
             Self::Whpx
@@ -59,36 +59,36 @@ impl Accelerator {
     }
 }
 
-/// Tipo di macchina q35 versionato (`pc-q35-X.Y`).
+/// Versioned q35 machine type (`pc-q35-X.Y`).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct MachineType(String);
 
 impl MachineType {
-    /// Accetta solo nomi `pc-q35-<maggiore>.<minore>`; l'alias `q35` è rifiutato
-    /// perché il suo significato cambia con la versione di QEMU.
+    /// Accepts only `pc-q35-<major>.<minor>` names; the `q35` alias is rejected
+    /// because its meaning changes with the QEMU version.
     pub fn versioned_q35(name: &str) -> Result<Self> {
         check_token("machine", name)?;
         if parse_q35_version(name).is_none() {
             return Err(BackendError::invalid(
                 "machine",
-                format!("`{name}` non è un tipo q35 versionato (atteso pc-q35-X.Y)"),
+                format!("`{name}` is not a versioned q35 type (expected pc-q35-X.Y)"),
             ));
         }
         Ok(Self(name.to_owned()))
     }
 
-    /// Nome QEMU.
+    /// QEMU name.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
-    /// Versione `(maggiore, minore)`.
+    /// Version `(major, minor)`.
     pub fn version(&self) -> (u32, u32) {
         parse_q35_version(&self.0).unwrap_or((0, 0))
     }
 }
 
-/// Estrae `(maggiore, minore)` da `pc-q35-X.Y`.
+/// Extracts `(major, minor)` from `pc-q35-X.Y`.
 pub(crate) fn parse_q35_version(name: &str) -> Option<(u32, u32)> {
     let v = name.strip_prefix("pc-q35-")?;
     let (a, b) = v.split_once('.')?;
@@ -101,40 +101,40 @@ pub(crate) fn parse_q35_version(name: &str) -> Option<(u32, u32)> {
     Some((a.parse().ok()?, b.parse().ok()?))
 }
 
-/// Modello CPU nominale.
+/// Nominal CPU model.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct CpuModel(String);
 
 impl CpuModel {
-    /// Modello verificato fino al desktop live su questo host (F0-02 9.2).
+    /// Model verified up to the live desktop on this host (F0-02 9.2).
     pub const VERIFIED_DEFAULT: &'static str = "qemu64";
 
-    /// Accetta un modello nominale; `host` e `max` sono rifiutati (con OVMF
-    /// sotto WHPX non avviano il firmware, F0-02 9.1). La presenza del modello
-    /// nel binario va verificata con [`crate::HostCapabilities::cpu_model`].
+    /// Accepts a nominal model; `host` and `max` are rejected (with OVMF
+    /// under WHPX they do not boot the firmware, F0-02 9.1). The presence of the model
+    /// in the binary must be verified with [`crate::HostCapabilities::cpu_model`].
     pub fn nominal(name: &str) -> Result<Self> {
         check_token("cpu", name)?;
         if matches!(name, "host" | "max") {
             return Err(BackendError::Unsupported {
-                what: format!("modello CPU `{name}`"),
-                hint: "con OVMF sotto WHPX `host`/`max` bloccano il firmware (F0-02); \
-                       usare un modello nominale come `qemu64` o `Skylake-Client-v4`"
+                what: format!("CPU model `{name}`"),
+                hint: "with OVMF under WHPX `host`/`max` hang the firmware (F0-02); \
+                       use a nominal model such as `qemu64` or `Skylake-Client-v4`"
                     .into(),
             });
         }
         Ok(Self(name.to_owned()))
     }
 
-    /// Nome QEMU.
+    /// QEMU name.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 }
 
-/// Formato esplicito del disco (nessuna rilevazione automatica del formato).
+/// Explicit disk format (no automatic format detection).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DiskFormat {
-    /// qcow2 (overlay della baseline).
+    /// qcow2 (baseline overlay).
     Qcow2,
     /// raw.
     Raw,
@@ -149,72 +149,72 @@ impl DiskFormat {
     }
 }
 
-/// Disco della VM. Il percorso è fornito da [`ManagedPaths::disk`].
+/// VM disk. The path is supplied by [`ManagedPaths::disk`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DiskSpec {
-    /// Formato del file.
+    /// File format.
     pub format: DiskFormat,
 }
 
-/// Limiti di validazione delle risorse virtuali.
+/// Validation limits of the virtual resources.
 pub mod limits {
-    /// vCPU minime.
+    /// Minimum vCPUs.
     pub const MIN_VCPUS: u32 = 1;
-    /// vCPU massime accettate dal builder (il limite effettivo dipende anche
-    /// dall'host e dalla policy, verificati a monte).
+    /// Maximum vCPUs accepted by the builder (the effective limit also depends
+    /// on the host and on the policy, verified upstream).
     pub const MAX_VCPUS: u32 = 64;
-    /// RAM minima in MiB.
+    /// Minimum RAM in MiB.
     pub const MIN_MEMORY_MIB: u32 = 128;
-    /// RAM massima in MiB accettata dal builder.
+    /// Maximum RAM in MiB accepted by the builder.
     pub const MAX_MEMORY_MIB: u32 = 256 * 1024;
 }
 
-/// Specifica di avvio di una VM.
+/// Launch specification of a VM.
 #[derive(Clone, Debug)]
 pub struct VmLaunchSpec {
-    /// Esecuzione (usata in `-name` e per ottenere i percorsi).
+    /// Run (used in `-name` and to obtain the paths).
     pub run_id: RunId,
-    /// Macchina q35 versionata.
+    /// Versioned q35 machine.
     pub machine: MachineType,
-    /// Acceleratore.
+    /// Accelerator.
     pub accelerator: Accelerator,
-    /// Modello CPU nominale.
+    /// Nominal CPU model.
     pub cpu: CpuModel,
-    /// Numero di vCPU.
+    /// Number of vCPUs.
     pub vcpus: u32,
     /// RAM in MiB.
     pub memory_mib: u32,
-    /// Disco, se presente.
+    /// Disk, if any.
     pub disk: Option<DiskSpec>,
-    /// ISO di installazione (avviabile), dal registro media.
+    /// Installation ISO (bootable), from the media registry.
     pub install_media: Option<MediaId>,
-    /// Supporto dati in sola lettura, dal registro media.
+    /// Read-only data medium, from the media registry.
     pub data_media: Option<MediaId>,
-    /// Limiti del Job Object (tetto CPU, memoria del job), ADR-0017.
+    /// Job Object limits (CPU cap, job memory), ADR-0017.
     pub limits: crate::process::JobLimits,
 }
 
-/// Comando QEMU pronto per lo spawn.
+/// QEMU command ready to spawn.
 #[derive(Clone, Debug)]
 pub struct QemuCommand {
-    /// Esecuzione a cui appartiene il processo (identità con handle e tempo di
-    /// creazione).
+    /// Run the process belongs to (identity with handle and creation
+    /// time).
     pub run_id: RunId,
-    /// Eseguibile.
+    /// Executable.
     pub program: ManagedPath,
-    /// Argomenti strutturati.
+    /// Structured arguments.
     pub args: Vec<OsString>,
-    /// Socket QMP.
+    /// QMP socket.
     pub qmp_socket: ManagedPath,
-    /// Socket VNC (`None` per il comando di probe).
+    /// VNC socket (`None` for the probe command).
     pub vnc_socket: Option<ManagedPath>,
-    /// File di stdout.
+    /// stdout file.
     pub stdout: ManagedPath,
-    /// File di stderr.
+    /// stderr file.
     pub stderr: ManagedPath,
-    /// Directory privata (socket, screendump).
+    /// Private directory (sockets, screendumps).
     pub private_dir: ManagedPath,
-    /// Limiti del contenitore del processo.
+    /// Limits of the process container.
     pub limits: crate::process::JobLimits,
 }
 
@@ -231,11 +231,11 @@ impl Args {
 }
 
 impl VmLaunchSpec {
-    /// Valida le risorse virtuali.
+    /// Validates the virtual resources.
     pub fn validate(&self) -> Result<()> {
         if !(limits::MIN_VCPUS..=limits::MAX_VCPUS).contains(&self.vcpus) {
             return Err(BackendError::ResourceLimit(format!(
-                "{} vCPU fuori dall'intervallo {}..={}",
+                "{} vCPUs outside the range {}..={}",
                 self.vcpus,
                 limits::MIN_VCPUS,
                 limits::MAX_VCPUS
@@ -243,7 +243,7 @@ impl VmLaunchSpec {
         }
         if !(limits::MIN_MEMORY_MIB..=limits::MAX_MEMORY_MIB).contains(&self.memory_mib) {
             return Err(BackendError::ResourceLimit(format!(
-                "{} MiB di RAM fuori dall'intervallo {}..={}",
+                "{} MiB of RAM outside the range {}..={}",
                 self.memory_mib,
                 limits::MIN_MEMORY_MIB,
                 limits::MAX_MEMORY_MIB
@@ -252,13 +252,13 @@ impl VmLaunchSpec {
         if self.install_media.is_some() && self.install_media == self.data_media {
             return Err(BackendError::invalid(
                 "data_media",
-                "lo stesso supporto come installazione e dati",
+                "the same medium as both installation and data",
             ));
         }
         Ok(())
     }
 
-    /// Costruisce il comando. Tutti i percorsi provengono da `paths`.
+    /// Builds the command. All paths come from `paths`.
     pub fn build(&self, paths: &dyn ManagedPaths) -> Result<QemuCommand> {
         self.validate()?;
         let run = &self.run_id;
@@ -271,7 +271,7 @@ impl VmLaunchSpec {
         vnc_socket.check_socket_len("vnc_socket")?;
         let fw_code = paths.firmware_code()?;
         let fw_vars = paths.firmware_vars(run)?;
-        // Unico protocollo di blocco ammesso (allowlist, ADR-0004/0010).
+        // The only allowed block protocol (allowlist, ADR-0004/0010).
         let proto = check_block_protocol("file")?;
 
         let mut a = Args(Vec::with_capacity(64));
@@ -310,9 +310,9 @@ impl VmLaunchSpec {
             next_boot += 1;
         }
         if let Some(spec) = self.disk {
-            let disk = paths.disk(run)?.ok_or_else(|| {
-                BackendError::invalid("disk", "nessun disco gestito per questa esecuzione")
-            })?;
+            let disk = paths
+                .disk(run)?
+                .ok_or_else(|| BackendError::invalid("disk", "no managed disk for this run"))?;
             a.opt(
                 "-blockdev",
                 format!(
@@ -328,7 +328,7 @@ impl VmLaunchSpec {
         } else if paths.disk(run)?.is_some() {
             return Err(BackendError::invalid(
                 "disk",
-                "disco gestito presente ma non dichiarato nella specifica",
+                "managed disk present but not declared in the specification",
             ));
         }
         if let Some(media) = &self.data_media {
@@ -383,8 +383,8 @@ fn push_cdrom(
     a.opt("-device", dev);
 }
 
-/// Comando minimo per il probe dell'acceleratore: VM in pausa senza firmware
-/// pflash, senza dischi, senza display, QMP nella directory privata.
+/// Minimal command for the accelerator probe: paused VM without pflash
+/// firmware, without disks, without display, QMP in the private directory.
 pub fn build_probe_command(
     program: ManagedPath,
     machine: &MachineType,
@@ -429,7 +429,7 @@ pub(crate) mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
 
-    /// Percorsi di prova in una radice fissa (non toccano il disco).
+    /// Test paths under a fixed root (they do not touch the disk).
     pub(crate) struct FakePaths {
         pub(crate) root: PathBuf,
         pub(crate) with_disk: bool,
@@ -445,7 +445,7 @@ pub(crate) mod tests {
             };
             let mut media = HashMap::new();
             media.insert(media_ubuntu(), root.join("media").join("ubuntu.iso"));
-            media.insert(media_dati(), root.join("media").join("dati.iso"));
+            media.insert(media_data(), root.join("media").join("data.iso"));
             Self {
                 root,
                 with_disk: true,
@@ -483,7 +483,7 @@ pub(crate) mod tests {
             let p = self
                 .media
                 .get(media)
-                .ok_or_else(|| BackendError::invalid("media", "non registrato"))?;
+                .ok_or_else(|| BackendError::invalid("media", "not registered"))?;
             ManagedPath::verify(p)
         }
         fn run_dir(&self, run: &RunId) -> Result<ManagedPath> {
@@ -494,7 +494,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// Identificativo di esecuzione deterministico per i test.
+    /// Deterministic run identifier for tests.
     pub(crate) fn run_id(n: u8) -> RunId {
         RunId::from_unix_millis(1_700_000_000_000, [n; 10])
     }
@@ -503,7 +503,7 @@ pub(crate) mod tests {
         MediaId::from_unix_millis(1_700_000_000_000, [1; 10])
     }
 
-    pub(crate) fn media_dati() -> MediaId {
+    pub(crate) fn media_data() -> MediaId {
         MediaId::from_unix_millis(1_700_000_000_000, [2; 10])
     }
 
@@ -524,8 +524,8 @@ pub(crate) mod tests {
         }
     }
 
-    /// Opzioni ammesse con le chiavi consentite (`None` = valore senza chiavi,
-    /// `Some(&[])` = flag senza valore).
+    /// Allowed options with the permitted keys (`None` = value without keys,
+    /// `Some(&[])` = flag without value).
     fn option_table() -> HashMap<&'static str, Option<&'static [&'static str]>> {
         let mut t: HashMap<&'static str, Option<&'static [&'static str]>> = HashMap::new();
         t.insert("-name", Some(&["guest"]));
@@ -566,19 +566,19 @@ pub(crate) mod tests {
         "ide-cd",
     ];
 
-    /// Verifica che gli argomenti siano soltanto coppie opzione/valore della
-    /// tabella, con le sole chiavi ammesse, e che nessun valore contenga
-    /// separatori in eccesso. Restituisce la descrizione della violazione.
+    /// Verifies that the arguments are only option/value pairs from the
+    /// table, with only the allowed keys, and that no value contains
+    /// extra separators. Returns the description of the violation.
     pub(crate) fn audit_args(args: &[OsString]) -> std::result::Result<(), String> {
         let table = option_table();
         let mut i = 0;
         let mut seen_nodefaults = false;
         let mut seen_nic_none = false;
         while i < args.len() {
-            let opt = args[i].to_str().ok_or("argomento non UTF-8")?;
+            let opt = args[i].to_str().ok_or("argument is not UTF-8")?;
             let keys = table
                 .get(opt)
-                .ok_or_else(|| format!("opzione non ammessa: {opt:?}"))?;
+                .ok_or_else(|| format!("option not allowed: {opt:?}"))?;
             if FLAGS.contains(&opt) {
                 seen_nodefaults |= opt == "-nodefaults";
                 i += 1;
@@ -586,19 +586,19 @@ pub(crate) mod tests {
             }
             let val = args
                 .get(i + 1)
-                .ok_or_else(|| format!("{opt} senza valore"))?
+                .ok_or_else(|| format!("{opt} without value"))?
                 .to_str()
-                .ok_or("valore non UTF-8")?;
+                .ok_or("value is not UTF-8")?;
             if val.starts_with('-') {
-                return Err(format!("valore di {opt} inizia con `-`: {val:?}"));
+                return Err(format!("value of {opt} starts with `-`: {val:?}"));
             }
             if val.chars().any(char::is_control) {
-                return Err(format!("carattere di controllo in {opt}"));
+                return Err(format!("control character in {opt}"));
             }
             match keys {
                 None => {
                     if val.contains([',', '=', ':']) {
-                        return Err(format!("{opt}: valore con separatori {val:?}"));
+                        return Err(format!("{opt}: value with separators {val:?}"));
                     }
                     if opt == "-nic" {
                         if val != "none" {
@@ -615,7 +615,7 @@ pub(crate) mod tests {
                     if opt == "-device" {
                         let dev = parts.next().unwrap_or_default();
                         if !DEVICES.contains(&dev) {
-                            return Err(format!("dispositivo non ammesso {dev:?}"));
+                            return Err(format!("device not allowed {dev:?}"));
                         }
                     }
                     for p in parts {
@@ -624,27 +624,27 @@ pub(crate) mod tests {
                                 Some(("unix", v)) => ("unix", v),
                                 _ => p
                                     .split_once('=')
-                                    .ok_or_else(|| format!("{opt}: parte senza chiave {p:?}"))?,
+                                    .ok_or_else(|| format!("{opt}: part without key {p:?}"))?,
                             }
                         } else {
                             p.split_once('=')
-                                .ok_or_else(|| format!("{opt}: parte senza chiave {p:?}"))?
+                                .ok_or_else(|| format!("{opt}: part without key {p:?}"))?
                         };
                         if !allowed.contains(&k) {
-                            return Err(format!("{opt}: chiave non ammessa {k:?}"));
+                            return Err(format!("{opt}: key not allowed {k:?}"));
                         }
                         if k == "file.driver" && v != "file" {
-                            return Err(format!("protocollo non ammesso {v:?}"));
+                            return Err(format!("protocol not allowed {v:?}"));
                         }
                         if k == "driver" && !["file", "qcow2", "raw"].contains(&v) {
-                            return Err(format!("driver di blocco non ammesso {v:?}"));
+                            return Err(format!("block driver not allowed {v:?}"));
                         }
                         if v.is_empty() {
-                            return Err(format!("{opt}: valore vuoto per {k}"));
+                            return Err(format!("{opt}: empty value for {k}"));
                         }
                         let colon_ok = k == "filename" || k == "file.filename" || k == "unix";
                         let extra = if colon_ok {
-                            // l'unico `:` ammesso è la lettera di unità
+                            // the only `:` allowed is the drive letter
                             let bytes = v.as_bytes();
                             let rest = if cfg!(windows) && bytes.len() >= 2 && bytes[1] == b':' {
                                 &v[2..]
@@ -656,7 +656,7 @@ pub(crate) mod tests {
                             v.contains([':', '='])
                         };
                         if extra {
-                            return Err(format!("{opt}: separatori nel valore di {k}: {v:?}"));
+                            return Err(format!("{opt}: separators in the value of {k}: {v:?}"));
                         }
                     }
                 }
@@ -664,7 +664,7 @@ pub(crate) mod tests {
             i += 2;
         }
         if !seen_nodefaults || !seen_nic_none {
-            return Err("manca -nodefaults o -nic none".into());
+            return Err("-nodefaults or -nic none missing".into());
         }
         Ok(())
     }
@@ -677,7 +677,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn comando_completo() {
+    fn full_command() {
         let cmd = spec().build(&FakePaths::new()).unwrap();
         let a = strs(&cmd);
         audit_args(&cmd.args).unwrap();
@@ -708,9 +708,9 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn supporto_dati_senza_boot() {
+    fn data_medium_without_boot() {
         let mut s = spec();
-        s.data_media = Some(media_dati());
+        s.data_media = Some(media_data());
         let cmd = s.build(&FakePaths::new()).unwrap();
         audit_args(&cmd.args).unwrap();
         assert!(strs(&cmd).contains(&"ide-cd,drive=cd-data,bus=ide.1".to_owned()));
@@ -719,12 +719,12 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn senza_disco_e_senza_media() {
+    fn without_disk_and_without_media() {
         let mut s = spec();
         s.disk = None;
         s.install_media = None;
         let mut p = FakePaths::new();
-        assert!(s.build(&p).is_err(), "disco gestito non dichiarato");
+        assert!(s.build(&p).is_err(), "managed disk not declared");
         p.with_disk = false;
         let cmd = s.build(&p).unwrap();
         audit_args(&cmd.args).unwrap();
@@ -733,11 +733,11 @@ pub(crate) mod tests {
         s2.install_media = None;
         let mut p2 = FakePaths::new();
         p2.with_disk = false;
-        assert!(s2.build(&p2).is_err(), "disco dichiarato ma assente");
+        assert!(s2.build(&p2).is_err(), "disk declared but missing");
     }
 
     #[test]
-    fn risorse_non_valide() {
+    fn invalid_resources() {
         let mut s = spec();
         s.vcpus = 0;
         assert!(matches!(
@@ -752,14 +752,14 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn media_non_registrato() {
+    fn unregistered_media() {
         let mut s = spec();
         s.install_media = Some(MediaId::from_unix_millis(1_700_000_000_000, [9; 10]));
         assert!(s.build(&FakePaths::new()).is_err());
     }
 
     #[test]
-    fn macchina_e_cpu() {
+    fn machine_and_cpu() {
         assert!(MachineType::versioned_q35("q35").is_err());
         assert!(MachineType::versioned_q35("pc-i440fx-11.1").is_err());
         assert!(MachineType::versioned_q35("pc-q35-11.1,accel=tcg").is_err());
@@ -776,7 +776,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn percorso_con_virgola_rifiutato() {
+    fn path_with_comma_rejected() {
         let mut p = FakePaths::new();
         p.media.insert(
             media_ubuntu(),
@@ -789,7 +789,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn comando_probe() {
+    fn probe_command() {
         let p = FakePaths::new();
         let run = run_id(2);
         let cmd = build_probe_command(
@@ -808,12 +808,12 @@ pub(crate) mod tests {
 
 #[cfg(test)]
 mod proptests {
-    use super::tests::{FakePaths, audit_args, media_dati, media_ubuntu, spec};
+    use super::tests::{FakePaths, audit_args, media_data, media_ubuntu, spec};
     use super::*;
     use proptest::prelude::*;
 
-    /// Stringhe ostili: separatori QEMU, prefissi di opzione e di protocollo,
-    /// controllo, Unicode, percorsi UNC/dispositivo e traversal.
+    /// Hostile strings: QEMU separators, option and protocol prefixes,
+    /// control characters, Unicode, UNC/device paths and traversal.
     fn hostile() -> impl Strategy<Value = String> {
         prop_oneof![
             "[ -~]{0,40}",
@@ -847,7 +847,7 @@ mod proptests {
         if let Ok(c) = cmd
             && let Err(e) = audit_args(&c.args)
         {
-            return Err(TestCaseError::fail(format!("iniezione: {e}\n{:?}", c.args)));
+            return Err(TestCaseError::fail(format!("injection: {e}\n{:?}", c.args)));
         }
         Ok(())
     }
@@ -855,11 +855,11 @@ mod proptests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(2000))]
 
-        /// Gli identificativi sono UUID v7 tipizzati (`lightvm-proto`): non
-        /// possono contenere separatori. Si provano UUID arbitrari, inclusi
-        /// rifiuti da stringhe ostili.
+        /// Identifiers are typed UUID v7s (`lightvm-proto`): they
+        /// cannot contain separators. Arbitrary UUIDs are tried, including
+        /// rejections of hostile strings.
         #[test]
-        fn identificativi_qualsiasi(
+        fn arbitrary_identifiers(
             ms in any::<u64>(),
             r in any::<[u8; 10]>(),
             m in any::<[u8; 10]>(),
@@ -878,7 +878,7 @@ mod proptests {
         }
 
         #[test]
-        fn macchina_e_cpu_ostili(m in hostile(), c in hostile()) {
+        fn hostile_machine_and_cpu(m in hostile(), c in hostile()) {
             let mut s = spec();
             if let Ok(mt) = MachineType::versioned_q35(&m) { s.machine = mt; }
             if let Ok(cm) = CpuModel::nominal(&c) { s.cpu = cm; }
@@ -886,20 +886,20 @@ mod proptests {
         }
 
         #[test]
-        fn percorsi_ostili(a in hostile(), b in hostile(), c in hostile()) {
+        fn hostile_paths(a in hostile(), b in hostile(), c in hostile()) {
             let mut p = FakePaths::new();
             p.media.insert(media_ubuntu(), p.root.join(&a).join(&b));
             let mut s = spec();
-            s.data_media = Some(media_dati());
-            p.media.insert(media_dati(), p.root.join(&c));
+            s.data_media = Some(media_data());
+            p.media.insert(media_data(), p.root.join(&c));
             check(&s.build(&p))?;
-            // percorso radice arbitrario (anche relativo, UNC o dispositivo)
+            // arbitrary root path (also relative, UNC or device)
             p.root = std::path::PathBuf::from(&a);
             check(&s.build(&p))?;
         }
 
         #[test]
-        fn risorse_qualsiasi(v in any::<u32>(), m in any::<u32>()) {
+        fn arbitrary_resources(v in any::<u32>(), m in any::<u32>()) {
             let mut s = spec();
             s.vcpus = v;
             s.memory_mib = m;

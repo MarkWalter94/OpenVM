@@ -1,9 +1,9 @@
-//! Record del catalogo e operazioni SQL dentro una transazione.
+//! Catalog records and SQL operations inside a transaction.
 //!
-//! Tutte le scritture passano da [`Tx`]: una transazione SQLite aperta da
-//! [`crate::Catalog::with_tx`] o, per gli intenti del journal, da
-//! [`crate::Catalog::commit`], che registra il passaggio a `committed` nella
-//! stessa transazione.
+//! All writes go through [`Tx`]: an SQLite transaction opened by
+//! [`crate::Catalog::with_tx`] or, for journal intents, by
+//! [`crate::Catalog::commit`], which records the transition to `committed` in
+//! the same transaction.
 
 use rusqlite::{OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
@@ -21,7 +21,7 @@ use crate::paths::ManagedPath;
 use crate::time::now_rfc3339;
 
 fn to_i64(v: u64) -> Result<i64> {
-    i64::try_from(v).map_err(|_| StorageError::Constraint(format!("valore fuori intervallo: {v}")))
+    i64::try_from(v).map_err(|_| StorageError::Constraint(format!("value out of range: {v}")))
 }
 
 fn to_u64(v: i64) -> u64 {
@@ -35,276 +35,276 @@ fn path_col(row: &Row<'_>, idx: usize) -> rusqlite::Result<ManagedPath> {
     })
 }
 
-/// Dati per creare una VM.
+/// Data for creating a VM.
 #[derive(Debug, Clone)]
 pub struct NewVm {
-    /// Nome univoco (senza distinzione maiuscole/minuscole).
+    /// Unique name (case-insensitive).
     pub name: String,
-    /// Sistema operativo guest dichiarato.
+    /// Declared guest operating system.
     pub guest_os: String,
-    /// Versione dello schema della configurazione.
+    /// Configuration schema version.
     pub config_version: u32,
-    /// Configurazione serializzata in JSON (mai interpretata come opzioni host).
+    /// Configuration serialized as JSON (never interpreted as host options).
     pub config: serde_json::Value,
 }
 
-/// VM nel catalogo.
+/// VM in the catalog.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VmRecord {
-    /// Identificativo.
+    /// Identifier.
     pub vm_id: VmId,
-    /// Nome.
+    /// Name.
     pub name: String,
-    /// Sistema operativo guest.
+    /// Guest operating system.
     pub guest_os: String,
-    /// Ultimo stato persistito.
+    /// Last persisted state.
     pub lifecycle: Lifecycle,
-    /// Versione dello schema della configurazione.
+    /// Configuration schema version.
     pub config_version: u32,
-    /// Configurazione.
+    /// Configuration.
     pub config: serde_json::Value,
-    /// Revisione (controllo di concorrenza ottimistico).
+    /// Revision (optimistic concurrency control).
     pub revision: u64,
-    /// SHA-256 del manifest su file.
+    /// SHA-256 of the on-disk manifest.
     pub manifest_sha256: Option<String>,
-    /// Creazione (UTC).
+    /// Creation time (UTC).
     pub created_at: String,
-    /// Ultimo aggiornamento (UTC).
+    /// Last update time (UTC).
     pub updated_at: String,
 }
 
-/// Media del registro approvato.
+/// Media in the approved registry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaRecord {
-    /// Identificativo.
+    /// Identifier.
     pub media_id: MediaId,
-    /// SHA-256 della copia gestita.
+    /// SHA-256 of the managed copy.
     pub sha256: String,
-    /// Dimensione in byte.
+    /// Size in bytes.
     pub size_bytes: u64,
-    /// Tipo.
+    /// Kind.
     pub kind: MediaKind,
-    /// Origine dichiarata dall'utente (testo, mai un percorso da aprire).
+    /// User-declared origin (text, never a path to open).
     pub declared_origin: String,
-    /// Approvazione (UTC).
+    /// Approval time (UTC).
     pub approved_at: String,
-    /// Copia gestita relativa alla radice.
+    /// Managed copy, relative to the root.
     pub managed_path: ManagedPath,
-    /// Stato.
+    /// Status.
     pub status: MediaStatus,
 }
 
-/// Disco gestito.
+/// Managed disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiskRecord {
-    /// Identificativo.
+    /// Identifier.
     pub disk_id: DiskId,
-    /// VM proprietaria.
+    /// Owning VM.
     pub vm_id: VmId,
-    /// Ruolo.
+    /// Role.
     pub role: DiskRole,
-    /// Base di un overlay.
+    /// Base of an overlay.
     pub backing_disk_id: Option<DiskId>,
-    /// Dimensione virtuale.
+    /// Virtual size.
     pub virtual_size_bytes: u64,
-    /// Byte occupati misurati.
+    /// Measured allocated bytes.
     pub allocated_bytes: u64,
-    /// Percorso gestito.
+    /// Managed path.
     pub managed_path: ManagedPath,
-    /// SHA-256 (per le basi).
+    /// SHA-256 (for bases).
     pub sha256: Option<String>,
-    /// Stato.
+    /// Status.
     pub status: DiskStatus,
-    /// Creazione (UTC).
+    /// Creation time (UTC).
     pub created_at: String,
 }
 
-/// Stato firmware gestito.
+/// Managed firmware state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FirmwareRecord {
-    /// Identificativo.
+    /// Identifier.
     pub fw_id: FirmwareId,
     /// VM.
     pub vm_id: VmId,
-    /// Ambito.
+    /// Scope.
     pub scope: FirmwareScope,
-    /// Origine della copia.
+    /// Source of the copy.
     pub source_fw_id: Option<FirmwareId>,
-    /// Percorso gestito.
+    /// Managed path.
     pub managed_path: ManagedPath,
     /// SHA-256.
     pub sha256: Option<String>,
-    /// Dimensione.
+    /// Size.
     pub size_bytes: u64,
-    /// Creazione (UTC).
+    /// Creation time (UTC).
     pub created_at: String,
 }
 
-/// Baseline a VM spenta.
+/// Baseline taken with the VM powered off.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BaselineRecord {
-    /// Identificativo.
+    /// Identifier.
     pub baseline_id: BaselineId,
     /// VM.
     pub vm_id: VmId,
-    /// Disco base immutabile.
+    /// Immutable base disk.
     pub base_disk_id: DiskId,
-    /// Stato firmware della baseline.
+    /// Firmware state of the baseline.
     pub vars_fw_id: Option<FirmwareId>,
-    /// Etichetta.
+    /// Label.
     pub label: String,
-    /// SHA-256 del manifest.
+    /// SHA-256 of the manifest.
     pub manifest_sha256: String,
-    /// Arresto pulito osservato (un arresto forzato non è mai "verificato").
+    /// Clean shutdown observed (a forced stop is never "verified").
     pub clean_shutdown: bool,
-    /// Baseline iniziale protetta (non cancellabile).
+    /// Protected initial baseline (cannot be deleted).
     pub protected: bool,
-    /// Creazione (UTC).
+    /// Creation time (UTC).
     pub created_at: String,
 }
 
-/// Esecuzione.
+/// Run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunRecord {
-    /// Identificativo.
+    /// Identifier.
     pub run_id: RunId,
     /// VM.
     pub vm_id: VmId,
-    /// Baseline di partenza.
+    /// Starting baseline.
     pub baseline_id: Option<BaselineId>,
-    /// Overlay dell'esecuzione.
+    /// Overlay of the run.
     pub overlay_disk_id: Option<DiskId>,
-    /// Vars dell'esecuzione.
+    /// Vars of the run.
     pub vars_fw_id: Option<FirmwareId>,
-    /// Stato.
+    /// Status.
     pub state: RunState,
-    /// Inizio (UTC).
+    /// Start time (UTC).
     pub started_at: String,
-    /// Fine (UTC).
+    /// End time (UTC).
     pub ended_at: Option<String>,
-    /// Causa di terminazione.
+    /// Termination cause.
     pub termination_cause: Option<TerminationCause>,
 }
 
-/// Operazione con revisione.
+/// Operation with revision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OperationRecord {
-    /// Identificativo.
+    /// Identifier.
     pub operation_id: OperationId,
     /// VM.
     pub vm_id: VmId,
-    /// Esecuzione.
+    /// Run.
     pub run_id: Option<RunId>,
-    /// Sessione agente richiedente (`None` per l'utente).
+    /// Requesting agent session (`None` for the user).
     pub session_id: Option<SessionId>,
-    /// Tipo (testo stabile definito dal core).
+    /// Kind (stable text defined by the core).
     pub kind: String,
-    /// Stato.
+    /// Status.
     pub state: OperationState,
-    /// Revisione della VM attesa dall'operazione.
+    /// VM revision expected by the operation.
     pub revision: u64,
-    /// Codice di errore pubblico.
+    /// Public error code.
     pub error_code: Option<String>,
-    /// Creazione (UTC).
+    /// Creation time (UTC).
     pub created_at: String,
-    /// Aggiornamento (UTC).
+    /// Update time (UTC).
     pub updated_at: String,
 }
 
-/// Sessione agente (solo persistenza).
+/// Agent session (persistence only).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRecord {
-    /// Identificativo.
+    /// Identifier.
     pub session_id: SessionId,
-    /// Obiettivo dichiarato.
+    /// Declared objective.
     pub objective: String,
-    /// Stato.
+    /// Status.
     pub state: SessionState,
-    /// Revisione della policy applicata.
+    /// Revision of the applied policy.
     pub policy_revision: u64,
-    /// Creazione (UTC).
+    /// Creation time (UTC).
     pub created_at: String,
-    /// Scadenza (UTC).
+    /// Expiry time (UTC).
     pub expires_at: String,
-    /// Fine (UTC).
+    /// End time (UTC).
     pub ended_at: Option<String>,
-    /// Causa di terminazione.
+    /// Termination cause.
     pub termination_cause: Option<String>,
 }
 
-/// Grant di sessione su una VM (solo persistenza; nessuna credenziale).
+/// Session grant on a VM (persistence only; no credentials).
 #[derive(Debug, Clone, PartialEq)]
 pub struct GrantRecord {
-    /// Identificativo.
+    /// Identifier.
     pub grant_id: GrantId,
-    /// Sessione.
+    /// Session.
     pub session_id: SessionId,
-    /// VM autorizzata.
+    /// Authorized VM.
     pub vm_id: VmId,
-    /// Capability approvate.
+    /// Approved capabilities.
     pub capabilities: serde_json::Value,
-    /// Quote approvate.
+    /// Approved quotas.
     pub quotas: serde_json::Value,
-    /// Creazione (UTC).
+    /// Creation time (UTC).
     pub created_at: String,
-    /// Scadenza (UTC).
+    /// Expiry time (UTC).
     pub expires_at: String,
-    /// Revoca (UTC).
+    /// Revocation time (UTC).
     pub revoked_at: Option<String>,
 }
 
-/// Evento di audit da registrare. Nessun payload: solo tipo, id ed esito.
+/// Audit event to record. No payload: only kind, ids and outcome.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuditEvent {
-    /// Tipo di azione (testo stabile, es. `vm.start`).
+    /// Action kind (stable text, e.g. `vm.start`).
     pub action: String,
-    /// Esito.
+    /// Outcome.
     pub outcome: Option<AuditOutcome>,
     /// VM.
     pub vm_id: Option<VmId>,
-    /// Esecuzione.
+    /// Run.
     pub run_id: Option<RunId>,
-    /// Sessione.
+    /// Session.
     pub session_id: Option<SessionId>,
-    /// Operazione.
+    /// Operation.
     pub operation_id: Option<OperationId>,
-    /// Codice di errore pubblico.
+    /// Public error code.
     pub error_code: Option<String>,
 }
 
-/// Evento di audit registrato.
+/// Recorded audit event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuditRecord {
-    /// Ordine monotono.
+    /// Monotonic sequence number.
     pub seq: i64,
     /// Timestamp (UTC).
     pub at: String,
-    /// Evento.
+    /// Event.
     pub event: AuditEvent,
 }
 
-/// Artefatto di un'esecuzione.
+/// Artifact of a run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactRecord {
-    /// Identificativo.
+    /// Identifier.
     pub artifact_id: ArtifactId,
-    /// Esecuzione.
+    /// Run.
     pub run_id: RunId,
-    /// Tipo.
+    /// Kind.
     pub kind: ArtifactKind,
-    /// Percorso gestito.
+    /// Managed path.
     pub managed_path: ManagedPath,
     /// SHA-256.
     pub sha256: String,
-    /// Dimensione.
+    /// Size.
     pub size_bytes: u64,
-    /// Creazione (UTC).
+    /// Creation time (UTC).
     pub created_at: String,
-    /// Conservazione fino a (UTC).
+    /// Retained until (UTC).
     pub retain_until: Option<String>,
 }
 
-/// Transazione sul catalogo.
+/// Catalog transaction.
 #[derive(Debug)]
 pub struct Tx<'c> {
     pub(crate) inner: rusqlite::Transaction<'c>,
@@ -317,7 +317,7 @@ impl Tx<'_> {
 
     // ---------------------------------------------------------------- VM
 
-    /// Crea una VM. Il nome è univoco senza distinzione di maiuscole.
+    /// Creates a VM. The name is unique, case-insensitively.
     pub fn insert_vm(&self, vm: &NewVm) -> Result<VmId> {
         let id = VmId::new_v7();
         let now = now_rfc3339();
@@ -331,7 +331,7 @@ impl Tx<'_> {
         Ok(id)
     }
 
-    /// Legge una VM.
+    /// Reads a VM.
     pub fn vm(&self, id: &VmId) -> Result<VmRecord> {
         self.inner
             .query_row(
@@ -368,7 +368,7 @@ impl Tx<'_> {
             })
     }
 
-    /// Elenco degli identificativi delle VM ordinati per nome.
+    /// List of VM identifiers, sorted by name.
     pub fn vm_ids(&self) -> Result<Vec<VmId>> {
         let mut st = self
             .inner
@@ -378,8 +378,8 @@ impl Tx<'_> {
         rows.collect::<rusqlite::Result<Vec<VmId>>>().db()
     }
 
-    /// Aggiorna la configurazione se la revisione attesa coincide; restituisce
-    /// la nuova revisione. Revisione diversa: [`StorageError::StateConflict`].
+    /// Updates the configuration if the expected revision matches; returns the
+    /// new revision. Different revision: [`StorageError::StateConflict`].
     pub fn update_vm_config(
         &self,
         id: &VmId,
@@ -405,13 +405,13 @@ impl Tx<'_> {
         if n == 0 {
             let current = self.vm(id)?.revision;
             return Err(StorageError::StateConflict(format!(
-                "revisione attesa {expected_revision}, corrente {current}"
+                "expected revision {expected_revision}, current {current}"
             )));
         }
         Ok(expected_revision + 1)
     }
 
-    /// Aggiorna l'ultimo stato persistito del ciclo di vita.
+    /// Updates the last persisted lifecycle state.
     pub fn set_vm_lifecycle(&self, id: &VmId, state: Lifecycle) -> Result<()> {
         let n = self
             .inner
@@ -439,7 +439,7 @@ impl Tx<'_> {
         Ok(())
     }
 
-    /// Cancella una VM senza dischi, baseline, esecuzioni o firmware.
+    /// Deletes a VM that has no disks, baselines, runs or firmware.
     pub fn delete_vm(&self, id: &VmId) -> Result<()> {
         self.inner
             .execute("DELETE FROM vms WHERE vm_id = ?1", params![id.sql()])
@@ -452,8 +452,8 @@ impl Tx<'_> {
 
     // ------------------------------------------------------------- media
 
-    /// Registra un media approvato (la copia gestita va prodotta con un intento
-    /// `import_media`).
+    /// Records an approved media (the managed copy must be produced with an
+    /// `import_media` intent).
     pub fn insert_media(&self, m: &MediaRecord) -> Result<()> {
         self.inner
             .execute(
@@ -475,7 +475,7 @@ impl Tx<'_> {
         Ok(())
     }
 
-    /// Legge un media.
+    /// Reads a media.
     pub fn media(&self, id: &MediaId) -> Result<MediaRecord> {
         self.inner
             .query_row(
@@ -503,12 +503,12 @@ impl Tx<'_> {
             })
     }
 
-    /// Collega un media approvato a una VM.
+    /// Attaches an approved media to a VM.
     pub fn attach_media(&self, vm: &VmId, slot: MediaSlot, media: &MediaId) -> Result<()> {
         let m = self.media(media)?;
         if m.status != MediaStatus::Approved {
             return Err(StorageError::StateConflict(format!(
-                "media {media} non approvato ({})",
+                "media {media} not approved ({})",
                 m.status
             )));
         }
@@ -522,7 +522,7 @@ impl Tx<'_> {
         Ok(())
     }
 
-    /// Scollega il media di uno slot.
+    /// Detaches the media from a slot.
     pub fn detach_media(&self, vm: &VmId, slot: MediaSlot) -> Result<()> {
         self.inner
             .execute(
@@ -533,7 +533,7 @@ impl Tx<'_> {
         Ok(())
     }
 
-    /// Media collegati a una VM.
+    /// Media attached to a VM.
     pub fn vm_media(&self, vm: &VmId) -> Result<Vec<(MediaSlot, MediaId)>> {
         let mut st = self
             .inner
@@ -545,7 +545,7 @@ impl Tx<'_> {
         rows.collect::<rusqlite::Result<Vec<_>>>().db()
     }
 
-    /// Cancella la riga di un media non referenziato.
+    /// Deletes the row of an unreferenced media.
     pub fn delete_media(&self, id: &MediaId) -> Result<()> {
         self.inner
             .execute("DELETE FROM media WHERE media_id = ?1", params![id.sql()])
@@ -553,9 +553,9 @@ impl Tx<'_> {
         Ok(())
     }
 
-    // ------------------------------------------------------------- dischi
+    // -------------------------------------------------------------- disks
 
-    /// Registra un disco gestito.
+    /// Records a managed disk.
     pub fn insert_disk(&self, d: &DiskRecord) -> Result<()> {
         self.inner
             .execute(
@@ -579,7 +579,7 @@ impl Tx<'_> {
         Ok(())
     }
 
-    /// Legge un disco.
+    /// Reads a disk.
     pub fn disk(&self, id: &DiskId) -> Result<DiskRecord> {
         self.disk_opt(id)?.ok_or_else(|| StorageError::NotFound {
             kind: "disk",
@@ -598,7 +598,7 @@ impl Tx<'_> {
             .db()
     }
 
-    /// Dischi di una VM.
+    /// Disks of a VM.
     pub fn disks_of_vm(&self, vm: &VmId) -> Result<Vec<DiskRecord>> {
         let mut st = self
             .inner
@@ -616,7 +616,7 @@ impl Tx<'_> {
         rows.collect::<rusqlite::Result<Vec<_>>>().db()
     }
 
-    /// Aggiorna lo stato di un disco.
+    /// Updates the status of a disk.
     pub fn set_disk_status(&self, id: &DiskId, status: DiskStatus) -> Result<()> {
         self.inner
             .execute(
@@ -627,7 +627,7 @@ impl Tx<'_> {
         Ok(())
     }
 
-    /// Aggiorna i byte occupati misurati.
+    /// Updates the measured allocated bytes.
     pub fn set_disk_allocated(&self, id: &DiskId, bytes: u64) -> Result<()> {
         self.inner
             .execute(
@@ -638,7 +638,7 @@ impl Tx<'_> {
         Ok(())
     }
 
-    /// Cancella la riga di un disco non referenziato.
+    /// Deletes the row of an unreferenced disk.
     pub fn delete_disk(&self, id: &DiskId) -> Result<()> {
         self.inner
             .execute("DELETE FROM disks WHERE disk_id = ?1", params![id.sql()])
@@ -648,7 +648,7 @@ impl Tx<'_> {
 
     // ----------------------------------------------------------- firmware
 
-    /// Registra uno stato firmware gestito.
+    /// Records a managed firmware state.
     pub fn insert_firmware(&self, f: &FirmwareRecord) -> Result<()> {
         self.inner
             .execute(
@@ -670,7 +670,7 @@ impl Tx<'_> {
         Ok(())
     }
 
-    /// Legge uno stato firmware.
+    /// Reads a firmware state.
     pub fn firmware(&self, id: &FirmwareId) -> Result<FirmwareRecord> {
         self.firmware_opt(id)?
             .ok_or_else(|| StorageError::NotFound {
@@ -696,7 +696,7 @@ impl Tx<'_> {
         rows.collect::<rusqlite::Result<Vec<_>>>().db()
     }
 
-    /// Cancella la riga di uno stato firmware non referenziato.
+    /// Deletes the row of an unreferenced firmware state.
     pub fn delete_firmware(&self, id: &FirmwareId) -> Result<()> {
         self.inner
             .execute(
@@ -712,20 +712,20 @@ impl Tx<'_> {
 
     // ----------------------------------------------------------- baseline
 
-    /// Registra una baseline. La VM deve risultare spenta (`stopped`): la
-    /// baseline si crea soltanto a VM spenta (sezione 8, ADR-0005).
+    /// Records a baseline. The VM must be powered off (`stopped`): a baseline
+    /// is created only while the VM is powered off (section 8, ADR-0005).
     pub fn insert_baseline(&self, b: &BaselineRecord) -> Result<()> {
         let vm = self.vm(&b.vm_id)?;
         if vm.lifecycle != Lifecycle::Stopped {
             return Err(StorageError::StateConflict(format!(
-                "baseline richiesta con VM in stato {}",
+                "baseline requested with VM in state {}",
                 vm.lifecycle
             )));
         }
         let disk = self.disk(&b.base_disk_id)?;
         if disk.role != DiskRole::Base || disk.vm_id != b.vm_id {
             return Err(StorageError::StateConflict(
-                "il disco della baseline deve essere una base della stessa VM".into(),
+                "the baseline disk must be a base disk of the same VM".into(),
             ));
         }
         self.inner
@@ -750,7 +750,7 @@ impl Tx<'_> {
         Ok(())
     }
 
-    /// Legge una baseline.
+    /// Reads a baseline.
     pub fn baseline(&self, id: &BaselineId) -> Result<BaselineRecord> {
         self.baseline_opt(id)?
             .ok_or_else(|| StorageError::NotFound {
@@ -770,7 +770,7 @@ impl Tx<'_> {
             .db()
     }
 
-    /// Baseline di una VM.
+    /// Baselines of a VM.
     pub fn baselines_of_vm(&self, vm: &VmId) -> Result<Vec<BaselineRecord>> {
         let mut st = self
             .inner
@@ -782,7 +782,7 @@ impl Tx<'_> {
         rows.collect::<rusqlite::Result<Vec<_>>>().db()
     }
 
-    /// `true` se la baseline è referenziata da esecuzioni o overlay.
+    /// `true` if the baseline is referenced by runs or overlays.
     pub fn baseline_referenced(&self, id: &BaselineId) -> Result<bool> {
         self.inner
             .query_row(
@@ -795,8 +795,8 @@ impl Tx<'_> {
             .db()
     }
 
-    /// Cancella una baseline non referenziata e non protetta, con il suo disco
-    /// base e il suo stato firmware. Riferimenti: [`StorageError::Referenced`].
+    /// Deletes an unreferenced, unprotected baseline together with its base
+    /// disk and its firmware state. References: [`StorageError::Referenced`].
     pub fn delete_baseline(&self, id: &BaselineId) -> Result<()> {
         let b = self.baseline(id)?;
         self.inner
@@ -812,9 +812,9 @@ impl Tx<'_> {
         Ok(())
     }
 
-    // ---------------------------------------------------------- esecuzioni
+    // ---------------------------------------------------------------- runs
 
-    /// Registra l'inizio di un'esecuzione.
+    /// Records the start of a run.
     pub fn insert_run(&self, r: &RunRecord) -> Result<()> {
         self.inner
             .execute(
@@ -837,7 +837,7 @@ impl Tx<'_> {
         Ok(())
     }
 
-    /// Legge un'esecuzione.
+    /// Reads a run.
     pub fn run(&self, id: &RunId) -> Result<RunRecord> {
         self.inner
             .query_row(
@@ -853,7 +853,7 @@ impl Tx<'_> {
             })
     }
 
-    /// Esecuzioni non concluse di una VM (`ended_at` assente).
+    /// Unfinished runs of a VM (`ended_at` absent).
     pub fn open_runs(&self, vm: &VmId) -> Result<Vec<RunId>> {
         let mut st = self
             .inner
@@ -863,7 +863,7 @@ impl Tx<'_> {
         rows.collect::<rusqlite::Result<Vec<RunId>>>().db()
     }
 
-    /// Aggiorna lo stato di un'esecuzione non conclusa.
+    /// Updates the state of an unfinished run.
     pub fn set_run_state(&self, id: &RunId, state: RunState) -> Result<()> {
         self.inner
             .execute(
@@ -874,7 +874,7 @@ impl Tx<'_> {
         Ok(())
     }
 
-    /// Chiude un'esecuzione con causa di terminazione.
+    /// Closes a run with a termination cause.
     pub fn end_run(&self, id: &RunId, state: RunState, cause: TerminationCause) -> Result<()> {
         let n = self
             .inner
@@ -886,15 +886,15 @@ impl Tx<'_> {
             .db()?;
         if n == 0 {
             return Err(StorageError::StateConflict(format!(
-                "esecuzione {id} assente o già chiusa"
+                "run {id} missing or already closed"
             )));
         }
         Ok(())
     }
 
-    // ---------------------------------------------------------- operazioni
+    // ---------------------------------------------------------- operations
 
-    /// Registra un'operazione.
+    /// Records an operation.
     pub fn insert_operation(&self, o: &OperationRecord) -> Result<()> {
         self.inner
             .execute(
@@ -918,7 +918,7 @@ impl Tx<'_> {
         Ok(())
     }
 
-    /// Aggiorna lo stato di un'operazione.
+    /// Updates the state of an operation.
     pub fn set_operation_state(
         &self,
         id: &OperationId,
@@ -935,7 +935,7 @@ impl Tx<'_> {
         Ok(())
     }
 
-    /// Legge un'operazione.
+    /// Reads an operation.
     pub fn operation(&self, id: &OperationId) -> Result<OperationRecord> {
         self.inner
             .query_row(
@@ -965,9 +965,9 @@ impl Tx<'_> {
             })
     }
 
-    // ------------------------------------------------------ sessioni/grant
+    // ------------------------------------------------------ sessions/grants
 
-    /// Registra una sessione.
+    /// Records a session.
     pub fn insert_session(&self, s: &SessionRecord) -> Result<()> {
         self.inner
             .execute(
@@ -989,7 +989,7 @@ impl Tx<'_> {
         Ok(())
     }
 
-    /// Aggiorna lo stato di una sessione; gli stati finali registrano la fine.
+    /// Updates the state of a session; final states record the end time.
     pub fn set_session_state(
         &self,
         id: &SessionId,
@@ -1012,7 +1012,7 @@ impl Tx<'_> {
         Ok(())
     }
 
-    /// Legge una sessione.
+    /// Reads a session.
     pub fn session(&self, id: &SessionId) -> Result<SessionRecord> {
         self.inner
             .query_row(
@@ -1040,7 +1040,7 @@ impl Tx<'_> {
             })
     }
 
-    /// Registra un grant.
+    /// Records a grant.
     pub fn insert_grant(&self, g: &GrantRecord) -> Result<()> {
         self.inner
             .execute(
@@ -1062,7 +1062,7 @@ impl Tx<'_> {
         Ok(())
     }
 
-    /// Revoca tutti i grant di una sessione.
+    /// Revokes all grants of a session.
     pub fn revoke_grants(&self, session: &SessionId) -> Result<usize> {
         self.inner
             .execute(
@@ -1072,7 +1072,7 @@ impl Tx<'_> {
             .db()
     }
 
-    /// Grant di una sessione.
+    /// Grants of a session.
     pub fn grants_of_session(&self, session: &SessionId) -> Result<Vec<GrantRecord>> {
         let mut st = self
             .inner
@@ -1109,11 +1109,11 @@ impl Tx<'_> {
 
     // --------------------------------------------------------------- audit
 
-    /// Aggiunge un evento di audit e ne restituisce l'ordine monotono.
+    /// Appends an audit event and returns its monotonic sequence number.
     pub fn append_audit(&self, e: &AuditEvent) -> Result<i64> {
         let outcome = e
             .outcome
-            .ok_or_else(|| StorageError::Constraint("audit senza esito".into()))?;
+            .ok_or_else(|| StorageError::Constraint("audit event without outcome".into()))?;
         self.inner
             .execute(
                 "INSERT INTO audit(at, action, outcome, vm_id, run_id, session_id, operation_id,
@@ -1134,7 +1134,7 @@ impl Tx<'_> {
         Ok(self.inner.last_insert_rowid())
     }
 
-    /// Eventi di audit con `seq > after`, in ordine.
+    /// Audit events with `seq > after`, in order.
     pub fn audit_since(&self, after: i64, limit: u32) -> Result<Vec<AuditRecord>> {
         let mut st = self
             .inner
@@ -1163,9 +1163,9 @@ impl Tx<'_> {
         rows.collect::<rusqlite::Result<Vec<_>>>().db()
     }
 
-    // ------------------------------------------------------------ artefatti
+    // ----------------------------------------------------------- artifacts
 
-    /// Registra un artefatto.
+    /// Records an artifact.
     pub fn insert_artifact(&self, a: &ArtifactRecord) -> Result<()> {
         self.inner
             .execute(
@@ -1187,7 +1187,7 @@ impl Tx<'_> {
         Ok(())
     }
 
-    /// Cancella la riga di un artefatto.
+    /// Deletes the row of an artifact.
     pub fn delete_artifact(&self, id: &ArtifactId) -> Result<()> {
         self.inner
             .execute(

@@ -1,35 +1,35 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "TestOutcome",
-  "description": "Esito di un test (ROADMAP 9). Il completamento della conversazione non produce\nautomaticamente `passed`.",
+  "description": "Outcome of a test (ROADMAP 9). Completing the conversation does not\nautomatically produce `passed`.",
   "oneOf": [
     {
-      "description": "Criteri verificati.",
+      "description": "Criteria verified.",
       "type": "string",
       "const": "passed"
     },
     {
-      "description": "Criteri non soddisfatti.",
+      "description": "Criteria not met.",
       "type": "string",
       "const": "failed"
     },
     {
-      "description": "Nessun verificatore affidabile o evidenze insufficienti.",
+      "description": "No reliable verifier or insufficient evidence.",
       "type": "string",
       "const": "inconclusive"
     },
     {
-      "description": "Annullato dall'utente.",
+      "description": "Cancelled by the user.",
       "type": "string",
       "const": "cancelled"
     },
     {
-      "description": "Tempo esaurito.",
+      "description": "Time ran out.",
       "type": "string",
       "const": "timed_out"
     },
     {
-      "description": "Guasto dell'infrastruttura, distinto dal fallimento del modello.",
+      "description": "Infrastructure failure, distinct from a model failure.",
       "type": "string",
       "const": "infrastructure_error"
     }

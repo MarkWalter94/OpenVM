@@ -1,23 +1,23 @@
 use std::fmt;
 
-/// Errori del client RFB. Gli errori di protocollo chiudono la connessione.
+/// RFB client errors. Protocol errors close the connection.
 #[derive(Debug)]
 pub enum Error {
-    /// Errore di I/O sul trasporto.
+    /// I/O error on the transport.
     Io(std::io::Error),
-    /// Errore TLS (handshake, verifica del certificato, configurazione).
+    /// TLS error (handshake, certificate verification, configuration).
     Tls(String),
-    /// Il server ha inviato dati non conformi o non previsti.
+    /// The server sent non-conforming or unexpected data.
     Protocol(String),
-    /// Il server richiede una versione o una funzione non supportata.
+    /// The server requires an unsupported version or feature.
     Unsupported(String),
-    /// Il server ha rifiutato la connessione o l'autenticazione, con motivo.
+    /// The server refused the connection or authentication, with a reason.
     Refused(String),
-    /// Il canale non è protetto: sicurezza `None` offerta su TCP in chiaro.
+    /// The channel is not protected: security `None` offered on cleartext TCP.
     InsecureChannel(String),
-    /// Configurazione del client non valida (percorsi, certificati).
+    /// Invalid client configuration (paths, certificates).
     Config(String),
-    /// Connessione chiusa (dal server o da [`crate::Session::stop`]).
+    /// Connection closed (by the server or by [`crate::Session::stop`]).
     Closed,
 }
 
@@ -26,12 +26,12 @@ impl fmt::Display for Error {
         match self {
             Self::Io(e) => write!(f, "I/O: {e}"),
             Self::Tls(e) => write!(f, "TLS: {e}"),
-            Self::Protocol(e) => write!(f, "protocollo: {e}"),
-            Self::Unsupported(e) => write!(f, "non supportato: {e}"),
-            Self::Refused(e) => write!(f, "rifiutato dal server: {e}"),
-            Self::InsecureChannel(e) => write!(f, "canale non protetto: {e}"),
-            Self::Config(e) => write!(f, "configurazione: {e}"),
-            Self::Closed => write!(f, "connessione chiusa"),
+            Self::Protocol(e) => write!(f, "protocol: {e}"),
+            Self::Unsupported(e) => write!(f, "unsupported: {e}"),
+            Self::Refused(e) => write!(f, "refused by the server: {e}"),
+            Self::InsecureChannel(e) => write!(f, "unprotected channel: {e}"),
+            Self::Config(e) => write!(f, "configuration: {e}"),
+            Self::Closed => write!(f, "connection closed"),
         }
     }
 }
