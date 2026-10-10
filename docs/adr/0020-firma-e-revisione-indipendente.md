@@ -1,9 +1,8 @@
 # ADR-0020 — Responsabilità di firma e revisione indipendente
 
-- Stato: Proposta
-- Data: 2026-10-09
-- Responsabile: da assegnare
-- Da chiudere entro: F0 (verifica della disponibilità e assegnazione delle responsabilità)
+- Stato: Accettata (2026-10-10): **firma del codice e revisione indipendente non disponibili**
+- Data: 2026-10-09; decisione: 2026-10-10
+- Responsabile: responsabile del progetto
 
 ## Contesto
 
@@ -23,6 +22,18 @@ Criteri:
 1. Disponibilità confermata per iscritto, non presunta.
 2. Separazione tra chi sviluppa i boundary e chi li rivede.
 3. Chiavi di firma fuori dai runner che eseguono guest non fidati.
+
+### Decisione del 2026-10-10
+
+Dichiarazione del responsabile del progetto (azione U-7): **non si firma il codice** e **non c'è un revisore indipendente** disponibile.
+
+Conseguenze (roadmap sezione 10 F6, sezione 14 e tabella dei rischi):
+
+- F0 si chiude su questo punto: la disponibilità è verificata (negativa) e registrata, non presunta.
+- Sviluppo e prove F1–F5 non sono bloccati.
+- **La pubblicazione pubblica prevista in F6 resta bloccata** finché mancano firma Windows con checksum verificabili e revisione indipendente mirata su boundary MCP, QMP, path, console e processi: la roadmap non ammette di dichiarare una firma inesistente né di saltare la revisione.
+- Fino ad allora gli artefatti sono distribuiti solo come build non firmate per uso interno, con checksum SHA-256 pubblicati accanto e la dicitura "non firmato".
+- Nessuna chiave di firma esiste quindi nessuna chiave è custodita (criterio 3 soddisfatto per assenza).
 
 ## Alternative considerate
 

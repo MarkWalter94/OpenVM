@@ -1,6 +1,8 @@
-//! Impostazioni della UI salvate su file (JSON): sorte delle VM se la UI
-//! termina senza arresto controllato (ADR-0015 parte B) e backend di
-//! rendering preferito (ADR-0014; vale dal prossimo avvio).
+//! Impostazioni della UI, modificate solo dalla pagina Settings e salvate
+//! dall'app in un file JSON (l'utente non lo modifica a mano): supervisor
+//! (catalogo, distribuzione QEMU, avvio automatico), sorte delle VM se la UI
+//! termina senza arresto controllato (ADR-0015 parte B), backend di rendering
+//! preferito (ADR-0014; vale dal prossimo avvio).
 //!
 //! Il file vive nel profilo utente (`%LOCALAPPDATA%\LightVM\impostazioni-ui.json`
 //! su Windows, `$XDG_CONFIG_HOME/lightvm/impostazioni-ui.json` o
@@ -71,13 +73,182 @@ impl PreferenzaRendering {
 }
 
 /// Impostazioni persistenti della UI.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Impostazioni {
     /// Sorte delle VM alla perdita della UI (predefinita: terminarle).
     pub politica_perdita_ui: ParentLossPolicy,
     /// Backend di rendering preferito (vale dal prossimo avvio).
     pub rendering: PreferenzaRendering,
+    /// Avvia il supervisor all'apertura di LightVM.
+    pub avvio_supervisor: bool,
+    /// Cartella del catalogo; `None` = predefinita nel profilo utente.
+    pub catalogo: Option<PathBuf>,
+    /// Distribuzione QEMU approvata; `None` = nessuna (avvio delle VM
+    /// rifiutato dal supervisor con un messaggio chiaro).
+    pub qemu_dir: Option<PathBuf>,
+}
+
+impl Default for Impostazioni {
+    fn default() -> Self {
+        Self {
+            politica_perdita_ui: ParentLossPolicy::default(),
+            rendering: PreferenzaRendering::default(),
+            avvio_supervisor: true,
+            catalogo: None,
+            qemu_dir: None,
+        }
+    }
+}
+
+/// Catalogo predefinito nel profilo utente.
+pub fn catalogo_predefinito() -> Option<PathBuf> {
+    percorso_predefinito().and_then(|f| f.parent().map(|d| d.join("catalogo")))
+}
+
+impl Impostazioni {
+    /// Catalogo effettivo (scelto o predefinito).
+    pub fn catalogo_effettivo(&self) -> Option<PathBuf> {
+        self.catalogo.clone().or_else(catalogo_predefinito)
+    }
+}
+
+/// Azioni richieste dalla sezione Supervisor; le esegue l'app (il selettore
+/// di cartelle è nativo e non è disponibile nei test headless).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AzioneSupervisor {
+    /// Scegliere la cartella del catalogo.
+    ScegliCatalogo,
+    /// Tornare al catalogo predefinito.
+    CatalogoPredefinito,
+    /// Scegliere la cartella della distribuzione QEMU.
+    ScegliQemu,
+    /// Nessuna distribuzione QEMU.
+    RimuoviQemu,
+    /// Applicare le impostazioni riavviando il supervisor.
+    Riavvia,
+    /// Arrestare il supervisor.
+    Arresta,
+}
+
+/// Stato del supervisor mostrato nella sezione.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StatoSupervisorUi {
+    /// Testo dello stato (in esecuzione, non avviato, errore).
+    pub descrizione: String,
+    /// Il supervisor è in esecuzione.
+    pub attivo: bool,
+    /// VM accese che un riavvio arresterebbe.
+    pub vm_accese: usize,
+    /// Le impostazioni del supervisor differiscono da quelle in uso.
+    pub da_applicare: bool,
+    /// Il selettore di cartelle è disponibile su questa piattaforma.
+    pub selettore: bool,
+}
+
+fn mostra_percorso(p: Option<&Path>, vuoto: &str) -> String {
+    p.map_or_else(|| vuoto.to_owned(), |p| p.display().to_string())
+}
+
+/// Sezione Supervisor della pagina Settings: percorsi mostrati come testo non
+/// modificabile, scelti con il selettore di cartelle nativo; avvio automatico;
+/// riavvio per applicare. Restituisce l'azione richiesta e, separatamente, se
+/// un valore modificabile qui (avvio automatico) è cambiato.
+pub fn supervisor_ui(
+    ui: &mut egui::Ui,
+    imp: &mut Impostazioni,
+    stato: &StatoSupervisorUi,
+) -> (Option<AzioneSupervisor>, bool) {
+    let mut azione = None;
+    ui.label(egui::RichText::new("Supervisor").strong());
+    ui.label(format!("Stato: {}", stato.descrizione));
+    egui::Grid::new("lightvm_impostazioni_supervisor")
+        .num_columns(3)
+        .spacing([12.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("Catalogo VM:");
+            ui.label(mostra_percorso(
+                imp.catalogo_effettivo().as_deref(),
+                "non determinabile",
+            ));
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(stato.selettore, egui::Button::new("Sfoglia…"))
+                    .clicked()
+                {
+                    azione = Some(AzioneSupervisor::ScegliCatalogo);
+                }
+                if ui
+                    .add_enabled(imp.catalogo.is_some(), egui::Button::new("Predefinito"))
+                    .clicked()
+                {
+                    azione = Some(AzioneSupervisor::CatalogoPredefinito);
+                }
+            });
+            ui.end_row();
+            ui.label("Cartella di QEMU:");
+            ui.label(mostra_percorso(
+                imp.qemu_dir.as_deref(),
+                "non impostata: le VM non si possono avviare",
+            ));
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(stato.selettore, egui::Button::new("Sfoglia… "))
+                    .on_hover_text("Cartella con qemu-system-x86_64 e qemu-img approvati (hash verificati dal supervisor)")
+                    .clicked()
+                {
+                    azione = Some(AzioneSupervisor::ScegliQemu);
+                }
+                if ui
+                    .add_enabled(imp.qemu_dir.is_some(), egui::Button::new("Nessuna"))
+                    .clicked()
+                {
+                    azione = Some(AzioneSupervisor::RimuoviQemu);
+                }
+            });
+            ui.end_row();
+        });
+    let cambiato = ui
+        .checkbox(
+            &mut imp.avvio_supervisor,
+            "Avvia il supervisor all'apertura di LightVM",
+        )
+        .changed();
+    if !stato.selettore {
+        ui.label("Selettore di cartelle non disponibile su questa piattaforma: usare --catalogo e --qemu-dir.");
+    }
+    ui.horizontal(|ui| {
+        let testo = if stato.attivo {
+            "Applica e riavvia il supervisor"
+        } else {
+            "Avvia il supervisor"
+        };
+        if ui.button(testo).clicked() {
+            azione = Some(AzioneSupervisor::Riavvia);
+        }
+        if ui
+            .add_enabled(stato.attivo, egui::Button::new("Arresta il supervisor"))
+            .clicked()
+        {
+            azione = Some(AzioneSupervisor::Arresta);
+        }
+    });
+    if stato.da_applicare && stato.attivo {
+        ui.colored_label(
+            ui.visuals().warn_fg_color,
+            "Modifiche non ancora applicate: riavviare il supervisor.",
+        );
+    }
+    if stato.attivo && stato.vm_accese > 0 {
+        ui.colored_label(
+            ui.visuals().warn_fg_color,
+            format!(
+                "Riavvio o arresto spengono le {} VM accese (arresto controllato).",
+                stato.vm_accese
+            ),
+        );
+    }
+    (azione, cambiato)
 }
 
 /// Percorso predefinito nel profilo utente, se determinabile.
@@ -110,7 +281,8 @@ impl Impostazioni {
             }
         };
         match serde_json::from_str::<Self>(&testo) {
-            Ok(i) if i.politica_perdita_ui == ParentLossPolicy::KeepVms && !KEEP_VMS_DISPONIBILE => (
+            Ok(i) if i.politica_perdita_ui == ParentLossPolicy::KeepVms
+                && !KEEP_VMS_DISPONIBILE => (
                 Impostazioni {
                     politica_perdita_ui: ParentLossPolicy::default(),
                     ..i
@@ -260,6 +432,9 @@ mod tests {
         let i = Impostazioni {
             politica_perdita_ui: ParentLossPolicy::ShutdownVms { powerdown_s: 30 },
             rendering: PreferenzaRendering::Wgpu,
+            avvio_supervisor: false,
+            catalogo: Some(PathBuf::from(r"D:\vm\catalogo")),
+            qemu_dir: Some(PathBuf::from(r"D:\qemu")),
         };
         i.salva(&p).unwrap();
         assert_eq!(Impostazioni::carica(&p), (i, None));

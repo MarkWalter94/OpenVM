@@ -35,11 +35,11 @@ La decisione diventa efficace con la conferma dell'utente (U-5) e con la chiusur
 
 | ID | Pendente | Chi |
 | --- | --- | --- |
-| P-1 | Conferma che in F0 non è disponibile un host Linux fisico con KVM | utente |
+| P-1 | Conferma che in F0 non è disponibile un host Linux fisico con KVM | **chiuso il 2026-10-10**: confermato (U-5); server Linux fisico reperito dopo, per R2a; ADR-0016 accettata |
 | P-2 | Crash della UI su Windows (UI che avvia il supervisor come processo separato); decisione ADR-0015 parte B | **chiuso il 2026-10-10**: ADR-0015 B accettata (impostazione, predefinito terminare le VM); prova `F1-09` verificata con entrambe le politiche |
-| P-4 | Tastiera fisica → winit → egui → QMP, inclusi AltGr, Ctrl+C/V, tastierino | utente con sviluppo |
-| P-5 | Test con secondo utente locale sui socket privati, oppure decisione di registrarlo come limite | utente |
-| P-6 | Disponibilità di firma del codice e revisione indipendente (ADR-0020) | utente |
+| P-4 | Tastiera fisica → winit → egui → QMP, inclusi AltGr, Ctrl+C/V, tastierino | utente con sviluppo: il responsabile lo esegue a fine sviluppo F1 |
+| P-5 | Test con secondo utente locale sui socket privati, oppure decisione di registrarlo come limite | indicazione del responsabile: eseguirlo dentro una VM. Parte Linux (socket Unix, `SO_PEERCRED`) in una VM Ubuntu con due utenti, valida solo **[processi]**; parte Windows (named pipe con ACL) richiede un guest Windows o un secondo account sull'host: da definire |
+| P-6 | Disponibilità di firma del codice e revisione indipendente (ADR-0020) | **chiuso il 2026-10-10**: non disponibili (U-7); pubblicazione F6 bloccata finché manca, ADR-0020 accettata |
 | P-7 | Dettagli del supporto dati approvato (ADR-0008) | sviluppo |
 
 ## Lavoro F1 avviato in parallelo
@@ -85,9 +85,9 @@ Punti critici emersi dal riesame del 2026-10-10:
 | --- | --- | --- | --- | --- |
 | I-1 | QEMU assente all'avvio | risolto | QEMU 11.1.0 installato in modo portabile con provenienza verificata | `F0-02` §2; ADR-0010 |
 | I-2 | Stato di WHPX non verificato | risolto con deviazione | WHPX funzionante; feature `HypervisorPlatform` riportata *Disabled* via CIM (D-6); `-cpu host` non avvia OVMF (D-1) | `F0-02` §1, §9 |
-| I-3 | Host Linux fisico con KVM non disponibile | aperto | esito proposto "verificato solo Windows" | `F0-07`; ADR-0016 |
+| I-3 | Host Linux fisico con KVM non disponibile | chiuso per F0 | esito "verificato solo Windows" (ADR-0016); server fisico per R2a reperito in seguito | `F0-07`; ADR-0016 |
 | I-4 | Avvisi di canonicalizzazione del percorso | non riprodotti | nessuna azione finché non ricompaiono | `F0-01` §8 |
-| I-5 | Disponibilità di firma e revisione indipendente non verificata | aperto | non blocca F1–F5; blocca la pubblicazione in F6; decisione da registrare in F0 (P-6) | ADR-0020 |
+| I-5 | Firma del codice e revisione indipendente non disponibili | dichiarato (2026-10-10) | non blocca F1–F5; **blocca la pubblicazione in F6** | ADR-0020 |
 | I-6 | Comportamento di eframe senza accelerazione grafica (RDP) | aperto in parte | WARP verificato come modalità degradata; RDP non eseguito, limite dichiarato | `F0-01` §6; ADR-0014 |
 | I-7 | Build MSVC richiede l'ambiente di Build Tools 2022 caricato esplicitamente | aperto | sviluppo e CI devono impostare l'ambiente; correzione locale a scelta dell'utente | `F0-01` §4.1 |
 | I-8 | Nessun secondo account locale per i test negativi multiutente | aperto | P-5 | `F0-04` §6 |
@@ -104,12 +104,12 @@ Elenco completo con origine in `docs/verification/F0-09-riesame-prove.md` §8.
 | --- | --- | --- |
 | U-1 | Da amministratore: verificare ed eventualmente abilitare la feature `HypervisorPlatform`, poi ripetere il probe e `-cpu host` | facoltativa (D-1, D-6) |
 | U-2 | Fornire un host Linux fisico Ubuntu LTS con KVM, se disponibile | alternativa a U-5 |
-| U-3 | Creare un secondo account locale non amministratore per i test sui socket privati, o decidere di registrare il limite | P-5 |
+| U-3 | Creare un secondo account locale non amministratore per i test sui socket privati, o decidere di registrare il limite | P-5 (risposta: "in una VM", vedi P-5) |
 | U-4 | Prova con tastiera fisica a sessione sbloccata | P-4 |
-| U-5 | Confermare l'esito "verificato solo Windows" | P-1 |
+| U-5 | Confermare l'esito "verificato solo Windows" | P-1 — **fatto il 2026-10-10** |
 | U-6 | In WSL: `sudo apt install build-essential pkg-config` (ed eventualmente `libxkbcommon-x11-0`) | build Linux standard (non bloccante) |
-| U-7 | Dichiarare responsabili di firma del codice e revisione indipendente, o la loro indisponibilità | P-6 |
+| U-7 | Dichiarare responsabili di firma del codice e revisione indipendente, o la loro indisponibilità | P-6 — **fatto il 2026-10-10**: nessuno |
 | U-8 | Facoltativa: smoke di `lightvm-desktop` in sessione RDP verso l'host | limite L-1 |
-| U-9 | Decidere la correzione dell'ambiente MSVC locale | I-7 |
+| U-9 | Decidere la correzione dell'ambiente MSVC locale | I-7 — sull'host attuale aggiunto il componente MSVC x64 a VS 2022 (2026-10-10) |
 | U-10 | Facoltativa, da amministratore: interrogare le quote NTFS | ADR-0017 |
 | U-11 | Facoltativa e non valida per la matrice: probe KVM annidato in WSL | solo integrazione |
