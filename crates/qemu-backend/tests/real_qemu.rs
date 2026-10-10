@@ -1412,3 +1412,96 @@ fn reale_f1_17_boot_da_disco_e_arresto_acpi() {
         "il guest non si è spento con ACPI"
     );
 }
+
+/// Tempo CPU totale (secondi) di un processo, letto dal sistema operativo.
+fn cpu_secondi(pid: u32) -> f64 {
+    let out = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &format!("(Get-Process -Id {pid}).TotalProcessorTime.TotalSeconds"),
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().replace(',', "."))
+        .unwrap_or_default();
+    out.parse().unwrap_or(f64::NAN)
+}
+
+/// ADR-0017 / F1-10: effetto del tetto CPU del Job Object su un guest reale.
+/// Boot di Ubuntu dal disco di F1-17 (2 vCPU) per 60 s senza tetto e con il
+/// tetto minimo (5 % dei vCPU = 0,1 core): il boot usa in media circa 0,2
+/// core (prima esecuzione: un tetto al 25 % non veniva mai raggiunto). Il
+/// tempo CPU di QEMU con il tetto deve restare vicino alla quota concessa e
+/// ben sotto quello senza tetto.
+#[test]
+#[ignore = "richiede QEMU reale e il disco di F1-17: impostare LIGHTVM_QEMU_DIR"]
+fn reale_effetto_tetto_cpu_durante_il_boot() {
+    let _g = SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let lab = require_lab!();
+    let mut log = Log::new(&lab, "tetto-cpu");
+    let paths = lab_paths(&lab, &mut log);
+    let caps = probe_caps(&lab, &paths, &mut log);
+    let (disco, vars) = disco_f1_17(&lab, &paths);
+    let fisso = DiscoFisso {
+        base: &paths,
+        disco,
+        vars,
+    };
+    let logical = u32::try_from(
+        std::thread::available_parallelism()
+            .map(std::num::NonZero::get)
+            .unwrap_or(1),
+    )
+    .unwrap();
+    let rt = rt();
+    let mut misura = |cpu_rate: Option<u32>| -> f64 {
+        let run_id = RunId::new_v7();
+        paths.prepare_run(&run_id);
+        let mut s = spec(&caps, &paths, run_id);
+        s.cpu = caps.cpu_model("Skylake-Client-v4").unwrap();
+        s.vcpus = 2;
+        s.memory_mib = 4096;
+        s.install_media = None;
+        s.limits = qemu_backend::JobLimits {
+            cpu_rate,
+            job_memory_bytes: None,
+        };
+        let run = rt
+            .block_on(QemuRun::start(&caps, &s, &fisso, RunConfig::default()))
+            .expect("avvio dal disco");
+        let pid = run.identity().pid;
+        let c0 = cpu_secondi(pid);
+        std::thread::sleep(Duration::from_secs(60));
+        let c1 = cpu_secondi(pid);
+        let id = run.identity();
+        let _ = rt.block_on(run.emergency_stop(Duration::from_secs(10)));
+        let _ = rt.block_on(run.close());
+        assert_no_orphan(&id);
+        let usati = c1 - c0;
+        log.line(format!(
+            "tetto {cpu_rate:?}: {usati:.1} s di CPU in 60 s ({:.2} core medi)",
+            usati / 60.0
+        ));
+        usati
+    };
+    let libero = misura(None);
+    // 5 % di 2 vCPU = 0,1 core: quota della macchina in centesimi di punto.
+    let rate = (2 * 5 * 100 / logical).max(1);
+    let con_tetto = misura(Some(rate));
+    let quota_core = f64::from(rate) / 10_000.0 * f64::from(logical);
+    log.line(format!(
+        "quota concessa {quota_core:.2} core; senza tetto {libero:.1} s, con tetto {con_tetto:.1} s"
+    ));
+    assert!(
+        con_tetto <= quota_core * 60.0 * 1.25,
+        "tempo CPU con tetto oltre la quota: {con_tetto:.1} s"
+    );
+    assert!(
+        libero > con_tetto * 1.5,
+        "il tetto non riduce il consumo: senza {libero:.1} s, con {con_tetto:.1} s"
+    );
+}
