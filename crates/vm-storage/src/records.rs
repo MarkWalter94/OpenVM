@@ -195,6 +195,8 @@ pub struct OperationRecord {
     pub vm_id: VmId,
     /// Esecuzione.
     pub run_id: Option<RunId>,
+    /// Sessione agente richiedente (`None` per l'utente).
+    pub session_id: Option<SessionId>,
     /// Tipo (testo stabile definito dal core).
     pub kind: String,
     /// Stato.
@@ -887,8 +889,8 @@ impl Tx<'_> {
         self.inner
             .execute(
                 "INSERT INTO operations(operation_id, vm_id, run_id, kind, state, revision,
-                                        error_code, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                                        error_code, created_at, updated_at, session_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     o.operation_id.sql(),
                     o.vm_id.sql(),
@@ -898,7 +900,8 @@ impl Tx<'_> {
                     to_i64(o.revision)?,
                     o.error_code,
                     o.created_at,
-                    o.updated_at
+                    o.updated_at,
+                    o.session_id.sql()
                 ],
             )
             .db()?;
@@ -927,13 +930,14 @@ impl Tx<'_> {
         self.inner
             .query_row(
                 "SELECT operation_id, vm_id, run_id, kind, state, revision, error_code, created_at,
-                        updated_at FROM operations WHERE operation_id = ?1",
+                        updated_at, session_id FROM operations WHERE operation_id = ?1",
                 params![id.sql()],
                 |r| {
                     Ok(OperationRecord {
                         operation_id: idc(r, 0)?,
                         vm_id: idc(r, 1)?,
                         run_id: idc(r, 2)?,
+                        session_id: idc(r, 9)?,
                         kind: r.get(3)?,
                         state: r.get(4)?,
                         revision: to_u64(r.get(5)?),

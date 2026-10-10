@@ -541,3 +541,169 @@ fn e2e_real_qemu_create_start_status_stop() {
         eprintln!("righe di audit: {}", events.len());
     });
 }
+
+/// Processi `qemu-system-x86_64.exe` figli di questo processo (il backend
+/// gira nel servizio in-process): PID.
+#[cfg(windows)]
+fn qemu_children() -> Vec<u32> {
+    let cmd = format!(
+        "Get-CimInstance Win32_Process -Filter \"ParentProcessId={} and Name='qemu-system-x86_64.exe'\" | \
+         ForEach-Object {{ $_.ProcessId }}",
+        std::process::id()
+    );
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &cmd])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    out.lines().filter_map(|l| l.trim().parse().ok()).collect()
+}
+
+/// Criterio di uscita F1 attraverso il servizio (non solo le API del
+/// backend): IPC → core → SQLite → `qemu-backend` → QEMU reale, almeno 20
+/// cicli start/stop sulla stessa VM (disco principale creato al primo avvio),
+/// arresto ordinario alternato con `quit` diretto, Emergency Stop nell'ultimo
+/// ciclo, nessun processo QEMU residuo dopo ogni ciclo, audit completo.
+/// `LIGHTVM_E2E_QEMU_DIR` obbligatoria; `LIGHTVM_F1_CYCLES` facoltativa (20).
+#[cfg(windows)]
+#[test]
+#[ignore = "richiede QEMU approvato e un acceleratore (LIGHTVM_E2E_QEMU_DIR)"]
+fn e2e_real_qemu_cicli_attraverso_il_servizio() {
+    use lightvm_service::adapters::backend::{QemuSetup, probe};
+    use qemu_backend::ShutdownPolicy;
+
+    let qemu_dir = PathBuf::from(
+        std::env::var_os("LIGHTVM_E2E_QEMU_DIR").expect("LIGHTVM_E2E_QEMU_DIR non impostata"),
+    );
+    let cycles: usize = std::env::var("LIGHTVM_F1_CYCLES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(20);
+    let dir = temp_dir("e2e-cicli");
+    let private_root = std::env::temp_dir().join(format!("lvm-cic-{}", std::process::id()));
+    let store = SqliteStore::open(&dir).unwrap();
+    let mut setup = QemuSetup::new(qemu_dir, store.root(), private_root);
+    // Il firmware non risponde all'ACPI: attesa breve, poi `quit`.
+    setup.stop_policy = ShutdownPolicy {
+        powerdown_timeout: Duration::from_secs(1),
+        quit_timeout: Duration::from_secs(10),
+        kill_timeout: Duration::from_secs(10),
+    };
+    let (host, vm_backend, capacity) = probe(setup).expect("probe di QEMU");
+    assert!(
+        capacity.accelerator_available,
+        "acceleratore non disponibile"
+    );
+    let audit = FileAuditSink::open(&audit_path(&dir)).unwrap();
+    let inspector = ManagedMediaInspector::new(store.root());
+    let engine =
+        CoreEngine::new(store, audit, vm_backend, inspector, core_config(capacity)).unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let dir2 = dir.clone();
+    rt.block_on(async move {
+        let (handle, ui) = start(config(&dir2), Box::new(engine), Box::new(host))
+            .await
+            .unwrap();
+        let svc = Svc {
+            handle,
+            ui,
+            calls: Calls::default(),
+        };
+        let mut c = connect_ui(&svc).await;
+        let mut cfg = sample_config("e2e-cicli");
+        cfg.vcpus = 1;
+        cfg.memory_mib = 1024;
+        cfg.disk_gib = 8;
+        let vm_id = match c.request(Request::CreateVm { config: cfg }).await.unwrap() {
+            ServerMessage::Response {
+                result: ResponseBody::VmCreated { vm },
+                ..
+            } => vm.id,
+            other => panic!("{other:?}"),
+        };
+        let mut avvii = Vec::new();
+        let mut arresti = Vec::new();
+        for i in 1..=cycles {
+            let t = std::time::Instant::now();
+            expect_succeeded(&submit(&mut c, vm_id, VmAction::Start).await);
+            let t_avvio = t.elapsed();
+            assert_eq!(state_of(&mut c, vm_id).await, VmState::Running, "ciclo {i}");
+            let figli = qemu_children();
+            assert_eq!(figli.len(), 1, "ciclo {i}: processi QEMU {figli:?}");
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let t = std::time::Instant::now();
+            let modo = if i == cycles {
+                match c.request(Request::EmergencyStop).await.unwrap() {
+                    ServerMessage::Response {
+                        result: ResponseBody::EmergencyStop(r),
+                        ..
+                    } => {
+                        assert!(r.completed, "ciclo {i}: {r:?}");
+                        assert_eq!(r.processes_terminated, 1, "ciclo {i}");
+                    }
+                    other => panic!("{other:?}"),
+                }
+                "emergency_stop"
+            } else if i % 2 == 0 {
+                expect_succeeded(&submit(&mut c, vm_id, VmAction::Stop).await);
+                "stop"
+            } else {
+                expect_succeeded(&submit(&mut c, vm_id, VmAction::ForceStop).await);
+                "force_stop"
+            };
+            let mut fermo = false;
+            for _ in 0..200 {
+                if state_of(&mut c, vm_id).await == VmState::Stopped {
+                    fermo = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            let t_arresto = t.elapsed();
+            assert!(fermo, "ciclo {i}: VM non arrestata ({modo})");
+            let residui = qemu_children();
+            assert!(residui.is_empty(), "ciclo {i}: QEMU residui {residui:?}");
+            eprintln!(
+                "ciclo {i}: avvio {:.1} ms, {modo} {:.1} ms, pid {:?}, residui 0",
+                t_avvio.as_secs_f64() * 1000.0,
+                t_arresto.as_secs_f64() * 1000.0,
+                figli
+            );
+            avvii.push(t_avvio.as_secs_f64() * 1000.0);
+            arresti.push((modo, t_arresto.as_secs_f64() * 1000.0));
+        }
+        let disk = dir2.join("vms").join(vm_id.to_string()).join("primary.qcow2");
+        assert!(disk.exists(), "disco principale assente");
+        svc.handle.shutdown().await;
+        let events = read_audit(&dir2);
+        let n = |a: AuditAction| {
+            events
+                .iter()
+                .filter(|e| e.action == a && e.outcome == AuditOutcome::Succeeded)
+                .count()
+        };
+        avvii.sort_by(f64::total_cmp);
+        eprintln!(
+            "RIEPILOGO {cycles} cicli attraverso il servizio: avvio ms min {:.1} mediana {:.1} max {:.1}; \
+             audit succeeded: vm_start {}, vm_stop (anche force_stop) {}, emergency_stop {}; arresti {arresti:?}",
+            avvii[0],
+            avvii[avvii.len() / 2],
+            avvii[avvii.len() - 1],
+            n(AuditAction::VmStart),
+            n(AuditAction::VmStop),
+            n(AuditAction::EmergencyStop),
+        );
+        assert_eq!(n(AuditAction::VmStart), cycles);
+        assert_eq!(n(AuditAction::VmStop), cycles - 1);
+        assert!(cycles >= 20 || std::env::var("LIGHTVM_F1_CYCLES").is_ok());
+    });
+    assert!(
+        qemu_children().is_empty(),
+        "QEMU residui dopo l'arresto del servizio"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

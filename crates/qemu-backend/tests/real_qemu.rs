@@ -886,3 +886,78 @@ fn reale_cicli_start_stop() {
     ));
     assert!(cycles >= 20 || std::env::var("LIGHTVM_F1_CYCLES").is_ok());
 }
+
+/// F1-17 (D-1, ADR-0011 criterio 2): boot della ISO live con un modello CPU
+/// nominale più ricco di `qemu64` (`LIGHTVM_F1_CPU`, predefinito
+/// `Skylake-Client-v4`), 2 vCPU, 4096 MiB. Uno screendump ogni 10 s per al
+/// massimo `LIGHTVM_F1_BOOT_S` secondi (predefinito 240), salvati in
+/// `lab/logs/f1-03/`. Il test verifica solo che il processo resti vivo e che
+/// le immagini non siano nere; l'arrivo al desktop si giudica dalle immagini
+/// e si registra nel file di verifica.
+#[test]
+#[ignore = "richiede QEMU reale: impostare LIGHTVM_QEMU_DIR"]
+fn reale_boot_live_cpu_nominale() {
+    let _g = SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let lab = require_lab!();
+    let cpu_name = std::env::var("LIGHTVM_F1_CPU").unwrap_or_else(|_| "Skylake-Client-v4".into());
+    let boot_s: u64 = std::env::var("LIGHTVM_F1_BOOT_S")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(240);
+    let mut log = Log::new(&lab, "boot-cpu");
+    let paths = lab_paths(&lab, &mut log);
+    let caps = probe_caps(&lab, &paths, &mut log);
+    let cpu = caps
+        .cpu_model(&cpu_name)
+        .unwrap_or_else(|e| panic!("modello {cpu_name}: {e}"));
+    let run_id = RunId::new_v7();
+    paths.prepare_run(&run_id);
+    let mut s = spec(&caps, &paths, run_id);
+    s.cpu = cpu;
+    s.memory_mib = 4096;
+    let rt = rt();
+    let t0 = Instant::now();
+    let run = rt
+        .block_on(QemuRun::start(&caps, &s, &paths, RunConfig::default()))
+        .unwrap_or_else(|e| panic!("avvio con {cpu_name}: {e}"));
+    log.line(format!(
+        "avvio con -cpu {cpu_name}: {:?}, pid {}",
+        t0.elapsed(),
+        run.identity().pid
+    ));
+    let mut n = 0u32;
+    while t0.elapsed() < Duration::from_secs(boot_s) {
+        std::thread::sleep(Duration::from_secs(10));
+        assert_eq!(
+            run.state(),
+            ProcessState::Running,
+            "QEMU uscito durante il boot con {cpu_name}"
+        );
+        let (shot, img) = rt.block_on(run.screenshot_rgb()).unwrap();
+        n += 1;
+        let png = lab.logs.join(format!(
+            "{}-boot-{cpu_name}-{:03}s.png",
+            lab.session,
+            t0.elapsed().as_secs()
+        ));
+        std::fs::write(&png, &shot.png).unwrap();
+        log.line(format!(
+            "t={:>4}s {}x{} non nero {:.2}% sha256 {} -> {}",
+            t0.elapsed().as_secs(),
+            shot.geometry.width,
+            shot.geometry.height,
+            img.non_black_percent(),
+            shot.sha256,
+            png.display()
+        ));
+    }
+    let report = rt
+        .block_on(run.emergency_stop(Duration::from_secs(10)))
+        .unwrap();
+    assert_eq!(report.active_after, 0);
+    let closed = rt.block_on(run.close()).unwrap();
+    assert!(closed.job_closed);
+    log.line(format!("{n} screendump; arresto {:?}", report.phase));
+}

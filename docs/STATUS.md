@@ -56,11 +56,11 @@ Avviato prima della chiusura di F0 e quindi **non utilizzabile per il criterio d
 | CI e delega cgroup | `.github/workflows/ci.yml` | `F1-08` | validata in locale; **mai eseguita su GitHub** |
 | Probe, processi, QMP, input, screenshot, profilo offline, 20 cicli reali, disco del servizio | `qemu-backend`, `lightvm-service` | `F1-03` | verificato su hardware (Windows, WHPX; VM nel firmware) |
 | UI che avvia il supervisor e usa l'IPC; crash della UI con VM reale | `apps/desktop`, `lightvm-service` | `F1-09` | verificato su hardware, con un esito fallito (arresto ordinato alla perdita della UI) |
-| UI: appunti, backend di rendering, istantanee, misure | `apps/desktop` | file `F1-05` non scritto | test automatici verdi; prove manuali e misure non eseguite |
+| UI: appunti, backend di rendering, istantanee, misure | `apps/desktop` | `F1-05` | verificato in simulazione/test (appunti, istantanee) e su hardware (ripiego di rendering, misure); lettura degli appunti in egui-winit non bloccata; memoria con wgpu oltre l'obiettivo (D-12) |
 
 Punti critici emersi dal riesame del 2026-10-10:
 
-- **Criterio di uscita F1 (F1-12) eseguito ma non valido**: le prove reali di `F1-03` passano sul primo host, ma per la sezione 10 non contano finché F0 non è chiusa; i 20 cicli attraverso il servizio restano da eseguire.
+- **Criterio di uscita F1 (F1-12) eseguito ma non valido**: le prove reali di `F1-03` (anche 20 cicli attraverso il servizio) passano sul primo host, ma per la sezione 10 non contano finché F0 non è chiusa.
 - **Arresto alla perdita della UI non coerente** (`F1-09`): attesa ACPI della VM 60 s contro timeout di arresto del supervisor 30 s; nessun orfano, ma la VM non è arrestata in modo ordinato. Decisione in ADR-0015 parte B.
 - **La console dello spike apre ancora direttamente il socket QMP**: il percorso di prodotto della console passa dal supervisor in F2 (ADR-0012, ADR-0013).
 

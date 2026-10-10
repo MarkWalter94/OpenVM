@@ -44,6 +44,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "0003_journal_review.sql",
         sql: include_str!("../migrations/0003_journal_review.sql"),
     },
+    Migration {
+        version: 4,
+        name: "0004_operation_session.sql",
+        sql: include_str!("../migrations/0004_operation_session.sql"),
+    },
 ];
 
 /// Versione di schema più recente nota a questo binario.
