@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, mpsc};
 use std::time::Duration;
 
@@ -16,7 +16,9 @@ use lightvm_proto::ipc::{
     ResponseBody, Role, SUPPORTED_PROTOCOL_VERSIONS, ServerMessage, ServiceEvent, ServiceState,
     StopReason,
 };
-use lightvm_proto::{Caller, ErrorCode, ProtocolError, ProtocolErrorCode, PublicError, ReplyError};
+use lightvm_proto::{
+    Actor, Caller, ErrorCode, ProtocolError, ProtocolErrorCode, PublicError, ReplyError,
+};
 
 use crate::credential::{Credential, CredentialId, CredentialStore};
 use crate::engine::VmEngine;
@@ -121,6 +123,8 @@ struct Shared {
     emergency_epoch: Arc<AtomicU64>,
     /// Politica alla perdita della UI in vigore (condivisa col supervisor).
     parent_loss_policy: Arc<Mutex<ParentLossPolicy>>,
+    /// VM con processo secondo il supervisor (budget dell'arresto).
+    vms_with_process: Arc<AtomicUsize>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -206,7 +210,7 @@ impl Shared {
         let _ = self.shutdown_trigger.send(true);
     }
 
-    async fn emergency_stop(&self) -> EmergencyStopReport {
+    async fn emergency_stop(&self, actor: Actor) -> EmergencyStopReport {
         // Revoca prima: dopo questo punto nessuna nuova mutazione dell'agente
         // viene accettata. Poi terminazione tramite il gestore del backend,
         // fuori dalla coda e fuori dal thread del supervisor.
@@ -219,7 +223,7 @@ impl Shared {
             .unwrap_or_default();
         // Registrazione nel core (audit, stato delle VM) senza attenderla: il
         // supervisor può essere occupato e il percorso prioritario non aspetta.
-        self.send_cmd(Command::EmergencyReconcile);
+        self.send_cmd(Command::EmergencyReconcile(actor));
         let _ = self.events.send(ServiceEvent::AgentSessionsStopped {
             reason: StopReason::EmergencyStop,
         });
@@ -247,7 +251,7 @@ impl Shared {
             ParentLossPolicy::KillVms => {
                 // Percorso prioritario: le VM terminano subito con primitive OS
                 // e il core registra l'Emergency Stop; poi arresto del servizio.
-                let r = self.emergency_stop().await;
+                let r = self.emergency_stop(Actor::System).await;
                 crate::diag!(
                     "lightvm-service: UI persa, Emergency Stop: {} processi terminati, completato {}",
                     r.processes_terminated,
@@ -260,16 +264,20 @@ impl Shared {
         }
     }
 
-    /// Attesa del supervisor durante l'arresto: con `shutdown_vms` copre
-    /// almeno l'attesa ACPI più `quit` e terminazione (20 s).
+    /// Attesa del supervisor durante l'arresto. Le VM si arrestano una dopo
+    /// l'altra, quindi il budget vale per ciascuna VM con processo: il
+    /// timeout del servizio, o con `shutdown_vms` almeno l'attesa ACPI più
+    /// `quit` e terminazione (20 s).
     fn shutdown_budget(&self) -> Duration {
-        match *lock(&self.parent_loss_policy) {
+        let per_vm = match *lock(&self.parent_loss_policy) {
             ParentLossPolicy::ShutdownVms { powerdown_s } => self
                 .cfg
                 .shutdown_timeout
                 .max(Duration::from_secs(u64::from(powerdown_s) + 20)),
             _ => self.cfg.shutdown_timeout,
-        }
+        };
+        let vms = self.vms_with_process.load(Ordering::SeqCst).max(1);
+        per_vm.saturating_mul(u32::try_from(vms).unwrap_or(u32::MAX))
     }
 }
 
@@ -320,7 +328,7 @@ impl ServiceHandle {
 
     /// Emergency Stop dal processo locale (percorso prioritario).
     pub async fn emergency_stop(&self) -> EmergencyStopReport {
-        self.shared.emergency_stop().await
+        self.shared.emergency_stop(Actor::User).await
     }
 
     /// Avvia l'arresto controllato senza attenderne la fine.
@@ -365,6 +373,7 @@ pub async fn start(
     let emergency = backend.emergency_handle();
     let emergency_epoch = Arc::new(AtomicU64::new(0));
     let parent_loss_policy = Arc::new(Mutex::new(cfg.parent_loss_policy));
+    let vms_with_process = Arc::new(AtomicUsize::new(0));
     let sup = SupervisorThread {
         engine,
         backend,
@@ -372,6 +381,7 @@ pub async fn start(
         max_frame: cfg.max_frame,
         emergency_epoch: emergency_epoch.clone(),
         parent_loss_policy: parent_loss_policy.clone(),
+        vms_with_process: vms_with_process.clone(),
     };
     // Pubblicato prima di qualunque iscrizione possibile: nessun client lo
     // riceve in ritardo, dopo eventi successivi (corsa con `subscribe`).
@@ -402,6 +412,7 @@ pub async fn start(
         stopping: AtomicBool::new(false),
         emergency_epoch,
         parent_loss_policy,
+        vms_with_process,
     });
 
     // Ciclo di accettazione.
@@ -507,7 +518,21 @@ async fn reject_busy(stream: BoxedStream, max: u32) {
 }
 
 async fn send<W: AsyncWrite + Unpin>(w: &mut W, m: &ServerMessage, max: u32) -> io::Result<()> {
-    frame::write_frame(w, m, max).await
+    let payload = serde_json::to_vec(m).map_err(io::Error::other)?;
+    // Una risposta troppo grande (per esempio un catalogo con molte VM)
+    // diventa un errore per quella richiesta, non una chiusura silenziosa
+    // della connessione.
+    if payload.len() > max as usize
+        && let ServerMessage::Response { request_id, .. } = m
+    {
+        let e = err(
+            Some(*request_id),
+            ErrorCode::ResourceLimit,
+            "risposta oltre la dimensione massima del frame",
+        );
+        return frame::write_frame(w, &e, max).await;
+    }
+    frame::write_frame_bytes(w, &payload, max).await
 }
 
 fn err(request_id: Option<RequestId>, e: ErrorCode, msg: &str) -> ServerMessage {
@@ -909,7 +934,7 @@ async fn dispatch(
         Request::EmergencyStop => {
             // Percorso prioritario: nessun posto in coda, nessun passaggio dal
             // thread del supervisor.
-            let report = shared.emergency_stop().await;
+            let report = shared.emergency_stop(Actor::User).await;
             return Dispatch::Reply(Ok(ResponseBody::EmergencyStop(report)));
         }
         Request::SetParentLossPolicy { policy } => {

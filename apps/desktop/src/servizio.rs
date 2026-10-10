@@ -97,6 +97,9 @@ impl ConfigServizio {
     }
 }
 
+/// Stato iniziale della connessione, prima dell'handshake.
+pub const CONNESSIONE_IN_CORSO: &str = "connessione in corso";
+
 /// Stato visto dalla UI, aggiornato dai thread IPC.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StatoServizio {
@@ -286,7 +289,7 @@ impl Servizio {
         };
 
         let stato = Arc::new(Mutex::new(StatoServizio {
-            connessione: "connessione in corso".into(),
+            connessione: CONNESSIONE_IN_CORSO.into(),
             ..StatoServizio::default()
         }));
         let (comandi, rx) = mpsc::unbounded_channel();

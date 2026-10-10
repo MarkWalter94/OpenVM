@@ -8,6 +8,10 @@ use lightvm_proto::{
     MAX_MEMORY_MARGIN_MIB, MIN_CPU_MAX_PERCENT, MIN_MEMORY_MARGIN_MIB, VmConfig, VmId, VmLimits,
 };
 
+use egui::WidgetType;
+
+use crate::tema::{self, Tono};
+
 /// Memoria guest minima proposta (il core rifiuta valori minori).
 pub const RAM_MIN_MIB: u64 = 512;
 /// Memoria guest massima proposta dal cursore; il core applica comunque i
@@ -119,9 +123,38 @@ pub fn config_predefinita(nome: &str) -> Result<VmConfig, String> {
     })
 }
 
-fn riga(ui: &mut egui::Ui, nome: &str, valore: String) {
-    ui.label(nome);
-    ui.label(valore);
+/// Cursore senza riquadro del valore, seguito dal valore come testo.
+fn cursore<T: egui::emath::Numeric>(
+    ui: &mut egui::Ui,
+    nome: &str,
+    valore: &mut T,
+    intervallo: std::ops::RangeInclusive<T>,
+    regola: impl FnOnce(egui::Slider<'_>) -> egui::Slider<'_>,
+    testo: impl Fn(T) -> String,
+) -> egui::Response {
+    let p = tema::Palette::di(ui);
+    ui.horizontal(|ui| {
+        // `Edits`: aprire il pannello non corregge il valore salvato (fuori
+        // intervallo o fuori passo resta com'è finché l'utente non sposta il
+        // cursore), quindi nessuna modifica fantasma da salvare.
+        let r = ui.add(
+            regola(egui::Slider::new(valore, intervallo))
+                .clamping(egui::SliderClamping::Edits)
+                .show_value(false),
+        );
+        // Nome accessibile: senza testo accanto il cursore sarebbe anonimo.
+        let (abilitato, v) = (r.enabled(), valore.to_f64());
+        r.widget_info(|| egui::WidgetInfo::slider(abilitato, v, nome));
+        ui.label(egui::RichText::new(testo(*valore)).color(p.testo));
+        r
+    })
+    .inner
+}
+
+/// Didascalia di un gruppo di righe dentro la scheda.
+fn gruppo(ui: &mut egui::Ui, testo: &str) {
+    let p = tema::Palette::di(ui);
+    ui.label(egui::RichText::new(testo).small().color(p.testo_debole));
 }
 
 /// Pannello delle impostazioni della VM. `spenta`: la VM è ferma e
@@ -133,123 +166,140 @@ pub fn impostazioni_vm_ui(
     max_vcpu: u32,
 ) -> Option<EsitoModifica> {
     let mut esito = None;
-    ui.label(
-        egui::RichText::new(format!("Impostazioni di {}", m.originale.name.as_str())).strong(),
+    tema::titolo_gruppo(
+        ui,
+        &format!("Risorse e limiti di {}", m.originale.name.as_str()),
     );
-    if !spenta {
-        ui.colored_label(
-            ui.visuals().warn_fg_color,
-            "Spegnere la VM per modificare risorse e limiti.",
-        );
-    }
-    let disco_min = m.originale.disk_gib;
-    ui.add_enabled_ui(spenta, |ui| {
-        egui::Grid::new("lightvm_impostazioni_vm")
-            .num_columns(3)
-            .spacing([12.0, 8.0])
-            .show(ui, |ui| {
-                let c = &mut m.config;
-                riga(ui, "vCPU", c.vcpus.to_string());
-                ui.add(
-                    egui::Slider::new(&mut c.vcpus, 1..=max_vcpu.max(1))
-                        .show_value(false)
-                        .text("vCPU"),
-                );
-                ui.end_row();
-
-                riga(ui, "Memoria (RAM)", format!("{} MiB", c.memory_mib));
-                ui.add(
-                    egui::Slider::new(&mut c.memory_mib, RAM_MIN_MIB..=RAM_MAX_MIB)
-                        .step_by(256.0)
-                        .logarithmic(true)
-                        .show_value(false)
-                        .text("Memoria"),
-                );
-                ui.end_row();
-
-                riga(ui, "Disco", format!("{} GiB", c.disk_gib));
-                ui.add(
-                    egui::Slider::new(&mut c.disk_gib, disco_min..=DISCO_MAX_GIB.max(disco_min))
-                        .logarithmic(true)
-                        .show_value(false)
-                        .text("Disco"),
+    tema::scheda(ui, |ui| {
+        if !spenta {
+            tema::avviso(
+                ui,
+                "Spegnere la VM per modificare risorse e limiti.",
+                Tono::Attenzione,
+            );
+            ui.add_space(6.0);
+        }
+        let disco_min = m.originale.disk_gib;
+        ui.add_enabled_ui(spenta, |ui| {
+            let c = &mut m.config;
+            gruppo(ui, "Risorse");
+            tema::riga(ui, "Processori virtuali", None, |ui| {
+                cursore(
+                    ui,
+                    "Processori virtuali",
+                    &mut c.vcpus,
+                    1..=max_vcpu.max(1),
+                    |s| s,
+                    |v| format!("{v} vCPU"),
                 )
-                .on_hover_text("Il disco si può solo ingrandire");
-                ui.end_row();
-
-                let l = &mut c.limits;
-                riga(
+            });
+            tema::riga(ui, "Memoria (RAM)", None, |ui| {
+                cursore(
                     ui,
-                    "CPU massima",
-                    if l.cpu_max_percent >= 100 {
-                        "nessun tetto (100 %)".into()
-                    } else {
-                        format!("{} % dei vCPU", l.cpu_max_percent)
-                    },
-                );
-                ui.add(
-                    egui::Slider::new(&mut l.cpu_max_percent, MIN_CPU_MAX_PERCENT..=100)
-                        .step_by(5.0)
-                        .show_value(false)
-                        .text("CPU massima"),
-                );
-                ui.end_row();
-
-                riga(
+                    "Memoria",
+                    &mut c.memory_mib,
+                    RAM_MIN_MIB..=RAM_MAX_MIB,
+                    |s| s.step_by(256.0).logarithmic(true),
+                    |v| format!("{v} MiB"),
+                )
+            });
+            tema::riga(ui, "Disco", Some("Si può solo ingrandire."), |ui| {
+                cursore(
                     ui,
-                    "Margine di memoria",
-                    format!("{} MiB oltre la RAM", l.memory_margin_mib),
-                );
-                egui::ComboBox::from_id_salt("lightvm_margine_memoria")
-                    .selected_text(format!("{} MiB", l.memory_margin_mib))
-                    .show_ui(ui, |ui| {
-                        for v in MARGINI_MIB {
-                            if (MIN_MEMORY_MARGIN_MIB..=MAX_MEMORY_MARGIN_MIB).contains(&v) {
+                    "Disco",
+                    &mut c.disk_gib,
+                    disco_min..=DISCO_MAX_GIB.max(disco_min),
+                    |s| s.logarithmic(true),
+                    |v| format!("{v} GiB"),
+                )
+            });
+            tema::divisore(ui);
+            gruppo(ui, "Limiti di esecuzione, applicati dal supervisor");
+            let l = &mut c.limits;
+            tema::riga(
+                ui,
+                "CPU massima",
+                Some("Percentuale del tempo dei vCPU."),
+                |ui| {
+                    cursore(
+                        ui,
+                        "CPU massima",
+                        &mut l.cpu_max_percent,
+                        MIN_CPU_MAX_PERCENT..=100,
+                        |s| s.step_by(5.0),
+                        |v| {
+                            if v >= 100 {
+                                "nessun tetto (100 %)".into()
+                            } else {
+                                format!("{v} %")
+                            }
+                        },
+                    )
+                },
+            );
+            tema::riga(
+                ui,
+                "Margine di memoria",
+                Some("Memoria concessa al processo oltre la RAM del guest."),
+                |ui| {
+                    let r = egui::ComboBox::from_id_salt("lightvm_margine_memoria")
+                        .selected_text(format!("{} MiB", l.memory_margin_mib))
+                        .show_ui(ui, |ui| {
+                            for v in MARGINI_MIB {
+                                if (MIN_MEMORY_MARGIN_MIB..=MAX_MEMORY_MARGIN_MIB).contains(&v) {
+                                    ui.selectable_value(
+                                        &mut l.memory_margin_mib,
+                                        v,
+                                        format!("{v} MiB"),
+                                    );
+                                }
+                            }
+                        });
+                    tema::nome_accessibile(&r.response, WidgetType::ComboBox, "Margine di memoria");
+                },
+            );
+            let budget =
+                |b: Option<u64>| b.map_or_else(|| "nessuno".to_owned(), |g| format!("{g} GiB"));
+            tema::riga(
+                ui,
+                "Budget di storage",
+                Some("Spazio massimo occupato dai file della VM."),
+                |ui| {
+                    let r = egui::ComboBox::from_id_salt("lightvm_budget_storage")
+                        .selected_text(budget(l.storage_budget_gib))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut l.storage_budget_gib, None, "nessuno");
+                            for g in BUDGET_GIB {
                                 ui.selectable_value(
-                                    &mut l.memory_margin_mib,
-                                    v,
-                                    format!("{v} MiB"),
+                                    &mut l.storage_budget_gib,
+                                    Some(g),
+                                    format!("{g} GiB"),
                                 );
                             }
-                        }
-                    });
-                ui.end_row();
-
-                let budget =
-                    |b: Option<u64>| b.map_or_else(|| "nessuno".to_owned(), |g| format!("{g} GiB"));
-                riga(ui, "Budget di storage", budget(l.storage_budget_gib));
-                egui::ComboBox::from_id_salt("lightvm_budget_storage")
-                    .selected_text(budget(l.storage_budget_gib))
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut l.storage_budget_gib, None, "nessuno");
-                        for g in BUDGET_GIB {
-                            ui.selectable_value(
-                                &mut l.storage_budget_gib,
-                                Some(g),
-                                format!("{g} GiB"),
-                            );
-                        }
-                    });
-                ui.end_row();
+                        });
+                    tema::nome_accessibile(&r.response, WidgetType::ComboBox, "Budget di storage");
+                },
+            );
+        });
+        tema::divisore(ui);
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(spenta, tema::discreto("Limiti predefiniti"))
+                .clicked()
+            {
+                m.config.limits = VmLimits::default();
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let cambiata = m.config != m.originale;
+                let salva = tema::primario(ui, "Salva impostazioni");
+                if ui.add_enabled(spenta && cambiata, salva).clicked() {
+                    esito = Some(EsitoModifica::Salva);
+                }
+                if ui.button("Chiudi").clicked() {
+                    esito = Some(EsitoModifica::Annulla);
+                }
             });
-    });
-    ui.horizontal(|ui| {
-        let cambiata = m.config != m.originale;
-        if ui
-            .add_enabled(spenta && cambiata, egui::Button::new("Salva impostazioni"))
-            .clicked()
-        {
-            esito = Some(EsitoModifica::Salva);
-        }
-        if ui.button("Chiudi").clicked() {
-            esito = Some(EsitoModifica::Annulla);
-        }
-        if ui
-            .add_enabled(spenta, egui::Button::new("Limiti predefiniti"))
-            .clicked()
-        {
-            m.config.limits = VmLimits::default();
-        }
+        });
     });
     esito
 }

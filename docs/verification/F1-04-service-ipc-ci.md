@@ -349,3 +349,24 @@ Schemi rigenerati con `LIGHTVM_UPDATE_SCHEMAS=1 cargo test -p lightvm-proto --te
 - I dinieghi del ruolo IPC (`permission_denied` per `pairing`) avvengono nel servizio e non passano dal core: non compaiono nell'audit.
 - Il `seq` dell'audit riparte da 1 a ogni avvio del supervisor nello stesso file.
 - Directory privata dei socket QEMU con ACL ereditata (radice `--runtime-dir` o `<catalogo>/p`).
+
+
+## Aggiornamento del 2026-10-10 (sera): riesame generale del codice del supervisor e del core
+
+Sezione aggiunta in coda (regola 8). Riesame in sola lettura di `lightvm-proto`, `lightvm-service`, `qemu-backend`, `vm-core`, `vm-storage`, `rfb-client`, `lightvm-mcp`; nessun problema trovato in grammatica degli argomenti QEMU, Job Object, ACL della pipe, credenziali, limiti dei frame, percorsi del catalogo, decoder RFB. Problemi trovati e corretti:
+
+| Problema | Correzione | Prova |
+| --- | --- | --- |
+| Uscita di una VM non richiesta (spegnimento dal guest, crash) pubblicata solo alla richiesta successiva di un client | il supervisor osserva il backend ogni secondo senza comandi e pubblica `vm_state` | `core_path.rs`: `unrequested_exit_is_published_without_requests` |
+| Budget dell'arresto del servizio unico (30 s) con VM arrestate una dopo l'altra: dalla seconda VM terminazione forzata | budget per ciascuna VM con processo | test esistenti; non provato con più VM reali |
+| Disco esistente rifiutato all'avvio e alla modifica se lo spazio libero scende sotto la sua dimensione | lo spazio libero limita solo creazione e crescita | `scenarios.rs`: `existing_disk_survives_less_free_space` |
+| Errore del catalogo durante l'inoltro: operazione persa e VM bloccata in `starting` | operazione scartata con l'errore e stato precedente ripristinato; a fine inoltro lo stato segue l'esito del backend | test esistenti (nessuna iniezione di guasti nel catalogo finto) |
+| Risposta oltre 64 KiB (molte VM) chiudeva la connessione senza errore | errore `resource_limit` per quella richiesta | — |
+| Esecuzione uscita durante la terminazione della scalata di arresto mai rilasciata (avvio successivo rifiutato) | rilascio se il processo risulta uscito, all'arresto e prima di un nuovo avvio | — |
+| Directory privata dei socket mai rimossa | rimossa al rilascio e all'avvio fallito; `runs/<run_id>/` resta per la diagnostica (fuori dal budget di storage, documentato) | — |
+| Riga del catalogo illeggibile: saltata all'apertura ma fatale nell'elenco (servizio non avviabile) | saltata con diagnostica anche nell'elenco | — |
+| Emergency Stop automatico alla perdita della UI registrato nell'audit come azione dell'utente | attore `system` | test esistenti |
+| Credenziali scadute o revocate mai rimosse | rimosse a ogni emissione | test esistenti |
+| Intestazione di `adapters/backend.rs` superata (disco non creato) | aggiornata | — |
+
+Lasciato com'è, con commento nel codice: l'indice degli `operation_id` del core non si riduce, così un id uscito dalla finestra di idempotenza non può essere riusato per un'altra richiesta.

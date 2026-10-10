@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use lightvm_proto::ipc::{Request, ResponseBody, Role, ServerMessage, ServiceEvent};
 use lightvm_proto::{
-    Actor, AuditAction, AuditEvent, AuditOutcome, ErrorCode, OperationId, OperationStatus,
-    ReplyError, VmAction, VmId, VmRequest, VmState,
+    Actor, AuditAction, AuditEvent, AuditOutcome, BackendObservation, ErrorCode, OperationId,
+    OperationStatus, ReplyError, VmAction, VmId, VmRequest, VmState,
 };
 use lightvm_service::adapters::audit::FileAuditSink;
 use lightvm_service::adapters::backend::{
@@ -31,7 +31,11 @@ struct Svc {
     handle: ServiceHandle,
     ui: Credential,
     calls: Calls,
+    /// Osservazioni del backend finto (uscite simulate dei processi).
+    observations: Observations,
 }
+
+type Observations = std::sync::Arc<std::sync::Mutex<Vec<(VmId, BackendObservation)>>>;
 
 fn audit_path(dir: &Path) -> PathBuf {
     dir.join("audit").join("audit.jsonl")
@@ -56,8 +60,10 @@ async fn start_sqlite(dir: &Path) -> Svc {
         };
         let audit = FileAuditSink::open(&audit_path(dir)).expect("audit su file");
         let calls = Calls::default();
+        let observations = Observations::default();
         let backend = FakeVmBackend {
             calls: calls.clone(),
+            observations: observations.clone(),
             ..FakeVmBackend::default()
         };
         let inspector = ManagedMediaInspector::new(store.root());
@@ -73,7 +79,14 @@ async fn start_sqlite(dir: &Path) -> Svc {
             calls: calls.clone(),
         };
         match start(config(dir), Box::new(engine), Box::new(host)).await {
-            Ok((handle, ui)) => return Svc { handle, ui, calls },
+            Ok((handle, ui)) => {
+                return Svc {
+                    handle,
+                    ui,
+                    calls,
+                    observations,
+                };
+            }
             Err(StartError::Lock(LockError::AlreadyRunning { .. })) => {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
@@ -353,6 +366,7 @@ async fn without_qemu_start_is_unsupported_and_audited() {
         handle,
         ui,
         calls: Calls::default(),
+        observations: Observations::default(),
     };
     let mut c = connect_ui(&svc).await;
     let vm_id = match c
@@ -466,6 +480,7 @@ fn e2e_real_qemu_create_start_status_stop() {
             handle,
             ui,
             calls: Calls::default(),
+            observations: Observations::default(),
         };
         let mut c = connect_ui(&svc).await;
         match c.request(Request::GetCapabilities).await.unwrap() {
@@ -708,6 +723,7 @@ fn e2e_real_qemu_cicli_attraverso_il_servizio() {
             handle,
             ui,
             calls: Calls::default(),
+            observations: Observations::default(),
         };
         let mut c = connect_ui(&svc).await;
         let mut cfg = sample_config("e2e-cicli");
@@ -847,6 +863,7 @@ fn e2e_real_qemu_impostazioni_vm() {
             handle,
             ui,
             calls: Calls::default(),
+            observations: Observations::default(),
         };
         let mut c = connect_ui(&svc).await;
         let mut cfg = sample_config("e2e-impostazioni");
@@ -1019,4 +1036,61 @@ async fn restart_reconciles_running_vm_and_closes_open_run() {
         })
         .unwrap();
     assert!(aperte.is_empty(), "esecuzioni ancora aperte: {aperte:?}");
+}
+
+/// Un processo che esce da solo (spegnimento dal guest, crash) produce
+/// l'evento `vm_state` senza che alcun client faccia richieste.
+#[tokio::test(flavor = "multi_thread")]
+async fn unrequested_exit_is_published_without_requests() {
+    let dir = temp_dir("core-exit");
+    let svc = start_sqlite(&dir).await;
+    let mut ui = connect_ui(&svc).await;
+    let vm_id = match ui
+        .request(Request::CreateVm {
+            config: sample_config("esce-da-sola"),
+        })
+        .await
+        .unwrap()
+    {
+        ServerMessage::Response {
+            result: ResponseBody::VmCreated { vm },
+            ..
+        } => vm.id,
+        other => panic!("{other:?}"),
+    };
+    expect_succeeded(&submit(&mut ui, vm_id, VmAction::Start).await);
+    let run_id = match ui.request(Request::VmStatus { vm_id }).await.unwrap() {
+        ServerMessage::Response {
+            result: ResponseBody::Vm { vm },
+            ..
+        } => vm.run_id.expect("esecuzione attiva"),
+        other => panic!("{other:?}"),
+    };
+    assert!(matches!(
+        ui.request(Request::Subscribe).await.unwrap(),
+        ServerMessage::Response {
+            result: ResponseBody::Subscribed,
+            ..
+        }
+    ));
+    svc.observations.lock().unwrap().push((
+        vm_id,
+        BackendObservation::ProcessExited {
+            run_id,
+            expected: false,
+        },
+    ));
+    let mut seen = None;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while seen.is_none() && tokio::time::Instant::now() < deadline {
+        if let Ok(Ok(Ok(ServiceEvent::VmState { vm_id: v, state }))) =
+            tokio::time::timeout(Duration::from_millis(500), ui.next_event()).await
+            && v == vm_id
+            && !state.has_process()
+        {
+            seen = Some(state);
+        }
+    }
+    assert!(seen.is_some(), "nessun evento dopo l'uscita del processo");
+    svc.handle.shutdown().await;
 }

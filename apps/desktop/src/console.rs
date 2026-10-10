@@ -13,6 +13,7 @@ use f0_console::qmp::{Button, InputEvent, Qmp, scale_abs};
 use rfb_client::{Framebuffer, Rect, Session, SessionConfig, SessionEvent, Transport};
 
 use crate::keymap::{self, KeyboardLayout};
+use crate::tema;
 
 /// Parametri della console reale (da riga di comando).
 #[derive(Clone, Debug)]
@@ -46,6 +47,9 @@ pub struct InputState {
     pressed_keys: Vec<&'static str>,
     pressed_buttons: Vec<Button>,
     last_abs: Option<(u32, u32)>,
+    /// Puntatore sopra l'immagine della console: solo allora la rotella va
+    /// al guest.
+    pointer_inside: bool,
 }
 
 fn egui_button(b: egui::PointerButton) -> Option<Button> {
@@ -114,10 +118,13 @@ impl InputState {
                 egui::Event::Cut if keyboard => tap(&mut out, "x"),
                 egui::Event::Paste(_) if keyboard => tap(&mut out, "v"),
                 egui::Event::PointerMoved(pos) => {
-                    if let Some((x, y)) = to_fb(*pos) {
+                    let fb = to_fb(*pos);
+                    self.pointer_inside = fb.is_some();
+                    if let Some((x, y)) = fb {
                         self.push_abs(&mut out, x, y, geom);
                     }
                 }
+                egui::Event::PointerGone => self.pointer_inside = false,
                 egui::Event::PointerButton {
                     pos,
                     button,
@@ -146,25 +153,22 @@ impl InputState {
                         });
                     }
                 }
-                egui::Event::MouseWheel { delta, .. } => {
-                    let hovering = self.last_abs.is_some();
-                    if hovering && delta.y != 0.0 {
-                        let b = if delta.y > 0.0 {
-                            Button::WheelUp
-                        } else {
-                            Button::WheelDown
-                        };
-                        let n = (delta.y.abs().round() as u32).clamp(1, 5);
-                        for _ in 0..n {
-                            out.push(InputEvent::Btn {
-                                button: b,
-                                down: true,
-                            });
-                            out.push(InputEvent::Btn {
-                                button: b,
-                                down: false,
-                            });
-                        }
+                egui::Event::MouseWheel { delta, .. } if self.pointer_inside && delta.y != 0.0 => {
+                    let b = if delta.y > 0.0 {
+                        Button::WheelUp
+                    } else {
+                        Button::WheelDown
+                    };
+                    let n = (delta.y.abs().round() as u32).clamp(1, 5);
+                    for _ in 0..n {
+                        out.push(InputEvent::Btn {
+                            button: b,
+                            down: true,
+                        });
+                        out.push(InputEvent::Btn {
+                            button: b,
+                            down: false,
+                        });
                     }
                 }
                 _ => {}
@@ -499,33 +503,44 @@ impl LiveConsole {
         self.pump_updates(ctx);
         let status = self.status.lock().map(|s| s.clone()).unwrap_or_default();
 
-        ui.heading("Console");
+        let p = tema::Palette::di(ui);
+        let mut screenshot = false;
+        tema::intestazione(
+            ui,
+            "Console",
+            "Schermo del guest: clic sull'immagine per inviare tastiera e mouse.",
+            |ui| screenshot = ui.button("Screenshot").clicked(),
+        );
+        if screenshot {
+            self.request_screenshot();
+        }
         ui.horizontal_wrapped(|ui| {
-            let (dot, color) = if self.connected {
-                ("■", egui::Color32::from_rgb(60, 180, 90))
+            ui.spacing_mut().item_spacing.x = 18.0;
+            let tono = if self.connected {
+                tema::Tono::Positivo
             } else {
-                ("■", egui::Color32::from_rgb(200, 70, 60))
+                tema::Tono::Pericolo
             };
-            ui.colored_label(color, dot);
-            ui.label(format!("RFB: {}", status.rfb));
-            ui.separator();
-            ui.label(format!(
+            tema::stato(ui, &format!("RFB: {}", status.rfb), tono);
+            let debole = |t: String| egui::RichText::new(t).color(p.testo_debole);
+            ui.label(debole(format!(
                 "Geometria: {}×{}",
                 self.geometry.0, self.geometry.1
-            ));
-            ui.separator();
-            ui.label(format!("Input QMP: {}", status.qmp));
-            ui.separator();
-            ui.label(format!("Layout guest: {}", self.config.layout.label()));
+            )));
+            ui.label(debole(format!("Input QMP: {}", status.qmp)));
+            ui.label(debole(format!(
+                "Layout guest: {}",
+                self.config.layout.label()
+            )));
         });
-        ui.horizontal(|ui| {
-            if ui.button("Screenshot").clicked() {
-                self.request_screenshot();
-            }
-            if !status.screenshot.is_empty() {
-                ui.label(&status.screenshot);
-            }
-        });
+        if !status.screenshot.is_empty() {
+            ui.label(
+                egui::RichText::new(&status.screenshot)
+                    .small()
+                    .color(p.testo_debole),
+            );
+        }
+        ui.add_space(8.0);
 
         let Some(tex) = &self.texture else {
             ui.label("In attesa del primo aggiornamento del framebuffer…");
@@ -581,14 +596,13 @@ impl LiveConsole {
         let events = ctx.input(|i| i.events.clone());
         let out = self.input.translate(&events, focused, &to_fb, geom);
         self.send(out);
-        if focused {
-            ui.painter().rect_stroke(
-                rect,
-                0.0,
-                egui::Stroke::new(2.0, egui::Color32::from_rgb(80, 140, 230)),
-                egui::StrokeKind::Outside,
-            );
-        }
+        let bordo = if focused {
+            egui::Stroke::new(2.0, p.accento)
+        } else {
+            egui::Stroke::new(1.0, p.bordo)
+        };
+        ui.painter()
+            .rect_stroke(rect, 2.0, bordo, egui::StrokeKind::Outside);
     }
 }
 
@@ -749,6 +763,38 @@ mod tests {
                 }
             ]
         );
+    }
+
+    #[test]
+    fn rotella_solo_con_il_puntatore_sopra_la_console() {
+        let mut st = InputState::default();
+        let dentro = |p: egui::Pos2| (p.x < 100.0).then_some((p.x as u32, p.y as u32));
+        let rotella = egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, 1.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let ev = [
+            egui::Event::PointerMoved(egui::pos2(10.0, 10.0)),
+            rotella.clone(),
+        ];
+        let out = st.translate(&ev, false, &dentro, (100, 100));
+        assert!(out.iter().any(|e| matches!(
+            e,
+            InputEvent::Btn {
+                button: Button::WheelUp,
+                ..
+            }
+        )));
+        // Fuori dall'immagine (intestazione, barra laterale): nessun inoltro.
+        let ev = [
+            egui::Event::PointerMoved(egui::pos2(500.0, 10.0)),
+            rotella.clone(),
+        ];
+        assert!(st.translate(&ev, false, &dentro, (100, 100)).is_empty());
+        let ev = [egui::Event::PointerGone, rotella];
+        assert!(st.translate(&ev, false, &dentro, (100, 100)).is_empty());
     }
 
     #[test]

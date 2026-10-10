@@ -46,8 +46,15 @@ pub trait VmEngine: Send + 'static {
     ) -> Result<VmRecord, PublicError>;
     /// Azione su una VM: accettazione nella coda del core ed esecuzione.
     fn submit(&mut self, caller: &Caller, req: VmRequest) -> Result<SubmitOutcome, PublicError>;
-    /// Registra nel core un Emergency Stop già eseguito dal percorso prioritario.
-    fn after_emergency_stop(&mut self);
+    /// Registra nel core un Emergency Stop già eseguito dal percorso
+    /// prioritario; `actor` è chi l'ha deciso (utente, o il supervisor alla
+    /// perdita della UI).
+    fn after_emergency_stop(&mut self, actor: Actor);
+    /// Applica al core le osservazioni del backend (uscite non richieste dei
+    /// processi), così che gli eventi `vm_state` arrivino anche senza richieste.
+    fn observe(&mut self);
+    /// VM con un processo (avvio, esecuzione, arresto), secondo l'ultimo stato noto.
+    fn vms_with_process(&self) -> usize;
     /// Arresto delle VM in esecuzione (arresto controllato del servizio).
     fn stop_all(&mut self);
     /// Cambi di stato dall'ultima chiamata, per gli eventi `vm_state`.
@@ -215,7 +222,7 @@ where
         Ok((admission, record))
     }
 
-    fn after_emergency_stop(&mut self) {
+    fn after_emergency_stop(&mut self, actor: Actor) {
         // Prima la registrazione dell'Emergency Stop, poi le altre osservazioni:
         // un'uscita già osservata non deve trasformarsi in un arresto ordinario.
         let Ok(vms) = self.core.list_vms(&Caller::User) else {
@@ -226,9 +233,17 @@ where
             // conferma la fine osservata e il core registra l'esito.
             let _ = self
                 .core
-                .emergency_stop_with(Actor::User, vm.vm_id, &mut self.backend);
+                .emergency_stop_with(actor, vm.vm_id, &mut self.backend);
         }
         self.apply_observations();
+    }
+
+    fn observe(&mut self) {
+        self.apply_observations();
+    }
+
+    fn vms_with_process(&self) -> usize {
+        self.last.values().filter(|s| s.has_process()).count()
     }
 
     fn stop_all(&mut self) {

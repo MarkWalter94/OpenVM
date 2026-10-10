@@ -77,10 +77,11 @@ fn abilitato(h: &Harness<'_, Prova>, label: &str) -> Vec<bool> {
 fn stato_e_acceleratore_sono_mostrati_come_testo() {
     let mut h = harness(connesso(vec![]), true);
     h.run();
-    h.get_by_label("lightvm-service (PID 4242): connesso");
-    h.get_by_label("backend: qemu");
-    h.get_by_label("acceleratore: whpx");
-    h.get_by_label("Alla chiusura anomala della UI: termina subito le VM");
+    h.get_by_label("Supervisor · PID 4242");
+    h.get_by_label("connesso");
+    h.get_by_label("qemu");
+    h.get_by_label("whpx");
+    h.get_by_label("termina subito le VM");
     h.get_by_label("Nessuna VM nel catalogo del supervisor.");
 }
 
@@ -94,16 +95,18 @@ fn avvia_solo_se_ferma_arresta_solo_se_attiva() {
         true,
     );
     h.run();
-    assert_eq!(abilitato(&h, "Avvia"), [true, false, false]);
-    assert_eq!(abilitato(&h, "Arresta"), [false, true, false]);
+    // Una sola azione principale per riga: Avvia se spenta, Arresta
+    // altrimenti, abilitata solo quando ammessa.
+    assert_eq!(abilitato(&h, "Avvia"), [true]);
+    assert_eq!(abilitato(&h, "Arresta"), [true, false]);
+    h.get_by_label("Spenta");
+    h.get_by_label("In esecuzione");
+    h.get_by_label("In avvio");
 
-    h.get_all_by_role_and_label(Role::Button, "Avvia")
-        .next()
-        .unwrap()
-        .click();
+    h.get_by_role_and_label(Role::Button, "Avvia").click();
     h.run();
     h.get_all_by_role_and_label(Role::Button, "Arresta")
-        .nth(1)
+        .next()
         .unwrap()
         .click();
     h.run();
@@ -117,7 +120,7 @@ fn avvia_solo_se_ferma_arresta_solo_se_attiva() {
 fn emergency_stop_restituisce_il_comando() {
     let mut h = harness(connesso(vec![vm("a", VmState::Running)]), true);
     h.run();
-    h.get_by_role_and_label(Role::Button, "⏹ Emergency Stop")
+    h.get_by_role_and_label(Role::Button, "Emergency Stop")
         .click();
     h.run();
     assert_eq!(h.state().scelte, [Comando::EmergencyStop]);
@@ -133,7 +136,7 @@ fn nessuna_azione_con_servizio_terminato_o_non_connesso() {
         stato.connesso = connesso_;
         let mut h = harness(stato, vivo);
         h.run();
-        for label in ["Aggiorna", "⏹ Emergency Stop", "Avvia", "Arresta"] {
+        for label in ["Aggiorna", "Emergency Stop", "Avvia", "Arresta", "Modifica"] {
             assert!(
                 abilitato(&h, label).iter().all(|a| !a),
                 "{label} abilitato con vivo={vivo} connesso={connesso_}"
@@ -142,5 +145,5 @@ fn nessuna_azione_con_servizio_terminato_o_non_connesso() {
     }
     let mut h = harness(connesso(vec![]), false);
     h.run();
-    h.get_by_label("lightvm-service (PID 4242) terminato");
+    h.get_by_label("terminato");
 }
