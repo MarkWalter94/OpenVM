@@ -34,7 +34,7 @@ Dati di implementazione (sezione 17), senza cambiare la decisione sopra:
 | Guest non può scrivere | Tre livelli: un CD-ROM non accetta scritture dal guest; il blocco QEMU è aperto in sola lettura; la copia gestita è in sola lettura e il suo hash è riverificato dal core prima di ogni avvio (`verify_media`): una modifica impedisce l'avvio | `vm-core/src/media.rs` |
 | Montaggio | Solo a VM spenta (configurazione della VM, `data_media`); nessun tool MCP lo cambia | `vm-core` (`update_vm_config` richiede VM spenta) |
 
-Prove: `vm-core` `scenarios::register_media_rejects_oversized_images`; `lightvm-service` `adapters::catalog::tests::firma_iso_9660_o_udf`; la ISO Ubuntu di riferimento ha la firma `CD001`. **Non eseguito**: un tentativo di scrittura dal guest sul CD-ROM dati con QEMU reale (da fare con la fixture di ADR-0019, F3).
+Prove: `vm-core` `scenarios::register_media_rejects_oversized_images`; `lightvm-service` `adapters::catalog::tests::firma_iso_9660_o_udf`; la ISO Ubuntu di riferimento ha la firma `CD001`. Scrittura dal guest con QEMU reale: **verificata impossibile** il 2026-10-10 (`docs/verification/F1-11-secondo-utente-e-supporto-dati.md`: `touch`, remount e `dd` falliti con "Read-only file system", hash dell'ISO invariato).
 
 ## Alternative considerate
 
@@ -51,7 +51,7 @@ Prove: `vm-core` `scenarios::register_media_rejects_oversized_images`; `lightvm-
 
 - Test negativo "File" della sezione 7.4 (ISO sostituita dopo l'approvazione) e "Host" (path traversal, UNC, device path, symlink/junction): da F1.
 - Identità e checksum della ISO guest: `docs/verification/F0-03-guest-media.md` (verificato).
-- Dettagli del supporto dati approvato: registrati il 2026-10-10 (sezione sopra, P-7 chiuso); prova di scrittura dal guest con QEMU reale non eseguita (F3, con la fixture di ADR-0019).
+- Dettagli del supporto dati approvato: registrati il 2026-10-10 (sezione sopra, P-7 chiuso); prova di scrittura dal guest con QEMU reale verificata in `F1-11`.
 
 ## Riferimenti
 
