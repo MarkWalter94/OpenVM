@@ -170,6 +170,17 @@
           "description": "Backend name.",
           "type": "string"
         },
+        "host": {
+          "description": "Capacity of the host as measured by the backend, if available.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HostCapacity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "max_frame_bytes": {
           "description": "Byte limit per frame.",
           "type": "integer",
@@ -248,6 +259,70 @@
       "required": [
         "connection_id",
         "role"
+      ]
+    },
+    "ConsoleTicket": {
+      "description": "Per-run display ticket for the console (ADR-0013, ROADMAP 6.4).\n\nThe UI connects to `socket_path` (a Unix socket in a directory private to\nthe user), writes `token` followed by `\\n` and then speaks RFB. The\nsupervisor forwards the stream to QEMU's display only after checking the\ntoken; the ticket is distinct from the QMP channel and from the IPC\ncredential, valid for one run, and revoked with it.",
+      "type": "object",
+      "properties": {
+        "geometry": {
+          "description": "Display geometry, if already known.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DisplayGeometry"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "run_id": {
+          "description": "Run the ticket is valid for.",
+          "$ref": "#/$defs/RunId"
+        },
+        "socket_path": {
+          "description": "Display socket to connect to.",
+          "type": "string"
+        },
+        "token": {
+          "description": "Display credential in hexadecimal: never logged.",
+          "type": "string",
+          "writeOnly": true
+        },
+        "vm_id": {
+          "description": "VM.",
+          "$ref": "#/$defs/VmId"
+        }
+      },
+      "required": [
+        "vm_id",
+        "run_id",
+        "socket_path",
+        "token"
+      ]
+    },
+    "DisplayGeometry": {
+      "description": "Guest display geometry in pixels.",
+      "type": "object",
+      "properties": {
+        "height": {
+          "description": "Height (1..=8192).",
+          "type": "integer",
+          "format": "uint32",
+          "maximum": 8192,
+          "minimum": 1
+        },
+        "width": {
+          "description": "Width (1..=8192).",
+          "type": "integer",
+          "format": "uint32",
+          "maximum": 8192,
+          "minimum": 1
+        }
+      },
+      "required": [
+        "width",
+        "height"
       ]
     },
     "EmergencyStopReport": {
@@ -357,11 +432,135 @@
         }
       ]
     },
+    "HostCapacity": {
+      "description": "Host capabilities detected by the probe (supplied to the core, never invented).",
+      "type": "object",
+      "properties": {
+        "accelerator_available": {
+          "description": "Hardware accelerator available and approved (no TCG fallback: ADR-0007).",
+          "type": "boolean"
+        },
+        "baseline_available": {
+          "description": "Baseline and restore available (from F3).",
+          "type": "boolean"
+        },
+        "free_storage_gib": {
+          "description": "Free space on the catalog volume in GiB.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "input_available": {
+          "description": "Typed input available in the backend.",
+          "type": "boolean"
+        },
+        "logical_cpus": {
+          "description": "Logical processors.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "reserved_memory_mib": {
+          "description": "Memory to leave to the host in MiB (reserve).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "reserved_storage_gib": {
+          "description": "Space to leave free in GiB (reserve, ADR-0017).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "screenshot_available": {
+          "description": "Screen capture available in the backend.",
+          "type": "boolean"
+        },
+        "total_memory_mib": {
+          "description": "Total physical memory in MiB.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "logical_cpus",
+        "total_memory_mib",
+        "reserved_memory_mib",
+        "free_storage_gib",
+        "reserved_storage_gib",
+        "accelerator_available",
+        "screenshot_available",
+        "input_available",
+        "baseline_available"
+      ]
+    },
+    "Label": {
+      "description": "Text declared by the user, without control characters; never interpreted.",
+      "type": "string",
+      "maxLength": 256,
+      "minLength": 1
+    },
     "MediaId": {
       "description": "MediaId: version 7 UUID, lowercase with hyphens.",
       "type": "string",
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "MediaKind": {
+      "description": "Kind of media in the media registry.",
+      "oneOf": [
+        {
+          "description": "Guest installation ISO.",
+          "type": "string",
+          "const": "install_iso"
+        },
+        {
+          "description": "Read-only data ISO to bring the software under test into the guest (ADR-0008).",
+          "type": "string",
+          "const": "data_iso"
+        }
+      ]
+    },
+    "MediaRecord": {
+      "description": "Approved media, as seen by clients: no host path.",
+      "type": "object",
+      "properties": {
+        "approved_at": {
+          "description": "Instant of the approval.",
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "declared_origin": {
+          "description": "Origin declared by the user (text, never interpreted).",
+          "$ref": "#/$defs/Label"
+        },
+        "id": {
+          "description": "Identifier.",
+          "$ref": "#/$defs/MediaId"
+        },
+        "kind": {
+          "description": "Kind of media.",
+          "$ref": "#/$defs/MediaKind"
+        },
+        "sha256": {
+          "description": "SHA-256 of the managed copy, computed at approval.",
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "size_bytes": {
+          "description": "Size in bytes of the managed copy.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "sha256",
+        "size_bytes",
+        "declared_origin",
+        "approved_at"
+      ]
     },
     "NetworkProfile": {
       "description": "Network profile. In the MVP the only allowed value is `offline` (ADR-0004): no\nguest NIC, default network devices excluded, no forwarding.",
@@ -958,6 +1157,81 @@
           "required": [
             "kind"
           ]
+        },
+        {
+          "description": "Response to `list_media`.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "media_list"
+            },
+            "media": {
+              "description": "Approved media.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/MediaRecord"
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "media"
+          ]
+        },
+        {
+          "description": "Response to `import_media`.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "media_imported"
+            },
+            "media": {
+              "description": "New registry entry.",
+              "$ref": "#/$defs/MediaRecord"
+            }
+          },
+          "required": [
+            "kind",
+            "media"
+          ]
+        },
+        {
+          "description": "Response to `delete_vm`.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "vm_deleted"
+            },
+            "vm_id": {
+              "description": "Deleted VM.",
+              "$ref": "#/$defs/VmId"
+            }
+          },
+          "required": [
+            "kind",
+            "vm_id"
+          ]
+        },
+        {
+          "description": "Response to `open_console`.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "console"
+            },
+            "ticket": {
+              "description": "Display ticket.",
+              "$ref": "#/$defs/ConsoleTicket"
+            }
+          },
+          "required": [
+            "kind",
+            "ticket"
+          ]
         }
       ]
     },
@@ -1106,6 +1380,11 @@
       "type": "string",
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "Sha256Digest": {
+      "description": "SHA-256 in lowercase hexadecimal.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
     },
     "StopReason": {
       "description": "Reason the agent sessions were stopped.",
@@ -1337,6 +1616,15 @@
         "config_revision": {
           "description": "Configuration revision, to be given in `update_vm`.",
           "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "disk_used_bytes": {
+          "description": "Space occupied on the host by the VM's files (disk, firmware state),\nif measurable.",
+          "type": [
+            "integer",
+            "null"
+          ],
           "format": "uint64",
           "minimum": 0
         },

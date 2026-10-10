@@ -35,6 +35,7 @@ fn vm(name: &str, state: VmState) -> VmSummary {
             limits: Default::default(),
         },
         config_revision: 1,
+        disk_used_bytes: None,
     }
 }
 

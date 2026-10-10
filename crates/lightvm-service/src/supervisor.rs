@@ -246,6 +246,7 @@ impl SupervisorThread {
                 backend: self.backend.name(),
                 accelerator: self.backend.accelerator(),
                 max_frame_bytes: self.max_frame,
+                host: None,
                 parent_loss_policy: *self
                     .parent_loss_policy
                     .lock()

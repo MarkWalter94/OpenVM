@@ -14,7 +14,12 @@
 //!   response; unknown operations cannot be deserialized
 //!   (`malformed_message`, no effect);
 //! - no field is interpreted as a host path or option: VMs are
-//!   referenced by [`VmId`], media by registry [`crate::MediaId`];
+//!   referenced by [`VmId`], media by registry [`crate::MediaId`]. Two
+//!   exceptions, both reserved to the `ui` role and never to agent sessions:
+//!   [`Request::ImportMedia`] carries the file the user chose with the native
+//!   picker of the UI (opened read-only as a regular file and copied into the
+//!   catalog, never passed to QEMU), and [`ConsoleTicket`] returns the path of
+//!   the per-run display socket (ADR-0013);
 //! - errors are [`ReplyError`]: operational ([`crate::PublicError`]) or
 //!   protocol ([`crate::ProtocolError`]), never mixed up. Missing, malformed,
 //!   unknown or revoked credential → `unauthenticated`; insufficient role
@@ -24,8 +29,8 @@ use schemars::{JsonSchema, Schema, generate::SchemaSettings};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Admission, OperationRecord, PROTOCOL_VERSION, ReplyError, RunId, VmConfig, VmId, VmName,
-    VmRecord, VmRequest, VmState,
+    Admission, DisplayGeometry, HostCapacity, MediaKind, MediaRecord, OperationRecord,
+    PROTOCOL_VERSION, ReplyError, RunId, VmConfig, VmId, VmName, VmRecord, VmRequest, VmState,
 };
 
 /// IPC protocol versions supported by the service, in order of preference.
@@ -140,6 +145,34 @@ pub enum Request {
     },
     /// Controlled shutdown of the service (UI only).
     Shutdown,
+    /// Approved media of the registry (UI only).
+    ListMedia,
+    /// Import of an ISO chosen by the user with the native picker of the UI
+    /// (UI only, never from agent sessions): read-only managed copy, SHA-256
+    /// and registry row (ADR-0008). The path is opened as a regular file
+    /// without following links and is never passed to QEMU.
+    ImportMedia {
+        /// File chosen by the user.
+        source_path: String,
+        /// Kind of media.
+        media_kind: MediaKind,
+        /// Origin declared by the user (free text, never interpreted).
+        declared_origin: String,
+    },
+    /// Deletion of a stopped VM with its disk and run files (UI only).
+    DeleteVm {
+        /// VM.
+        vm_id: VmId,
+        /// Expected revision: a concurrent change is rejected.
+        expected_revision: u64,
+    },
+    /// Console of a running VM (UI only): per-run display ticket (ADR-0013).
+    /// The ticket is revoked when the run ends, on Emergency Stop and when
+    /// the connection is revoked.
+    OpenConsole {
+        /// VM.
+        vm_id: VmId,
+    },
 }
 
 impl Request {
@@ -161,6 +194,10 @@ impl Request {
             Self::EmergencyStop => "emergency_stop",
             Self::SetParentLossPolicy { .. } => "set_parent_loss_policy",
             Self::Shutdown => "shutdown",
+            Self::ListMedia => "list_media",
+            Self::ImportMedia { .. } => "import_media",
+            Self::DeleteVm { .. } => "delete_vm",
+            Self::OpenConsole { .. } => "open_console",
         }
     }
 }
@@ -181,6 +218,33 @@ pub struct VmSummary {
     pub config: VmConfig,
     /// Configuration revision, to be given in `update_vm`.
     pub config_revision: u64,
+    /// Space occupied on the host by the VM's files (disk, firmware state),
+    /// if measurable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_used_bytes: Option<u64>,
+}
+
+/// Per-run display ticket for the console (ADR-0013, ROADMAP 6.4).
+///
+/// The UI connects to `socket_path` (a Unix socket in a directory private to
+/// the user), writes `token` followed by `\n` and then speaks RFB. The
+/// supervisor forwards the stream to QEMU's display only after checking the
+/// token; the ticket is distinct from the QMP channel and from the IPC
+/// credential, valid for one run, and revoked with it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ConsoleTicket {
+    /// VM.
+    pub vm_id: VmId,
+    /// Run the ticket is valid for.
+    pub run_id: RunId,
+    /// Display socket to connect to.
+    pub socket_path: String,
+    /// Display credential in hexadecimal: never logged.
+    #[schemars(extend("writeOnly" = true))]
+    pub token: String,
+    /// Display geometry, if already known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geometry: Option<DisplayGeometry>,
 }
 
 /// Capabilities reported by `get_capabilities`.
@@ -197,6 +261,9 @@ pub struct Capabilities {
     /// Active policy on UI loss.
     #[serde(default)]
     pub parent_loss_policy: ParentLossPolicy,
+    /// Capacity of the host as measured by the backend, if available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<HostCapacity>,
 }
 
 /// Minimum allowed wait for the orderly shutdown on UI loss.
@@ -329,6 +396,26 @@ pub enum ResponseBody {
     },
     /// Shutdown accepted.
     ShuttingDown,
+    /// Response to `list_media`.
+    MediaList {
+        /// Approved media.
+        media: Vec<MediaRecord>,
+    },
+    /// Response to `import_media`.
+    MediaImported {
+        /// New registry entry.
+        media: MediaRecord,
+    },
+    /// Response to `delete_vm`.
+    VmDeleted {
+        /// Deleted VM.
+        vm_id: VmId,
+    },
+    /// Response to `open_console`.
+    Console {
+        /// Display ticket.
+        ticket: ConsoleTicket,
+    },
 }
 
 /// State of the service.

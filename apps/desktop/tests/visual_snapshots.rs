@@ -88,6 +88,7 @@ fn vm(name: &str, state: VmState, vcpus: u32, memory_mib: u64) -> VmSummary {
             limits: Default::default(),
         },
         config_revision: 1,
+        disk_used_bytes: None,
     }
 }
 

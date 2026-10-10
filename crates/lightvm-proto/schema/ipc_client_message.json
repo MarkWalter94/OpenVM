@@ -228,6 +228,21 @@
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     },
+    "MediaKind": {
+      "description": "Kind of media in the media registry.",
+      "oneOf": [
+        {
+          "description": "Guest installation ISO.",
+          "type": "string",
+          "const": "install_iso"
+        },
+        {
+          "description": "Read-only data ISO to bring the software under test into the guest (ADR-0008).",
+          "type": "string",
+          "const": "data_iso"
+        }
+      ]
+    },
     "MouseButton": {
       "description": "Pointer button (allowed QMP `InputButton` names).",
       "oneOf": [
@@ -599,6 +614,90 @@
           },
           "required": [
             "op"
+          ]
+        },
+        {
+          "description": "Approved media of the registry (UI only).",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "list_media"
+            }
+          },
+          "required": [
+            "op"
+          ]
+        },
+        {
+          "description": "Import of an ISO chosen by the user with the native picker of the UI\n(UI only, never from agent sessions): read-only managed copy, SHA-256\nand registry row (ADR-0008). The path is opened as a regular file\nwithout following links and is never passed to QEMU.",
+          "type": "object",
+          "properties": {
+            "declared_origin": {
+              "description": "Origin declared by the user (free text, never interpreted).",
+              "type": "string"
+            },
+            "media_kind": {
+              "description": "Kind of media.",
+              "$ref": "#/$defs/MediaKind"
+            },
+            "op": {
+              "type": "string",
+              "const": "import_media"
+            },
+            "source_path": {
+              "description": "File chosen by the user.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "source_path",
+            "media_kind",
+            "declared_origin"
+          ]
+        },
+        {
+          "description": "Deletion of a stopped VM with its disk and run files (UI only).",
+          "type": "object",
+          "properties": {
+            "expected_revision": {
+              "description": "Expected revision: a concurrent change is rejected.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "op": {
+              "type": "string",
+              "const": "delete_vm"
+            },
+            "vm_id": {
+              "description": "VM.",
+              "$ref": "#/$defs/VmId"
+            }
+          },
+          "required": [
+            "op",
+            "vm_id",
+            "expected_revision"
+          ]
+        },
+        {
+          "description": "Console of a running VM (UI only): per-run display ticket (ADR-0013).\nThe ticket is revoked when the run ends, on Emergency Stop and when\nthe connection is revoked.",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "open_console"
+            },
+            "vm_id": {
+              "description": "VM.",
+              "$ref": "#/$defs/VmId"
+            }
+          },
+          "required": [
+            "op",
+            "vm_id"
           ]
         }
       ]
