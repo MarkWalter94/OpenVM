@@ -56,6 +56,7 @@ Avviato prima della chiusura di F0 e quindi **non utilizzabile per il criterio d
 | CI e delega cgroup | `.github/workflows/ci.yml` | `F1-08` | validata in locale; **mai eseguita su GitHub** |
 | Probe, processi, QMP, input, screenshot, profilo offline, 20 cicli reali, disco del servizio | `qemu-backend`, `lightvm-service` | `F1-03` | verificato su hardware (Windows, WHPX; VM nel firmware) |
 | UI che avvia il supervisor e usa l'IPC; crash della UI con VM reale | `apps/desktop`, `lightvm-service` | `F1-09` | verificato su hardware; politica alla perdita della UI come impostazione (ADR-0015 B) |
+| Limiti per VM (CPU, memoria, budget storage), impostazioni della VM, `--apri-vm` | `lightvm-proto`, `vm-core`, `qemu-backend`, `lightvm-service`, `apps/desktop` | `F1-10` | verificato su hardware (Windows); storage completo in F3 |
 | UI: appunti, backend di rendering, istantanee, misure | `apps/desktop` | `F1-05` | verificato in simulazione/test (appunti, istantanee) e su hardware (ripiego di rendering, misure); lettura degli appunti in egui-winit non bloccata; memoria con wgpu oltre l'obiettivo (D-12) |
 
 Punti critici emersi dal riesame del 2026-10-10:
@@ -77,7 +78,7 @@ Punti critici emersi dal riesame del 2026-10-10:
 | `docs/COMPATIBILITY.md` | riga Windows 11 → Linux "sperimentale" con i dati F0; riga Ubuntu "non verificato"; completato nel commit `aa04ccd` |
 | `docs/TESTING.md` | misure F0 registrate; egui_kittest provato; completato nel commit `aa04ccd`; misure F1-18 assenti |
 | `docs/RELEASE_PLAN.md` | backlog F0 con esiti; backlog F1 con avanzamento per voce |
-| `docs/adr/` | 21 ADR Accettata, di cui 0016 condizionata alla conferma dell'utente e 0021, 0023 accettate in parte; 5 ADR Proposta (0015 solo parte A — parte B accettata il 2026-10-10, 0017, 0020, 0022, 0026) |
+| `docs/adr/` | 21 ADR Accettata, di cui 0016 condizionata alla conferma dell'utente e 0021, 0023 accettate in parte; ADR Proposta o aperte in parte il 2026-10-10: 0015 parte A (Linux, R2a), 0017 (limiti per VM accettati; soglie host e storage completo in F3); accettate il 2026-10-10: 0015 parte B, 0016, 0020, 0022, 0026 |
 
 ## Impedimenti e punti aperti
 
