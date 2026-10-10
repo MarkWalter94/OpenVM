@@ -76,7 +76,7 @@ lightvm-desktop --impostazioni C:\lvmtest\imp.json --apri-vm prova-cli --smoke 8
 - Il budget di storage conta i file sotto `vms/<vm_id>/` (overlay, baseline, firmware); log e screenshot per esecuzione (`runs/`) non sono ancora attribuiti alla VM: contabilità completa in F3.
 - L'uscita di QEMU al limite di memoria a esecuzione avviata è riconosciuta dal picco del job e registrata solo come avviso del supervisor; non diventa ancora un codice distinto nell'osservazione del core.
 - La riconciliazione al riavvio presuppone che nessun processo di un supervisor precedente sia vivo: vero su Windows (Job Object con `KILL_ON_JOB_CLOSE`), da verificare su Linux (R2a).
-- La riga `runs` dell'esecuzione interrotta resta aperta nel catalogo dopo la riconciliazione al riavvio.
+- ~~La riga `runs` dell'esecuzione interrotta resta aperta nel catalogo dopo la riconciliazione al riavvio.~~ Risolto lo stesso giorno: la riconciliazione chiude le esecuzioni aperte con causa `recovered` (`core_path::restart_reconciles_running_vm_and_closes_open_run`).
 - `--crea` crea una VM senza supporto di installazione: l'importazione delle ISO nel registro media arriva con la creazione guidata (F2).
 
 ## Azioni richieste
@@ -84,7 +84,7 @@ lightvm-desktop --impostazioni C:\lvmtest\imp.json --apri-vm prova-cli --smoke 8
 1. Misurare l'effetto del tetto CPU con un guest che carica la CPU (dopo l'installazione su disco, F1-17).
 2. F3: contabilità completa dello storage per VM e prove sotto pressione.
 3. F5: strumento MCP per i limiti, entro i limiti impostati dall'utente.
-4. Chiudere la riga `runs` interrotta durante la riconciliazione al riavvio.
+4. ~~Chiudere la riga `runs` interrotta durante la riconciliazione al riavvio.~~ Fatto (vedi Limiti).
 
 ## Decisioni proposte
 

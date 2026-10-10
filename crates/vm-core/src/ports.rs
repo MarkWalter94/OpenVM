@@ -71,6 +71,11 @@ pub trait IdGenerator {
 pub trait CatalogStore {
     /// Inserisce una nuova VM.
     fn insert_vm(&mut self, vm: &VmRecord) -> Result<(), PublicError>;
+    /// Chiude le esecuzioni della VM rimaste aperte (riavvio del supervisor
+    /// senza processi superstiti); restituisce quante sono state chiuse.
+    fn close_open_runs(&mut self, _id: VmId, _reason: RunEndReason) -> Result<u32, PublicError> {
+        Ok(0)
+    }
     /// `true` se il journal del catalogo ha intenti non conclusi sulla VM
     /// (file in corso di modifica o "da verificare"): la VM non si riconcilia
     /// automaticamente.

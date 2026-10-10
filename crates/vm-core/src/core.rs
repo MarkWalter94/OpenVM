@@ -1455,6 +1455,7 @@ where
             if self.store.has_open_intents(id)? {
                 continue;
             }
+            self.store.close_open_runs(id, RunEndReason::Reconciled)?;
             self.finish_recovery(id)?;
             done.push(id);
         }
