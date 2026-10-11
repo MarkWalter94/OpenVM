@@ -93,8 +93,8 @@ public static extern System.IntPtr SendMessageTimeout(System.IntPtr hWnd, uint M
 
 $Source = $PSScriptRoot
 $Payload = @(
-    'lightvm-desktop.exe', 'lightvm-service.exe', 'README.md', 'USER_GUIDE.md',
-    'LICENSE.txt', 'THIRD-PARTY-LICENSES.txt', 'BUILDINFO.txt', 'SHA256SUMS.txt',
+    'lightvm-desktop.exe', 'lightvm-service.exe', 'lightvm-mcp.exe', 'README.md', 'USER_GUIDE.md',
+    'LICENSE.txt', 'THIRD-PARTY-LICENSES.txt', 'SBOM.cdx.json', 'BUILDINFO.txt', 'SHA256SUMS.txt',
     'install.ps1', 'uninstall.ps1'
 )
 $ShortcutName = 'LightVM.lnk'
@@ -137,9 +137,9 @@ if (Test-Path -LiteralPath $Prefix) {
         throw "The prefix $Prefix is not empty and contains no LightVM installation (install-manifest.json missing): refusing to overwrite."
     }
 }
-$running = @(Get-Process -Name 'lightvm-desktop', 'lightvm-service' -ErrorAction SilentlyContinue |
+$running = @(Get-Process -Name 'lightvm-desktop', 'lightvm-service', 'lightvm-mcp' -ErrorAction SilentlyContinue |
     Where-Object { $_.Path -and $_.Path.StartsWith($Prefix + '\', [StringComparison]::OrdinalIgnoreCase) })
-if ($running.Count -gt 0) { throw 'LightVM is running from the prefix: close it (stop the VMs first) and retry.' }
+if ($running.Count -gt 0) { throw 'LightVM is running from the prefix: close it (stop the VMs first, and the AI clients using lightvm-mcp) and retry.' }
 
 New-Item -ItemType Directory -Force -Path $Prefix | Out-Null
 foreach ($f in $Payload) {

@@ -93,9 +93,9 @@ if (-not (Test-Path -LiteralPath $manifestPath)) {
 $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
 if ($manifest.product -ne 'LightVM') { throw "$manifestPath is not a LightVM manifest. Nothing removed." }
 
-$running = @(Get-Process -Name 'lightvm-desktop', 'lightvm-service' -ErrorAction SilentlyContinue |
+$running = @(Get-Process -Name 'lightvm-desktop', 'lightvm-service', 'lightvm-mcp' -ErrorAction SilentlyContinue |
     Where-Object { $_.Path -and $_.Path.StartsWith($Prefix + '\', [StringComparison]::OrdinalIgnoreCase) })
-if ($running.Count -gt 0) { throw 'LightVM is running from this installation: close it (stop the VMs first) and retry.' }
+if ($running.Count -gt 0) { throw 'LightVM is running from this installation: close it (stop the VMs first, and the AI clients using lightvm-mcp) and retry.' }
 
 # The working directory must not keep the prefix busy.
 if ((Get-Location).Path.StartsWith($Prefix, [StringComparison]::OrdinalIgnoreCase)) { Set-Location $env:TEMP }

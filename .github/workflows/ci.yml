@@ -381,13 +381,15 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: smoke-${{ runner.os }}
-      - name: UI release build (Linux)
+      # `--smoke` exists only with the `dev-tools` feature (F6: test and
+      # measurement switches are not in the distributed binary).
+      - name: UI release build with dev-tools (Linux)
         if: runner.os == 'Linux'
-        run: cargo build --release --locked -p lightvm-desktop
-      - name: UI release build (Windows)
+        run: cargo build --release --locked -p lightvm-desktop --features dev-tools
+      - name: UI release build with dev-tools (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: cargo build --release --locked -p lightvm-desktop
+        run: cargo build --release --locked -p lightvm-desktop --features dev-tools
       - name: X11 on Xvfb with llvmpipe (glow, then wgpu on lavapipe)
         if: matrix.name == 'linux-x11-llvmpipe'
         env:

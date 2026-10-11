@@ -2037,7 +2037,7 @@ dependencies = [
  "egui",
  "egui_extras",
  "egui_kittest",
- "f0-console",
+ "lightvm-desktop",
  "lightvm-proto",
  "lightvm-service",
  "png",

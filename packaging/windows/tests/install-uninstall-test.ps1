@@ -43,6 +43,9 @@ function Read-RawPath([string]$key) {
 }
 
 function Invoke-Script([string]$file, [string[]]$arguments) {
+    # A failing script writes to stderr: with 2>&1 and 'Stop' Windows
+    # PowerShell would turn that into a terminating error of this script.
+    $ErrorActionPreference = 'Continue'
     $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $file @arguments 2>&1
     $code = $LASTEXITCODE
     $out | ForEach-Object { Write-Host "    | $_" }
@@ -54,8 +57,8 @@ try {
     # Fake package.
     $pkg = Join-Path $work 'package'
     New-Item -ItemType Directory -Force -Path $pkg | Out-Null
-    $payload = @('lightvm-desktop.exe', 'lightvm-service.exe', 'README.md', 'USER_GUIDE.md',
-        'LICENSE.txt', 'THIRD-PARTY-LICENSES.txt', 'BUILDINFO.txt')
+    $payload = @('lightvm-desktop.exe', 'lightvm-service.exe', 'lightvm-mcp.exe', 'README.md', 'USER_GUIDE.md',
+        'LICENSE.txt', 'THIRD-PARTY-LICENSES.txt', 'SBOM.cdx.json', 'BUILDINFO.txt')
     foreach ($f in $payload) { Set-Content -LiteralPath (Join-Path $pkg $f) -Value "dummy $f" -Encoding ascii }
     Copy-Item -LiteralPath (Join-Path $scripts 'install.ps1') -Destination $pkg
     Copy-Item -LiteralPath (Join-Path $scripts 'uninstall.ps1') -Destination $pkg
@@ -75,6 +78,12 @@ try {
     $after = Read-RawPath $scratchKey
     Check ($after.Kind -eq [Microsoft.Win32.RegistryValueKind]::ExpandString) "PATH kind after install is ExpandString (found $($after.Kind))"
     Check ($after.Value -eq "$original;$prefix") "PATH after install keeps %USERPROFILE% unexpanded (found '$($after.Value)')"
+    # Every package file (MCP adapter and SBOM included, F6) is installed
+    # and listed in the manifest, so that uninstall.ps1 removes it.
+    $installed = Get-Content -Raw -LiteralPath (Join-Path $prefix 'install-manifest.json') | ConvertFrom-Json
+    foreach ($f in $payload + @('install.ps1', 'uninstall.ps1', 'SHA256SUMS.txt', 'install-manifest.json')) {
+        Check ((Test-Path -LiteralPath (Join-Path $prefix $f) -PathType Leaf) -and (@($installed.files) -contains $f)) "$f installed and listed in the manifest"
+    }
 
     # 2. uninstall removes only the prefix entry, kind kept.
     $code = Invoke-Script (Join-Path $prefix 'uninstall.ps1') @('-Prefix', $prefix, '-EnvironmentKey', $scratchKey)
@@ -109,6 +118,16 @@ try {
     Check (Test-Path -LiteralPath (Join-Path $work 'sentinel.txt')) 'parent folder ("..") untouched'
     Check (Test-Path -LiteralPath $outsideLnk) 'shortcut outside the Start Menu Programs folder kept'
     Check ((Read-RawPath $scratchKey).Value -eq $original) 'PATH untouched when path_added is false'
+
+    # 4. A package without the MCP adapter is incomplete: install refuses
+    #    and creates nothing.
+    $pkg3 = Join-Path $work 'package-no-mcp'
+    Copy-Item -LiteralPath $pkg -Destination $pkg3 -Recurse
+    Remove-Item -LiteralPath (Join-Path $pkg3 'lightvm-mcp.exe')
+    $prefix3 = Join-Path $work 'prefix3'
+    $code = Invoke-Script (Join-Path $pkg3 'install.ps1') @('-Prefix', $prefix3, '-NoShortcut', '-EnvironmentKey', $scratchKey)
+    Check ($code -ne 0) "install.ps1 refuses a package without lightvm-mcp.exe (exit $code)"
+    Check (-not (Test-Path -LiteralPath $prefix3)) 'nothing installed from the incomplete package'
 } finally {
     Remove-Item -LiteralPath "HKCU:\$scratchKey" -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue

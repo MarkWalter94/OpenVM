@@ -21,6 +21,13 @@ path = "src/main.rs"
 default = ["wgpu", "glow"]
 wgpu = ["eframe/wgpu"]
 glow = ["eframe/glow"]
+# Test and measurement switches (`--smoke`, `--simulated-console`, `--static`,
+# `--no-supervisor`) and the simulated framebuffer API (F6-01 §6): off by
+# default and never enabled by the packaging script, so the distributed
+# binary does not contain them (`scripts/check-release-artifacts.ps1`). The
+# tests get it through the self dev-dependency below; measurement builds
+# enable it explicitly (`--features dev-tools`).
+dev-tools = []
 
 [dependencies]
 # `links` (automatic opening of URLs) is excluded on purpose: ROADMAP 6.0
@@ -32,10 +39,10 @@ eframe = { workspace = true, features = ["accesskit", "default_fonts", "wayland"
 egui = { workspace = true, features = ["default_fonts"] }
 egui_extras = { workspace = true }
 # Console (F2): read-only RFB client on the supervisor's per-run display
-# ticket; input goes through the supervisor IPC, never QMP from the UI. From
-# the F0 spike only the PNG encoder is used (screenshots).
+# ticket; input goes through the supervisor IPC, never QMP from the UI.
+# Screenshots are encoded with `png` (below): the F0 spike `f0-console` is no
+# longer in the product graph (ADR-0023, F6).
 rfb-client = { path = "../../crates/rfb-client" }
-f0-console = { path = "../../spikes/f0-console" }
 # Supervisor as a child process and IPC (F1-11): only the client side of the
 # service, without `qemu-backend` (ADR-0024).
 lightvm-proto = { path = "../../crates/lightvm-proto" }
@@ -45,7 +52,8 @@ serde_json = "=1.0.151"
 tokio = { version = "=1.53.2", features = ["rt", "sync", "time", "macros"] }
 # Session reports (F5): screenshots read on demand are checked against their
 # SHA-256 and decoded for display (same versions as the rest of the
-# workspace; the UI never writes them to disk).
+# workspace; the UI never writes them to disk). `png` also encodes the
+# console screenshots.
 sha2 = "=0.11.0"
 png = "=0.18.1"
 
@@ -58,6 +66,12 @@ rfd = { version = "=0.15.4", default-features = false }
 # `snapshot` + `wgpu`: graphical snapshots compared with the files in
 # `tests/snapshots/` (F1-19, ADR-0022); tolerance in `kittest.toml`.
 egui_kittest = { workspace = true, features = ["snapshot", "wgpu"] }
+# The tests (unit, kittest, binary) are built with `dev-tools` (simulated
+# framebuffer); with resolver 2/3 a dev-dependency feature is enabled only
+# for the targets that need dev-dependencies, so `cargo build --release
+# -p lightvm-desktop` (and the package) stays without it. No default
+# features here, so the glow-only / wgpu-only checks keep a single backend.
+lightvm-desktop = { path = ".", default-features = false, features = ["dev-tools"] }
 
 [lints]
 workspace = true

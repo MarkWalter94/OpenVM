@@ -41,7 +41,7 @@ Criteria:
 - A dependency with an incompatible or unmaintained licence is replaced or the code is brought in-house.
 - Vulnerability management in `docs/SECURITY.md` relies on these checks.
 - The Linux package declares the libraries loaded with `dlopen` listed in `F1-07` §6 (F1-14).
-- The `f0-console` spike, currently a dependency of `apps/desktop`, must be removed from the product graph before F6.
+- The `f0-console` spike was a dependency of `apps/desktop` and had to leave the product graph before F6: **done on 2026-10-11** (`F6-01`, dated section). `tempfile` and `uds_windows` remain in the shipped graph through the product crate `rfb-client`.
 
 ## Required evidence
 
