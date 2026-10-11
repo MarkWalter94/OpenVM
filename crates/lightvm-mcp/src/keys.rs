@@ -103,7 +103,7 @@ pub fn first_untypable(text: &str) -> Option<usize> {
 }
 
 /// QEMU key codes accepted by `vm_keyboard_press`.
-const ALLOWED: &[&str] = &[
+pub(crate) const ALLOWED: &[&str] = &[
     "shift",
     "shift_r",
     "alt",

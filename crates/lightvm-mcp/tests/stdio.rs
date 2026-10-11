@@ -427,6 +427,13 @@ async fn handshake_tools_list_and_protocol_errors() {
     assert_eq!(r["result"]["protocolVersion"], "2025-11-25", "{r}");
     assert_eq!(r["result"]["serverInfo"]["name"], "lightvm");
     assert!(r["result"]["capabilities"]["tools"].is_object());
+    assert!(
+        r["result"]["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("Call the help tool first"),
+        "{r}"
+    );
     let list = m.request("tools/list", json!({}));
     let tools = list["result"]["tools"].as_array().unwrap();
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
@@ -454,11 +461,22 @@ async fn handshake_tools_list_and_protocol_errors() {
     for t in tools {
         assert_eq!(t["inputSchema"]["type"], "object", "{t}");
         assert_eq!(t["outputSchema"]["type"], "object", "{t}");
+        let title = t["title"].as_str().unwrap();
         assert!(
-            t["title"].as_str().unwrap().starts_with("LightVM vm.")
-                || t["title"].as_str().unwrap().contains('.')
+            title.starts_with("LightVM ") && (title.contains('.') || title == "LightVM help"),
+            "{title}"
         );
     }
+    // The guide is the first tool and works before any session.
+    assert_eq!(tools[0]["name"], "help");
+    let r = m.request(
+        "tools/call",
+        json!({"name": "help", "arguments": {"topic": "tools"}}),
+    );
+    assert_ne!(r["result"]["isError"], true, "{r}");
+    let text = r["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("## vm_keyboard_type"), "{text}");
+    assert_eq!(r["result"]["structuredContent"]["session_state"], "none");
     // Unknown tool: protocol error -32602, not a tool result.
     let r = m.request(
         "tools/call",

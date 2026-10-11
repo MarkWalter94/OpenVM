@@ -15,8 +15,11 @@ Flow, for any client:
 
 1. In the app: turn agent access on and click *Pair a client…*.
 2. Start the client with the configuration below.
-3. Ask the model to work in the VM: it calls `session_request` with the
-   objective and shows you a verification code.
+3. Ask the model to work in the VM and to **call the `help` tool first**:
+   `help` is the adapter's complete guide for agents (steps, every tool with
+   its parameters, key names, error codes, limits), so the model needs no
+   other documentation. It then calls `session_request` with the objective
+   and shows you a verification code.
 4. In the app, check that the code matches, pick the VM, the capabilities,
    the duration, and approve; hand over mouse/keyboard control if needed.
 5. Revoke or pause from the app at any time; the report of the session is
@@ -37,11 +40,19 @@ too, as the Claude Code example does.
 
 ### Claude Code
 
-`claude-code/mcp.json` (adapter at its installed path; adjust `command`).
+`claude-code/mcp.json` (adapter at the installer's default path; replace
+`<you>` with your Windows user name). Or register it once for every session:
+
+```text
+claude mcp add lightvm -- "C:\Users\<you>\AppData\Local\Programs\LightVM\lightvm-mcp.exe"
+```
+
+A prompt that works for any task: *"Use the lightvm MCP server; call its
+help tool first and follow it. Task: …"*
 Headless run restricted to the LightVM tools only:
 
 ```text
-claude -p "<objective>" --mcp-config examples/mcp/claude-code/mcp.json --strict-mcp-config \
+claude -p "Call the lightvm help tool first, then: <objective>" --mcp-config examples/mcp/claude-code/mcp.json --strict-mcp-config \
   --tools "" --allowedTools mcp__lightvm --permission-mode dontAsk \
   --no-session-persistence --output-format stream-json --verbose --max-budget-usd 4
 ```

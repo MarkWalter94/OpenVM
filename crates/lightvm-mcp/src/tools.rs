@@ -29,6 +29,17 @@ use crate::schema::schema_for;
 #[serde(deny_unknown_fields)]
 pub struct NoParams {}
 
+/// `help`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HelpParams {
+    /// `start` (default), `workflow`, `tools`, `keys`, `errors`, `limits`
+    /// or a tool name such as `vm_keyboard_press`.
+    #[serde(default)]
+    #[schemars(length(max = 64))]
+    pub topic: Option<String>,
+}
+
 /// `session_request`.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -457,6 +468,21 @@ pub struct DeclareOut {
     pub note: String,
 }
 
+/// `help`.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct HelpOut {
+    /// Topic shown.
+    pub topic: String,
+    /// The guide (Markdown).
+    pub guide: String,
+    /// State of this adapter's session.
+    pub session_state: Phase,
+    /// What to do next given the session state.
+    pub next_step: String,
+    /// Other topics (tool names are topics too).
+    pub topics: Vec<String>,
+}
+
 /// `session_end`.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct EndOut {
@@ -506,6 +532,13 @@ fn def<P: JsonSchema, O: JsonSchema>(
 #[must_use]
 pub fn catalogue() -> Vec<ToolDef> {
     vec![
+        def::<HelpParams, HelpOut>(
+            "help",
+            "help",
+            "START HERE. Complete guide to using the LightVM virtual machine: the steps from asking for a session to finishing, every tool with its parameters and when to use it, key names, error codes and limits. Needs no session. Call it with no topic first; topics: workflow, tools, keys, errors, limits, or a tool name.",
+            true,
+            false,
+        ),
         def::<SessionRequestParams, SessionOut>(
             "session_request",
             "session.request",
