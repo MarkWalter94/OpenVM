@@ -92,14 +92,39 @@ impl BaselineGuard {
     /// handles are open). [`StorageError::IntegrityMismatch`] on a
     /// difference or on a file without a recorded hash.
     pub fn verify(&mut self) -> Result<()> {
+        self.verify_with(&|| false, &|_| {})
+    }
+
+    /// [`Self::verify`] polling `cancel` between blocks (cancelled:
+    /// [`StorageError::StateConflict`] with [`crate::HASH_CANCELLED`]) and
+    /// reporting the bytes read with `progress`.
+    pub fn verify_with(&mut self, cancel: &dyn Fn() -> bool, progress: &dyn Fn(u64)) -> Result<()> {
+        self.check(true, cancel, progress)
+    }
+
+    /// Hash check through the handles; `strict` refuses a file without a
+    /// recorded hash, otherwise it is only reported (as [`Catalog::guard_run`]
+    /// does).
+    fn check(
+        &mut self,
+        strict: bool,
+        cancel: &dyn Fn() -> bool,
+        progress: &dyn Fn(u64),
+    ) -> Result<()> {
         for f in &self.files {
             let Some(expected) = &f.sha256 else {
-                return Err(StorageError::IntegrityMismatch {
-                    path: f.path.to_string(),
-                    detail: "no recorded hash".into(),
-                });
+                if strict {
+                    return Err(StorageError::IntegrityMismatch {
+                        path: f.path.to_string(),
+                        detail: "no recorded hash".into(),
+                    });
+                }
+                if !self.report.hash_not_recorded.contains(&f.path) {
+                    self.report.hash_not_recorded.push(f.path.clone());
+                }
+                continue;
             };
-            let (actual, _) = fsx::sha256_handle(&f._file, &f.abs)?;
+            let (actual, _) = fsx::sha256_handle_with(&f._file, &f.abs, cancel, progress)?;
             if &actual != expected {
                 return Err(StorageError::IntegrityMismatch {
                     path: f.path.to_string(),
@@ -111,6 +136,16 @@ impl BaselineGuard {
             }
         }
         Ok(())
+    }
+
+    /// Bytes read by [`Self::verify`] (sizes read on the guard handles of
+    /// the files with a recorded hash).
+    pub fn verify_bytes(&self) -> u64 {
+        self.files
+            .iter()
+            .filter(|f| f.sha256.is_some())
+            .map(|f| f._file.metadata().map_or(0, |m| m.len()))
+            .sum()
     }
 
     /// Guard handle of one of the baseline's files (read with
@@ -146,6 +181,32 @@ impl RunGuard {
     /// (declared limit).
     pub fn no_delete_paths(&self) -> impl Iterator<Item = &ManagedPath> {
         self.no_delete.iter().map(|f| &f.path)
+    }
+
+    /// Bytes of the baseline hashed by [`Self::verify_baseline`].
+    pub fn baseline_bytes(&self) -> u64 {
+        self.baseline
+            .as_ref()
+            .map_or(0, BaselineGuard::verify_bytes)
+    }
+
+    /// Hash check of the baseline **through the guard handles** for a guard
+    /// obtained with [`Catalog::open_run_guard`], with the same rule as
+    /// [`Catalog::guard_run`] (a file without a recorded hash is reported in
+    /// [`GuardReport::hash_not_recorded`]). The service runs it on a
+    /// worker thread, the guard opened on its supervisor thread). The
+    /// handles were opened before the hash and stay open until the guard is
+    /// dropped: the content verified is the content QEMU reads (ADR-0025).
+    /// Cancellable (see [`BaselineGuard::verify_with`]).
+    pub fn verify_baseline(
+        &mut self,
+        cancel: &dyn Fn() -> bool,
+        progress: &dyn Fn(u64),
+    ) -> Result<()> {
+        match self.baseline.as_mut() {
+            Some(b) => b.check(false, cancel, progress),
+            None => Ok(()),
+        }
     }
 }
 
@@ -197,6 +258,19 @@ impl Catalog {
     /// hash through the handles (on every start) and opens the run's overlay
     /// and vars without `FILE_SHARE_DELETE`.
     pub fn guard_run(&mut self, run_id: &RunId) -> Result<RunGuard> {
+        self.run_guard(run_id, true)
+    }
+
+    /// [`Self::guard_run`] **without** the hash check: the handles are
+    /// opened (writer detector, links refused, read-only attribute
+    /// restored) and the caller must run [`RunGuard::verify_baseline`]
+    /// before handing the files to QEMU. Lets the service open the guard on
+    /// its supervisor thread (fast) and hash on a worker (slow).
+    pub fn open_run_guard(&mut self, run_id: &RunId) -> Result<RunGuard> {
+        self.run_guard(run_id, false)
+    }
+
+    fn run_guard(&mut self, run_id: &RunId, verify: bool) -> Result<RunGuard> {
         let (run, overlay, vars) = self.read(|tx| {
             let run = tx.run(run_id)?;
             let overlay = run
@@ -217,7 +291,7 @@ impl Catalog {
             )));
         }
         let baseline = match &run.baseline_id {
-            Some(b) => Some(self.baseline_guard(b, true)?),
+            Some(b) => Some(self.baseline_guard(b, verify)?),
             None => None,
         };
         let mut no_delete = Vec::new();

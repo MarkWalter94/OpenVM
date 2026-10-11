@@ -72,6 +72,7 @@ fn delete_names_the_vm_and_waits_for_the_outcome() {
         s.delete = RequestStatus::Failed(Failure {
             unsupported: true,
             message: "deletion: unsupported".into(),
+            ..Failure::default()
         });
     });
     h.run_steps(4);

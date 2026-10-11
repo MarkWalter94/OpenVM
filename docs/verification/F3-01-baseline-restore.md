@@ -218,3 +218,13 @@ The full verification at every start costs about 0.8 s per GiB of base on this h
 - The temporary of a creation is created by `qemu-img` itself (not `CREATE_NEW`): its name is a fresh UUID in the catalog's `tmp/`, checked absent right before.
 - Synthetic fixture images in the headless tests are files with a QCOW2 header, not real images; real images are covered by the real tests only.
 - The live-session cycles do not boot a guest from the overlay disk (data disk only).
+
+## Update of 2026-10-11: baseline verification at start off the supervisor thread
+
+The full SHA-256 of the baseline (base disk and UEFI variables) at every start (ADR-0025 point 5) no longer runs on the supervisor thread (it cost ~0.8 s/GiB while every other VM waited, see Measurements above):
+
+- `Catalog::open_current_state` (new) does what `guard_current_state` did (run row checked against the current state; guard handles opened: base and baseline variables with `FILE_SHARE_READ` only, writer detector, links refused, read-only attribute restored; overlay and its variables without `FILE_SHARE_DELETE`; overlay and base headers checked) **without the hash**. `guard_current_state` keeps the old behaviour (hash included).
+- `RunGuard::verify_baseline(cancel, progress)` (new) hashes **through those guard handles** on the start worker thread (same rule as `guard_run`: a file without a recorded hash is reported, not refused), cancellable between 1 MiB blocks; `RunGuard::baseline_bytes` gives the total for the progress. `BaselineGuard::verify_with` is the cancellable form of `verify`.
+- The guard is opened before the hash and dropped only when the run is released, so the content verified is the content QEMU reads (the argument of ADR-0025 is unchanged; the hash only runs on another thread). A tampered base still refuses the start before any process (VM `stopped`): the existing `f3` service tests now go through the worker, and `vm-storage/tests/baseline.rs::tampered_baseline_is_detected_at_restore_and_at_start` covers the split API.
+- While the hash runs the VM is `starting` with `VmSummary.start.phase = verifying_baseline` and the bytes hashed (contract, cancellation and measurements in F2-01, update of 2026-10-11). Forced stop, Emergency Stop, revocation and shutdown cancel the hash; nothing is launched.
+- Not re-measured with real QEMU for a baseline start in this update (`f3_real` not rerun); the worker path is the one measured with the 6.4 GB ISO in F2-01.

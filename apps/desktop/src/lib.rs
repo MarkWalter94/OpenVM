@@ -6,6 +6,11 @@
 //! batches, dialogs for deletion and for closing with running VMs, Settings
 //! with QEMU paths, host capacity and the security facts of this version.
 //!
+//! F3: Baselines page of a VM (baselines with the VM off: creation with the
+//! explicit consent after an unclean stop, restore, deletion), with the
+//! long operations shown as progress and cancelled only by the Emergency
+//! Stop.
+//!
 //! The simulated framebuffer is a pattern generated in memory: it is not a
 //! real console, it is shown only on request (`--simulated-console`, or
 //! `--smoke`) and is never used in the product path (F2 exit criterion: no
@@ -17,6 +22,7 @@
 
 use std::time::{Duration, Instant};
 
+pub mod baselines;
 pub mod clipboard;
 pub mod console;
 pub mod dashboard;
@@ -33,9 +39,11 @@ pub mod wizard;
 
 use console::{ConsoleAction, LiveConsole};
 use dashboard::{Confirm, DashboardAction};
-use lightvm_proto::{MediaKind, RunId, VmId, VmState};
+use lightvm_proto::{BaselineId, Label, MediaKind, RunId, UtcTimestamp, VmId, VmState};
 use render::RenderingInfo;
-use service::{RequestStatus, Service, ServiceCommand, ServiceConfig, ServiceState, Supervisor};
+use service::{
+    BaselineOp, RequestStatus, Service, ServiceCommand, ServiceConfig, ServiceState, Supervisor,
+};
 use settings::{SupervisorAction, SupervisorUiState, UiSettings};
 
 pub use dashboard::dashboard_ui;
@@ -113,6 +121,9 @@ const RECONNECT_AFTER: Duration = Duration::from_secs(2);
 /// the supervisor shutdown terminates the remaining ones.
 pub const CLOSE_STOP_TIMEOUT: Duration = Duration::from_secs(90);
 
+/// Re-read interval of the VM list while a VM is starting.
+pub const START_POLL: Duration = Duration::from_millis(500);
+
 /// Side navigation items.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Section {
@@ -170,6 +181,53 @@ struct ConfirmDialog {
     run_id: Option<RunId>,
     /// The action was sent (deletion: waiting for the outcome).
     sent: bool,
+    focus: bool,
+}
+
+/// Baseline action to confirm (F3).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum BaselineConfirm {
+    /// Creation, with the label generated when the dialog opened.
+    Create { label: Label },
+    /// Restore: the current state is discarded.
+    Restore { id: BaselineId, label: String },
+    /// Deletion.
+    Delete {
+        id: BaselineId,
+        label: String,
+        size: u64,
+    },
+}
+
+impl BaselineConfirm {
+    /// The request recorded by the supervisor state is this one.
+    fn matches(&self, op: &BaselineOp) -> bool {
+        match (self, op) {
+            (Self::Create { label }, BaselineOp::Create { label: l, .. }) => label == l,
+            (Self::Restore { id, .. }, BaselineOp::Restore(i))
+            | (Self::Delete { id, .. }, BaselineOp::Delete(i)) => id == i,
+            _ => false,
+        }
+    }
+}
+
+/// Wait in the dialog for a creation or restore to show up as running on
+/// the VM; then the dialog closes and the progress is on the page (the
+/// Emergency Stop must stay reachable).
+const BASELINE_DIALOG_WAIT: Duration = Duration::from_secs(2);
+
+/// Baseline confirmation dialog open.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BaselineDialog {
+    vm_id: VmId,
+    name: String,
+    kind: BaselineConfirm,
+    /// Creation refused for an unclean stop: explicit consent asked.
+    unclean: bool,
+    /// Consent checkbox.
+    consent: bool,
+    /// The action was sent, at this instant.
+    sent: Option<Instant>,
     focus: bool,
 }
 
@@ -243,6 +301,15 @@ pub struct LightVmApp {
     vm_edit: Option<vm_settings::VmEdit>,
     wizard: Option<wizard::Wizard>,
     dialog: Option<ConfirmDialog>,
+    /// VM whose Baselines page is open (F3).
+    baselines_vm: Option<VmId>,
+    baseline_dialog: Option<BaselineDialog>,
+    /// Creation or restore sent by this UI: VM and instant (elapsed time).
+    baseline_sent: Option<(VmId, Instant)>,
+    /// Fixed clock for the generated baseline labels (tests).
+    fixed_now: Option<UtcTimestamp>,
+    /// Last re-read of the VM list for the progress of a start.
+    start_poll: Option<Instant>,
     closing: Option<Closing>,
     allow_close: bool,
     keyboard_nav: bool,
@@ -297,6 +364,11 @@ impl LightVmApp {
             vm_edit: None,
             wizard: None,
             dialog: None,
+            baselines_vm: None,
+            baseline_dialog: None,
+            baseline_sent: None,
+            fixed_now: None,
+            start_poll: None,
             closing: None,
             allow_close: false,
             keyboard_nav: false,
@@ -447,6 +519,8 @@ impl LightVmApp {
         self.vm_edit = None;
         self.wizard = None;
         self.dialog = None;
+        self.baselines_vm = None;
+        self.baseline_dialog = None;
         self.service_error = None;
         let (tx, rx) = std::sync::mpsc::channel();
         let ctx = ctx.clone();
@@ -725,7 +799,23 @@ impl LightVmApp {
 
     /// A confirmation dialog is open.
     pub fn dialog_open(&self) -> bool {
-        self.dialog.is_some()
+        self.dialog.is_some() || self.baseline_dialog.is_some()
+    }
+
+    /// VM whose Baselines page is open, if any.
+    pub fn baselines_vm(&self) -> Option<VmId> {
+        self.baselines_vm
+    }
+
+    /// Fixes the instant used for the generated baseline labels (tests and
+    /// snapshots); `None` uses the system clock.
+    #[doc(hidden)]
+    pub fn set_fixed_time(&mut self, t: Option<UtcTimestamp>) {
+        self.fixed_now = t;
+    }
+
+    fn now(&self) -> UtcTimestamp {
+        self.fixed_now.unwrap_or_else(UtcTimestamp::now)
     }
 
     /// The close of the app with running VMs is in progress (dialog shown).
@@ -792,6 +882,7 @@ impl LightVmApp {
         }
         self.track_keyboard_navigation(&ctx);
         self.collect_restart();
+        self.poll_starting(&ctx);
         self.sync_fullscreen(&ctx);
         self.handle_close_request(&ctx);
 
@@ -867,6 +958,7 @@ impl LightVmApp {
             });
 
         self.confirm_dialog_ui(ui);
+        self.baseline_dialog_ui(ui);
         self.close_dialog_ui(ui, &ctx);
         // Second defence: no widget writes the host clipboard.
         clipboard::strip_clipboard_output(&ctx);
@@ -894,6 +986,10 @@ impl LightVmApp {
                 for s in Section::ALL {
                     let focus_ring = self.keyboard_nav;
                     if theme::nav_item(ui, s.label(), self.section == s, focus_ring).clicked() {
+                        if s == Section::Dashboard && self.section == s {
+                            // Back to the VM list from a VM's page.
+                            self.baselines_vm = None;
+                        }
                         self.section = s;
                     }
                 }
@@ -911,6 +1007,27 @@ impl LightVmApp {
                     });
                 });
             });
+    }
+
+    /// While a VM is starting (media and baseline verification, launch) the
+    /// supervisor publishes no event for the progress: the VM list is
+    /// re-read every [`START_POLL`].
+    fn poll_starting(&mut self, ctx: &egui::Context) {
+        let Some(s) = &self.service else { return };
+        let st = s.state();
+        if !st.connected || !st.vms.iter().any(|v| v.state == VmState::Starting) {
+            self.start_poll = None;
+            return;
+        }
+        let now = Instant::now();
+        if self
+            .start_poll
+            .is_none_or(|t| now.duration_since(t) >= START_POLL)
+        {
+            self.start_poll = Some(now);
+            s.send(ServiceCommand::Refresh);
+        }
+        ctx.request_repaint_after(START_POLL);
     }
 
     /// Keyboard navigation in use: Tab or arrows since the last click.
@@ -983,6 +1100,10 @@ impl LightVmApp {
             self.wizard_page(ui, &state, active);
             return;
         }
+        if let Some(vm_id) = self.baselines_vm {
+            self.baselines_page(ui, &state, vm_id, active);
+            return;
+        }
 
         match dashboard_ui(ui, &state, pid, alive) {
             Some(DashboardAction::Command(c)) => self.send(c),
@@ -992,6 +1113,11 @@ impl LightVmApp {
                 self.send(ServiceCommand::ListMedia);
             }
             Some(DashboardAction::Console(id)) => self.open_console(id),
+            Some(DashboardAction::Baselines(id)) => {
+                self.vm_edit = None;
+                self.baselines_vm = Some(id);
+                self.send(ServiceCommand::ListBaselines(id));
+            }
             Some(DashboardAction::Edit(id)) => {
                 self.vm_edit = state.vm(id).map(|v| {
                     vm_settings::VmEdit::new(v.vm_id, v.config_revision, v.config.clone())
@@ -1017,7 +1143,9 @@ impl LightVmApp {
         };
         ui.add_space(14.0);
         let current = state.vm(m.vm_id);
-        let stopped = active && current.is_some_and(|v| v.state == VmState::Stopped);
+        let stopped = active
+            && current
+                .is_some_and(|v| v.state == VmState::Stopped && v.baselines.operation.is_none());
         let max_vcpu = wizard::Bounds::new(state.host).max_vcpus;
         match vm_settings::vm_settings_ui(ui, m, stopped, max_vcpu, &state.media) {
             Some(vm_settings::EditOutcome::Save) => {
@@ -1031,6 +1159,265 @@ impl LightVmApp {
             }
             Some(vm_settings::EditOutcome::Cancel) => self.vm_edit = None,
             None => {}
+        }
+    }
+
+    fn baselines_page(
+        &mut self,
+        ui: &mut egui::Ui,
+        state: &ServiceState,
+        vm_id: VmId,
+        active: bool,
+    ) {
+        let Some(vm) = state.vm(vm_id) else {
+            // Deleted meanwhile.
+            self.baselines_vm = None;
+            return;
+        };
+        let request = state.baseline.as_ref().filter(|r| r.vm_id == vm_id);
+        let any_pending = state
+            .baseline
+            .as_ref()
+            .is_some_and(|r| r.status.is_pending());
+        let running = vm.baselines.operation.is_some()
+            || request
+                .is_some_and(|r| r.status.is_pending() && !matches!(r.op, BaselineOp::Delete(_)));
+        if !running && !any_pending {
+            self.baseline_sent = None;
+        }
+        let elapsed = self
+            .baseline_sent
+            .filter(|(id, _)| *id == vm_id && running)
+            .map(|(_, t)| t.elapsed());
+        if running {
+            // Elapsed time and the end of the operation, without polling
+            // faster than once a second.
+            ui.ctx().request_repaint_after(Duration::from_secs(1));
+        }
+        let list = state.baselines.get(&vm_id);
+        let env = baselines::BaselinesEnv {
+            vm,
+            list,
+            request,
+            any_pending,
+            active,
+            available: dashboard::baselines_available(state),
+            elapsed,
+        };
+        let open = |kind| BaselineDialog {
+            vm_id,
+            name: vm.name.as_str().to_owned(),
+            kind,
+            unclean: false,
+            consent: false,
+            sent: None,
+            focus: true,
+        };
+        let find = |id: BaselineId| list.and_then(|l| l.items.iter().find(|b| b.baseline_id == id));
+        match baselines::baselines_ui(ui, &env) {
+            Some(baselines::BaselineAction::Back) => self.baselines_vm = None,
+            Some(baselines::BaselineAction::EmergencyStop) => {
+                self.send(ServiceCommand::EmergencyStop);
+            }
+            Some(baselines::BaselineAction::Refresh) => {
+                self.send(ServiceCommand::Refresh);
+                self.send(ServiceCommand::ListBaselines(vm_id));
+            }
+            Some(baselines::BaselineAction::Create) => {
+                let items = list.map_or(&[][..], |l| &l.items[..]);
+                let label = baselines::auto_label(items, self.now());
+                self.baseline_dialog = Some(open(BaselineConfirm::Create { label }));
+            }
+            Some(baselines::BaselineAction::Restore(id)) => {
+                if let Some(b) = find(id) {
+                    self.baseline_dialog = Some(open(BaselineConfirm::Restore {
+                        id,
+                        label: b.label.as_str().to_owned(),
+                    }));
+                }
+            }
+            Some(baselines::BaselineAction::Delete(id)) => {
+                if let Some(b) = find(id) {
+                    self.baseline_dialog = Some(open(BaselineConfirm::Delete {
+                        id,
+                        label: b.label.as_str().to_owned(),
+                        size: b.size_bytes,
+                    }));
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// Confirmation of a baseline creation, restore or deletion; for a
+    /// creation refused because of an unclean stop, the explicit consent
+    /// to a baseline marked "not verified".
+    fn baseline_dialog_ui(&mut self, ui: &egui::Ui) {
+        let Some(d) = &mut self.baseline_dialog else {
+            return;
+        };
+        let state = self.service.as_ref().map(|s| s.state()).unwrap_or_default();
+        let vm = state.vm(d.vm_id);
+        let list = state.baselines.get(&d.vm_id);
+        let request = state
+            .baseline
+            .as_ref()
+            .filter(|r| r.vm_id == d.vm_id && d.kind.matches(&r.op));
+        let long = !matches!(d.kind, BaselineConfirm::Delete { .. });
+        let mut error = None;
+        let mut pending = false;
+        if let Some(sent) = d.sent {
+            match request.map(|r| (&r.op, &r.status)) {
+                Some((_, RequestStatus::Pending)) => {
+                    let started = vm.is_some_and(|v| v.baselines.operation.is_some());
+                    if long && (started || sent.elapsed() >= BASELINE_DIALOG_WAIT) {
+                        // Running: the progress is on the page.
+                        self.baseline_dialog = None;
+                        return;
+                    }
+                    pending = true;
+                    ui.ctx().request_repaint_after(Duration::from_millis(250));
+                }
+                Some((_, RequestStatus::Done(_))) => {
+                    self.baseline_dialog = None;
+                    return;
+                }
+                Some((op, RequestStatus::Failed(f))) => {
+                    if matches!(d.kind, BaselineConfirm::Create { .. })
+                        && f.reason() == Some("unclean_shutdown")
+                        && !d.unclean
+                    {
+                        d.unclean = true;
+                        d.consent = false;
+                        d.sent = None;
+                        d.focus = true;
+                    } else {
+                        error = Some(baselines::error_text(op, f));
+                    }
+                }
+                _ => {}
+            }
+        }
+        let other_pending = d.sent.is_none()
+            && state
+                .baseline
+                .as_ref()
+                .is_some_and(|r| r.status.is_pending());
+        let exists =
+            |id: &BaselineId| list.and_then(|l| l.items.iter().find(|b| b.baseline_id == *id));
+        let refusal = match (vm, &d.kind) {
+            (None, _) => Some("The VM no longer exists."),
+            (Some(v), _) if v.state != VmState::Stopped => {
+                Some("The VM is no longer stopped: stop it first.")
+            }
+            (Some(v), _) if v.baselines.operation.is_some() && !pending => {
+                Some("A baseline operation is already in progress on this VM.")
+            }
+            _ if other_pending => Some("Another baseline operation is in progress."),
+            (_, BaselineConfirm::Restore { id, .. }) if exists(id).is_none() => {
+                Some("This baseline no longer exists.")
+            }
+            (_, BaselineConfirm::Delete { id, .. }) if !pending => match exists(id) {
+                None => Some("This baseline no longer exists."),
+                Some(b) => baselines::delete_refusal(b),
+            },
+            _ => None,
+        };
+        if error.is_none() && !pending {
+            error = refusal.map(str::to_owned);
+        }
+        let name = &d.name;
+        let spec = match &d.kind {
+            BaselineConfirm::Create { label } if d.unclean => dialogs::ConfirmSpec {
+                title: format!("\u{201c}{name}\u{201d} was not shut down cleanly"),
+                body: format!(
+                    "Its last run ended with a forced stop, an Emergency Stop, a crash or a supervisor restart, so its disk may hold incomplete writes. The safer way is to start it, shut it down from the guest, then create the baseline.\n\nIf you go on, \u{201c}{}\u{201d} is created anyway and stays marked Not verified.",
+                    label.as_str()
+                ),
+                confirm: "Create unverified baseline".into(),
+                destructive: false,
+            },
+            BaselineConfirm::Create { label } => dialogs::ConfirmSpec {
+                title: format!("Create a baseline of \u{201c}{name}\u{201d}?"),
+                body: format!(
+                    "LightVM copies the VM's disk and UEFI variables, with the VM off, into the read-only baseline \u{201c}{}\u{201d}. Restoring it later brings the VM back to this state.\n\nFor a large disk this takes several minutes. The VM cannot be started meanwhile; only the Emergency Stop cancels the operation.",
+                    label.as_str()
+                ),
+                confirm: "Create baseline".into(),
+                destructive: false,
+            },
+            BaselineConfirm::Restore { label, .. } => {
+                let since = match vm.and_then(|v| v.baselines.current) {
+                    Some(cur) => format!(
+                        "everything written since the restore of \u{201c}{}\u{201d}",
+                        baselines::label_of(list, cur).unwrap_or("the current baseline")
+                    ),
+                    None => "the VM's disk as it is now".to_owned(),
+                };
+                dialogs::ConfirmSpec {
+                    title: format!("Restore \u{201c}{label}\u{201d}?"),
+                    body: format!(
+                        "The current state of \u{201c}{name}\u{201d} is discarded: {since} and its UEFI variables are lost. The VM gets a fresh copy of the baseline and the guest starts from a normal boot (no RAM state is restored). Other baselines are kept.\n\nTo keep the current state, create a baseline of it first. This cannot be undone."
+                    ),
+                    confirm: "Discard and restore".into(),
+                    destructive: true,
+                }
+            }
+            BaselineConfirm::Delete { label, size, .. } => dialogs::ConfirmSpec {
+                title: format!("Delete baseline \u{201c}{label}\u{201d}?"),
+                body: format!(
+                    "The baseline ({}) is removed from the host permanently. The VM's current state does not change. This cannot be undone.",
+                    dashboard::format_bytes(*size)
+                ),
+                confirm: "Delete baseline".into(),
+                destructive: true,
+            },
+        };
+        let consent = if d.unclean {
+            Some((
+                "I understand: the baseline is marked Not verified",
+                &mut d.consent,
+            ))
+        } else {
+            None
+        };
+        let focus = std::mem::replace(&mut d.focus, false);
+        let choice = dialogs::confirm_with_consent(
+            ui,
+            "lightvm_baseline_dialog",
+            &spec,
+            pending,
+            error.as_deref(),
+            focus,
+            consent,
+        );
+        match choice {
+            Some(dialogs::Choice::Cancel) => self.baseline_dialog = None,
+            Some(dialogs::Choice::Confirm) if refusal.is_none() => {
+                let vm_id = d.vm_id;
+                let command = match &d.kind {
+                    BaselineConfirm::Create { label } => ServiceCommand::CreateBaseline {
+                        vm_id,
+                        label: label.clone(),
+                        allow_unclean: d.unclean,
+                    },
+                    BaselineConfirm::Restore { id, .. } => ServiceCommand::RestoreBaseline {
+                        vm_id,
+                        baseline_id: *id,
+                    },
+                    BaselineConfirm::Delete { id, .. } => ServiceCommand::DeleteBaseline {
+                        vm_id,
+                        baseline_id: *id,
+                    },
+                };
+                let now = Instant::now();
+                d.sent = Some(now);
+                if long {
+                    self.baseline_sent = Some((vm_id, now));
+                }
+                self.send(command);
+            }
+            _ => {}
         }
     }
 
@@ -1145,11 +1532,15 @@ impl LightVmApp {
         }
         // The action is no longer possible (state changed meanwhile).
         let still_valid = match (d.kind, vm) {
-            (Confirm::Delete(_), Some(v)) => v.state == VmState::Stopped,
+            (Confirm::Delete(_), Some(v)) => {
+                v.state == VmState::Stopped && v.baselines.operation.is_none()
+            }
             (Confirm::ForceStop(_), Some(v)) => v.state.has_process(),
             (Confirm::Reset(_), Some(v)) => v.state == VmState::Running && v.run_id == d.run_id,
             (Confirm::DetachInstall(_), Some(v)) => {
-                v.state == VmState::Stopped && v.config.install_media.is_some()
+                v.state == VmState::Stopped
+                    && v.config.install_media.is_some()
+                    && v.baselines.operation.is_none()
             }
             (_, None) => false,
         };
@@ -1473,7 +1864,8 @@ impl LightVmApp {
                 }
             }
             let (layout, fullscreen) = (self.settings.keyboard_layout, self.fullscreen);
-            let modal_open = self.dialog.is_some() || self.closing.is_some();
+            let modal_open =
+                self.dialog.is_some() || self.baseline_dialog.is_some() || self.closing.is_some();
             let action = self.live.as_mut().and_then(|live| {
                 live.ui(
                     ui,
@@ -1617,7 +2009,7 @@ impl LightVmApp {
                 return;
             }
         };
-        let stamp: String = lightvm_proto::UtcTimestamp::now()
+        let stamp: String = UtcTimestamp::now()
             .to_string()
             .chars()
             .take(19)

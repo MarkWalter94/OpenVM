@@ -1596,6 +1596,53 @@
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
     },
+    "StartPhase": {
+      "description": "Phase of a start before the VM process exists.",
+      "oneOf": [
+        {
+          "description": "SHA-256 of the approved media (installation and data ISO) recomputed\nthrough the protected handles (UI: \"Verifying media…\").",
+          "type": "string",
+          "const": "verifying_media"
+        },
+        {
+          "description": "SHA-256 of the baseline the current state is an overlay of (base disk\nand UEFI variables) recomputed through the guard handles (UI:\n\"Verifying baseline…\").",
+          "type": "string",
+          "const": "verifying_baseline"
+        },
+        {
+          "description": "Checks done: QEMU is being launched.",
+          "type": "string",
+          "const": "launching"
+        }
+      ]
+    },
+    "StartProgress": {
+      "description": "Progress of the checks of a start, in [`VmSummary::start`].",
+      "type": "object",
+      "properties": {
+        "phase": {
+          "description": "What the service is doing.",
+          "$ref": "#/$defs/StartPhase"
+        },
+        "total_bytes": {
+          "description": "Bytes to hash in total (approved media plus baseline files).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "verified_bytes": {
+          "description": "Bytes hashed so far, all files of the start together.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "phase",
+        "verified_bytes",
+        "total_bytes"
+      ]
+    },
     "StopReason": {
       "description": "Reason the agent sessions were stopped.",
       "oneOf": [
@@ -1920,6 +1967,17 @@
           "anyOf": [
             {
               "$ref": "#/$defs/RunId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "start": {
+          "description": "Sub-status of a start in progress (state `starting`): verification of\nthe approved media and of the baseline before QEMU is launched\n(ADR-0008, ADR-0025). Absent outside a start, and for a start with\nnothing to verify. Additive field: older clients ignore it.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StartProgress"
             },
             {
               "type": "null"

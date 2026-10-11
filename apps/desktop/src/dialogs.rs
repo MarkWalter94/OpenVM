@@ -1,6 +1,7 @@
 //! Modal dialogs (ROADMAP F2, "consistent dialogs"): confirmation of
-//! destructive actions (forced stop, reset, deletion) and closing the app
-//! with running VMs. Same frame, same button order (Cancel, then the
+//! destructive actions (forced stop, reset, deletion, baseline restore and
+//! deletion), baseline creation with the explicit consent for an unclean
+//! stop (F3) and closing the app with running VMs. Same frame, same button order (Cancel, then the
 //! action), Esc and a click outside cancel, keyboard focus on Cancel when
 //! the dialog opens.
 
@@ -52,6 +53,20 @@ pub fn confirm(
     error: Option<&str>,
     focus_cancel: bool,
 ) -> Option<Choice> {
+    confirm_with_consent(ui, id, spec, pending, error, focus_cancel, None)
+}
+
+/// As [`confirm`], with an optional consent checkbox (its text and value):
+/// the action button is enabled only once it is ticked.
+pub fn confirm_with_consent(
+    ui: &egui::Ui,
+    id: &str,
+    spec: &ConfirmSpec,
+    pending: bool,
+    error: Option<&str>,
+    focus_cancel: bool,
+    mut consent: Option<(&str, &mut bool)>,
+) -> Option<Choice> {
     let ctx = ui.ctx().clone();
     let mut choice = None;
     let modal = egui::Modal::new(egui::Id::new(id))
@@ -62,6 +77,10 @@ pub fn confirm(
             ui.label(egui::RichText::new(&spec.title).size(17.0).color(p.text));
             ui.add_space(6.0);
             ui.add(egui::Label::new(egui::RichText::new(&spec.body).color(p.text_weak)).wrap());
+            if let Some((text, value)) = consent.as_mut() {
+                ui.add_space(10.0);
+                ui.add_enabled(!pending, egui::Checkbox::new(value, *text));
+            }
             if let Some(e) = error {
                 ui.add_space(8.0);
                 theme::notice(ui, e, Tone::Danger);
@@ -74,11 +93,13 @@ pub fn confirm(
                 });
             }
             ui.add_space(16.0);
+            let consented = consent.as_ref().is_none_or(|(_, v)| **v);
             buttons(
                 ui,
                 &spec.confirm,
                 spec.destructive,
                 !pending,
+                consented,
                 focus_cancel,
                 &mut choice,
             );
@@ -94,6 +115,7 @@ fn buttons(
     confirm: &str,
     destructive: bool,
     enabled: bool,
+    confirm_enabled: bool,
     focus_cancel: bool,
     choice: &mut Option<Choice>,
 ) {
@@ -115,7 +137,10 @@ fn buttons(
             theme::primary(ui, confirm)
         };
         if ui
-            .add_enabled(enabled, b.min_size(egui::vec2(confirm_w, 0.0)))
+            .add_enabled(
+                enabled && confirm_enabled,
+                b.min_size(egui::vec2(confirm_w, 0.0)),
+            )
             .clicked()
         {
             *choice = Some(Choice::Confirm);
@@ -173,7 +198,7 @@ pub fn close(ui: &egui::Ui, view: &CloseView, focus_cancel: bool) -> Option<Choi
                         .wrap(),
                     );
                     ui.add_space(16.0);
-                    buttons(ui, "Stop them and quit", false, true, focus_cancel, &mut choice);
+                    buttons(ui, "Stop them and quit", false, true, true, focus_cancel, &mut choice);
                 }
                 CloseView::Stopping {
                     vms,

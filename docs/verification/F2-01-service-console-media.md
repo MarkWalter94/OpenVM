@@ -292,3 +292,61 @@ Raw output: `e2e-fix1.log` in the session scratchpad.
 - Finding 11: the regression test covers the guard on a failing step; the full `QemuVmBackend::start` error paths need QEMU and were not forced to fail in the real run.
 - Findings 4 and 7 on real QEMU: the routing is unit-tested (`stop_and_exit_routing`) and the core/engine behaviour with the fake backend; an escalation timeout and an Emergency Stop during a real graceful stop were not reproduced with QEMU in this run.
 - Finding 12: a stale fallback root is removed only when its PID is not running; a PID reused by another process keeps its directory until the next start after that process ends.
+## Update of 2026-10-11: start checks off the supervisor thread
+
+The approved media are re-hashed at every start (ADR-0008). Until now this ran on the supervisor thread inside `submit_vm(start)`: with the 6.4 GB ISO (about a minute on a cold cache) nothing else was served meanwhile (console input of the other VMs, stops, status, events). Since F3 the same happened for the baseline base disk and UEFI variables (~0.8 s/GiB).
+
+### Changes
+
+- **Three steps, like the media import and the baseline jobs** (`crates/lightvm-service/src/start.rs`):
+  1. *begin* (supervisor thread, `CoreEngine::begin_start`): the core forwards the start (`starting`, run created); every file to verify is **opened** with its guard and the handle is kept: media copies through `vm_storage::MediaGuard` (`FILE_SHARE_READ` only, `FILE_FLAG_OPEN_REPARSE_POINT`, every path component checked against links, regular file, ISO 9660/UDF signature read on the handle), the current-state files through `Catalog::open_current_state` (the run guard of ADR-0025 without the hash). A writer already holding a file makes the open fail (`vm_busy`) and the start is refused, as before.
+  2. *work* (thread `lightvm-start-check`, `StartJob::run`): SHA-256 read **through those same handles**, in 1 MiB blocks, cancellable between blocks, progress published for `VmSummary::start`.
+  3. *finish* (supervisor thread, `Command::FinishStart` → `VmEngine::finish_start`): if the run is still the VM's current one and nothing cancelled it, the observed facts go to the core, which still makes the comparison with the registry (`vm_core::media::verify_media` through a precomputed inspector), then QEMU is launched. The media handles are handed to the backend (`BackendPort::set_start_media`) and kept with the catalog guard until the run is released.
+- **Why the file verified is the file QEMU opens.** The handle is opened before the hash and closed only when the run is released. While it is open (no `FILE_SHARE_WRITE`, no `FILE_SHARE_DELETE`) the copy cannot be written, renamed or deleted, and no directory above it can be renamed (checked on this host: renaming `media\` or a parent fails with "access denied" while the file is open; test `start_media_guard_pins_the_verified_file`). QEMU opens the service-chosen managed path read-only (`file.read-only=on`), which is compatible with the guard; so the bytes hashed are the bytes QEMU reads. The previous inspector hashed by path and closed the file before QEMU opened it (TOCTOU window, a TODO since F1-04): now closed. Limits unchanged from ADR-0025: administrator, raw volume access, a memory mapping made before the guard, no share modes on Linux.
+- **Cancellation**: forced stop of the VM (`run_queue` raises the job flag), Emergency Stop (`after_emergency_stop` raises every flag; the epoch check of the worker too), revocation or closing of the connection that sent the start, service shutdown (the shutdown waits, bounded, for the start workers like for the baseline jobs). Nothing is launched; the start operation fails (`state_conflict`, or `unauthenticated` for a revocation) and the VM is `stopped`. A copy whose hash differs still makes the start fail with `permission_denied` / `media_identity_mismatch` and the VM `failed`, as before.
+- **Reply**: `submit_vm(start)` keeps its contract (the reply carries the final operation record, sent when QEMU runs or the start failed). The server queues it in order and awaits the reply in a task (`submit_start_deferred`), like `import_media`: the connection keeps serving other requests and events meanwhile; the late response is matched by `request_id`. A client that sends requests concurrently on one connection must match responses by `request_id` (`Client::request` returns the next non-event message).
+- Engines used directly (tests; `offload_start_checks(false)` is the default) run the same job inline: same code path, synchronous. The supervisor loop turns offload on.
+
+### Contract additions (additive, schema regenerated: `ipc_server_message.json`)
+
+- `VmSummary.start: Option<StartProgress>` (omitted from JSON when absent) with `StartProgress { phase, verified_bytes, total_bytes }` and `StartPhase` = `verifying_media` | `verifying_baseline` | `launching`. Present while the VM is `starting` and its checks run. The UI receives the `vm_state(starting)` event as before and polls `vm_status` / `list_vms` for the progress ("Verifying media… 41 %"); no new event.
+
+### Tests
+
+- `supervisor::start_tests` (fakes, slow "hash" behind a gate): the supervisor serves `vm_status` / `list_vms` / ping during the verification with the sub-status (with the real loop thread, 20 status requests each answered in < 500 ms); the start reply waits; launch with the media handles registered before `vm_start`, handles dropped only at the stop; forced stop, Emergency Stop, revocation and shutdown cancel (no launch, VM `stopped`, handles dropped, a new start works afterwards); a copy tampered during the verification is refused (`permission_denied`, VM `failed`).
+- `adapters::catalog::tests::start_media_guard_pins_the_verified_file` (real files): while the guard is held, write / rename / delete of the copy and rename of `media\` fail even with the read-only attribute removed; progress counts every byte; cancellation; a writer already present → `vm_busy`; a copy changed before the start → hash mismatch; not an ISO → `invalid_argument`; missing → `not_found`.
+- `tests/ipc.rs::start_reply_waits_for_the_checks_while_the_connection_keeps_serving`: on one connection, a `vm_status` sent after the start is answered first (`starting`, `verifying_media`), then the start response.
+- `vm-storage/tests/baseline.rs`: the split check (`open_current_state` + `RunGuard::verify_baseline`) detects the tampered base, is cancellable, reports progress.
+- All crates: 380 tests passed, 0 failed (18 ignored real/long tests); `clippy -D warnings` clean on all crates' targets and on `lightvm-service --no-default-features`.
+
+### Real run (QEMU 11.1.0, WHPX, release build)
+
+`cargo test --release -p lightvm-service --test f2 e2e_real_start_checks -- --ignored --nocapture` with `LIGHTVM_E2E_QEMU_DIR=lab/qemu/qemu-11.1.0` and the 6 482 409 472-byte Ubuntu 26.04.1 ISO:
+
+| Measure | Value |
+| --- | --- |
+| Import (copy + hash) | 24.4 s |
+| Start reply (hash of the managed copy through the guard + QEMU launch) | 4.20 s (≈1 471 MiB/s: the copy was still in the OS file cache after the import) |
+| Sub-status seen | `starting` / `verifying_media` from 0.1 s (155 MB hashed) to 3.86 s (6.37 of 6.48 GB) |
+| `vm_status` during the start (other connection, 37 samples, every ~100 ms) | p50 0.47 ms, p95 0.52 ms, max 232.7 ms |
+| `list_vms` during the start (37 samples) | p50 0.26 ms, p95 0.34 ms, max 0.85 ms |
+| Console ticket + first framebuffer update after the start | 186 ms |
+| Managed copy during the run | rename refused, open for writing refused (read-only attribute removed first) |
+
+The single 232 ms sample is the QEMU launch itself (`QemuRun::start`, still on the supervisor thread after the checks), not the hash. The hash duration does not affect these latencies (the supervisor does not take part in it); a cold-cache run (about a minute for this ISO) only lengthens the `verifying_media` phase.
+
+### Not done / limits
+
+- The QEMU launch (process start, QMP handshake, accelerator and NIC checks, `qemu-img` grow of the disk) still runs on the supervisor thread: ~0.2 s here.
+- No cold-cache measurement in this run (the copy had just been written; flushing the file cache needs administrator rights).
+- Hashes are not skipped for unchanged files: see the proposal below.
+
+### Proposal (not implemented): skipping the hash of unchanged files
+
+Idea: record at verification time the OS identity of the file (volume serial number, file index), size, last write time and read-only attribute, and skip the hash when they are unchanged, with a full hash on the first use after a supervisor start or every N starts. Not implemented, because it does not keep ADR-0008's guarantee ("hash re-verified at every start"):
+
+1. the last write time is settable by any process of the same user (`SetFileTime`): a change made while the service is running followed by restoring the time stamp is invisible to the identity check (same file index, size, attributes);
+2. raw volume writes and writes through a memory mapping made before the guard bypass the time stamp too (already declared limits of ADR-0025, but today the hash at the next start still catches the change; with the cache it would not);
+3. the identity is not readable with stable `std` without `unsafe` (`vm-storage` and `lightvm-service` contain no `unsafe`); it would need `GetFileInformationByHandle` in `qemu-backend`'s FFI layer.
+
+A variant that keeps a hard guarantee: keep the media guard open *between* runs (from the first verification until the service stops, `FILE_SHARE_READ` only), so the file cannot change while the service lives, and hash only when the guard is (re)acquired. This changes the rule from "hash at every start" to "hash at every acquisition of a continuous guard"; it needs an ADR-0008 / ADR-0025 decision (and makes the copy undeletable while the service runs).

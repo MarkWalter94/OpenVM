@@ -188,10 +188,14 @@ fn no_action_with_service_terminated_or_not_connected() {
 /// shows the hint to remove it; the button asks for a confirmation.
 #[test]
 fn install_media_hint_after_first_run() {
+    // As the real service reports it: no run id for a stopped VM, the
+    // installed system shows in the disk usage.
     let mut installed = vm(1, "installed", VmState::Stopped);
-    installed.run_id = Some(common::run_id(1));
+    installed.run_id = None;
+    installed.disk_used_bytes = Some(6_900_000_000);
     installed.config.install_media = Some(common::media_id(1));
     let mut fresh = vm(2, "fresh", VmState::Stopped);
+    fresh.disk_used_bytes = Some(3 << 20);
     fresh.config.install_media = Some(common::media_id(1));
     let mut h = harness(connected(vec![installed, fresh]), true);
     h.run();
@@ -201,7 +205,7 @@ fn install_media_hint_after_first_run() {
         )
         .count(),
         1,
-        "only the VM that already ran shows the hint"
+        "only the VM whose disk holds a system shows the hint"
     );
     h.get_by_role_and_label(Role::Button, "Remove the installation media of installed")
         .click();

@@ -391,6 +391,27 @@ fn tampered_baseline_is_detected_at_restore_and_at_start() {
     .unwrap();
     let e = cat.guard_current_state(&fx.vm, &run).unwrap_err();
     assert!(matches!(e, StorageError::IntegrityMismatch { .. }), "{e:?}");
+    // Same check split as the service does it: guard opened without the
+    // hash (fast), hash through the guard handles afterwards (worker).
+    let mut files = cat
+        .open_current_state(&fx.vm, &run)
+        .unwrap()
+        .expect("overlay state");
+    let total = files.guard.baseline_bytes();
+    assert!(total > 0);
+    let e = files.guard.verify_baseline(&|| true, &|_| {}).unwrap_err();
+    assert!(
+        matches!(&e, StorageError::StateConflict(m) if m == vm_storage::HASH_CANCELLED),
+        "{e:?}"
+    );
+    let read = std::cell::Cell::new(0u64);
+    let e = files
+        .guard
+        .verify_baseline(&|| false, &|n| read.set(read.get() + n))
+        .unwrap_err();
+    assert!(matches!(e, StorageError::IntegrityMismatch { .. }), "{e:?}");
+    assert!(read.get() > 0 && read.get() <= total);
+    drop(files);
     cat.with_tx(|tx| {
         tx.end_run(
             &run,

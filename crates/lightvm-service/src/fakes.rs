@@ -19,8 +19,8 @@ use vm_core::media::{ObservedMediaFacts, VerifiedMedia};
 use vm_core::ports::{AuditSink, CatalogStore, MediaInspector, VmBackend};
 
 use crate::engine::{
-    BackendPort, BaselinePort, CoreEngine, ImageTool, ImportCopied, ImportJob, MediaImportPort,
-    StartDisks, VmEngine, core_config,
+    BackendPort, BaselinePort, CoreEngine, GuardedMedia, ImageTool, ImportCopied, ImportJob,
+    MediaGuardPort, MediaImportPort, StartDisks, VmEngine, core_config,
 };
 use crate::supervisor::{Backend, EmergencyOutcome, EmergencyStop, ParentLossPolicy};
 
@@ -52,6 +52,11 @@ impl Gate {
     pub fn open(&self) {
         *lock(&self.open) = true;
         self.cv.notify_all();
+    }
+
+    /// `true` once opened.
+    pub fn is_open(&self) -> bool {
+        *lock(&self.open)
     }
 
     fn wait(&self) {
@@ -361,18 +366,92 @@ impl AuditSink for MemoryAudit {
     }
 }
 
-/// Fake media inspector: reports the registered facts (no file).
-#[derive(Debug, Default)]
-pub struct FakeInspector;
+/// Fake media inspector: reports the registered facts (no file). For the
+/// start checks ([`MediaGuardPort`]) the "hash" can take time (`delay`),
+/// wait for a gate, and report a tampered copy; every step is logged in
+/// `calls` (`media_open`, `media_hash_done`, `media_hash_cancelled`,
+/// `media_guard_dropped`).
+#[derive(Debug, Default, Clone)]
+pub struct FakeInspector {
+    /// Duration of the hash of each medium (cancellation polled every 5 ms).
+    pub delay: std::time::Duration,
+    /// Gate the hash waits for before ending (cancellation polled).
+    pub gate: Option<Arc<Gate>>,
+    /// Raised: the copy is observed with a hash different from the registry.
+    pub tampered: Arc<std::sync::atomic::AtomicBool>,
+    /// Calls received.
+    pub calls: Calls,
+}
 
-impl MediaInspector for FakeInspector {
-    fn inspect(&mut self, entry: &MediaEntry) -> Result<ObservedMediaFacts, PublicError> {
-        Ok(ObservedMediaFacts {
-            sha256: entry.record.sha256,
+impl FakeInspector {
+    fn facts(&self, entry: &MediaEntry) -> ObservedMediaFacts {
+        let mut sha256 = entry.record.sha256;
+        if self.tampered.load(std::sync::atomic::Ordering::SeqCst) {
+            sha256 = Sha256Digest::from_bytes([0xee; 32]);
+        }
+        ObservedMediaFacts {
+            sha256,
             size_bytes: entry.record.size_bytes,
             file_identity: entry.file_identity,
             read_only: true,
-        })
+        }
+    }
+}
+
+impl MediaInspector for FakeInspector {
+    fn inspect(&mut self, entry: &MediaEntry) -> Result<ObservedMediaFacts, PublicError> {
+        Ok(self.facts(entry))
+    }
+}
+
+/// Medium "held open" by the fake inspector for a start.
+#[derive(Debug)]
+struct FakeGuardedMedia {
+    entry: MediaEntry,
+    cfg: FakeInspector,
+}
+
+impl Drop for FakeGuardedMedia {
+    fn drop(&mut self) {
+        push(&self.cfg.calls, "media_guard_dropped");
+    }
+}
+
+impl GuardedMedia for FakeGuardedMedia {
+    fn size_bytes(&self) -> u64 {
+        self.entry.record.size_bytes
+    }
+
+    fn observe(
+        &mut self,
+        cancel: &dyn Fn() -> bool,
+        progress: &dyn Fn(u64),
+    ) -> Result<ObservedMediaFacts, PublicError> {
+        let t0 = std::time::Instant::now();
+        loop {
+            if cancel() {
+                push(&self.cfg.calls, "media_hash_cancelled");
+                return Err(PublicError::state_conflict("verification cancelled"));
+            }
+            let gate_open = self.cfg.gate.as_ref().is_none_or(|g| g.is_open());
+            if gate_open && t0.elapsed() >= self.cfg.delay {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        progress(self.entry.record.size_bytes);
+        push(&self.cfg.calls, "media_hash_done");
+        Ok(self.cfg.facts(&self.entry))
+    }
+}
+
+impl MediaGuardPort for FakeInspector {
+    fn open_for_start(&mut self, entry: &MediaEntry) -> Result<Box<dyn GuardedMedia>, PublicError> {
+        push(&self.calls, "media_open");
+        Ok(Box::new(FakeGuardedMedia {
+            entry: entry.clone(),
+            cfg: self.clone(),
+        }))
     }
 }
 
@@ -408,6 +487,9 @@ pub struct FakeVmBackend {
     /// Current-state files received for the next start, with their guard,
     /// kept like the real backend until the next stop.
     pub start_disks: BTreeMap<VmId, (RunId, StartDisks)>,
+    /// Media handles received for the next start, kept like the real
+    /// backend until the next stop.
+    pub start_media: BTreeMap<VmId, (RunId, Vec<Box<dyn GuardedMedia>>)>,
 }
 
 /// Outcomes of background graceful stops injected by a test.
@@ -438,12 +520,14 @@ impl VmBackend for FakeVmBackend {
     fn shutdown(&mut self, vm_id: VmId, run_id: RunId) -> Result<(), PublicError> {
         push(&self.calls, "vm_shutdown");
         self.start_disks.remove(&vm_id);
+        self.start_media.remove(&vm_id);
         self.exits.push((vm_id, run_id, true));
         Ok(())
     }
     fn force_stop(&mut self, vm_id: VmId, run_id: RunId) -> Result<(), PublicError> {
         push(&self.calls, "vm_force_stop");
         self.start_disks.remove(&vm_id);
+        self.start_media.remove(&vm_id);
         self.exits.push((vm_id, run_id, false));
         self.stopping.remove(&vm_id);
         lock(&self.emergency_killed).remove(&vm_id);
@@ -497,6 +581,10 @@ impl BackendPort for FakeVmBackend {
     fn set_start_disks(&mut self, vm_id: VmId, run_id: RunId, disks: StartDisks) {
         push(&self.calls, "vm_start_disks");
         self.start_disks.insert(vm_id, (run_id, disks));
+    }
+    fn set_start_media(&mut self, vm_id: VmId, run_id: RunId, guards: Vec<Box<dyn GuardedMedia>>) {
+        push(&self.calls, format!("vm_start_media:{}", guards.len()));
+        self.start_media.insert(vm_id, (run_id, guards));
     }
     fn take_exits(&mut self) -> Vec<(VmId, RunId, bool)> {
         std::mem::take(&mut self.exits)
@@ -597,7 +685,7 @@ pub fn sample_engine(backend: FakeVmBackend, audit: MemoryAudit) -> MemoryEngine
         MemoryStore::default(),
         audit,
         backend,
-        FakeInspector,
+        FakeInspector::default(),
         core_config(host_capacity()),
     )
     .expect("in-memory core");

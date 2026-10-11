@@ -914,3 +914,120 @@ mod binary {
         assert!(out.stdout.is_empty());
     }
 }
+
+/// The reply of `submit_vm(start)` waits for the file checks of the start
+/// (hash of the approved media, on a worker thread), while the same
+/// connection keeps serving: a `vm_status` sent after it is answered first,
+/// with the `starting` sub-status.
+#[tokio::test(flavor = "multi_thread")]
+async fn start_reply_waits_for_the_checks_while_the_connection_keeps_serving() {
+    use lightvm_proto::ipc::{ClientMessage, StartPhase};
+    use lightvm_proto::{
+        Caller, Label, ManagedRelPath, MediaEntry, MediaId, MediaKind, MediaRecord, OperationId,
+        OperationStatus, Sha256Digest, UtcTimestamp, VmAction, VmRequest, VmState,
+    };
+    use lightvm_service::engine::{CoreEngine, core_config};
+    use lightvm_service::fakes::{FakeInspector, MemoryStore, host_capacity, sample_config};
+    use vm_core::ports::CatalogStore as _;
+
+    let gate = Gate::closed();
+    let calls = Calls::default();
+    let entry = MediaEntry {
+        record: MediaRecord {
+            id: MediaId::new_v7(),
+            kind: MediaKind::InstallIso,
+            sha256: Sha256Digest::from_bytes([3; 32]),
+            size_bytes: 1 << 30,
+            declared_origin: Label::parse("test").unwrap(),
+            approved_at: UtcTimestamp::now(),
+        },
+        managed_path: ManagedRelPath::parse("media/a.iso").unwrap(),
+        file_identity: None,
+    };
+    let mut store = MemoryStore::default();
+    store.insert_media(&entry).unwrap();
+    let mut engine = CoreEngine::new(
+        store,
+        MemoryAudit::default(),
+        FakeVmBackend {
+            calls: calls.clone(),
+            ..FakeVmBackend::default()
+        },
+        FakeInspector {
+            gate: Some(gate.clone()),
+            calls: calls.clone(),
+            ..FakeInspector::default()
+        },
+        core_config(host_capacity()),
+    )
+    .unwrap();
+    let mut cfg = sample_config("iso");
+    cfg.install_media = Some(entry.record.id);
+    let vm_id = engine.create_vm(&Caller::User, cfg).unwrap().id;
+    let dir = temp_dir("start-deferred");
+    let (handle, ui) = start(config(&dir), Box::new(engine), Box::new(FakeHost { calls }))
+        .await
+        .expect("service start");
+    let svc = Svc {
+        handle,
+        ui,
+        calls: Calls::default(),
+        dir,
+    };
+    let (mut c, _) = connect_ui(&svc).await;
+    let send = |id, body| ClientMessage::Request {
+        request_id: id,
+        body,
+    };
+    c.send(&send(
+        100,
+        Request::SubmitVm {
+            request: VmRequest {
+                operation_id: OperationId::new_v7(),
+                vm_id,
+                expected_run_id: None,
+                action: VmAction::Start,
+            },
+        },
+    ))
+    .await
+    .unwrap();
+    c.send(&send(101, Request::VmStatus { vm_id }))
+        .await
+        .unwrap();
+    match tokio::time::timeout(T, c.recv())
+        .await
+        .expect("timeout")
+        .expect("message")
+    {
+        ServerMessage::Response {
+            request_id: 101,
+            result: ResponseBody::Vm { vm },
+        } => {
+            assert_eq!(vm.state, VmState::Starting);
+            let p = vm.start.expect("start sub-status");
+            assert_eq!(
+                (p.phase, p.total_bytes),
+                (StartPhase::VerifyingMedia, 1 << 30)
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    gate.open();
+    match tokio::time::timeout(T, c.recv())
+        .await
+        .expect("timeout")
+        .expect("message")
+    {
+        ServerMessage::Response {
+            request_id: 100,
+            result:
+                ResponseBody::Operation {
+                    operation: Some(op),
+                    ..
+                },
+        } => assert_eq!(op.status, OperationStatus::Succeeded),
+        other => panic!("{other:?}"),
+    }
+    svc.handle.shutdown().await;
+}

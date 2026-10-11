@@ -25,7 +25,15 @@
 //!   closing of the connection, service shutdown) and stops `qemu-img`;
 //!   the result is then discarded and audited as failed. The service
 //!   shutdown waits (bounded) for the jobs still running, so nothing is
-//!   left half published (the catalog journal covers a crash anyway).
+//!   left half published (the catalog journal covers a crash anyway);
+//! - **start checks**: the hash of the approved media and of the baseline,
+//!   re-verified at every start (ADR-0008, ADR-0025), runs on a worker
+//!   thread ([`SupervisorThread::spawn_start_job`], [`crate::start`]) through
+//!   handles opened here and kept until the run ends; the VM is `starting`
+//!   with `VmSummary::start` showing the phase. The `submit_vm(start)` reply
+//!   is held until QEMU is launched (or the start fails). Forced stop,
+//!   Emergency Stop, revocation of the requesting connection and shutdown
+//!   cancel the checks; nothing is launched and the VM ends `stopped`.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -38,14 +46,15 @@ use lightvm_proto::ipc::{
     ServiceState, StopReason,
 };
 use lightvm_proto::{
-    Actor, BaselineId, Caller, Label, MediaKind, PublicError, ReplyError, RunId, TerminationCause,
-    VmConfig, VmId, VmRequest,
+    Actor, Admission, BaselineId, Caller, Label, MediaKind, OperationStatus, PublicError,
+    ReplyError, RunId, TerminationCause, VmConfig, VmId, VmRequest,
 };
 use tokio::sync::{OwnedSemaphorePermit, broadcast, oneshot, watch};
 
 use crate::display::DisplayRegistry;
 use crate::engine::{
-    BaselineOutcome, BaselineRequest, CancelCheck, ImportCopied, StorageDone, VmEngine,
+    BaselineOutcome, BaselineRequest, CancelCheck, ImportCopied, StartDone, StartJob, StorageDone,
+    VmEngine,
 };
 
 /// Media imports copying at the same time (each holds a worker thread).
@@ -181,6 +190,14 @@ impl SupervisorRequest {
 
 pub(crate) type Reply = oneshot::Sender<Result<ResponseBody, ReplyError>>;
 
+/// Reply of a `submit_vm(start)` held while the start's file checks run.
+pub(crate) struct StartHolder {
+    reply: Reply,
+    admission: Admission,
+    /// Revocation of the requesting connection: cancels the checks.
+    revoked: watch::Receiver<bool>,
+}
+
 pub(crate) enum Command {
     Request {
         req: SupervisorRequest,
@@ -226,6 +243,15 @@ pub(crate) enum Command {
         /// Emergency Stop generation when the operation was queued.
         epoch: u64,
     },
+    /// File checks of a start finished on their worker thread: launch or
+    /// failure, then the reply held for the request that started it.
+    FinishStart {
+        done: StartDone,
+        /// Reply of the `submit_vm` that asked for the start, if held.
+        holder: Option<StartHolder>,
+        /// Emergency Stop generation when the checks began.
+        epoch: u64,
+    },
     /// Console tickets revoked outside the supervisor thread (UI connection
     /// revoked or closed, Emergency Stop): audit and, for a lost console,
     /// release of the keys and buttons still pressed on these runs.
@@ -246,6 +272,7 @@ impl std::fmt::Debug for Command {
             Self::Shutdown { .. } => write!(f, "Shutdown"),
             Self::FinishImport { .. } => write!(f, "FinishImport"),
             Self::FinishStorage { done, .. } => write!(f, "FinishStorage({done:?})"),
+            Self::FinishStart { done, .. } => write!(f, "FinishStart({done:?})"),
             Self::ConsolesRevoked { runs, cause, .. } => {
                 write!(f, "ConsolesRevoked({}, {cause:?})", runs.len())
             }
@@ -281,8 +308,11 @@ pub(crate) struct SupervisorThread {
     pub(crate) imports: usize,
     /// Baseline jobs whose work is in progress (F3).
     pub(crate) storage_jobs: usize,
-    /// Raised at the service shutdown: cancels the baseline jobs.
+    /// Raised at the service shutdown: cancels the baseline jobs and the
+    /// start checks.
     pub(crate) storage_cancel: Arc<AtomicBool>,
+    /// Start checks running on worker threads.
+    pub(crate) start_jobs: usize,
 }
 
 /// Maximum interval between two observations of the process exits (shutdown
@@ -305,6 +335,9 @@ fn panic_text(p: &(dyn std::any::Any + Send)) -> &str {
 
 impl SupervisorThread {
     pub(crate) fn run(mut self, rx: mpsc::Receiver<Command>) {
+        // The file checks of a start (hash of a multi-GiB ISO) run on worker
+        // threads: this thread keeps serving the other requests.
+        self.engine.offload_start_checks(true);
         let mut next_observe = Instant::now() + OBSERVE_INTERVAL;
         loop {
             let wait = next_observe.saturating_duration_since(Instant::now());
@@ -333,6 +366,18 @@ impl SupervisorThread {
                                 return;
                             }
                         }
+                    }
+                    // Start checks begun by the command and not yet spawned.
+                    let r = catch_unwind(AssertUnwindSafe(|| {
+                        for job in self.engine.take_start_jobs() {
+                            self.spawn_start_job(job, None);
+                        }
+                    }));
+                    if let Err(p) = r {
+                        crate::diag!(
+                            "lightvm-service: supervisor: panic while starting the start checks: {}",
+                            panic_text(p.as_ref())
+                        );
                     }
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -410,9 +455,41 @@ impl SupervisorThread {
                 } else {
                     self.handle(req, caller.as_ref(), connection_id)
                 };
+                // A start whose file checks were left to a worker: the
+                // reply waits for the launch (same answer as before, the
+                // supervisor stays free meanwhile).
+                let mut jobs = self.engine.take_start_jobs();
+                if let Ok(ResponseBody::Operation {
+                    admission,
+                    operation: Some(op),
+                }) = &res
+                    && op.kind == lightvm_proto::OperationKind::Start
+                    && op.status == OperationStatus::Forwarded
+                    && let Some(i) = jobs.iter().position(|j| j.operation_id() == op.id)
+                    && let Some(reply) = slot.take()
+                {
+                    let job = jobs.remove(i);
+                    let holder = StartHolder {
+                        reply,
+                        admission: admission.clone(),
+                        revoked,
+                    };
+                    self.spawn_start_job(job, Some(holder));
+                }
+                for job in jobs {
+                    self.spawn_start_job(job, None);
+                }
                 if let Some(reply) = slot.take() {
                     let _ = reply.send(res);
                 }
+            }
+            Command::FinishStart {
+                done,
+                holder,
+                epoch,
+            } => {
+                self.start_jobs = self.start_jobs.saturating_sub(1);
+                self.finish_start(done, holder, epoch, slot);
             }
             Command::FinishImport {
                 caller,
@@ -528,7 +605,7 @@ impl SupervisorThread {
         // Bounded wait for the cancelled baseline jobs: their result is
         // discarded (the journal would roll it back anyway).
         let deadline = Instant::now() + STORAGE_SHUTDOWN_WAIT;
-        while self.storage_jobs > 0 {
+        while self.storage_jobs > 0 || self.start_jobs > 0 {
             let left = deadline.saturating_duration_since(Instant::now());
             match rx.recv_timeout(left) {
                 Ok(cmd) => self.refuse_at_shutdown(cmd),
@@ -581,6 +658,17 @@ impl SupervisorThread {
                         PublicError::state_conflict("service shutting down"),
                     );
                     let _ = reply.send(Err(ReplyError::Operational(e)));
+                }
+                Command::FinishStart {
+                    done,
+                    holder,
+                    epoch,
+                } => {
+                    // Nothing is launched: the shutdown cancels the start
+                    // (VM back to `stopped`, handles closed).
+                    self.start_jobs = self.start_jobs.saturating_sub(1);
+                    let mut slot = None;
+                    self.finish_start(done, holder, epoch, &mut slot);
                 }
                 Command::ConsolesRevoked {
                     runs, actor, cause, ..
@@ -746,6 +834,114 @@ impl SupervisorThread {
         }
     }
 
+    /// File checks of a start (media and baseline hashes, see
+    /// [`crate::start`]) on a worker thread; the result comes back as
+    /// [`Command::FinishStart`]. Cancelled by the engine (forced stop or
+    /// Emergency Stop of the VM), by a new Emergency Stop generation, by the
+    /// revocation or closing of the requesting connection, by the shutdown.
+    fn spawn_start_job(&mut self, job: StartJob, holder: Option<StartHolder>) {
+        let epoch = self.emergency_epoch.load(Ordering::SeqCst);
+        let cancel: CancelCheck = {
+            let current = self.emergency_epoch.clone();
+            let shutdown = self.storage_cancel.clone();
+            let rv = holder.as_ref().map(|h| h.revoked.clone());
+            Arc::new(move || {
+                shutdown.load(Ordering::SeqCst)
+                    || current.load(Ordering::SeqCst) != epoch
+                    || rv.as_ref().is_some_and(is_revoked)
+            })
+        };
+        let tx = self.self_tx.clone();
+        // The worker owns the job (its handles) and the held reply: if the
+        // thread cannot start, the checks run here so that the start ends.
+        let (job_tx, job_rx) = mpsc::channel::<(StartJob, Option<StartHolder>)>();
+        let spawned = std::thread::Builder::new()
+            .name("lightvm-start-check".into())
+            .spawn(move || {
+                let Ok((job, holder)) = job_rx.recv() else {
+                    return;
+                };
+                let done = job.run(&|| cancel());
+                // If the supervisor is gone nothing is launched: the
+                // handles close with the result.
+                let _ = tx.send(Command::FinishStart {
+                    done,
+                    holder,
+                    epoch,
+                });
+            });
+        let inline = match spawned {
+            Ok(_) => match job_tx.send((job, holder)) {
+                Ok(()) => {
+                    self.start_jobs += 1;
+                    None
+                }
+                Err(mpsc::SendError(back)) => Some(back),
+            },
+            Err(e) => {
+                crate::diag!("lightvm-service: start check thread not started: {e}");
+                Some((job, holder))
+            }
+        };
+        if let Some((job, holder)) = inline {
+            let done = job.run(&|| false);
+            let mut slot = None;
+            self.finish_start(done, holder, epoch, &mut slot);
+        }
+    }
+
+    /// Last step of a start (see [`Command::FinishStart`]).
+    fn finish_start(
+        &mut self,
+        done: StartDone,
+        holder: Option<StartHolder>,
+        epoch: u64,
+        slot: &mut Option<Reply>,
+    ) {
+        let abort = self.start_abort_reason(holder.as_ref(), epoch);
+        let admission = holder.as_ref().map(|h| h.admission.clone());
+        *slot = holder.map(|h| h.reply);
+        let res = self.engine.finish_start(done, abort);
+        match (slot.take(), admission) {
+            (Some(reply), Some(admission)) => {
+                let _ = reply.send(
+                    res.map(|op| ResponseBody::Operation {
+                        admission,
+                        operation: Some(op),
+                    })
+                    .map_err(ReplyError::Operational),
+                );
+            }
+            _ => {
+                if let Err(e) = res {
+                    crate::diag!("lightvm-service: start not completed: {}", e.message);
+                }
+            }
+        }
+        // Starts queued behind this one, dispatched by the engine.
+        for job in self.engine.take_start_jobs() {
+            self.spawn_start_job(job, None);
+        }
+    }
+
+    /// Reason to cancel a start whose checks ended: revocation of the
+    /// requesting connection, Emergency Stop, shutdown.
+    fn start_abort_reason(&self, holder: Option<&StartHolder>, epoch: u64) -> Option<PublicError> {
+        if holder.is_some_and(|h| is_revoked(&h.revoked)) {
+            Some(PublicError::unauthenticated(
+                "connection revoked: start cancelled",
+            ))
+        } else if epoch != self.emergency_epoch.load(Ordering::SeqCst) {
+            Some(PublicError::state_conflict(
+                "start cancelled by the Emergency Stop",
+            ))
+        } else if self.storage_cancel.load(Ordering::SeqCst) {
+            Some(PublicError::state_conflict("service shutting down"))
+        } else {
+            None
+        }
+    }
+
     /// Console ticket: the core checks the caller and the VM state, the
     /// display registry starts the per-run proxy owned by the connection;
     /// the outcome is audited only once the proxy is up (or failed).
@@ -892,5 +1088,7 @@ impl SupervisorThread {
     }
 }
 
+#[cfg(test)]
+mod start_tests;
 #[cfg(test)]
 mod tests;
