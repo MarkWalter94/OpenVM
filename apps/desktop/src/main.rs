@@ -795,5 +795,6 @@ fn service_config(
         runtime_dir: a.runtime_dir.as_ref().map(PathBuf::from),
         audit_log: a.audit_log.as_ref().map(PathBuf::from),
         policy,
+        pairing_dir: None,
     }))
 }

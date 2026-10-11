@@ -3,6 +3,7 @@
 //! run, observation deadline, cancellation of media imports, geometry
 //! refresh, graceful stop timeout and Emergency Stop during a graceful stop.
 
+use crate::reports::ReportStore;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
@@ -85,6 +86,7 @@ fn supervisor(engine: Box<dyn VmEngine>) -> (SupervisorThread, mpsc::Receiver<Co
         storage_cancel: Arc::default(),
         start_jobs: 0,
         agents: Arc::default(),
+        reports: ReportStore::default(),
     };
     (sup, rx)
 }

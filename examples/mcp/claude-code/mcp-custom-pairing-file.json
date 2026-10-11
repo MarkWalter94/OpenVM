@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "lightvm": {
+      "type": "stdio",
+      "command": "C:\Program Files\LightVM\lightvm-mcp.exe",
+      "args": [],
+      "env": {
+        "LIGHTVM_PAIRING_FILE": "C:\Users\<you>\AppData\Local\LightVM\pairing\pairing.json"
+      }
+    }
+  }
+}

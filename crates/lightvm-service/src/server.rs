@@ -42,9 +42,10 @@ use crate::engine::{NewSession, VmEngine};
 use crate::frame::{self, FrameError};
 use crate::lock::{InstanceLock, LockError};
 use crate::ratelimit::{RateLimit, TokenBucket};
+use crate::reports::CallRecord;
 use crate::supervisor::{
-    Backend, Command, EmergencyStop, ParentLossPolicy, SupervisorRequest, SupervisorThread,
-    unauthenticated,
+    Backend, Command, EmergencyStop, ParentLossPolicy, ReportRequest, SupervisorRequest,
+    SupervisorThread, unauthenticated,
 };
 use crate::transport::{Accepted, BoxedStream, EndpointOptions, Listener, PeerInfo};
 
@@ -573,6 +574,9 @@ pub async fn start(
         storage_cancel: Arc::default(),
         start_jobs: 0,
         agents: agents.clone(),
+        reports: crate::reports::ReportStore::new(Some(
+            cfg.catalog_dir.join(crate::reports::SESSIONS_DIR),
+        )),
     };
     // Published before any possible subscription: no client receives it late,
     // after later events (race with `subscribe`).
@@ -1016,6 +1020,9 @@ async fn handle_connection(shared: Arc<Shared>, stream: BoxedStream, peer: PeerI
     // Replies of long requests served without blocking the connection (media
     // import: the reply arrives after the copy, events keep flowing).
     let (late_tx, mut late_rx) = tokio::sync::mpsc::channel::<ServerMessage>(4);
+    // Agent calls waiting for their reply, recorded in the session report
+    // with their outcome (F5).
+    let mut pending_calls: HashMap<RequestId, PendingCall> = HashMap::new();
 
     let close_reason: Option<CloseReason> = loop {
         let flow = tokio::select! {
@@ -1024,6 +1031,7 @@ async fn handle_connection(shared: Arc<Shared>, stream: BoxedStream, peer: PeerI
             _ = session_ended(&mut session_end) => Flow::Close(Some(CloseReason::Revoked)),
             _ = flag_set(&mut closing_rx) => Flow::Close(Some(CloseReason::ServiceStopping)),
             Some(m) = late_rx.recv() => {
+                note_reply(&shared, &mut pending_calls, &m);
                 if send(&mut wr, &m, max).await.is_err() { Flow::Close(None) } else { Flow::Continue }
             }
             ev = recv_event(&mut events) => {
@@ -1056,11 +1064,15 @@ async fn handle_connection(shared: Arc<Shared>, stream: BoxedStream, peer: PeerI
                     if send(&mut wr, &m, max).await.is_err() { Flow::Close(None) } else { Flow::Continue }
                 }
                 Some(Ok(ClientMessage::Request { request_id, body })) => {
+                    if role == Role::Pairing && let Some(p) = pending_call(&body) {
+                        pending_calls.insert(request_id, p);
+                    }
                     if !bucket.try_acquire() {
                         let m = err(Some(request_id), ErrorCode::ResourceLimit, &format!(
                             "request rate over the limit; retry in {} ms",
                             bucket.retry_after().as_millis()
                         ));
+                        note_reply(&shared, &mut pending_calls, &m);
                         if send(&mut wr, &m, max).await.is_err() { Flow::Close(None) } else { Flow::Continue }
                     } else if matches!(
                         body,
@@ -1068,12 +1080,16 @@ async fn handle_connection(shared: Arc<Shared>, stream: BoxedStream, peer: PeerI
                             | Request::CreateBaseline { .. }
                             | Request::RestoreBaseline { .. }
                             | Request::AwaitSession { .. }
+                            | Request::Agent { call: AgentCall::Snapshot { .. } | AgentCall::Restore { .. }, .. }
                     ) {
                         spawn_detached(&shared, role, connection_id, peer.pid, &revoke_rx, &late_tx, request_id, body);
                         Flow::Continue
                     } else if let Some((request, caller, agent)) = start_request(&shared, role, connection_id, &body) {
                         match submit_start_deferred(&shared, caller, agent, connection_id, &revoke_rx, &late_tx, request_id, request) {
-                            Some(m) => if send(&mut wr, &m, max).await.is_err() { Flow::Close(None) } else { Flow::Continue },
+                            Some(m) => {
+                                note_reply(&shared, &mut pending_calls, &m);
+                                if send(&mut wr, &m, max).await.is_err() { Flow::Close(None) } else { Flow::Continue }
+                            }
                             None => Flow::Continue,
                         }
                     } else {
@@ -1084,6 +1100,7 @@ async fn handle_connection(shared: Arc<Shared>, stream: BoxedStream, peer: PeerI
                                     Ok(result) => ServerMessage::Response { request_id, result },
                                     Err(error) => ServerMessage::Error { request_id: Some(request_id), error },
                                 };
+                                note_reply(&shared, &mut pending_calls, &m);
                                 if send(&mut wr, &m, max).await.is_err() { Flow::Close(None) } else { Flow::Continue }
                             }
                             Dispatch::Interrupted(reason) => Flow::Close(Some(reason)),
@@ -1141,6 +1158,115 @@ async fn handle_connection(shared: Arc<Shared>, stream: BoxedStream, peer: PeerI
         }
     }
     let _ = tokio::io::AsyncWriteExt::shutdown(&mut wr).await;
+}
+
+/// Agent call waiting for its reply (session report, F5).
+struct PendingCall {
+    session_id: SessionId,
+    call: &'static str,
+    vm_id: Option<lightvm_proto::VmId>,
+    operation_id: Option<lightvm_proto::OperationId>,
+    run_id: Option<lightvm_proto::RunId>,
+}
+
+/// Agent calls recorded in the report: lease renewals, screenshot chunks
+/// and the report calls themselves (recorded by the supervisor) are not.
+fn pending_call(body: &Request) -> Option<PendingCall> {
+    let Request::Agent { session, call } = body else {
+        return None;
+    };
+    if matches!(
+        call,
+        AgentCall::RenewLease
+            | AgentCall::ScreenshotChunk { .. }
+            | AgentCall::ToolNote { .. }
+            | AgentCall::Declare { .. }
+            | AgentCall::Report { .. }
+    ) {
+        return None;
+    }
+    let run_id = match call {
+        AgentCall::Screenshot {
+            expected_run_id, ..
+        } => Some(*expected_run_id),
+        AgentCall::Submit { request } => request.expected_run_id,
+        _ => None,
+    };
+    let name = match call {
+        AgentCall::Submit { request } => match request.action {
+            lightvm_proto::VmAction::Start => "submit.start",
+            lightvm_proto::VmAction::Stop => "submit.stop",
+            lightvm_proto::VmAction::ForceStop => "submit.force_stop",
+            lightvm_proto::VmAction::Reset => "submit.reset",
+            lightvm_proto::VmAction::Screenshot => "submit.screenshot",
+            lightvm_proto::VmAction::Input(_) => "submit.input",
+        },
+        other => other.name(),
+    };
+    Some(PendingCall {
+        session_id: session.session_id,
+        call: name,
+        vm_id: call.vm_id(),
+        operation_id: call.operation_id(),
+        run_id,
+    })
+}
+
+/// Records the outcome of an agent call before its reply is written: the
+/// record reaches the supervisor before any later request of the agent.
+fn note_reply(
+    shared: &Arc<Shared>,
+    pending: &mut HashMap<RequestId, PendingCall>,
+    m: &ServerMessage,
+) {
+    let (request_id, result) = match m {
+        ServerMessage::Response { request_id, result } => (*request_id, Ok(result)),
+        ServerMessage::Error {
+            request_id: Some(request_id),
+            error,
+        } => (*request_id, Err(error)),
+        _ => return,
+    };
+    let Some(p) = pending.remove(&request_id) else {
+        return;
+    };
+    let mut rec = CallRecord {
+        session_id: p.session_id,
+        call: p.call,
+        vm_id: p.vm_id,
+        run_id: p.run_id,
+        operation_id: p.operation_id,
+        ok: true,
+        error: None,
+        screenshot: false,
+    };
+    match result {
+        Ok(ResponseBody::Operation {
+            operation: Some(op),
+            ..
+        })
+        | Ok(ResponseBody::OperationStatus { operation: op }) => {
+            rec.run_id = op.run_id.or(rec.run_id);
+            if op.status == lightvm_proto::OperationStatus::Failed
+                || op.status == lightvm_proto::OperationStatus::Discarded
+            {
+                rec.ok = false;
+                rec.error = op.error;
+            }
+        }
+        Ok(ResponseBody::AgentScreenshot { screenshot, .. }) => {
+            rec.run_id = Some(screenshot.run_id);
+            rec.screenshot = true;
+        }
+        Ok(ResponseBody::AgentVm { vm }) => rec.run_id = vm.run_id.or(rec.run_id),
+        Ok(_) => {}
+        Err(ReplyError::Operational(e)) => {
+            rec.ok = false;
+            rec.error = Some(e.code);
+        }
+        Err(ReplyError::Protocol(_)) => rec.ok = false,
+    }
+    shared.send_cmd(Command::AgentCallDone(Box::new(rec)));
 }
 
 /// Waits for the end of the session bound to an agent connection (never for
@@ -1477,6 +1603,60 @@ async fn dispatch(
                 )
                 .await,
             );
+        }
+        Request::ListSessionReports => SupervisorRequest::Report(Box::new(ReportRequest::List)),
+        Request::GetSessionReport { session_id } => {
+            SupervisorRequest::Report(Box::new(ReportRequest::Header(session_id)))
+        }
+        Request::GetSessionReportEvents {
+            session_id,
+            offset,
+            limit,
+        } => SupervisorRequest::Report(Box::new(ReportRequest::Events {
+            session_id,
+            offset,
+            limit,
+        })),
+        Request::GetReportScreenshotChunk {
+            session_id,
+            shot,
+            index,
+        } => SupervisorRequest::Report(Box::new(ReportRequest::ShotChunk {
+            session_id,
+            shot,
+            index,
+        })),
+        Request::SetSessionVerdict {
+            session_id,
+            outcome,
+            rationale,
+        } => SupervisorRequest::Report(Box::new(ReportRequest::Verdict {
+            session_id,
+            outcome,
+            rationale,
+        })),
+        Request::VerifySession {
+            session_id,
+            verifier,
+        } => SupervisorRequest::Report(Box::new(ReportRequest::Verify {
+            session_id,
+            verifier,
+        })),
+        Request::ExportSessionReport {
+            session_id,
+            format,
+            destination,
+            overwrite,
+            include_screenshots,
+        } => SupervisorRequest::Report(Box::new(ReportRequest::Export {
+            session_id,
+            format,
+            destination,
+            overwrite,
+            include_screenshots,
+        })),
+        Request::DeleteSessionReport { session_id } => {
+            SupervisorRequest::Report(Box::new(ReportRequest::Delete(session_id)))
         }
     };
     let reply_rx = match enqueue(

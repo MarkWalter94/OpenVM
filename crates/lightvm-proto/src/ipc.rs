@@ -28,11 +28,16 @@
 use schemars::{JsonSchema, Schema, generate::SchemaSettings};
 use serde::{Deserialize, Serialize};
 
+use crate::report::{
+    AgentBaselineView, LogEntry, ReportEvent, ReportFormat, SessionReport, SessionReportSummary,
+    SessionVerifier,
+};
 use crate::{
     Admission, BaselineId, CapabilitySet, DisplayGeometry, Grant, HostCapacity, Label, Lease,
     MediaKind, MediaRecord, OperationId, OperationRecord, PROTOCOL_VERSION, Quotas, ReplyError,
     RevocationReport, RunId, Screenshot, SessionId, SessionState, SessionToken, Sha256Digest,
-    TerminationCause, UtcTimestamp, VmConfig, VmId, VmName, VmRecord, VmRequest, VmState,
+    TerminationCause, TestOutcome, UtcTimestamp, VmConfig, VmId, VmName, VmRecord, VmRequest,
+    VmState,
 };
 
 /// IPC protocol versions supported by the service, in order of preference.
@@ -308,6 +313,70 @@ pub enum Request {
         /// New owner.
         owner: InputOwner,
     },
+    /// Session reports, newest first (UI only, F5). Reports survive service
+    /// restarts; sessions do not.
+    ListSessionReports,
+    /// Header of a report, without events (UI only).
+    GetSessionReport {
+        /// Session.
+        session_id: SessionId,
+    },
+    /// A page of the events of a report (UI only).
+    GetSessionReportEvents {
+        /// Session.
+        session_id: SessionId,
+        /// First event (0-based).
+        offset: u32,
+        /// Events, 1..=[`crate::report::MAX_REPORT_EVENTS_PAGE`].
+        limit: u32,
+    },
+    /// Chunk of a stored screenshot of a report (UI only).
+    GetReportScreenshotChunk {
+        /// Session.
+        session_id: SessionId,
+        /// Screenshot index in the report.
+        shot: u32,
+        /// Chunk index, from 0.
+        index: u32,
+    },
+    /// Explicit judgement of the local user on a session (UI only): sets the
+    /// outcome with the rationale, attributed to the user.
+    SetSessionVerdict {
+        /// Session.
+        session_id: SessionId,
+        /// Outcome.
+        outcome: TestOutcome,
+        /// Rationale (1..=2000 characters, plain text).
+        rationale: String,
+    },
+    /// Runs an automatic verifier on the session's evidence (UI only).
+    VerifySession {
+        /// Session.
+        session_id: SessionId,
+        /// Verifier.
+        verifier: SessionVerifier,
+    },
+    /// Export of a report to a file chosen by the user with the native save
+    /// dialog (UI only; MCP can never choose a destination).
+    ExportSessionReport {
+        /// Session.
+        session_id: SessionId,
+        /// Format.
+        format: ReportFormat,
+        /// Absolute path of the new file.
+        destination: String,
+        /// Replace an existing file (the user confirmed it).
+        #[serde(default)]
+        overwrite: bool,
+        /// Also write the stored screenshots next to the file.
+        #[serde(default)]
+        include_screenshots: bool,
+    },
+    /// Deletion of the report and screenshots of a terminated session (UI only).
+    DeleteSessionReport {
+        /// Session.
+        session_id: SessionId,
+    },
 }
 
 impl Request {
@@ -350,6 +419,14 @@ impl Request {
             Self::ResumeSession { .. } => "resume_session",
             Self::RevokeSession { .. } => "revoke_session",
             Self::SetInputOwner { .. } => "set_input_owner",
+            Self::ListSessionReports => "list_session_reports",
+            Self::GetSessionReport { .. } => "get_session_report",
+            Self::GetSessionReportEvents { .. } => "get_session_report_events",
+            Self::GetReportScreenshotChunk { .. } => "get_report_screenshot_chunk",
+            Self::SetSessionVerdict { .. } => "set_session_verdict",
+            Self::VerifySession { .. } => "verify_session",
+            Self::ExportSessionReport { .. } => "export_session_report",
+            Self::DeleteSessionReport { .. } => "delete_session_report",
         }
     }
 }
@@ -437,6 +514,75 @@ pub enum AgentCall {
     RenewLease,
     /// Ordinary end of the session by the agent (the VM is not stopped).
     EndSession,
+    /// Baselines of the VM of the grant (`vm.status`, F5).
+    ListBaselines {
+        /// VM.
+        vm_id: VmId,
+    },
+    /// Checkpoint with the VM off (`vm.snapshot`, F5): a new baseline,
+    /// never a replacement; refused unless the VM is `stopped` (no hidden
+    /// shutdown). Long: the reply arrives when done
+    /// ([`ResponseBody::BaselineCreated`]).
+    Snapshot {
+        /// Idempotency key of the request (recorded in the report).
+        operation_id: OperationId,
+        /// VM.
+        vm_id: VmId,
+        /// Label (1..=200 characters, plain text; stored with the prefix
+        /// `agent: `).
+        label: String,
+    },
+    /// Restore with the VM off (`vm.restore`, F5): only the session's
+    /// initial baseline or one created by this session; refused unless the
+    /// VM is `stopped`. Long ([`ResponseBody::BaselineRestored`]).
+    Restore {
+        /// Idempotency key of the request (recorded in the report).
+        operation_id: OperationId,
+        /// VM.
+        vm_id: VmId,
+        /// Baseline.
+        baseline_id: BaselineId,
+    },
+    /// LightVM events of the session and QEMU diagnostics of the current run,
+    /// host paths removed (`vm.logs`, F5).
+    Logs {
+        /// VM.
+        vm_id: VmId,
+        /// Only events after this sequence number.
+        #[serde(default)]
+        after_seq: Option<u64>,
+        /// Entries, 1..=[`crate::report::MAX_LOG_ENTRIES`] (default 50).
+        #[serde(default)]
+        limit: Option<u32>,
+    },
+    /// Declaration of the agent about its result (F5): recorded as a claim,
+    /// never as the outcome.
+    Declare {
+        /// Outcome the agent claims.
+        claimed_outcome: TestOutcome,
+        /// Summary (at most 2000 characters kept, plain text).
+        summary: String,
+    },
+    /// Note of the adapter for the report: MCP tool name and a bounded
+    /// summary (never typed text).
+    ToolNote {
+        /// MCP tool name (at most 64 characters kept).
+        tool: String,
+        /// Outcome.
+        ok: bool,
+        /// Error code, if any (at most 64 characters kept).
+        #[serde(default)]
+        error_code: Option<String>,
+        /// Summary (at most 512 bytes serialized, otherwise replaced).
+        #[serde(default)]
+        detail: serde_json::Value,
+    },
+    /// Summary of this session's report (only the own session).
+    Report {
+        /// Session (absent = this session).
+        #[serde(default)]
+        session_id: Option<SessionId>,
+    },
 }
 
 impl AgentCall {
@@ -452,13 +598,51 @@ impl AgentCall {
             Self::Operation { .. } => "operation",
             Self::RenewLease => "renew_lease",
             Self::EndSession => "end_session",
+            Self::ListBaselines { .. } => "list_baselines",
+            Self::Snapshot { .. } => "snapshot",
+            Self::Restore { .. } => "restore",
+            Self::Logs { .. } => "logs",
+            Self::Declare { .. } => "declare",
+            Self::ToolNote { .. } => "tool_note",
+            Self::Report { .. } => "report",
         }
     }
 
     /// `true` if the call mutates a VM (refused while the session is paused).
     #[must_use]
     pub const fn is_mutation(&self) -> bool {
-        matches!(self, Self::Submit { .. })
+        matches!(
+            self,
+            Self::Submit { .. } | Self::Snapshot { .. } | Self::Restore { .. }
+        )
+    }
+
+    /// VM the call is about, if any (reports).
+    #[must_use]
+    pub fn vm_id(&self) -> Option<VmId> {
+        match self {
+            Self::VmStatus { vm_id }
+            | Self::Screenshot { vm_id, .. }
+            | Self::ListBaselines { vm_id }
+            | Self::Snapshot { vm_id, .. }
+            | Self::Restore { vm_id, .. }
+            | Self::Logs { vm_id, .. } => Some(*vm_id),
+            Self::Submit { request } => Some(request.vm_id),
+            _ => None,
+        }
+    }
+
+    /// Operation of the call, if any (reports).
+    #[must_use]
+    pub fn operation_id(&self) -> Option<OperationId> {
+        match self {
+            Self::Submit { request } => Some(request.operation_id),
+            Self::Screenshot { operation_id, .. }
+            | Self::Operation { operation_id }
+            | Self::Snapshot { operation_id, .. }
+            | Self::Restore { operation_id, .. } => Some(*operation_id),
+            _ => None,
+        }
     }
 }
 
@@ -1094,6 +1278,88 @@ pub enum ResponseBody {
         /// Discarded queue and requests already forwarded.
         report: RevocationReport,
     },
+    /// Response to `list_session_reports`.
+    SessionReports {
+        /// Reports, newest first.
+        reports: Vec<SessionReportSummary>,
+    },
+    /// A report header (events empty: read them by page).
+    SessionReport {
+        /// Report.
+        report: Box<SessionReport>,
+    },
+    /// Response to `get_session_report_events`.
+    SessionReportEvents {
+        /// Session.
+        session_id: SessionId,
+        /// Events recorded in total.
+        total: u32,
+        /// First event of the page.
+        offset: u32,
+        /// Events.
+        events: Vec<ReportEvent>,
+    },
+    /// Response to `get_report_screenshot_chunk`.
+    ReportScreenshotChunk {
+        /// Session.
+        session_id: SessionId,
+        /// Screenshot index.
+        shot: u32,
+        /// Chunk index.
+        index: u32,
+        /// Number of chunks.
+        chunks: u32,
+        /// SHA-256 of the whole PNG.
+        sha256: Sha256Digest,
+        /// Bytes of the chunk, standard base64 with padding.
+        data: String,
+    },
+    /// Response to `export_session_report`.
+    SessionReportExported {
+        /// Session.
+        session_id: SessionId,
+        /// Format.
+        format: ReportFormat,
+        /// Bytes written (report file).
+        bytes: u64,
+        /// SHA-256 of the report file.
+        sha256: Sha256Digest,
+        /// Screenshots written next to it.
+        screenshots: u32,
+    },
+    /// Response to `delete_session_report`.
+    SessionReportDeleted {
+        /// Session.
+        session_id: SessionId,
+    },
+    /// Response to the agent call `list_baselines`.
+    AgentBaselines {
+        /// VM.
+        vm_id: VmId,
+        /// Baselines, oldest first.
+        baselines: Vec<AgentBaselineView>,
+    },
+    /// Response to the agent call `logs`.
+    AgentLogs {
+        /// VM.
+        vm_id: VmId,
+        /// LightVM entries after `after_seq`, oldest first.
+        entries: Vec<LogEntry>,
+        /// Last sequence returned (pass it as `after_seq` next time).
+        last_seq: u64,
+        /// QEMU diagnostics of the current run (last lines, host paths removed).
+        qemu: Vec<LogEntry>,
+    },
+    /// Response to the agent calls `declare` and `tool_note`.
+    Recorded {
+        /// Report event recorded (0 if dropped by the limit).
+        seq: u64,
+    },
+    /// Response to the agent call `report`.
+    AgentReport {
+        /// Summary of the session's report.
+        report: SessionReportSummary,
+    },
 }
 
 /// State of the service.
@@ -1193,6 +1459,12 @@ pub enum ServiceEvent {
         vm_id: VmId,
         /// Owner now.
         owner: InputOwner,
+    },
+    /// A session report was created or changed (termination, verdict,
+    /// verification, deletion): re-read the list or the header (F5).
+    SessionReportChanged {
+        /// Session.
+        session_id: SessionId,
     },
 }
 

@@ -39,7 +39,7 @@
 //! ([`VmBackend::force_stop`]).
 
 use std::any::Any;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -49,11 +49,11 @@ use lightvm_proto::ipc::{
 };
 use lightvm_proto::{
     Actor, Admission, AuditAction, AuditOutcome, BackendObservation, BaselineId, Caller,
-    DisplayGeometry, ErrorCode, Grant, HostCapacity, InputEvent, Label, Lease, MediaEntry,
-    MediaKind, MediaRecord, OperationId, OperationKind, OperationRecord, OperationStatus,
-    PolicyLayer, PublicError, ResourceLimits, RevocationReport, RunId, Screenshot, SessionId,
-    SessionState, SessionToken, TerminationCause, VmAction, VmConfig, VmId, VmRecord, VmRequest,
-    VmState,
+    Capability, DisplayGeometry, ErrorCode, Grant, HostCapacity, InputEvent, Label, Lease,
+    MediaEntry, MediaKind, MediaRecord, OperationId, OperationKind, OperationRecord,
+    OperationStatus, PolicyLayer, PublicError, ResourceLimits, RevocationReport, RunId, Screenshot,
+    SessionId, SessionState, SessionToken, TerminationCause, VmAction, VmConfig, VmId, VmRecord,
+    VmRequest, VmState,
 };
 use vm_core::ports::{AuditSink, CatalogStore, IdGenerator, VmBackend};
 use vm_core::{Core, CoreConfig, DispatchOutcome, VmStatus};
@@ -274,6 +274,39 @@ pub trait VmEngine: Send + 'static {
         Vec::new()
     }
     /// Audit of a session lifecycle step decided by the service.
+    /// Facts of a VM for a session report (F5): name, configuration and
+    /// revision, current baseline, current run.
+    fn report_context(&mut self, _vm_id: VmId) -> Option<ReportContext> {
+        None
+    }
+
+    /// PNG of the last screenshot of an agent session, if it is
+    /// `operation_id` (copy for the session report, F5).
+    fn session_screenshot(
+        &self,
+        _session_id: SessionId,
+        _operation_id: OperationId,
+    ) -> Option<(Screenshot, Vec<u8>)> {
+        None
+    }
+
+    /// Core checks of an agent call served outside the queue (report,
+    /// declaration, tool note, logs; F5): a live session presenting its
+    /// token; with `capability`, also authorized on `vm_id`.
+    fn agent_check(
+        &mut self,
+        _caller: &Caller,
+        _vm_id: Option<VmId>,
+        _capability: Option<Capability>,
+    ) -> Result<SessionId, PublicError> {
+        Err(PublicError::unsupported("agent reports not available"))
+    }
+
+    /// QEMU diagnostics of the VM's current run (raw text, last part).
+    fn qemu_log(&mut self, _vm_id: VmId) -> Option<String> {
+        None
+    }
+
     fn record_event(
         &mut self,
         _actor: Actor,
@@ -331,6 +364,21 @@ pub struct NewSession {
     pub client_name: String,
     /// Purpose declared by the agent.
     pub purpose: String,
+}
+
+/// Facts of a VM for a session report, see [`VmEngine::report_context`].
+#[derive(Debug, Clone)]
+pub struct ReportContext {
+    /// Name.
+    pub name: String,
+    /// Configuration.
+    pub config: VmConfig,
+    /// Configuration revision.
+    pub config_revision: u64,
+    /// Baseline the current state is an overlay of.
+    pub baseline: Option<BaselineSummary>,
+    /// Current run.
+    pub run_id: Option<RunId>,
 }
 
 /// Outcome of [`VmEngine::create_session`].
@@ -639,6 +687,12 @@ pub trait BackendPort: VmBackend + Send + 'static {
     fn release_input(&mut self, _vm_id: VmId, _run_id: RunId) {}
     /// Image bytes of the last screenshot of the run (F4: agent screenshots),
     /// with its metadata; taken once.
+    /// QEMU diagnostics (stderr) of a run, last part, raw (F5 `vm.logs`;
+    /// the service removes host paths).
+    fn qemu_log(&mut self, _vm_id: VmId, _run_id: RunId) -> Option<String> {
+        None
+    }
+
     fn take_screenshot(&mut self, _vm_id: VmId, _run_id: RunId) -> Option<(Screenshot, Vec<u8>)> {
         None
     }
@@ -756,6 +810,9 @@ where
     /// Reports of sessions terminated through the gate, for the reply of
     /// the core revocation that follows.
     gate_reports: BTreeMap<SessionId, RevocationReport>,
+    /// Storage operations of agent sessions in progress (F5): operation →
+    /// session, to record the baselines a session created.
+    agent_storage: BTreeMap<OperationId, SessionId>,
 }
 
 /// Service-side data of an agent session.
@@ -766,6 +823,11 @@ struct SessionMeta {
     client_name: String,
     purpose: String,
     lease_ms: i64,
+    /// Baseline the VM's current state was an overlay of at approval: the
+    /// session's protected initial baseline (F5), restorable by the agent.
+    initial_baseline: Option<BaselineId>,
+    /// Baselines created by the session (`vm.snapshot`), restorable too.
+    created: BTreeSet<BaselineId>,
 }
 
 /// Screenshot of an agent session kept for its chunked read.
@@ -848,6 +910,7 @@ where
             last_owners: BTreeMap::new(),
             gate: None,
             gate_reports: BTreeMap::new(),
+            agent_storage: BTreeMap::new(),
         };
         let _ = e.state_changes();
         Ok(e)
@@ -1476,7 +1539,7 @@ where
             return Vec::new();
         };
         let mut out = Vec::new();
-        let mut seen = std::collections::BTreeSet::new();
+        let mut seen = BTreeSet::new();
         for vm in vms {
             seen.insert(vm.vm_id);
             let now = (vm.state, vm.run_id);
@@ -1620,6 +1683,21 @@ where
         cancel: CancelCheck,
     ) -> Result<StorageJob, PublicError> {
         self.apply_observations();
+        if let Caller::Agent { session_id, .. } = caller {
+            // F5: an agent restores only its session's initial baseline or a
+            // baseline it created (never one of the user's other baselines).
+            if let BaselineRequest::Restore { baseline_id, .. } = &req {
+                let allowed = self.session_meta.get(session_id).is_some_and(|m| {
+                    m.initial_baseline == Some(*baseline_id) || m.created.contains(baseline_id)
+                });
+                if !allowed {
+                    return Err(PublicError::permission_denied(
+                        "the session may restore only its initial baseline or the ones it created",
+                    )
+                    .with_detail("reason", "baseline_not_restorable"));
+                }
+            }
+        }
         let tool = self.backend.image_tool();
         let vm_id = req.vm_id();
         let kind = req.kind();
@@ -1640,6 +1718,9 @@ where
                         }
                     }
                 })?;
+        if let Caller::Agent { session_id, .. } = caller {
+            self.agent_storage.insert(operation_id, *session_id);
+        }
         Ok(StorageJob {
             vm_id,
             operation_id,
@@ -1653,10 +1734,18 @@ where
             operation_id,
             result,
         } = done;
-        self.core
+        let session = self.agent_storage.remove(&operation_id);
+        let r = self
+            .core
             .finish_storage_operation(vm_id, operation_id, |store| {
                 store.finish_storage_job(result)
-            })
+            });
+        if let (Ok(BaselineOutcome::Created(b)), Some(s)) = (&r, session)
+            && let Some(m) = self.session_meta.get_mut(&s)
+        {
+            m.created.insert(b.baseline_id);
+        }
+        r
     }
 
     fn abort_baseline_job(&mut self, done: StorageDone, reason: PublicError) -> PublicError {
@@ -1665,6 +1754,7 @@ where
             operation_id,
             result,
         } = done;
+        self.agent_storage.remove(&operation_id);
         let r = self
             .core
             .finish_storage_operation(vm_id, operation_id, |store| {
@@ -1725,6 +1815,7 @@ where
         };
         let (grant, lease) = self.core.create_session(spec, new.token)?;
         let id = grant.session_id;
+        let initial_baseline = self.core.store().baseline_facts(new.vm_id).current;
         self.session_meta.insert(
             id,
             SessionMeta {
@@ -1733,6 +1824,8 @@ where
                 client_name: new.client_name,
                 purpose: new.purpose,
                 lease_ms: new.lease_ms,
+                initial_baseline,
+                created: BTreeSet::new(),
             },
         );
         if new.give_input
@@ -1944,7 +2037,103 @@ where
                 let report = self.end_session(session_id, TerminationCause::Completed, false)?;
                 Ok(ResponseBody::SessionEnded { session_id, report })
             }
+            AgentCall::ListBaselines { vm_id } => {
+                self.apply_observations();
+                let list = self
+                    .core
+                    .with_visible_vm(caller, vm_id, |store| store.list_baselines(vm_id))?;
+                let meta = self.session_meta.get(&session_id);
+                let baselines = list
+                    .into_iter()
+                    .map(|b| {
+                        let initial = meta.and_then(|m| m.initial_baseline) == Some(b.baseline_id);
+                        let created_by_session =
+                            meta.is_some_and(|m| m.created.contains(&b.baseline_id));
+                        lightvm_proto::report::AgentBaselineView {
+                            baseline_id: b.baseline_id,
+                            label: b.label.to_string(),
+                            created_at: b.created_at,
+                            clean_shutdown: b.clean_shutdown,
+                            initial,
+                            created_by_session,
+                            current: b.current,
+                            restorable: initial || created_by_session,
+                        }
+                    })
+                    .collect();
+                Ok(ResponseBody::AgentBaselines { vm_id, baselines })
+            }
+            // Served by the supervisor (storage jobs, reports).
+            AgentCall::Snapshot { .. }
+            | AgentCall::Restore { .. }
+            | AgentCall::Logs { .. }
+            | AgentCall::Declare { .. }
+            | AgentCall::ToolNote { .. }
+            | AgentCall::Report { .. } => {
+                Err(PublicError::infrastructure("agent call not dispatched"))
+            }
         }
+    }
+
+    fn report_context(&mut self, vm_id: VmId) -> Option<ReportContext> {
+        let st = self.vm_status(&Caller::User, vm_id).ok()?;
+        let baseline = st.baselines.current.and_then(|cur| {
+            self.core
+                .store()
+                .list_baselines(vm_id)
+                .ok()?
+                .into_iter()
+                .find(|b| b.baseline_id == cur)
+        });
+        Some(ReportContext {
+            name: st.name.to_string(),
+            config: st.config,
+            config_revision: st.config_revision,
+            baseline,
+            run_id: st.run_id,
+        })
+    }
+
+    fn session_screenshot(
+        &self,
+        session_id: SessionId,
+        operation_id: OperationId,
+    ) -> Option<(Screenshot, Vec<u8>)> {
+        self.shots
+            .get(&session_id)
+            .filter(|s| s.operation.id == operation_id)
+            .map(|s| (s.meta.clone(), s.png.clone()))
+    }
+
+    fn agent_check(
+        &mut self,
+        caller: &Caller,
+        vm_id: Option<VmId>,
+        capability: Option<Capability>,
+    ) -> Result<SessionId, PublicError> {
+        let Caller::Agent { session_id, token } = caller else {
+            return Err(PublicError::permission_denied(
+                "agent calls need an agent session",
+            ));
+        };
+        self.sync_gates();
+        if !self.session_token_ok(*session_id, token.as_ref()) {
+            return Err(crate::agents::unauthenticated());
+        }
+        if let (Some(cap), Some(vm)) = (capability, vm_id)
+            && !self.core.is_authorized(caller, vm, cap)
+        {
+            return Err(PublicError::permission_denied(
+                "action not authorized by the effective policy",
+            )
+            .with_detail("capability", cap.as_str()));
+        }
+        Ok(*session_id)
+    }
+
+    fn qemu_log(&mut self, vm_id: VmId) -> Option<String> {
+        let run = self.core.vm_status(&Caller::User, vm_id).ok()?.run_id?;
+        self.backend.qemu_log(vm_id, run)
     }
 
     fn session_changes(&mut self) -> Vec<(SessionId, SessionState, Option<TerminationCause>)> {

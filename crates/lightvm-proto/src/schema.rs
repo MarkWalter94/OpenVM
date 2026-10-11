@@ -61,6 +61,7 @@ pub fn public_schemas() -> Vec<(&'static str, Schema)> {
         ("caller", generate::<Caller>()),
         ("vm_request", generate::<VmRequest>()),
         ("admission", generate::<Admission>()),
+        ("session_report", generate::<report::SessionReport>()),
     ]
     .into_iter()
     .chain(ipc::schemas())

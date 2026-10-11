@@ -313,6 +313,21 @@
           "description": "Screenshot bytes read by an agent session (F4, never the bytes).",
           "type": "string",
           "const": "screenshot_read"
+        },
+        {
+          "description": "Verdict on a session report: user judgement or automatic verifier (F5).",
+          "type": "string",
+          "const": "session_verdict"
+        },
+        {
+          "description": "Export of a session report to a file chosen by the user (F5, never\nthe path).",
+          "type": "string",
+          "const": "report_export"
+        },
+        {
+          "description": "Deletion of a session report and its screenshots (F5).",
+          "type": "string",
+          "const": "report_delete"
         }
       ]
     },

@@ -94,14 +94,21 @@ fn storage_operations_require_a_stopped_vm_and_the_user() {
     );
     h.stop(vm);
     let _ = run;
+    // F5: an agent needs the explicit capability (`vm.snapshot` /
+    // `vm.restore`) on the VM of its grant and a host with baselines (this
+    // test host has none: `unsupported`; the permission case with a host
+    // that has them is in `lightvm-mcp/tests/stdio.rs`). Deleting stays
+    // with the user.
     let (_, agent) = h.session(&[vm], &[Capability::VmSnapshot, Capability::VmRestore], 7);
-    assert_eq!(
-        code(
-            h.core
-                .begin_storage_operation(&agent, vm, OperationKind::Snapshot, |_, _, _| Ok(()))
-        ),
-        ErrorCode::PermissionDenied
-    );
+    for kind in [OperationKind::Snapshot, OperationKind::Restore] {
+        assert_eq!(
+            code(
+                h.core
+                    .begin_storage_operation(&agent, vm, kind, |_, _, _| Ok(()))
+            ),
+            ErrorCode::Unsupported
+        );
+    }
     assert_eq!(
         code(h.core.delete_baseline_with(&agent, vm, |_| Ok(()))),
         ErrorCode::PermissionDenied

@@ -11,6 +11,12 @@
 //! long operations shown as progress and cancelled only by the Emergency
 //! Stop.
 //!
+//! F4: Agents page (agent access switch, pairing of a client, session
+//! requests with their verification code, approval of one VM with
+//! capabilities, duration and limits, sessions with pause, revocation and
+//! input control, session page) and the agent session indicator on every
+//! page, full screen console included, with the Emergency Stop.
+//!
 //! The simulated framebuffer is a pattern generated in memory: it is not a
 //! real console, it is shown only on request (`--simulated-console`, or
 //! `--smoke`) and is never used in the product path (F2 exit criterion: no
@@ -22,6 +28,7 @@
 
 use std::time::{Duration, Instant};
 
+pub mod agents;
 pub mod baselines;
 pub mod clipboard;
 pub mod console;
@@ -30,6 +37,7 @@ pub mod diag;
 pub mod dialogs;
 pub mod keymap;
 pub mod libraries;
+pub mod pairing;
 pub mod render;
 pub mod service;
 pub mod settings;
@@ -39,7 +47,8 @@ pub mod wizard;
 
 use console::{ConsoleAction, LiveConsole};
 use dashboard::{Confirm, DashboardAction};
-use lightvm_proto::{BaselineId, Label, MediaKind, RunId, UtcTimestamp, VmId, VmState};
+use lightvm_proto::ipc::InputOwner;
+use lightvm_proto::{BaselineId, Label, MediaKind, RunId, SessionId, UtcTimestamp, VmId, VmState};
 use render::RenderingInfo;
 use service::{
     BaselineOp, RequestStatus, Service, ServiceCommand, ServiceConfig, ServiceState, Supervisor,
@@ -131,19 +140,22 @@ pub enum Section {
     Dashboard,
     /// Console of the guest.
     Console,
+    /// Agent access, requests and sessions (F4).
+    Agents,
     /// Settings.
     Settings,
 }
 
 impl Section {
     /// All items, in side panel order.
-    pub const ALL: [Self; 3] = [Self::Dashboard, Self::Console, Self::Settings];
+    pub const ALL: [Self; 4] = [Self::Dashboard, Self::Console, Self::Agents, Self::Settings];
 
     /// Visible and accessible label (name of the AccessKit node).
     pub fn label(self) -> &'static str {
         match self {
             Self::Dashboard => "Dashboard",
             Self::Console => "Console",
+            Self::Agents => "Agents",
             Self::Settings => "Settings",
         }
     }
@@ -231,6 +243,23 @@ struct BaselineDialog {
     focus: bool,
 }
 
+/// Revocation of an agent session to confirm.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RevokeDialog {
+    session_id: SessionId,
+    client: String,
+    vm_name: String,
+    sent: bool,
+    focus: bool,
+}
+
+/// "Pair a client" dialog.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PairingDialog {
+    sent: bool,
+    focus: bool,
+}
+
 /// Close of the app with running VMs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Closing {
@@ -306,6 +335,12 @@ pub struct LightVmApp {
     baseline_dialog: Option<BaselineDialog>,
     /// Creation or restore sent by this UI: VM and instant (elapsed time).
     baseline_sent: Option<(VmId, Instant)>,
+    /// Agent session whose page is open (F4).
+    agent_session: Option<SessionId>,
+    /// Approval form of a session request.
+    approve_form: Option<agents::ApproveForm>,
+    revoke_dialog: Option<RevokeDialog>,
+    pairing_dialog: Option<PairingDialog>,
     /// Fixed clock for the generated baseline labels (tests).
     fixed_now: Option<UtcTimestamp>,
     /// Last re-read of the VM list for the progress of a start.
@@ -367,6 +402,10 @@ impl LightVmApp {
             baselines_vm: None,
             baseline_dialog: None,
             baseline_sent: None,
+            agent_session: None,
+            approve_form: None,
+            revoke_dialog: None,
+            pairing_dialog: None,
             fixed_now: None,
             start_poll: None,
             closing: None,
@@ -468,6 +507,7 @@ impl LightVmApp {
             runtime_dir: None,
             audit_log: None,
             policy: self.settings.ui_loss_policy,
+            pairing_dir: None,
         })
     }
 
@@ -521,6 +561,10 @@ impl LightVmApp {
         self.dialog = None;
         self.baselines_vm = None;
         self.baseline_dialog = None;
+        self.agent_session = None;
+        self.approve_form = None;
+        self.revoke_dialog = None;
+        self.pairing_dialog = None;
         self.service_error = None;
         let (tx, rx) = std::sync::mpsc::channel();
         let ctx = ctx.clone();
@@ -799,7 +843,20 @@ impl LightVmApp {
 
     /// A confirmation dialog is open.
     pub fn dialog_open(&self) -> bool {
-        self.dialog.is_some() || self.baseline_dialog.is_some()
+        self.dialog.is_some()
+            || self.baseline_dialog.is_some()
+            || self.revoke_dialog.is_some()
+            || self.pairing_dialog.is_some()
+    }
+
+    /// Agent session whose page is open, if any.
+    pub fn agent_session(&self) -> Option<SessionId> {
+        self.agent_session
+    }
+
+    /// Request whose approval form is open, if any.
+    pub fn reviewing(&self) -> Option<lightvm_proto::ipc::SessionRequestId> {
+        self.approve_form.as_ref().map(|f| f.request_id)
     }
 
     /// VM whose Baselines page is open, if any.
@@ -904,6 +961,8 @@ impl LightVmApp {
 
         let p = theme::Palette::of(ui);
         let immersive = self.fullscreen && self.section == Section::Console;
+        // Agent session indicator: on every page, full screen included.
+        self.agent_banner(ui, &p);
         if !immersive {
             self.side_panel(ui, &p);
             egui::Panel::bottom("lightvm_status")
@@ -952,6 +1011,9 @@ impl LightVmApp {
                     self.dashboard_page(ui);
                 }),
                 Section::Console => self.console_page(ui, &ctx, chords),
+                Section::Agents => page(ui, "lightvm_page_agents", |ui| {
+                    self.agents_page(ui);
+                }),
                 Section::Settings => page(ui, "lightvm_page_settings", |ui| {
                     self.settings_ui(ui, &ctx);
                 }),
@@ -959,7 +1021,10 @@ impl LightVmApp {
 
         self.confirm_dialog_ui(ui);
         self.baseline_dialog_ui(ui);
+        self.revoke_dialog_ui(ui);
+        self.pairing_dialog_ui(ui);
         self.close_dialog_ui(ui, &ctx);
+        self.emergency_stop_over_dialogs(&ctx);
         // Second defence: no widget writes the host clipboard.
         clipboard::strip_clipboard_output(&ctx);
     }
@@ -989,6 +1054,9 @@ impl LightVmApp {
                         if s == Section::Dashboard && self.section == s {
                             // Back to the VM list from a VM's page.
                             self.baselines_vm = None;
+                        }
+                        if s == Section::Agents && self.section == s {
+                            self.agent_session = None;
                         }
                         self.section = s;
                     }
@@ -1064,6 +1132,330 @@ impl LightVmApp {
         let alive = s.is_alive();
         let (text, tone) = connection_state(alive, &s.state());
         (format!("Supervisor {text}"), tone)
+    }
+
+    /// Indicator of a live agent session (or of a waiting request) above
+    /// every page; refreshes the time left once a second.
+    fn agent_banner(&mut self, ui: &mut egui::Ui, p: &theme::Palette) {
+        let Some(srv) = &mut self.service else { return };
+        let alive = srv.is_alive();
+        let state = srv.state();
+        let live = state.agents.live().next().is_some();
+        let waiting = !state.agents.requests.is_empty();
+        if !live && !(waiting && self.section != Section::Agents) {
+            return;
+        }
+        if live || waiting {
+            ui.ctx().request_repaint_after(Duration::from_secs(1));
+        }
+        let env = agents::AgentsEnv {
+            state: &state,
+            active: alive && state.connected,
+            now: self.now(),
+        };
+        let tone = if live { p.warning } else { p.accent };
+        let mut action = None;
+        egui::Panel::top("lightvm_agent_banner")
+            .resizable(false)
+            .frame(
+                egui::Frame::new()
+                    .fill(tone.linear_multiply(0.16))
+                    .stroke(egui::Stroke::new(1.0, tone))
+                    .inner_margin(egui::Margin::symmetric(14, 6)),
+            )
+            .show(ui, |ui| {
+                action = agents::banner_ui(ui, &env, self.section != Section::Agents);
+            });
+        if let Some(a) = action {
+            self.run_agent_action(a, &state);
+        }
+    }
+
+    /// A dialog blocks the window, the indicator included: while an agent
+    /// session is live the Emergency Stop stays reachable above it, where
+    /// the indicator shows it.
+    fn emergency_stop_over_dialogs(&mut self, ctx: &egui::Context) {
+        if !self.dialog_open() && self.closing.is_none() {
+            return;
+        }
+        let Some(srv) = &self.service else { return };
+        if srv.state().agents.live().next().is_none() {
+            return;
+        }
+        let at: Option<egui::Rect> =
+            ctx.data(|d| d.get_temp(egui::Id::new(agents::BANNER_STOP_RECT)));
+        let area = egui::Area::new(egui::Id::new("lightvm_emergency_over_dialogs"))
+            .order(egui::Order::Tooltip);
+        let area = match at {
+            Some(r) => area.fixed_pos(r.min),
+            None => area.anchor(egui::Align2::RIGHT_TOP, egui::vec2(-14.0, 6.0)),
+        };
+        let clicked = area
+            .show(ctx, |ui| {
+                let mut b =
+                    theme::danger(ui, "Emergency Stop").fill(theme::Palette::of(ui).surface);
+                if let Some(r) = at {
+                    b = b.min_size(r.size());
+                }
+                let r = ui
+                    .add(b)
+                    .on_hover_text("Immediately terminates all VMs and revokes the agent sessions");
+                theme::accessible_name(
+                    &r,
+                    egui::WidgetType::Button,
+                    "Emergency Stop: stop all VMs and agent sessions now",
+                );
+                r.clicked()
+            })
+            .inner;
+        if clicked {
+            self.send(ServiceCommand::EmergencyStop);
+        }
+    }
+
+    fn agents_page(&mut self, ui: &mut egui::Ui) {
+        let Some(srv) = &mut self.service else {
+            theme::page_header(ui, "Agents", agents::DESCRIPTION, |_| {});
+            theme::card(ui, |ui| {
+                empty_state(
+                    ui,
+                    "Agent sessions are not available: the supervisor is not running.",
+                    "Start it from Settings, Supervisor.",
+                );
+            });
+            return;
+        };
+        let alive = srv.is_alive();
+        let state = srv.state();
+        let env = agents::AgentsEnv {
+            state: &state,
+            active: alive && state.connected,
+            now: self.now(),
+        };
+        // A form whose request is gone (decided, expired, withdrawn) closes,
+        // unless its own approval just succeeded or failed.
+        if let Some(f) = &self.approve_form {
+            let approved = state
+                .agents
+                .approval
+                .as_ref()
+                .is_some_and(|a| a.request_id == f.request_id && !a.status.is_pending());
+            let done = matches!(
+                state.agents.approval.as_ref(),
+                Some(a) if a.request_id == f.request_id && matches!(a.status, RequestStatus::Done(_))
+            );
+            if done || (state.agents.request(f.request_id).is_none() && !(f.sent && approved)) {
+                self.approve_form = None;
+            }
+        }
+        let action = match self.agent_session {
+            Some(id) => agents::session_page_ui(ui, &env, id),
+            None => agents::agents_ui(ui, &env, &mut self.approve_form),
+        };
+        if let Some(a) = action {
+            self.run_agent_action(a, &state);
+        }
+    }
+
+    /// Executes a choice of the Agents views.
+    fn run_agent_action(&mut self, a: agents::AgentAction, state: &ServiceState) {
+        use agents::AgentAction as A;
+        match a {
+            A::SetAccess(on) => self.send(ServiceCommand::SetAgentAccess(on)),
+            A::Pair => {
+                self.pairing_dialog = Some(PairingDialog {
+                    sent: false,
+                    focus: true,
+                });
+            }
+            A::Review(id) => {
+                self.approve_form = state
+                    .agents
+                    .request(id)
+                    .map(|r| agents::ApproveForm::new(r, &state.vms));
+            }
+            A::CancelReview => self.approve_form = None,
+            A::Approve(request_id, approval) => {
+                if let Some(f) = &mut self.approve_form {
+                    f.sent = true;
+                }
+                self.send(ServiceCommand::ApproveSession {
+                    request_id,
+                    approval,
+                });
+            }
+            A::Deny(id) => {
+                if self
+                    .approve_form
+                    .as_ref()
+                    .is_some_and(|f| f.request_id == id)
+                {
+                    self.approve_form = None;
+                }
+                self.send(ServiceCommand::DenySession(id));
+            }
+            A::Pause(id) => self.send(ServiceCommand::PauseSession(id)),
+            A::Resume(id) => self.send(ServiceCommand::ResumeSession(id)),
+            A::Revoke(id) => {
+                if let Some(s) = state.agents.session(id) {
+                    self.revoke_dialog = Some(RevokeDialog {
+                        session_id: id,
+                        client: s.client_name.clone(),
+                        vm_name: state
+                            .vm(s.vm_id)
+                            .map_or_else(|| "its VM".into(), |v| v.name.as_str().to_owned()),
+                        sent: false,
+                        focus: true,
+                    });
+                }
+            }
+            A::TakeInput(vm_id) => self.send(ServiceCommand::SetInputOwner {
+                vm_id,
+                owner: InputOwner::User,
+            }),
+            A::GiveInput(vm_id, session_id) => {
+                // Keys still held are released by the supervisor on the
+                // handover.
+                self.send(ServiceCommand::SetInputOwner {
+                    vm_id,
+                    owner: InputOwner::Agent { session_id },
+                });
+            }
+            A::Details(id) => {
+                self.agent_session = Some(id);
+                self.section = Section::Agents;
+            }
+            A::Back => self.agent_session = None,
+            // Leaving the Console page also leaves full screen.
+            A::Open => {
+                self.agent_session = None;
+                self.section = Section::Agents;
+            }
+            A::EmergencyStop => self.send(ServiceCommand::EmergencyStop),
+            A::Refresh => {
+                self.send(ServiceCommand::GetAgentAccess);
+                self.send(ServiceCommand::ListSessionRequests);
+                self.send(ServiceCommand::ListSessions);
+            }
+        }
+    }
+
+    /// Confirmation of a revocation.
+    fn revoke_dialog_ui(&mut self, ui: &egui::Ui) {
+        let Some(d) = &mut self.revoke_dialog else {
+            return;
+        };
+        let state = self.service.as_ref().map(|s| s.state()).unwrap_or_default();
+        let session = state.agents.session(d.session_id);
+        let control = state
+            .agents
+            .control
+            .as_ref()
+            .filter(|c| c.op == service::AgentOp::Revoke(d.session_id));
+        let mut error = None;
+        let mut pending = false;
+        if d.sent {
+            match control.map(|c| &c.status) {
+                Some(RequestStatus::Pending) => pending = true,
+                Some(RequestStatus::Done(())) => {
+                    self.revoke_dialog = None;
+                    return;
+                }
+                Some(RequestStatus::Failed(f)) => error = Some(f.message.clone()),
+                _ => {}
+            }
+        }
+        let ended = session.is_none_or(|s| s.state == lightvm_proto::SessionState::Terminated);
+        if ended && !pending && error.is_none() {
+            if d.sent {
+                self.revoke_dialog = None;
+                return;
+            }
+            error = Some("The session has already ended.".into());
+        }
+        let spec = dialogs::ConfirmSpec {
+            title: format!("Revoke the session of \u{201c}{}\u{201d}?", d.client),
+            body: format!(
+                "The agent loses access to \u{201c}{}\u{201d} at once and its connection is closed; it needs a new approval to come back. Actions it already sent may still complete. The VM keeps running.",
+                d.vm_name
+            ),
+            confirm: "Revoke session".into(),
+            destructive: true,
+        };
+        let focus = std::mem::replace(&mut d.focus, false);
+        match dialogs::confirm(
+            ui,
+            "lightvm_revoke_dialog",
+            &spec,
+            pending,
+            error.as_deref(),
+            focus,
+        ) {
+            Some(dialogs::Choice::Cancel) => self.revoke_dialog = None,
+            Some(dialogs::Choice::Confirm) if !ended => {
+                d.sent = true;
+                let id = d.session_id;
+                self.send(ServiceCommand::RevokeSession(id));
+            }
+            _ => {}
+        }
+    }
+
+    /// "Pair a client": explanation, then where the pairing file is.
+    fn pairing_dialog_ui(&mut self, ui: &egui::Ui) {
+        let Some(d) = &mut self.pairing_dialog else {
+            return;
+        };
+        let state = self.service.as_ref().map(|s| s.state()).unwrap_or_default();
+        let now = self.fixed_now.unwrap_or_else(UtcTimestamp::now);
+        let focus = std::mem::replace(&mut d.focus, false);
+        let (spec, pending, error) = match (&state.agents.pairing, d.sent) {
+            (RequestStatus::Done(f), true) => (
+                dialogs::ConfirmSpec {
+                    title: "Pairing file ready".into(),
+                    body: format!(
+                        "Written to {}, readable only by your user account, valid until {} ({}).\n\nStart the LightVM MCP adapter, or restart your MCP client, now: it reads the file and asks for a session. The request appears on the Agents page with a verification code to compare with the one the agent shows.",
+                        f.path.display(),
+                        agents::clock(f.expires_at),
+                        agents::time_left(now, f.expires_at)
+                    ),
+                    confirm: "Done".into(),
+                    destructive: false,
+                },
+                false,
+                None,
+            ),
+            (status, sent) => (
+                dialogs::ConfirmSpec {
+                    title: "Pair an agent client".into(),
+                    body: "LightVM issues a pairing credential valid for 10 minutes and writes it to a file in your user profile that only your user account can read. The LightVM MCP adapter reads it from there.\n\nThe credential is never shown, copied or logged, and it gives no access to any VM: the agent can only ask for a session, which you approve here.".into(),
+                    confirm: "Write pairing file".into(),
+                    destructive: false,
+                },
+                sent && status.is_pending(),
+                match status {
+                    RequestStatus::Failed(f) if sent => Some(f.message.clone()),
+                    _ => None,
+                },
+            ),
+        };
+        let ready = d.sent && matches!(state.agents.pairing, RequestStatus::Done(_));
+        match dialogs::confirm(
+            ui,
+            "lightvm_pairing_dialog",
+            &spec,
+            pending,
+            error.as_deref(),
+            focus,
+        ) {
+            Some(dialogs::Choice::Cancel) => self.pairing_dialog = None,
+            Some(dialogs::Choice::Confirm) if ready => self.pairing_dialog = None,
+            Some(dialogs::Choice::Confirm) => {
+                d.sent = true;
+                self.send(ServiceCommand::CreatePairing);
+            }
+            None => {}
+        }
     }
 
     fn dashboard_page(&mut self, ui: &mut egui::Ui) {
@@ -1846,8 +2238,21 @@ impl LightVmApp {
             }
         }
         let state = self.state();
-        let input_error = state.as_ref().and_then(|s| s.input_error.clone());
-        if let Some(name) = self.live.as_ref().map(|l| l.target().vm_name.clone()) {
+        let mut input_error = state.as_ref().and_then(|s| s.input_error.clone());
+        if let Some((name, vm_id)) = self
+            .live
+            .as_ref()
+            .map(|l| (l.target().vm_name.clone(), l.target().vm_id))
+        {
+            // F4: while an agent session owns the input, nothing typed or
+            // clicked here is sent; "Take control" gives it back.
+            let agent = state
+                .as_ref()
+                .filter(|s| s.agents.agent_has_input(vm_id))
+                .map(|s| s.agents.input_session(vm_id).map(|x| x.client_name.clone()));
+            if let Some(live) = &mut self.live {
+                live.set_input_blocked(agent.is_some());
+            }
             if !self.fullscreen {
                 theme::page_header(
                     ui,
@@ -1863,9 +2268,24 @@ impl LightVmApp {
                     ui.add_space(6.0);
                 }
             }
+            if let Some(client) = &agent {
+                input_error = None;
+                let taking = state.as_ref().is_some_and(|s| {
+                    s.agents.control.as_ref().is_some_and(|c| {
+                        c.status.is_pending()
+                            && c.op == service::AgentOp::InputOwner(vm_id, InputOwner::User)
+                    })
+                });
+                if agent_input_notice(ui, client.as_deref(), taking) {
+                    self.send(ServiceCommand::SetInputOwner {
+                        vm_id,
+                        owner: InputOwner::User,
+                    });
+                }
+                ui.add_space(4.0);
+            }
             let (layout, fullscreen) = (self.settings.keyboard_layout, self.fullscreen);
-            let modal_open =
-                self.dialog.is_some() || self.baseline_dialog.is_some() || self.closing.is_some();
+            let modal_open = self.dialog_open() || self.closing.is_some();
             let action = self.live.as_mut().and_then(|live| {
                 live.ui(
                     ui,
@@ -2266,6 +2686,44 @@ fn sanitize_file_name(s: &str) -> String {
             }
         })
         .collect()
+}
+
+/// Notice above the console while an agent owns the input, with the
+/// "Take control" button; returns `true` when it is clicked.
+fn agent_input_notice(ui: &mut egui::Ui, client: Option<&str>, taking: bool) -> bool {
+    let p = theme::Palette::of(ui);
+    let mut clicked = false;
+    egui::Frame::new()
+        .fill(p.warning.linear_multiply(0.12))
+        .corner_radius(egui::CornerRadius::same(6))
+        .inner_margin(egui::Margin::symmetric(12, 6))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal_wrapped(|ui| {
+                theme::dot(ui, p.warning);
+                let who = client.map_or_else(
+                    || "an agent".to_owned(),
+                    |c| format!("the agent \u{201c}{c}\u{201d}"),
+                );
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Input controlled by {who}: your keyboard and mouse are not sent to the guest."
+                    ))
+                    .color(p.text),
+                );
+                let r = ui.add_enabled(
+                    !taking,
+                    theme::primary(ui, if taking { "Taking control…" } else { "Take control" }),
+                );
+                theme::accessible_name(
+                    &r,
+                    egui::WidgetType::Button,
+                    "Take keyboard and mouse control back",
+                );
+                clicked = r.clicked();
+            });
+        });
+    clicked
 }
 
 /// Description under the Console title when no console is connected.

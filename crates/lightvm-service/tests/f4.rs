@@ -1346,7 +1346,15 @@ async fn request_role_matrix() {
             | Request::PauseSession { .. }
             | Request::ResumeSession { .. }
             | Request::RevokeSession { .. }
-            | Request::SetInputOwner { .. } => Who::Ui,
+            | Request::SetInputOwner { .. }
+            | Request::ListSessionReports
+            | Request::GetSessionReport { .. }
+            | Request::GetSessionReportEvents { .. }
+            | Request::GetReportScreenshotChunk { .. }
+            | Request::SetSessionVerdict { .. }
+            | Request::VerifySession { .. }
+            | Request::ExportSessionReport { .. }
+            | Request::DeleteSessionReport { .. } => Who::Ui,
         }
     }
     let svc = start_svc("f4-roles", Opts::default()).await;
@@ -1441,6 +1449,39 @@ async fn request_role_matrix() {
             vm_id: vm,
             owner: InputOwner::User,
         },
+        // F5: session reports are UI-only (an agent never chooses an
+        // export destination nor sets a verdict).
+        Request::ListSessionReports,
+        Request::GetSessionReport { session_id: sid },
+        Request::GetSessionReportEvents {
+            session_id: sid,
+            offset: 0,
+            limit: 10,
+        },
+        Request::GetReportScreenshotChunk {
+            session_id: sid,
+            shot: 0,
+            index: 0,
+        },
+        Request::SetSessionVerdict {
+            session_id: sid,
+            outcome: lightvm_proto::TestOutcome::Passed,
+            rationale: "x".into(),
+        },
+        Request::VerifySession {
+            session_id: sid,
+            verifier: lightvm_proto::report::SessionVerifier::FixtureMarker {
+                expected: lightvm_proto::report::FixtureMarker::Present,
+            },
+        },
+        Request::ExportSessionReport {
+            session_id: sid,
+            format: lightvm_proto::report::ReportFormat::Json,
+            destination: "C:/x.json".into(),
+            overwrite: true,
+            include_screenshots: false,
+        },
+        Request::DeleteSessionReport { session_id: sid },
     ];
     let mut a = agent_client(&svc, &mut u).await;
     let mut checked = 0;

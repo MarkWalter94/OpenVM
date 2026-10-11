@@ -251,3 +251,77 @@ pub(crate) fn baseline(n: u8, vm: u8, label: &str) -> lightvm_proto::ipc::Baseli
         in_use: false,
     }
 }
+
+/// Fixed instant of the agent tests: 2026-10-11 09:12 UTC.
+pub(crate) fn now() -> UtcTimestamp {
+    UtcTimestamp::from_unix_millis(1_791_709_920_000).unwrap()
+}
+
+/// `now()` plus `s` seconds.
+pub(crate) fn at(s: i64) -> UtcTimestamp {
+    now().checked_add_millis(s * 1000).unwrap()
+}
+
+pub(crate) fn session_id(n: u8) -> lightvm_proto::SessionId {
+    lightvm_proto::SessionId::from_unix_millis(1_760_000_400_000 + u64::from(n), [n; 10])
+}
+
+/// Pending request of the agent `client` with the code `482-913`, asking
+/// for VM 1, screen and input; expires 4:12 after `now()`.
+pub(crate) fn session_request(id: u64, client: &str) -> lightvm_proto::ipc::SessionRequestInfo {
+    use lightvm_proto::Capability;
+    lightvm_proto::ipc::SessionRequestInfo {
+        request_id: id,
+        connection_id: 7,
+        client_name: client.into(),
+        peer_pid: Some(4321),
+        purpose: "Check that the text editor saves a file in the home folder".into(),
+        requested_vms: vec![vm_id(1)],
+        requested_capabilities: [
+            Capability::VmScreenshot,
+            Capability::VmInput,
+            Capability::VmReset,
+        ]
+        .into(),
+        verification_code: "482-913".into(),
+        requested_at: at(-48),
+        expires_at: at(252),
+    }
+}
+
+/// Live session `n` of `client` on VM `vm`, 52 minutes left, with usage.
+pub(crate) fn session(
+    n: u8,
+    vm: u8,
+    client: &str,
+    state: lightvm_proto::SessionState,
+    input: bool,
+) -> lightvm_proto::ipc::SessionInfo {
+    use lightvm_proto::Capability;
+    lightvm_proto::ipc::SessionInfo {
+        session_id: session_id(n),
+        vm_id: vm_id(vm),
+        connection_id: (state != lightvm_proto::SessionState::Terminated).then_some(7),
+        client_name: client.into(),
+        purpose: "Check that the text editor saves a file in the home folder".into(),
+        state,
+        termination: None,
+        capabilities: [
+            Capability::VmList,
+            Capability::VmStatus,
+            Capability::VmScreenshot,
+            Capability::VmInput,
+        ]
+        .into(),
+        quotas: lightvm_proto::ipc::AGENT_DEFAULT_QUOTAS,
+        usage: lightvm_proto::ipc::SessionUsage {
+            operations: 12,
+            input_events: 340,
+            screenshots: 4,
+        },
+        created_at: at(-8 * 60),
+        expires_at: at(52 * 60),
+        lease_expires_at: at(8),
+        input_owner: input,
+    }
+}

@@ -48,6 +48,8 @@ pub mod parent;
 #[cfg(feature = "supervisor")]
 pub mod ratelimit;
 #[cfg(feature = "supervisor")]
+pub mod reports;
+#[cfg(feature = "supervisor")]
 pub mod server;
 #[cfg(feature = "supervisor")]
 pub mod start;

@@ -1163,6 +1163,18 @@ impl BackendPort for QemuVmBackend {
         }
     }
 
+    fn qemu_log(&mut self, vm_id: VmId, run_id: RunId) -> Option<String> {
+        use std::io::{Read as _, Seek as _, SeekFrom};
+        let run = self.run(vm_id, run_id).ok()?;
+        let mut f = std::fs::File::open(run.command().stderr.as_path()).ok()?;
+        let len = f.metadata().ok()?.len();
+        f.seek(SeekFrom::Start(len.saturating_sub(16 * 1024)))
+            .ok()?;
+        let mut buf = Vec::new();
+        f.take(16 * 1024).read_to_end(&mut buf).ok()?;
+        Some(String::from_utf8_lossy(&buf).into_owned())
+    }
+
     fn take_screenshot(&mut self, vm_id: VmId, run_id: RunId) -> Option<(Screenshot, Vec<u8>)> {
         let shot = self.last_shots.remove(&vm_id)?;
         (shot.run_id == run_id).then(|| (shot.metadata(vm_id), shot.png))

@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "lightvm": {
+      "type": "stdio",
+      "command": "C:\Program Files\LightVM\lightvm-mcp.exe",
+      "args": []
+    }
+  }
+}

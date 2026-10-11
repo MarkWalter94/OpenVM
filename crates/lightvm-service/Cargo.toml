@@ -28,12 +28,17 @@ path = "src/bin/lightvm-ipc-probe.rs"
 # `qemu-backend` stays in the supervisor only (ADR-0024).
 [features]
 default = ["supervisor"]
-supervisor = ["dep:qemu-backend", "dep:sha2", "dep:socket2", "dep:vm-core", "dep:vm-storage"]
+supervisor = ["dep:lightvm-fixture", "dep:png", "dep:qemu-backend", "dep:sha2", "dep:socket2", "dep:vm-core", "dep:vm-storage"]
 
 # Exact versions and lockfile (ROADMAP 6.3); no git dependencies.
 [dependencies]
 getrandom = { version = "=0.4.3", features = ["std"] }
 lightvm-proto = { path = "../lightvm-proto" }
+# F5: ADR-0019 pixel verifier run on the stored screenshots of a session
+# report (`verify_session`), and PNG decoding for it (same version as
+# qemu-backend).
+lightvm-fixture = { path = "../lightvm-fixture", optional = true }
+png = { version = "=0.18.1", optional = true }
 # Composition root (ROADMAP 6.1): real core, SQLite catalog and QEMU backend.
 qemu-backend = { path = "../qemu-backend", optional = true }
 serde = { version = "=1.0.229", features = ["derive"] }
@@ -63,11 +68,6 @@ rustix = { version = "=1.1.5", features = ["event", "process"] }
 [dev-dependencies]
 # End-to-end console test through the display ticket (tests only).
 rfb-client = { path = "../rfb-client" }
-# F3 fixture (ADR-0019): data ISO and pixel verifier for the real tests.
-lightvm-fixture = { path = "../lightvm-fixture" }
-# F4 real test: decoding of the agent's PNG screenshots (same version as
-# qemu-backend, tests only).
-png = "=0.18.1"
 tokio = { version = "=1.53.2", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 
 [lints]
@@ -100,4 +100,8 @@ required-features = ["supervisor"]
 
 [[test]]
 name = "f4_real"
+required-features = ["supervisor"]
+
+[[test]]
+name = "f5_reports"
 required-features = ["supervisor"]

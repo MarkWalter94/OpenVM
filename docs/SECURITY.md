@@ -117,7 +117,7 @@ Checklist to be completed with a reference to the verification file on the produ
 
 ## 6. Rules on secrets
 
-- Credentials in the OS credential store; never in process arguments, reports, logs or committed examples (section 9).
+- Credentials in the OS credential store; never in process arguments, reports, logs or committed examples (section 9). Deviation (F4): the pairing credential for agent clients is delivered in a user-only-ACL file with a 10-minute expiry instead of the OS credential store (ADR-0006).
 - No provider or MCP client credential passed to QEMU; environment of child processes cleaned (section 6.3).
 - Runners with untrusted guests or images have no production credentials (section 13).
 - The `.gitignore` file excludes keys and `.env` files; it does not replace review before committing.
