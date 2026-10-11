@@ -306,3 +306,168 @@ fn snapshot_dashboard_light_theme() {
     let mut h = harness(app, egui::vec2(1100.0, 640.0));
     h.snapshot("dashboard_light");
 }
+
+/// F3: a stopped VM on an overlay of its first baseline, with a second,
+/// not verified baseline taken on it; a running VM without baselines.
+fn baselines_catalog() -> ServiceState {
+    use lightvm_desktop::service::BaselineList;
+    let mut lab = vm(1, "ubuntu-lab", VmState::Stopped);
+    lab.run_id = Some(common::run_id(1));
+    lab.baselines.current = Some(common::baseline_id(1));
+    lab.baselines.count = 2;
+    lab.baselines.bytes = 7 << 30;
+    lab.baselines.overlay_bytes = 300 << 20;
+    let mut s = connected(vec![lab, vm(2, "build-runner", VmState::Running)]);
+    if let Some(h) = &mut s.host {
+        h.baseline_available = true;
+    }
+    let mut first = common::baseline(1, 1, "Clean install");
+    first.current = true;
+    first.in_use = true;
+    let mut second = common::baseline(2, 1, "Before the update");
+    second.clean_shutdown = false;
+    second.derived_from = Some(common::baseline_id(1));
+    s.baselines.insert(
+        common::vm_id(1),
+        BaselineList {
+            loaded: true,
+            items: vec![first, second],
+            error: None,
+        },
+    );
+    s
+}
+
+fn baselines_app(state: ServiceState) -> LightVmApp {
+    let (mut app, _hs) = app(state);
+    app.set_fixed_time(Some(
+        lightvm_proto::UtcTimestamp::from_unix_millis(1_791_709_920_000).unwrap(),
+    ));
+    app
+}
+
+fn open_baselines(h: &mut Harness<'_, LightVmApp>, run: bool) {
+    h.get_by_role_and_label(Role::Button, "More actions for ubuntu-lab")
+        .click();
+    if run {
+        h.run();
+    } else {
+        h.run_steps(6);
+    }
+    h.get_by_role_and_label(Role::Button, "Baselines of ubuntu-lab")
+        .click();
+    if run {
+        h.run();
+    } else {
+        h.run_steps(6);
+    }
+}
+
+#[test]
+fn snapshot_dashboard_with_baselines() {
+    let _serial = serial();
+    let mut h = harness(
+        baselines_app(baselines_catalog()),
+        egui::vec2(1100.0, 560.0),
+    );
+    h.snapshot("dashboard_baselines");
+}
+
+#[test]
+fn snapshot_baselines_page() {
+    let _serial = serial();
+    let mut h = harness(
+        baselines_app(baselines_catalog()),
+        egui::vec2(1100.0, 640.0),
+    );
+    open_baselines(&mut h, true);
+    h.snapshot("baselines");
+}
+
+#[test]
+fn snapshot_baselines_page_light_theme() {
+    let _serial = serial();
+    let mut app = baselines_app(baselines_catalog());
+    app.set_theme(UiTheme::Light);
+    let mut h = harness(app, egui::vec2(1100.0, 640.0));
+    open_baselines(&mut h, true);
+    h.snapshot("baselines_light");
+}
+
+#[test]
+fn snapshot_baselines_empty() {
+    let _serial = serial();
+    let mut s = baselines_catalog();
+    s.vms[0].baselines = Default::default();
+    s.baselines
+        .get_mut(&common::vm_id(1))
+        .unwrap()
+        .items
+        .clear();
+    let mut h = harness(baselines_app(s), egui::vec2(1100.0, 520.0));
+    open_baselines(&mut h, true);
+    h.snapshot("baselines_empty");
+}
+
+/// Long operation in progress: spinner, explanation, changes disabled. The
+/// spinner keeps asking for frames: fixed number of steps.
+#[test]
+fn snapshot_baselines_creating() {
+    let _serial = serial();
+    let mut s = baselines_catalog();
+    s.vms[0].baselines.operation = Some(lightvm_proto::ipc::StorageOperation::CreateBaseline);
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1100.0, 700.0))
+        .build_ui_state(|ui, app: &mut LightVmApp| app.ui(ui), baselines_app(s));
+    h.run_steps(4);
+    h.ctx
+        .all_styles_mut(|s| s.visuals.text_cursor.blink = false);
+    open_baselines(&mut h, false);
+    h.run_steps(4);
+    h.snapshot("baselines_creating");
+}
+
+#[test]
+fn snapshot_baseline_dialogs() {
+    let _serial = serial();
+    let (fake, hs) = FakeSupervisor::new(baselines_catalog());
+    let mut app = baselines_app(baselines_catalog());
+    app.set_supervisor(fake);
+    let mut h = harness(app, egui::vec2(1100.0, 640.0));
+    open_baselines(&mut h, true);
+    h.get_by_role_and_label(Role::Button, "Create a baseline of ubuntu-lab")
+        .click();
+    h.run();
+    h.snapshot("dialog_baseline_create");
+    h.get_by_role_and_label(Role::Button, "Create baseline")
+        .click();
+    h.run_steps(4);
+    hs.update(|s| {
+        s.baseline = Some(lightvm_desktop::service::BaselineRequest {
+            vm_id: common::vm_id(1),
+            op: lightvm_desktop::service::BaselineOp::Create {
+                label: lightvm_proto::Label::parse("Baseline 3 \u{b7} 2026-10-11 09:12 UTC")
+                    .unwrap(),
+                allow_unclean: false,
+            },
+            status: lightvm_desktop::service::RequestStatus::Failed(
+                lightvm_desktop::service::Failure::coded(
+                    lightvm_proto::ErrorCode::StateConflict,
+                    "baseline: state_conflict: unclean",
+                )
+                .with_detail("reason", "unclean_shutdown"),
+            ),
+        });
+    });
+    h.run();
+    h.snapshot("dialog_baseline_unclean");
+    h.key_press(egui::Key::Escape);
+    h.run();
+    hs.update(|s| s.baseline = None);
+    // The outcome notice goes away: the rows move up before the click.
+    h.run();
+    h.get_by_role_and_label(Role::Button, "Restore baseline Before the update")
+        .click();
+    h.run();
+    h.snapshot("dialog_baseline_restore");
+}

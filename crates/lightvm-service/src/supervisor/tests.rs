@@ -83,6 +83,7 @@ fn supervisor(engine: Box<dyn VmEngine>) -> (SupervisorThread, mpsc::Receiver<Co
         imports: 0,
         storage_jobs: 0,
         storage_cancel: Arc::default(),
+        start_jobs: 0,
     };
     (sup, rx)
 }
@@ -386,7 +387,7 @@ fn a_run_replaced_within_one_command_revokes_the_console_ticket() {
     };
     assert_eq!(sup.display.active(), vec![(vm, run1)]);
     // The guest powered off and the next command starts the VM again:
-    // `running → stopped → running` within one command.
+    // `running â†’ stopped â†’ running` within one command.
     lock(&parts.observations).push((
         vm,
         BackendObservation::ProcessExited {

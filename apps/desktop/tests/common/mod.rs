@@ -31,7 +31,7 @@ impl Handles {
         self.sent.lock().unwrap().clone()
     }
     /// Recorded commands except the periodic ones (media list, ticket
-    /// requests, input).
+    /// requests, input, VM list re-read while a VM is starting).
     pub(crate) fn actions(&self) -> Vec<ServiceCommand> {
         self.sent()
             .into_iter()
@@ -39,6 +39,7 @@ impl Handles {
                 !matches!(
                     c,
                     ServiceCommand::ListMedia
+                        | ServiceCommand::Refresh
                         | ServiceCommand::OpenConsole(_)
                         | ServiceCommand::Input(_)
                 )
@@ -145,6 +146,7 @@ pub(crate) fn vm(n: u8, name: &str, state: VmState) -> VmSummary {
         config_revision: 3,
         disk_used_bytes: Some(5_637_144_576),
         baselines: Default::default(),
+        start: Default::default(),
     }
 }
 
@@ -222,4 +224,30 @@ pub(crate) fn deterministic_frame(w: usize, h: usize) -> egui::ColorImage {
         }
     }
     egui::ColorImage::new([w, h], px)
+}
+
+pub(crate) fn baseline_id(n: u8) -> lightvm_proto::BaselineId {
+    lightvm_proto::BaselineId::from_unix_millis(1_760_000_300_000 + u64::from(n), [n; 10])
+}
+
+/// Verified baseline of VM `vm`, not current, not in use: 3 GiB on the
+/// host, 32 GiB disk, created 2026-10-10 08:00 UTC plus `n` hours.
+pub(crate) fn baseline(n: u8, vm: u8, label: &str) -> lightvm_proto::ipc::BaselineSummary {
+    lightvm_proto::ipc::BaselineSummary {
+        baseline_id: baseline_id(n),
+        vm_id: vm_id(vm),
+        label: Label::parse(label).unwrap(),
+        created_at: UtcTimestamp::from_unix_millis(1_791_619_200_000 + i64::from(n) * 3_600_000)
+            .unwrap(),
+        clean_shutdown: true,
+        protected: false,
+        derived_from: None,
+        config_revision: 3,
+        virtual_size_bytes: 32 << 30,
+        size_bytes: 3 << 30,
+        disk_sha256: Sha256Digest::from_bytes([n; 32]),
+        firmware_sha256: Some(Sha256Digest::from_bytes([n.wrapping_add(1); 32])),
+        current: false,
+        in_use: false,
+    }
 }

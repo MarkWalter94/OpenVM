@@ -21,7 +21,7 @@
 //! [`VmEngine::finish_baseline_job`] or [`VmEngine::abort_baseline_job`]); the
 //! VM is busy in between. A start of a VM whose current state is an overlay
 //! receives the verified, guarded files from the catalog
-//! ([`BaselinePort::start_disks`] → [`BackendPort::set_start_disks`]); a
+//! ([`BaselinePort::start_disks`] â†’ [`BackendPort::set_start_disks`]); a
 //! refusal there leaves the VM `stopped` ([`vm_core::Core::refuse_start`]).
 //!
 //! The Emergency Stop does not go through here: the priority path terminates
@@ -41,10 +41,14 @@ use lightvm_proto::{
     OperationKind, OperationRecord, PolicyLayer, PublicError, ResourceLimits, RunId,
     TerminationCause, VmAction, VmConfig, VmId, VmRecord, VmRequest, VmState,
 };
-use vm_core::ports::{AuditSink, CatalogStore, IdGenerator, MediaInspector, VmBackend};
+use vm_core::ports::{AuditSink, CatalogStore, IdGenerator, VmBackend};
 use vm_core::{Core, CoreConfig, DispatchOutcome, VmStatus};
 
 use crate::adapters::{SystemClock, SystemIds};
+pub use crate::start::{
+    GuardedMedia, MediaGuardPort, ProgressCell, StartDone, StartGuard, StartJob,
+};
+use crate::start::{PrecomputedInspector, StartFailure, cancelled_error};
 
 /// Outcome of `submit_vm`: admission and optional record after execution.
 pub type SubmitOutcome = (Admission, Option<OperationRecord>);
@@ -80,7 +84,7 @@ pub trait VmEngine: Send + 'static {
     fn stop_all(&mut self);
     /// State changes since the last call, for the `vm_state` events: a VM
     /// is reported when its state **or its run** changed (a run replaced
-    /// within one command, `running → stopped → running`, is a change).
+    /// within one command, `running â†’ stopped â†’ running`, is a change).
     fn state_changes(&mut self) -> Vec<(VmId, VmState)>;
     /// Current run of every VM with a process, `None` for the others,
     /// according to the last [`Self::state_changes`]: the supervisor revokes
@@ -176,6 +180,26 @@ pub trait VmEngine: Send + 'static {
     ) -> Result<(), PublicError> {
         Err(PublicError::unsupported("baselines not available"))
     }
+    /// `true`: the file checks of a start (media and baseline hashes) are
+    /// left to the caller as [`StartJob`]s ([`Self::take_start_jobs`]) and
+    /// completed with [`Self::finish_start`]; `false` (default): they run
+    /// inline in [`Self::submit`]. The supervisor thread turns it on.
+    fn offload_start_checks(&mut self, _on: bool) {}
+    /// Start checks begun since the last call (offload on), to run on a
+    /// worker thread.
+    fn take_start_jobs(&mut self) -> Vec<StartJob> {
+        Vec::new()
+    }
+    /// Last step of a start whose checks ran on a worker: launch, or record
+    /// the failure (`abort` = cancelled by the caller with that reason).
+    /// Returns the final record of the start operation.
+    fn finish_start(
+        &mut self,
+        _done: StartDone,
+        _abort: Option<PublicError>,
+    ) -> Result<OperationRecord, PublicError> {
+        Err(PublicError::unsupported("deferred start not available"))
+    }
 }
 
 /// Cancellation check of a long storage operation, polled by its work.
@@ -217,9 +241,11 @@ pub struct StartDisks {
     pub base: PathBuf,
     /// UEFI variables of the baseline (protected read-only during the run).
     pub base_vars: Option<PathBuf>,
-    /// Catalog guard (baseline read-only, overlay not deletable): kept by
-    /// the backend until the run is released.
-    pub guard: Box<dyn Any + Send>,
+    /// Catalog guard (baseline read-only, overlay not deletable), opened
+    /// before the baseline's hash is verified through it
+    /// ([`StartGuard::verify`], on the start worker): kept by the backend
+    /// until the run is released.
+    pub guard: Box<dyn StartGuard>,
 }
 
 impl std::fmt::Debug for StartDisks {
@@ -383,8 +409,11 @@ pub trait BaselinePort {
     fn delete_baseline(&mut self, _vm: VmId, _baseline: BaselineId) -> Result<(), PublicError> {
         Err(PublicError::unsupported("baselines not available"))
     }
-    /// Verified, guarded files of the VM's current state for run `run`,
-    /// `None` if the VM runs on its standalone disk.
+    /// Guarded files of the VM's current state for run `run`, `None` if the
+    /// VM runs on its standalone disk. Cheap (supervisor thread): the guard
+    /// handles are opened and the headers checked, the baseline's hash is
+    /// verified afterwards through the same handles by
+    /// [`StartGuard::verify`] (start worker), before QEMU is launched.
     fn start_disks(&self, _vm: VmId, _run: RunId) -> Result<Option<StartDisks>, PublicError> {
         Ok(None)
     }
@@ -475,6 +504,18 @@ pub trait BackendPort: VmBackend + Send + 'static {
     /// the guard until the run is released. A backend without support
     /// ignores them (and starts the standalone disk).
     fn set_start_disks(&mut self, _vm_id: VmId, _run_id: RunId, _disks: StartDisks) {}
+    /// Protected handles of the approved media verified for the start of
+    /// `run_id` that follows: the backend keeps them until the run is
+    /// released (dropped if the start fails), so the files QEMU opens are
+    /// the files hashed through them. A backend without processes may drop
+    /// them.
+    fn set_start_media(
+        &mut self,
+        _vm_id: VmId,
+        _run_id: RunId,
+        _guards: Vec<Box<dyn GuardedMedia>>,
+    ) {
+    }
     /// Runs ended since the last call, with `true` for an observed clean
     /// guest shutdown (F3: a baseline is "verified" only after one).
     fn take_exits(&mut self) -> Vec<(VmId, RunId, bool)> {
@@ -526,6 +567,7 @@ fn summary(s: VmStatus, disk_used_bytes: Option<u64>, mut baselines: VmBaselines
         config_revision: s.config_revision,
         disk_used_bytes,
         baselines,
+        start: None,
     }
 }
 
@@ -543,10 +585,24 @@ where
     last: BTreeMap<VmId, (VmState, Option<RunId>)>,
     /// Last display geometry refresh per VM (run, instant): debounce.
     last_refresh: BTreeMap<VmId, (RunId, std::time::Instant)>,
-    /// Graceful stops forwarded and still running in the backend: VM →
+    /// Graceful stops forwarded and still running in the backend: VM â†’
     /// (operation, run). The operation stays forwarded in the core (VM in
     /// `stopping`) until the backend reports the outcome.
     pending_stops: BTreeMap<VmId, (OperationId, RunId)>,
+    /// Start checks left to a worker ([`VmEngine::offload_start_checks`]).
+    offload: bool,
+    /// Starts whose checks are running: the forwarded start, its progress
+    /// and its cancellation flag. The VM is `starting` meanwhile.
+    pending_starts: BTreeMap<VmId, PendingStart>,
+    /// Start checks begun and not yet taken by the supervisor.
+    start_jobs: Vec<StartJob>,
+}
+
+/// Start forwarded by the core whose file checks are running.
+struct PendingStart {
+    dispatch: vm_core::Dispatch,
+    progress: Arc<ProgressCell>,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl<S, A, B, M> std::fmt::Debug for CoreEngine<S, A, B, M>
@@ -566,7 +622,7 @@ where
     S: CatalogStore + MediaImportPort + BaselinePort + Send + 'static,
     A: AuditSink + Send + 'static,
     B: BackendPort,
-    M: MediaInspector + Send + 'static,
+    M: MediaGuardPort + Send + 'static,
 {
     /// Builds the core and loads the catalog (VMs with a process in the persisted
     /// state enter `recovering`).
@@ -596,6 +652,9 @@ where
             last: BTreeMap::new(),
             last_refresh: BTreeMap::new(),
             pending_stops: BTreeMap::new(),
+            offload: false,
+            pending_starts: BTreeMap::new(),
+            start_jobs: Vec::new(),
         };
         let _ = e.state_changes();
         Ok(e)
@@ -664,7 +723,143 @@ where
     fn with_usage(&self, s: VmStatus) -> VmSummary {
         let used = self.core.store().vm_disk_usage(s.vm_id);
         let baselines = self.core.store().baseline_facts(s.vm_id);
-        summary(s, used, baselines)
+        let start = match self.pending_starts.get(&s.vm_id) {
+            Some(p) if s.state == VmState::Starting && s.run_id == Some(p.dispatch.run_id) => {
+                Some(p.progress.snapshot())
+            }
+            _ => None,
+        };
+        let mut out = summary(s, used, baselines);
+        out.start = start;
+        out
+    }
+
+    /// Starts in progress (checks running on a worker).
+    pub fn pending_starts(&self) -> usize {
+        self.pending_starts.len()
+    }
+
+    /// First step of a start forwarded by the core (supervisor thread):
+    /// opens the files to verify with their guards (cheap) and returns the
+    /// checks to run. A refusal here ends the start at once: current-state
+    /// files refused â†’ VM back to `stopped` (as before F3 offload); a medium
+    /// that cannot be opened â†’ start failed (as an inspection error).
+    fn begin_start(&mut self, d: vm_core::Dispatch) -> Result<Option<StartJob>, PublicError> {
+        let vm_id = d.vm_id;
+        let disks = match self.core.store().start_disks(vm_id, d.run_id) {
+            Ok(disks) => disks,
+            Err(e) => {
+                self.core.refuse_start(vm_id, d.operation_id, e)?;
+                return Ok(None);
+            }
+        };
+        let entries = d
+            .start
+            .as_ref()
+            .map(|p| p.media.clone())
+            .unwrap_or_default();
+        let mut media = Vec::with_capacity(entries.len());
+        for entry in entries {
+            match self.inspector.open_for_start(&entry) {
+                Ok(g) => media.push((entry, g)),
+                Err(e) => {
+                    drop(disks);
+                    self.core.finish_dispatch(vm_id, d.operation_id, Err(e))?;
+                    return Ok(None);
+                }
+            }
+        }
+        let job = StartJob::new(vm_id, d.run_id, d.operation_id, media, disks);
+        self.pending_starts.insert(
+            vm_id,
+            PendingStart {
+                dispatch: d,
+                progress: job.progress.clone(),
+                cancel: job.cancel.clone(),
+            },
+        );
+        Ok(Some(job))
+    }
+
+    /// Last step of a start (supervisor thread): launch if the run is still
+    /// current and every check passed, otherwise record the failure.
+    fn complete_start(
+        &mut self,
+        done: StartDone,
+        abort: Option<PublicError>,
+    ) -> Result<OperationRecord, PublicError> {
+        let vm_id = done.vm_id;
+        let pending = match self.pending_starts.get(&vm_id) {
+            Some(p) if p.dispatch.operation_id == done.operation_id => {
+                self.pending_starts.remove(&vm_id)
+            }
+            _ => None,
+        };
+        let Some(pending) = pending else {
+            return Err(PublicError::not_found("start not pending"));
+        };
+        let d = pending.dispatch;
+        let current = self
+            .core
+            .vm_status(&Caller::User, vm_id)
+            .is_ok_and(|s| s.state == VmState::Starting && s.run_id == Some(done.run_id));
+        let StartDone {
+            run_id,
+            facts,
+            guards,
+            disks,
+            outcome,
+            ..
+        } = done;
+        let r = if !current {
+            // Forced stop or Emergency Stop during the checks: the run is
+            // already closed, nothing is launched.
+            drop((guards, disks));
+            self.core
+                .finish_dispatch(vm_id, d.operation_id, Err(cancelled_error()))
+        } else if let Some(e) = abort {
+            drop((guards, disks));
+            self.core.refuse_start(vm_id, d.operation_id, e)
+        } else {
+            match outcome {
+                Err(StartFailure::Cancelled) => {
+                    drop((guards, disks));
+                    self.core
+                        .refuse_start(vm_id, d.operation_id, cancelled_error())
+                }
+                Err(StartFailure::Baseline(e)) => {
+                    drop((guards, disks));
+                    self.core.refuse_start(vm_id, d.operation_id, e)
+                }
+                // The core compares the facts and records the failure.
+                Err(StartFailure::Media) => {
+                    drop((guards, disks));
+                    let mut pre = PrecomputedInspector(facts);
+                    self.core.execute_dispatch(d, &mut self.backend, &mut pre)
+                }
+                Ok(()) => {
+                    if let Some(disks) = disks {
+                        self.backend.set_start_disks(vm_id, run_id, disks);
+                    }
+                    if !guards.is_empty() {
+                        self.backend.set_start_media(vm_id, run_id, guards);
+                    }
+                    let mut pre = PrecomputedInspector(facts);
+                    self.core.execute_dispatch(d, &mut self.backend, &mut pre)
+                }
+            }
+        };
+        // Operations queued behind the start.
+        let _ = self.run_queue(vm_id);
+        r
+    }
+
+    /// Cancels the checks of a pending start of the VM (forced stop,
+    /// Emergency Stop): the worker stops within one block.
+    fn cancel_pending_start(&self, vm_id: VmId) {
+        if let Some(p) = self.pending_starts.get(&vm_id) {
+            p.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 
     /// Input with pointer coordinates on a geometry different from the one
@@ -723,17 +918,24 @@ where
     fn run_queue(&mut self, vm_id: VmId) -> Result<(), PublicError> {
         while let Some(d) = self.core.begin_dispatch(vm_id)? {
             if d.action == VmAction::Start {
-                // F3: the current state may be an overlay of a baseline:
-                // verified and guarded files from the catalog, or a refusal
-                // before any process (the VM stays stopped).
-                match self.core.store().start_disks(vm_id, d.run_id) {
-                    Ok(Some(disks)) => self.backend.set_start_disks(vm_id, d.run_id, disks),
-                    Ok(None) => {}
-                    Err(e) => {
-                        self.core.refuse_start(vm_id, d.operation_id, e)?;
-                        continue;
+                // Files to verify opened with their guards here; the hashes
+                // run on a worker (offload) or inline, then `complete_start`
+                // launches QEMU (see `crate::start`). F3: the current state
+                // may be an overlay of a baseline, refused before any
+                // process (the VM stays stopped).
+                if let Some(job) = self.begin_start(d)? {
+                    if self.offload {
+                        self.start_jobs.push(job);
+                    } else {
+                        let done = job.run(&|| false);
+                        self.complete_start(done, None)?;
                     }
                 }
+                continue;
+            }
+            if d.action == VmAction::ForceStop {
+                // A forced stop during the checks of a start cancels them.
+                self.cancel_pending_start(vm_id);
             }
             if d.action == VmAction::Stop {
                 match self.backend.begin_shutdown(vm_id, d.run_id) {
@@ -748,8 +950,12 @@ where
                     None => {}
                 }
             }
-            self.core
-                .execute_dispatch(d, &mut self.backend, &mut self.inspector)?;
+            // Not a start: no medium to inspect.
+            self.core.execute_dispatch(
+                d,
+                &mut self.backend,
+                &mut PrecomputedInspector::default(),
+            )?;
         }
         self.settle_pending_stops();
         Ok(())
@@ -761,7 +967,7 @@ where
     S: CatalogStore + MediaImportPort + BaselinePort + Send + 'static,
     A: AuditSink + Send + 'static,
     B: BackendPort,
-    M: MediaInspector + Send + 'static,
+    M: MediaGuardPort + Send + 'static,
 {
     fn list_vms(&mut self, caller: &Caller) -> Result<Vec<VmSummary>, PublicError> {
         self.apply_observations();
@@ -807,6 +1013,10 @@ where
     fn after_emergency_stop(&mut self, actor: Actor) {
         // First record the Emergency Stop, then the other observations: an exit
         // already observed must not turn into an ordinary stop.
+        // Start checks still running are cancelled: their VM is stopped below.
+        for vm in self.pending_starts.keys() {
+            self.cancel_pending_start(*vm);
+        }
         let Ok(vms) = self.core.list_vms(&Caller::User) else {
             return;
         };
@@ -853,7 +1063,7 @@ where
             }
         }
         // The stops run in parallel in the backend, each bounded by its own
-        // escalation (ACPI wait → `quit` → termination): wait for them.
+        // escalation (ACPI wait â†’ `quit` â†’ termination): wait for them.
         let deadline = std::time::Instant::now() + STOP_ALL_LIMIT;
         while !self.pending_stops.is_empty() && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -1081,5 +1291,22 @@ where
         self.core.delete_baseline_with(caller, vm_id, |store| {
             store.delete_baseline(vm_id, baseline_id)
         })
+    }
+
+    fn offload_start_checks(&mut self, on: bool) {
+        self.offload = on;
+    }
+
+    fn take_start_jobs(&mut self) -> Vec<StartJob> {
+        std::mem::take(&mut self.start_jobs)
+    }
+
+    fn finish_start(
+        &mut self,
+        done: StartDone,
+        abort: Option<PublicError>,
+    ) -> Result<OperationRecord, PublicError> {
+        self.apply_observations();
+        self.complete_start(done, abort)
     }
 }

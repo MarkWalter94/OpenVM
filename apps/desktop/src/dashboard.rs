@@ -4,10 +4,10 @@
 //! chosen [`DashboardAction`], so it can be tested without processes.
 
 use egui::WidgetType;
-use lightvm_proto::ipc::VmSummary;
+use lightvm_proto::ipc::{StartPhase, StartProgress, VmSummary};
 use lightvm_proto::{GuestOs, VmId, VmState};
 
-use crate::service::{ServiceCommand, ServiceState};
+use crate::service::{BaselineList, ServiceCommand, ServiceState};
 use crate::theme::{self, Tone};
 
 /// Description under the Dashboard title.
@@ -46,6 +46,8 @@ pub enum DashboardAction {
     Console(VmId),
     /// Open the settings panel of a VM.
     Edit(VmId),
+    /// Open the Baselines page of a VM (F3).
+    Baselines(VmId),
     /// Ask a confirmation.
     Confirm(Confirm),
 }
@@ -114,10 +116,39 @@ pub fn vm_details(v: &VmSummary) -> String {
     )
 }
 
-/// The VM was started at least once, is stopped and still has the
-/// installation media attached: it would boot the installer again.
+/// Text of the checks of a start in progress, with the percentage while
+/// hashing: `Verifying baseline… 42 %`. The text carries the meaning; the
+/// progress bar only repeats it.
+pub fn start_progress_text(p: &StartProgress) -> String {
+    let what = match p.phase {
+        StartPhase::VerifyingMedia => "Verifying installation media…",
+        StartPhase::VerifyingBaseline => "Verifying baseline…",
+        StartPhase::Launching => return "Launching…".to_owned(),
+    };
+    match start_fraction(p) {
+        Some(f) => format!("{what} {} %", (f * 100.0).floor() as u32),
+        None => what.to_owned(),
+    }
+}
+
+/// Fraction of the bytes verified, if known.
+pub fn start_fraction(p: &StartProgress) -> Option<f32> {
+    (p.total_bytes > 0 && p.phase != StartPhase::Launching)
+        .then(|| (p.verified_bytes.min(p.total_bytes) as f64 / p.total_bytes as f64) as f32)
+}
+
+/// Space on the host above which the VM disk is considered to hold an
+/// installed system (a fresh disk occupies a few MiB).
+pub const INSTALLED_DISK_BYTES: u64 = 1 << 30;
+
+/// The VM is stopped, still has the installation media attached and its
+/// disk already holds data (an installed system): it would boot the
+/// installer again. The service does not report the last run of a stopped
+/// VM, so the disk usage is the signal.
 pub fn install_media_pending(v: &VmSummary) -> bool {
-    v.state == VmState::Stopped && v.run_id.is_some() && v.config.install_media.is_some()
+    v.state == VmState::Stopped
+        && v.config.install_media.is_some()
+        && (v.run_id.is_some() || v.disk_used_bytes.is_some_and(|b| b >= INSTALLED_DISK_BYTES))
 }
 
 /// Width of the actions column of a row.
@@ -138,10 +169,25 @@ fn action_button(
     r.clicked()
 }
 
-fn vm_row(ui: &mut egui::Ui, v: &VmSummary, active: bool, choice: &mut Option<DashboardAction>) {
+/// The supervisor can handle baselines (unknown capacity: let it decide).
+pub fn baselines_available(state: &ServiceState) -> bool {
+    state.host.is_none_or(|h| h.baseline_available)
+}
+
+fn vm_row(
+    ui: &mut egui::Ui,
+    v: &VmSummary,
+    active: bool,
+    baselines: (Option<&BaselineList>, bool),
+    choice: &mut Option<DashboardAction>,
+) {
     let p = theme::Palette::of(ui);
     let name = v.name.as_str();
     let (state_text, tone) = vm_state(v.state);
+    let (list, baselines_available) = baselines;
+    // A baseline operation in progress: the VM is busy.
+    let busy = v.baselines.operation;
+    let busy_hover = "A baseline operation is in progress on this VM";
     ui.horizontal(|ui| {
         ui.set_min_height(46.0);
         let left = (ui.available_width() - ACTIONS_WIDTH - 12.0).max(150.0);
@@ -157,6 +203,9 @@ fn vm_row(ui: &mut egui::Ui, v: &VmSummary, active: bool, choice: &mut Option<Da
                             .truncate(),
                     );
                     theme::pill(ui, state_text, tone);
+                    if let Some(op) = busy {
+                        theme::pill(ui, crate::baselines::operation_label(op), Tone::Warning);
+                    }
                 });
                 ui.add(
                     egui::Label::new(
@@ -166,6 +215,29 @@ fn vm_row(ui: &mut egui::Ui, v: &VmSummary, active: bool, choice: &mut Option<Da
                     )
                     .wrap(),
                 );
+                if let Some(progress) = v.start.filter(|_| v.state == VmState::Starting) {
+                    let text = start_progress_text(&progress);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        if let Some(f) = start_fraction(&progress) {
+                            let bar = ui.add(
+                                egui::ProgressBar::new(f)
+                                    .desired_width(140.0)
+                                    .desired_height(6.0),
+                            );
+                            theme::accessible_name(&bar, WidgetType::ProgressIndicator, &text);
+                        } else {
+                            ui.spinner();
+                        }
+                        ui.label(egui::RichText::new(&text).small().color(p.text));
+                    });
+                }
+                if let Some(line) = crate::baselines::dashboard_line(v, list) {
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(line).small().color(p.text_weak))
+                            .wrap(),
+                    );
+                }
             },
         );
         ui.allocate_ui_with_layout(
@@ -178,12 +250,14 @@ fn vm_row(ui: &mut egui::Ui, v: &VmSummary, active: bool, choice: &mut Option<Da
                 if matches!(v.state, VmState::Stopped | VmState::Failed) {
                     let hover = if v.state == VmState::Failed {
                         "VM in error: the supervisor brings it back to Stopped"
+                    } else if busy.is_some() {
+                        busy_hover
                     } else {
                         "Start the VM"
                     };
                     if action_button(
                         ui,
-                        active && v.state == VmState::Stopped,
+                        active && v.state == VmState::Stopped && busy.is_none(),
                         theme::primary(ui, "Start"),
                         &format!("Start {name}"),
                         hover,
@@ -210,7 +284,11 @@ fn vm_row(ui: &mut egui::Ui, v: &VmSummary, active: bool, choice: &mut Option<Da
                 }
                 let r = ui
                     .add_enabled(active, theme::subtle("Edit"))
-                    .on_hover_text("Resources and limits (editable while the VM is stopped)");
+                    .on_hover_text(if busy.is_some() {
+                        busy_hover
+                    } else {
+                        "Resources and limits (editable while the VM is stopped)"
+                    });
                 theme::accessible_name(&r, WidgetType::Button, &format!("Edit {name}"));
                 if r.clicked() {
                     *choice = Some(DashboardAction::Edit(v.vm_id));
@@ -231,12 +309,29 @@ fn vm_row(ui: &mut egui::Ui, v: &VmSummary, active: bool, choice: &mut Option<Da
                             *choice = Some(DashboardAction::Confirm(Confirm::Reset(v.vm_id)));
                         }
                         ui.separator();
+                        let b = ui
+                            .add_enabled(baselines_available, egui::Button::new("Baselines…"))
+                            .on_hover_text(
+                                "Read-only copies of the disk taken with the VM off: create, restore, delete",
+                            )
+                            .on_disabled_hover_text(
+                                "Not available: the supervisor has no QEMU disk image tool",
+                            );
+                        theme::accessible_name(
+                            &b,
+                            WidgetType::Button,
+                            &format!("Baselines of {name}"),
+                        );
+                        if b.clicked() {
+                            *choice = Some(DashboardAction::Baselines(v.vm_id));
+                        }
+                        ui.separator();
                         let delete = ui
                             .add_enabled(
-                                v.state == VmState::Stopped,
+                                v.state == VmState::Stopped && busy.is_none(),
                                 egui::Button::new(egui::RichText::new("Delete…").color(p.danger)),
                             )
-                            .on_hover_text("Removes the VM and its disk (only when stopped)")
+                            .on_hover_text("Removes the VM, its disk and its baselines (only when stopped)")
                             .on_disabled_hover_text("Stop the VM to delete it");
                         if delete.clicked() {
                             *choice = Some(DashboardAction::Confirm(Confirm::Delete(v.vm_id)));
@@ -261,7 +356,10 @@ fn vm_row(ui: &mut egui::Ui, v: &VmSummary, active: bool, choice: &mut Option<Da
                 .small()
                 .color(p.text_weak),
             );
-            let r = ui.add_enabled(active, theme::subtle("Remove installation media…"));
+            let r = ui.add_enabled(
+                active && busy.is_none(),
+                theme::subtle("Remove installation media…"),
+            );
             theme::accessible_name(
                 &r,
                 WidgetType::Button,
@@ -366,7 +464,8 @@ pub fn dashboard_ui(
             if i > 0 {
                 theme::divider(ui);
             }
-            ui.push_id(v.vm_id, |ui| vm_row(ui, v, active, &mut choice));
+            let baselines = (state.baselines.get(&v.vm_id), baselines_available(state));
+            ui.push_id(v.vm_id, |ui| vm_row(ui, v, active, baselines, &mut choice));
         }
     });
     choice

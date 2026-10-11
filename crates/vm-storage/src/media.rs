@@ -470,3 +470,66 @@ impl Catalog {
         })
     }
 }
+
+/// Managed media copy held open for a VM start (ADR-0008, ADR-0025).
+///
+/// Opened by the supervisor thread before the hash and kept until the run is
+/// released: with `FILE_SHARE_READ` only (Windows) nobody can write, rename
+/// or delete the file, nor rename a directory above it, while the guard is
+/// alive; a process already holding it open for writing makes the open fail
+/// ([`StorageError::VmBusy`]). The hash ([`Self::sha256_with`]) is read
+/// **through this handle** (on any thread), so the bytes verified are the
+/// bytes QEMU reads from the same, unchangeable file.
+#[derive(Debug)]
+pub struct MediaGuard {
+    file: File,
+    abs: PathBuf,
+    size: u64,
+}
+
+impl MediaGuard {
+    /// Opens `rel` under the catalog `root`: every existing component
+    /// checked against links and reparse points, the file opened without
+    /// following a reparse point and checked to be a regular file on the
+    /// handle. A missing copy is an I/O error of kind `NotFound`.
+    pub fn open(root: &Path, rel: &ManagedPath) -> Result<Self> {
+        let abs = crate::paths::resolve_checked(root, rel)?;
+        let file = fsx::open_regular(&abs, Share::ReadOnly, rel.as_str())?;
+        let size = file
+            .metadata()
+            .map_err(|e| StorageError::io(&abs, e))?
+            .len();
+        Ok(Self { file, abs, size })
+    }
+
+    /// Size read on the handle at open.
+    pub fn size_bytes(&self) -> u64 {
+        self.size
+    }
+
+    /// `true` if the file has the read-only attribute (read on the handle).
+    pub fn read_only(&self) -> Result<bool> {
+        Ok(self
+            .file
+            .metadata()
+            .map_err(|e| StorageError::io(&self.abs, e))?
+            .permissions()
+            .readonly())
+    }
+
+    /// The guard handle (reads only: for example the volume descriptor).
+    pub fn file(&self) -> &File {
+        &self.file
+    }
+
+    /// Hex SHA-256 and bytes read through the handle; `cancel` is polled
+    /// between 1 MiB blocks ([`StorageError::StateConflict`] with
+    /// [`crate::HASH_CANCELLED`]), `progress` receives the bytes read.
+    pub fn sha256_with(
+        &self,
+        cancel: &dyn Fn() -> bool,
+        progress: &dyn Fn(u64),
+    ) -> Result<(String, u64)> {
+        fsx::sha256_handle_with(&self.file, &self.abs, cancel, progress)
+    }
+}

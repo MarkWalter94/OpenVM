@@ -21,7 +21,9 @@
 //! - New files created with `CREATE_NEW` and published without overwriting.
 //! - Baseline opened with `FILE_SHARE_READ` only during preparation and
 //!   execution, hash verified through the handle before every start
-//!   ([`Catalog::guard_run`], ADR-0025).
+//!   ([`Catalog::guard_run`], ADR-0025); the service opens the guard on its
+//!   supervisor thread ([`Catalog::open_current_state`]) and hashes through
+//!   the same handles on a worker ([`RunGuard::verify_baseline`]).
 //! - Storage does not start processes and does not interpret configurations as
 //!   host options: disks are produced by the caller (`qemu-backend`).
 //!
@@ -64,6 +66,7 @@ pub use enums::{
     TargetKind, TerminationCause,
 };
 pub use error::{PathRejection, Result, StorageError};
+pub use fsx::HASH_CANCELLED;
 pub use guard::{BaselineGuard, GuardReport, RunGuard, WriterProbe};
 pub use ids::{
     ArtifactId, BaselineId, DiskId, FirmwareId, GrantId, MediaId, OperationId, RunId, SessionId,
@@ -75,8 +78,8 @@ pub use manifest::{
     sha256_file,
 };
 pub use media::{
-    CopiedMedia, MAX_DECLARED_ORIGIN, MediaCheck, MediaImportJob, MediaImportReservation,
-    MediaLimits, NOT_OPTICAL_IMAGE,
+    CopiedMedia, MAX_DECLARED_ORIGIN, MediaCheck, MediaGuard, MediaImportJob,
+    MediaImportReservation, MediaLimits, NOT_OPTICAL_IMAGE,
 };
 pub use ops::PromoteBaseline;
 pub use paths::ManagedPath;

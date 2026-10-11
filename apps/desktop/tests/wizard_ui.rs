@@ -241,6 +241,7 @@ fn unsupported_media_registry_is_explained() {
         error: Some(Failure {
             unsupported: true,
             message: "approved media: unsupported: operation list_media not implemented yet".into(),
+            ..Failure::default()
         }),
     };
     let (mut app, hs) = app_with(state);
@@ -261,6 +262,7 @@ fn unsupported_media_registry_is_explained() {
         s.import = RequestStatus::Failed(Failure {
             unsupported: true,
             message: "import: unsupported".into(),
+            ..Failure::default()
         });
     });
     h.run_steps(4);

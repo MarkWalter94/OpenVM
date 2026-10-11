@@ -2097,3 +2097,218 @@ fn e2e_real_qemu_f2_exit_install_reboot_reopen() {
         );
     });
 }
+
+/// Real start with the 6.4 GB Ubuntu ISO through the service: the media
+/// hash re-verified at the start (ADR-0008) runs on a worker thread, so
+/// `vm_status` / `list_vms` from another connection stay fast during the
+/// verification (the VM is `starting` with the `verifying_media` sub-status
+/// and the bytes hashed so far); then the start reply arrives, the console
+/// opens and the framebuffer updates; the managed copy cannot be renamed or
+/// written while the VM runs. Requires `LIGHTVM_E2E_QEMU_DIR`; optional
+/// `LIGHTVM_E2E_ISO`. Run in release: `cargo test --release -p
+/// lightvm-service --test f2 e2e_real_start_checks -- --ignored --nocapture`.
+#[test]
+#[ignore = "requires approved QEMU, an accelerator and the Ubuntu ISO (LIGHTVM_E2E_QEMU_DIR)"]
+fn e2e_real_start_checks_do_not_block_the_supervisor() {
+    use lightvm_proto::ipc::StartPhase;
+    use lightvm_service::adapters::backend::{QemuSetup, probe};
+
+    let iso = std::env::var_os("LIGHTVM_E2E_ISO").map_or_else(
+        || {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../lab/media/ubuntu-26.04.1-desktop-amd64.iso")
+        },
+        PathBuf::from,
+    );
+    let iso = std::fs::canonicalize(&iso).expect("ISO");
+    let iso_text = iso.to_str().unwrap().trim_start_matches(r"\\?\").to_owned();
+    if let Ok(rd) = std::fs::read_dir(std::env::temp_dir().join("lightvm-service-tests")) {
+        for e in rd.flatten() {
+            if e.file_name().to_string_lossy().starts_with("f2-startchk-") {
+                drop(RemoveCatalog(e.path()));
+            }
+        }
+    }
+    let dir = temp_dir("f2-startchk");
+    let _cleanup = RemoveCatalog(dir.clone());
+    let store = SqliteStore::open(&dir).unwrap();
+    let setup = QemuSetup::new(qemu_dir_for_test(), store.root(), short_dir("lvs"));
+    let (host, vm_backend, mut capacity) = probe(setup).expect("QEMU probe");
+    assert!(capacity.accelerator_available, "accelerator not available");
+    if capacity.free_storage_gib < capacity.reserved_storage_gib + 16 {
+        eprintln!(
+            "free space {} GiB below reserve {} + 16 GiB: reserve set to 0 for this test",
+            capacity.free_storage_gib, capacity.reserved_storage_gib
+        );
+        capacity.reserved_storage_gib = 0;
+        capacity.free_storage_gib = capacity.free_storage_gib.max(16);
+    }
+    let audit = FileAuditSink::open(&audit_path(&dir)).unwrap();
+    let inspector = ManagedMediaInspector::new(store.root());
+    let engine =
+        CoreEngine::new(store, audit, vm_backend, inspector, core_config(capacity)).unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let dir2 = dir.clone();
+    rt.block_on(async move {
+        let (handle, ui) = start(config(&dir2), Box::new(engine), Box::new(host))
+            .await
+            .unwrap();
+        let svc = Svc {
+            handle,
+            ui,
+            calls: Calls::default(),
+        };
+        let (mut c, _) = connect_ui(&svc).await;
+        let media = tokio::time::timeout(
+            Duration::from_secs(600),
+            import_media(&mut c, iso_text, MediaKind::InstallIso),
+        )
+        .await
+        .expect("import timeout");
+        let mut cfg = sample_config("f2-start-checks");
+        cfg.vcpus = 2;
+        cfg.memory_mib = 4096;
+        cfg.disk_gib = 16;
+        cfg.install_media = Some(media.id);
+        let vm = match req(&mut c, Request::CreateVm { config: cfg }).await {
+            ServerMessage::Response {
+                result: ResponseBody::VmCreated { vm },
+                ..
+            } => vm,
+            other => panic!("{other:?}"),
+        };
+
+        // Start on its own connection; status and list from another one.
+        let t0 = Instant::now();
+        let starter = {
+            let mut c2 = connect_ui(&svc).await.0;
+            let vm_id = vm.id;
+            tokio::spawn(async move {
+                let m = tokio::time::timeout(
+                    Duration::from_secs(600),
+                    c2.request(Request::SubmitVm {
+                        request: VmRequest {
+                            operation_id: OperationId::new_v7(),
+                            vm_id,
+                            expected_run_id: None,
+                            action: VmAction::Start,
+                        },
+                    }),
+                )
+                .await
+                .expect("start timeout")
+                .unwrap();
+                (m, t0.elapsed())
+            })
+        };
+        let (mut status_lat, mut list_lat) = (Vec::new(), Vec::new());
+        let mut phases = Vec::new();
+        let mut last_progress = None;
+        while !starter.is_finished() {
+            let t = Instant::now();
+            let s = status(&mut c, vm.id).await;
+            status_lat.push(t.elapsed());
+            if let Some(p) = s.start {
+                if phases.last() != Some(&p.phase) {
+                    eprintln!(
+                        "{:>7.1} s: {:?} {:?} {}/{} bytes",
+                        t0.elapsed().as_secs_f64(),
+                        s.state,
+                        p.phase,
+                        p.verified_bytes,
+                        p.total_bytes
+                    );
+                    phases.push(p.phase);
+                }
+                last_progress = Some((t0.elapsed(), p));
+            }
+            let t = Instant::now();
+            assert!(matches!(
+                req(&mut c, Request::ListVms).await,
+                ServerMessage::Response { .. }
+            ));
+            list_lat.push(t.elapsed());
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let (m, start_time) = starter.await.unwrap();
+        succeeded(&m);
+        let n = (status_lat.len(), list_lat.len());
+        let (s50, s95, smax) = (
+            percentile(&mut status_lat, 0.5),
+            percentile(&mut status_lat, 0.95),
+            *status_lat.iter().max().unwrap(),
+        );
+        let (l50, l95, lmax) = (
+            percentile(&mut list_lat, 0.5),
+            percentile(&mut list_lat, 0.95),
+            *list_lat.iter().max().unwrap(),
+        );
+        eprintln!(
+            "start reply after {start_time:?} ({:.0} MiB/s over {} bytes); last progress {last_progress:?}",
+            media.size_bytes as f64 / 1048576.0 / start_time.as_secs_f64(),
+            media.size_bytes
+        );
+        eprintln!(
+            "during the start: {} vm_status p50 {:.2} ms p95 {:.2} ms max {:.2} ms; {} list_vms p50 {:.2} ms p95 {:.2} ms max {:.2} ms",
+            n.0,
+            ms(s50),
+            ms(s95),
+            ms(smax),
+            n.1,
+            ms(l50),
+            ms(l95),
+            ms(lmax)
+        );
+        assert!(phases.contains(&StartPhase::VerifyingMedia), "{phases:?}");
+        assert!(smax < Duration::from_secs(1), "vm_status blocked: {smax:?}");
+        assert!(lmax < Duration::from_secs(1), "list_vms blocked: {lmax:?}");
+
+        // Console through the ticket: framebuffer updates.
+        let run = status(&mut c, vm.id).await.run_id.expect("run");
+        let t = Instant::now();
+        let ticket = open_console(&mut c, vm.id).await;
+        assert_eq!(ticket.run_id, run);
+        let seen = rfb_watch(&ticket);
+        let mut ok = false;
+        for _ in 0..200 {
+            if seen.lock().unwrap().updates >= 1 {
+                ok = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        eprintln!(
+            "console: ticket + first framebuffer update in {:?}: {:?}",
+            t.elapsed(),
+            seen.lock().unwrap()
+        );
+        assert!(ok, "no framebuffer update");
+
+        // The managed copy cannot be renamed or written while the VM runs.
+        let copy = std::fs::read_dir(dir2.join("media"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| p.extension().is_some_and(|x| x == "iso"))
+            .expect("managed copy");
+        assert!(std::fs::rename(&copy, copy.with_extension("moved")).is_err());
+        let mut p = std::fs::metadata(&copy).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        p.set_readonly(false);
+        std::fs::set_permissions(&copy, p).unwrap();
+        assert!(
+            std::fs::OpenOptions::new().append(true).open(&copy).is_err(),
+            "managed copy writable during the run"
+        );
+        let mut p = std::fs::metadata(&copy).unwrap().permissions();
+        p.set_readonly(true);
+        std::fs::set_permissions(&copy, p).unwrap();
+
+        succeeded(&submit(&mut c, vm.id, Some(run), VmAction::ForceStop).await);
+        svc.handle.shutdown().await;
+    });
+}

@@ -11,17 +11,21 @@
 //!   ([`crate::diag`]).
 //!
 //! After the `ready` line the UI talks to the service only via authenticated
-//! IPC, with four connections: requests (reply by `request_id`), events
+//! IPC, with six connections: requests (reply by `request_id`), events
 //! (`subscribe`), a fast lane for console tickets and keyboard/mouse input
-//! (never queued behind a start or a stop) and a slow lane for ISO imports
-//! (copy and SHA-256 of several GiB). Reads of a frame cannot be interrupted
-//! safely, so the lanes do not share a connection.
+//! (never queued behind a start or a stop), a slow lane for ISO imports
+//! (copy and SHA-256 of several GiB), a storage lane for baseline creation
+//! and restore (F3: full copy and hash of the disk, minutes, no timeout)
+//! and a start lane (the reply to a start arrives after the verification of
+//! media and baseline and the launch of QEMU, seconds). Each lane matches
+//! its replies by `request_id` on its own connection. Reads of a frame
+//! cannot be interrupted safely, so the lanes do not share a connection.
 //!
 //! The UI opens neither QMP nor VM files: start, stop, input and Emergency
 //! Stop go through the service core (ROADMAP 6.1). The console display is
 //! reached only with the per-run ticket of `open_console` (ADR-0013).
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::io::{BufRead, BufReader, Write as _};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -30,12 +34,13 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use lightvm_proto::ipc::{
-    ConsoleTicket, ParentLossPolicy, Request, ResponseBody, ServerMessage, ServiceEvent, VmSummary,
+    BaselineSummary, ConsoleTicket, ParentLossPolicy, Request, ResponseBody, ServerMessage,
+    ServiceEvent, VmSummary,
 };
 use lightvm_proto::{
-    ErrorCode, HostCapacity, InputBatch, InputEvent, KeyAction, MediaKind, MediaRecord,
-    MouseButton, OperationId, OperationStatus, PointerButton, ReplyError, RunId, VmAction,
-    VmConfig, VmId, VmRequest,
+    BaselineId, ErrorCode, HostCapacity, InputBatch, InputEvent, KeyAction, Label, MediaKind,
+    MediaRecord, MouseButton, OperationId, OperationStatus, PointerButton, ReplyError, RunId,
+    VmAction, VmConfig, VmId, VmRequest,
 };
 use lightvm_service::client::Client;
 use lightvm_service::credential::Credential;
@@ -117,21 +122,50 @@ pub const CONNECTING: &str = "connecting";
 
 /// Failure of a request, readable, with the "not provided by this
 /// supervisor" case recognisable (`unsupported`).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Failure {
     /// The supervisor does not implement the operation.
     pub unsupported: bool,
     /// Readable description.
     pub message: String,
+    /// Error code of the supervisor, if the failure came from its reply
+    /// (`None`: connection or protocol problem).
+    pub code: Option<ErrorCode>,
+    /// Structured details of the reply (for example `reason`), without
+    /// secrets.
+    pub details: BTreeMap<String, String>,
 }
 
 impl Failure {
     /// Failure from a description.
     pub fn new(message: impl Into<String>) -> Self {
         Self {
-            unsupported: false,
             message: message.into(),
+            ..Self::default()
         }
+    }
+
+    /// Failure with the code of a supervisor reply (stand-ins build them
+    /// too).
+    pub fn coded(code: ErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            unsupported: code == ErrorCode::Unsupported,
+            message: message.into(),
+            code: Some(code),
+            details: BTreeMap::new(),
+        }
+    }
+
+    /// Adds a detail (`reason`, `needed_bytes`, ...).
+    #[must_use]
+    pub fn with_detail(mut self, key: &str, value: impl Into<String>) -> Self {
+        self.details.insert(key.to_owned(), value.into());
+        self
+    }
+
+    /// Value of the `reason` detail, if any.
+    pub fn reason(&self) -> Option<&str> {
+        self.details.get("reason").map(String::as_str)
     }
 }
 
@@ -192,6 +226,45 @@ pub struct ConsoleRequest {
     pub status: RequestStatus<RunId>,
 }
 
+/// Baselines of a VM known to the UI (F3).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BaselineList {
+    /// The list was received at least once.
+    pub loaded: bool,
+    /// Baselines, oldest first.
+    pub items: Vec<BaselineSummary>,
+    /// Last read error, if any.
+    pub error: Option<Failure>,
+}
+
+/// Baseline operation requested by the UI.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BaselineOp {
+    /// Creation with the given label.
+    Create {
+        /// Label of the new baseline.
+        label: Label,
+        /// Consent to a baseline after an unclean stop ("not verified").
+        allow_unclean: bool,
+    },
+    /// Restore of a baseline.
+    Restore(BaselineId),
+    /// Deletion of a baseline.
+    Delete(BaselineId),
+}
+
+/// Last baseline operation requested by the UI and its outcome (on
+/// success, the baseline concerned).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BaselineRequest {
+    /// VM.
+    pub vm_id: VmId,
+    /// Operation.
+    pub op: BaselineOp,
+    /// Outcome.
+    pub status: RequestStatus<BaselineId>,
+}
+
 /// State seen by the UI, updated by the IPC threads.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ServiceState {
@@ -223,6 +296,10 @@ pub struct ServiceState {
     pub console: Option<ConsoleRequest>,
     /// Last refused input batch, readable (cleared by the next accepted one).
     pub input_error: Option<String>,
+    /// Baselines per VM, as last read (F3).
+    pub baselines: BTreeMap<VmId, BaselineList>,
+    /// Last baseline operation (creation, restore, deletion).
+    pub baseline: Option<BaselineRequest>,
 }
 
 impl ServiceState {
@@ -304,6 +381,59 @@ pub enum ServiceCommand {
     OpenConsole(VmId),
     /// Keyboard and mouse towards the guest.
     Input(InputBatch),
+    /// Re-reads the baselines of a VM.
+    ListBaselines(VmId),
+    /// Creates a baseline of a stopped VM (long: storage lane).
+    CreateBaseline {
+        /// VM.
+        vm_id: VmId,
+        /// Label of the new baseline.
+        label: Label,
+        /// Consent to a baseline after an unclean stop, recorded as not
+        /// verified.
+        allow_unclean: bool,
+    },
+    /// Restores a baseline: the current state is discarded (long: storage
+    /// lane).
+    RestoreBaseline {
+        /// VM.
+        vm_id: VmId,
+        /// Baseline.
+        baseline_id: BaselineId,
+    },
+    /// Deletes a baseline that is not in use.
+    DeleteBaseline {
+        /// VM.
+        vm_id: VmId,
+        /// Baseline.
+        baseline_id: BaselineId,
+    },
+}
+
+impl ServiceCommand {
+    /// Baseline operation of the command, if it is one (list excluded).
+    pub fn baseline_op(&self) -> Option<(VmId, BaselineOp)> {
+        match self {
+            Self::CreateBaseline {
+                vm_id,
+                label,
+                allow_unclean,
+            } => Some((
+                *vm_id,
+                BaselineOp::Create {
+                    label: label.clone(),
+                    allow_unclean: *allow_unclean,
+                },
+            )),
+            Self::RestoreBaseline { vm_id, baseline_id } => {
+                Some((*vm_id, BaselineOp::Restore(*baseline_id)))
+            }
+            Self::DeleteBaseline { vm_id, baseline_id } => {
+                Some((*vm_id, BaselineOp::Delete(*baseline_id)))
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Supervisor seen by the UI: the real child process ([`Service`]) or, in
@@ -645,7 +775,15 @@ pub fn mark_pending(
                 status: RequestStatus::Pending,
             });
         }
-        _ => {}
+        c => {
+            if let Some((vm_id, op)) = c.baseline_op() {
+                s.baseline = Some(BaselineRequest {
+                    vm_id,
+                    op,
+                    status: RequestStatus::Pending,
+                });
+            }
+        }
     }
 }
 
@@ -663,6 +801,9 @@ fn fail_pending(s: &mut ServiceState, why: &str) {
     if let Some(r) = &mut s.console {
         fail(&mut r.status, why);
     }
+    if let Some(r) = &mut s.baseline {
+        fail(&mut r.status, why);
+    }
     s.connected = false;
 }
 
@@ -678,7 +819,19 @@ fn mark_failed(s: &mut ServiceState, c: &ServiceCommand, f: Failure) {
             });
         }
         ServiceCommand::Input(_) => s.input_error = Some(f.message),
-        _ => s.last_outcome = Some(f.message),
+        ServiceCommand::ListBaselines(vm_id) => {
+            s.baselines.entry(*vm_id).or_default().error = Some(f);
+        }
+        c => match c.baseline_op() {
+            Some((vm_id, op)) => {
+                s.baseline = Some(BaselineRequest {
+                    vm_id,
+                    op,
+                    status: RequestStatus::Failed(f),
+                });
+            }
+            None => s.last_outcome = Some(f.message),
+        },
     }
 }
 
@@ -701,8 +854,8 @@ fn failure(m: &ServerMessage) -> Failure {
     match m {
         ServerMessage::Error { error, .. } => match error {
             ReplyError::Operational(e) => Failure {
-                unsupported: e.code == ErrorCode::Unsupported,
-                message: format!("{}: {}", e.code.as_str(), e.message),
+                details: e.details.clone().unwrap_or_default(),
+                ..Failure::coded(e.code, format!("{}: {}", e.code.as_str(), e.message))
             },
             ReplyError::Protocol(e) => Failure::new(format!("protocol: {e}")),
         },
@@ -812,11 +965,14 @@ async fn ipc_loop(
         let e = connect(&endpoint, &cred).await?;
         let f = connect(&endpoint, &cred).await?;
         let s = connect(&endpoint, &cred).await?;
-        Ok::<_, String>((r, e, f, s))
+        let b = connect(&endpoint, &cred).await?;
+        let st = connect(&endpoint, &cred).await?;
+        Ok::<_, String>((r, e, f, s, b, st))
     }
     .await;
     drop(cred);
-    let (mut requests, mut events, mut fast, mut slow) = match connections {
+    let (mut requests, mut events, mut fast, mut slow, mut storage, mut starts) = match connections
+    {
         Ok(x) => x,
         Err(m) => {
             lanes.update(|s| s.connection = m);
@@ -858,6 +1014,13 @@ async fn ipc_loop(
                     // The run_id changes on start: the list is re-read.
                     ev_lanes.queue(ServiceCommand::Refresh);
                 }
+                Ok(Ok(ServiceEvent::BaselinesChanged { vm_id })) => {
+                    // Operation started or ended, baseline created, restored
+                    // or deleted: VM summary (operation, current state) and
+                    // list re-read.
+                    ev_lanes.queue(ServiceCommand::Refresh);
+                    ev_lanes.queue(ServiceCommand::ListBaselines(vm_id));
+                }
                 Ok(Ok(_)) => {}
                 Ok(Err(m)) => {
                     let d = describe_error(&m);
@@ -880,6 +1043,8 @@ async fn ipc_loop(
 
     let fast_queue = Arc::new(FastQueue::default());
     let (slow_tx, mut slow_rx) = mpsc::unbounded_channel::<ServiceCommand>();
+    let (storage_tx, mut storage_rx) = mpsc::unbounded_channel::<ServiceCommand>();
+    let (start_tx, mut start_rx) = mpsc::unbounded_channel::<ServiceCommand>();
     let main_lanes = lanes.clone();
     let fast_in = fast_queue.clone();
     // Ends when every strong sender is gone (the `Service` was dropped).
@@ -890,11 +1055,19 @@ async fn ipc_loop(
                 ServiceCommand::ImportMedia { .. } => {
                     let _ = slow_tx.send(c);
                 }
+                ServiceCommand::CreateBaseline { .. } | ServiceCommand::RestoreBaseline { .. } => {
+                    let _ = storage_tx.send(c);
+                }
+                ServiceCommand::Start(_) | ServiceCommand::OpenVm { .. } => {
+                    let _ = start_tx.send(c);
+                }
                 c => run(&mut requests, &main_lanes, c).await,
             }
         }
         fast_in.close();
         drop(slow_tx);
+        drop(storage_tx);
+        drop(start_tx);
     };
     let fast_lanes = lanes.clone();
     let fast_lane = async move {
@@ -908,13 +1081,31 @@ async fn ipc_loop(
             run(&mut slow, &slow_lanes, c).await;
         }
     };
+    // Baseline creation and restore: the reply arrives when the operation
+    // ends (minutes for a large disk), without timeout; only the Emergency
+    // Stop, the closing of the connection or the service shutdown cancel it.
+    // Starts: the reply arrives after the verification of the media and of
+    // the baseline and the launch of QEMU (seconds); the VM list is polled
+    // meanwhile on the request lane for the progress.
+    let start_lanes = lanes.clone();
+    let start_lane = async move {
+        while let Some(c) = start_rx.recv().await {
+            run(&mut starts, &start_lanes, c).await;
+        }
+    };
+    let storage_lanes = lanes.clone();
+    let storage_lane = async move {
+        while let Some(c) = storage_rx.recv().await {
+            run(&mut storage, &storage_lanes, c).await;
+        }
+    };
     // The loop ends when the service is no longer used (executor and lanes
     // done) or when the event connection closes (the supervisor is gone):
     // the command channel is then dropped, so `Service::send` returns
     // `false`, and the requests still waiting are marked as failed.
     tokio::select! {
         () = event_reader => {}
-        _ = async { tokio::join!(executor, fast_lane, slow_lane) } => {}
+        _ = async { tokio::join!(executor, fast_lane, slow_lane, storage_lane, start_lane) } => {}
     }
     lanes.update(|s| fail_pending(s, "supervisor connection closed"));
 }
@@ -936,8 +1127,8 @@ async fn request(c: &mut Client, body: Request) -> Result<ServerMessage, Failure
 
 fn context(what: &str, f: Failure) -> Failure {
     Failure {
-        unsupported: f.unsupported,
         message: format!("{what}: {}", f.message),
+        ..f
     }
 }
 
@@ -962,7 +1153,26 @@ async fn execute(c: &mut Client, lanes: &Lanes, command: ServiceCommand) -> Resu
                     result: ResponseBody::VmList { vms },
                     ..
                 } => {
-                    lock(state).vms = vms;
+                    // Baselines not read yet, or changed since: re-read, so
+                    // the Dashboard can name the baseline a VM is on.
+                    let stale: Vec<VmId> = {
+                        let mut s = lock(state);
+                        s.vms = vms;
+                        s.vms
+                            .iter()
+                            .filter(|v| {
+                                let count = v.baselines.count as usize;
+                                (count > 0 || v.baselines.current.is_some())
+                                    && s.baselines
+                                        .get(&v.vm_id)
+                                        .is_none_or(|l| !l.loaded || l.items.len() != count)
+                            })
+                            .map(|v| v.vm_id)
+                            .collect()
+                    };
+                    for vm_id in stale {
+                        lanes.queue(ServiceCommand::ListBaselines(vm_id));
+                    }
                     Ok(())
                 }
                 m => Err(failure(&m)),
@@ -1207,6 +1417,97 @@ async fn execute(c: &mut Client, lanes: &Lanes, command: ServiceCommand) -> Resu
         ServiceCommand::Reset { vm_id, run_id } => {
             vm_action(c, state, vm_id, Some(run_id), VmAction::Reset, "reset").await
         }
+        ServiceCommand::ListBaselines(vm_id) => {
+            match request(c, Request::ListBaselines { vm_id }).await? {
+                ServerMessage::Response {
+                    result: ResponseBody::Baselines { baselines, .. },
+                    ..
+                } => {
+                    lock(state).baselines.insert(
+                        vm_id,
+                        BaselineList {
+                            loaded: true,
+                            items: baselines,
+                            error: None,
+                        },
+                    );
+                    Ok(())
+                }
+                m => Err(context("baselines", failure(&m))),
+            }
+        }
+        ServiceCommand::CreateBaseline {
+            vm_id,
+            label,
+            allow_unclean,
+        } => {
+            let op = BaselineOp::Create {
+                label: label.clone(),
+                allow_unclean,
+            };
+            let body = Request::CreateBaseline {
+                vm_id,
+                label,
+                allow_unclean,
+            };
+            match request(c, body).await? {
+                ServerMessage::Response {
+                    result: ResponseBody::BaselineCreated { baseline },
+                    ..
+                } => {
+                    baseline_done(
+                        lanes,
+                        vm_id,
+                        op,
+                        baseline.baseline_id,
+                        format!("baseline created: {}", baseline.label.as_str()),
+                    );
+                    Ok(())
+                }
+                m => Err(context("baseline", failure(&m))),
+            }
+        }
+        ServiceCommand::RestoreBaseline { vm_id, baseline_id } => {
+            match request(c, Request::RestoreBaseline { vm_id, baseline_id }).await? {
+                ServerMessage::Response {
+                    result: ResponseBody::BaselineRestored { .. },
+                    ..
+                } => {
+                    let label = baseline_label(state, vm_id, baseline_id);
+                    baseline_done(
+                        lanes,
+                        vm_id,
+                        BaselineOp::Restore(baseline_id),
+                        baseline_id,
+                        format!("baseline restored: {label}"),
+                    );
+                    Ok(())
+                }
+                m => Err(context("restore", failure(&m))),
+            }
+        }
+        ServiceCommand::DeleteBaseline { vm_id, baseline_id } => {
+            let label = baseline_label(state, vm_id, baseline_id);
+            match request(c, Request::DeleteBaseline { vm_id, baseline_id }).await? {
+                ServerMessage::Response {
+                    result: ResponseBody::BaselineDeleted { .. },
+                    ..
+                } => {
+                    if let Some(l) = lock(state).baselines.get_mut(&vm_id) {
+                        l.items.retain(|b| b.baseline_id != baseline_id);
+                    }
+                    baseline_done(
+                        lanes,
+                        vm_id,
+                        BaselineOp::Delete(baseline_id),
+                        baseline_id,
+                        format!("baseline deleted: {label}"),
+                    );
+                    Ok(())
+                }
+                m => Err(context("baseline deletion", failure(&m))),
+            }
+        }
         ServiceCommand::EmergencyStop => match request(c, Request::EmergencyStop).await? {
             ServerMessage::Response {
                 result: ResponseBody::EmergencyStop(r),
@@ -1222,6 +1523,30 @@ async fn execute(c: &mut Client, lanes: &Lanes, command: ServiceCommand) -> Resu
             m => Err(failure(&m)),
         },
     }
+}
+
+/// Label of a known baseline, for the outcome line.
+fn baseline_label(state: &Mutex<ServiceState>, vm_id: VmId, id: BaselineId) -> String {
+    lock(state)
+        .baselines
+        .get(&vm_id)
+        .and_then(|l| l.items.iter().find(|b| b.baseline_id == id))
+        .map_or_else(|| "baseline".into(), |b| b.label.as_str().to_owned())
+}
+
+/// Records a successful baseline operation and re-reads the VM list and the
+/// baselines (queued: the storage lane does not wait for them).
+fn baseline_done(lanes: &Lanes, vm_id: VmId, op: BaselineOp, id: BaselineId, outcome: String) {
+    lanes.update(|s| {
+        s.baseline = Some(BaselineRequest {
+            vm_id,
+            op,
+            status: RequestStatus::Done(id),
+        });
+        s.last_outcome = Some(outcome);
+    });
+    lanes.queue(ServiceCommand::Refresh);
+    lanes.queue(ServiceCommand::ListBaselines(vm_id));
 }
 
 /// Re-reads the list after a successful change: a failure is reported in
@@ -1423,6 +1748,11 @@ mod tests {
             pub(super) requests: Arc<Mutex<Vec<Request>>>,
             /// Set: the event connection is closed (supervisor gone).
             pub(super) close_events: Arc<AtomicBool>,
+            /// Events to push on the event connection.
+            pub(super) events: Arc<Mutex<Vec<ServiceEvent>>>,
+            /// Set: the reply to `create_baseline` or to a start is held back (a long
+            /// operation) until it is cleared.
+            pub(super) hold_baseline: Arc<AtomicBool>,
         }
 
         pub(super) fn start(script: Script) -> Server {
@@ -1438,7 +1768,10 @@ mod tests {
             };
             let requests = Arc::new(Mutex::new(Vec::new()));
             let close_events = Arc::new(AtomicBool::new(false));
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let hold_baseline = Arc::new(AtomicBool::new(false));
             let (r2, c2) = (requests.clone(), close_events.clone());
+            let (e2, h2) = (events.clone(), hold_baseline.clone());
             let (tx, rx) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Builder::new_current_thread()
@@ -1450,7 +1783,14 @@ mod tests {
                     tx.send(listener.endpoint().to_owned()).unwrap();
                     loop {
                         if let Ok(Accepted::Ok(stream, _)) = listener.accept().await {
-                            tokio::spawn(serve(stream, script.clone(), r2.clone(), c2.clone()));
+                            tokio::spawn(serve(
+                                stream,
+                                script.clone(),
+                                r2.clone(),
+                                c2.clone(),
+                                e2.clone(),
+                                h2.clone(),
+                            ));
                         }
                     }
                 });
@@ -1459,6 +1799,8 @@ mod tests {
                 endpoint: rx.recv_timeout(Duration::from_secs(10)).unwrap(),
                 requests,
                 close_events,
+                events,
+                hold_baseline,
             }
         }
 
@@ -1467,6 +1809,8 @@ mod tests {
             script: Script,
             requests: Arc<Mutex<Vec<Request>>>,
             close: Arc<AtomicBool>,
+            events: Arc<Mutex<Vec<ServiceEvent>>>,
+            hold: Arc<AtomicBool>,
         ) {
             let max = frame::DEFAULT_MAX_FRAME;
             loop {
@@ -1491,9 +1835,25 @@ mod tests {
                                 return;
                             }
                             while !close.load(Ordering::SeqCst) {
+                                let pending: Vec<ServiceEvent> =
+                                    std::mem::take(&mut *lock(&events));
+                                for event in pending {
+                                    let m = ServerMessage::Event { event };
+                                    if frame::write_frame(&mut s, &m, max).await.is_err() {
+                                        return;
+                                    }
+                                }
                                 tokio::time::sleep(Duration::from_millis(10)).await;
                             }
                             return;
+                        }
+                        let long = matches!(body, Request::CreateBaseline { .. })
+                            || matches!(&body, Request::SubmitVm { request }
+                                if request.action == VmAction::Start);
+                        if long {
+                            while hold.load(Ordering::SeqCst) {
+                                tokio::time::sleep(Duration::from_millis(10)).await;
+                            }
                         }
                         match script(&body) {
                             Ok(result) => ServerMessage::Response { request_id, result },
@@ -1765,6 +2125,188 @@ mod tests {
             revision: 1
         }));
         assert!(matches!(l.state().delete, RequestStatus::Failed(_)));
+    }
+
+    fn baseline(vm_id: VmId, label: &str) -> BaselineSummary {
+        BaselineSummary {
+            baseline_id: BaselineId::new_v7(),
+            vm_id,
+            label: Label::parse(label).unwrap(),
+            created_at: lightvm_proto::UtcTimestamp::from_unix_millis(1_791_710_000_000).unwrap(),
+            clean_shutdown: true,
+            protected: false,
+            derived_from: None,
+            config_revision: 1,
+            virtual_size_bytes: 8 << 30,
+            size_bytes: 3 << 30,
+            disk_sha256: lightvm_proto::Sha256Digest::from_bytes([7; 32]),
+            firmware_sha256: None,
+            current: false,
+            in_use: false,
+        }
+    }
+
+    fn requested(server: &fake::Server, f: impl Fn(&Request) -> bool) -> bool {
+        lock(&server.requests).iter().any(f)
+    }
+
+    /// F3: a baseline creation is long (the reply arrives when it ends,
+    /// without timeout): it runs on its own lane, so the VM list, the
+    /// baselines list and a deletion are answered meanwhile; its outcome
+    /// then re-reads the list.
+    #[test]
+    fn baseline_creation_does_not_block_other_requests() {
+        let vm = VmId::new_v7();
+        let created = baseline(vm, "Baseline 1");
+        let c2 = created.clone();
+        let server = fake::start(Arc::new(move |r: &Request| match r {
+            Request::ListBaselines { vm_id } => Ok(ResponseBody::Baselines {
+                vm_id: *vm_id,
+                baselines: Vec::new(),
+            }),
+            Request::CreateBaseline { .. } => Ok(ResponseBody::BaselineCreated {
+                baseline: c2.clone(),
+            }),
+            Request::DeleteBaseline { .. } => Err(ReplyError::Operational(
+                lightvm_proto::PublicError::state_conflict("baseline in use")
+                    .with_detail("reason", "baseline_referenced"),
+            )),
+            r => base_reply(r),
+        }));
+        server.hold_baseline.store(true, Ordering::SeqCst);
+        let l = Loop::start(server.endpoint.clone());
+        let label = Label::parse("Baseline 1").unwrap();
+        assert!(l.send(ServiceCommand::CreateBaseline {
+            vm_id: vm,
+            label: label.clone(),
+            allow_unclean: false,
+        }));
+        assert!(matches!(
+            l.state().baseline,
+            Some(BaselineRequest {
+                status: RequestStatus::Pending,
+                ..
+            })
+        ));
+        l.wait("create_baseline received", |_| {
+            requested(&server, |r| matches!(r, Request::CreateBaseline { .. }))
+        });
+        // Held: the other lanes keep working.
+        assert!(l.send(ServiceCommand::ListBaselines(vm)));
+        l.wait("list answered during the creation", |s| {
+            s.baselines.get(&vm).is_some_and(|b| b.loaded)
+        });
+        assert!(l.state().baseline.unwrap().status.is_pending());
+        server.hold_baseline.store(false, Ordering::SeqCst);
+        l.wait("creation done", |s| {
+            s.baseline.as_ref().is_some_and(|b| !b.status.is_pending())
+        });
+        let s = l.state();
+        assert_eq!(
+            s.baseline,
+            Some(BaselineRequest {
+                vm_id: vm,
+                op: BaselineOp::Create {
+                    label,
+                    allow_unclean: false
+                },
+                status: RequestStatus::Done(created.baseline_id),
+            })
+        );
+        // The refused deletion keeps the code and the reason of the reply.
+        let id = BaselineId::new_v7();
+        assert!(l.send(ServiceCommand::DeleteBaseline {
+            vm_id: vm,
+            baseline_id: id
+        }));
+        l.wait("deletion refused", |s| {
+            matches!(&s.baseline, Some(b) if matches!(b.op, BaselineOp::Delete(_)) && !b.status.is_pending())
+        });
+        let Some(BaselineRequest {
+            status: RequestStatus::Failed(f),
+            ..
+        }) = l.state().baseline
+        else {
+            panic!("not failed")
+        };
+        assert_eq!(f.code, Some(ErrorCode::StateConflict));
+        assert_eq!(f.reason(), Some("baseline_referenced"));
+    }
+
+    /// A start replies only after the verification of media and baseline
+    /// and the launch: it has its own lane, the VM list is read meanwhile.
+    #[test]
+    fn start_does_not_block_other_requests() {
+        let server = fake::start(Arc::new(|r: &Request| match r {
+            Request::SubmitVm { .. } => Ok(operation_ok()),
+            Request::ListBaselines { vm_id } => Ok(ResponseBody::Baselines {
+                vm_id: *vm_id,
+                baselines: Vec::new(),
+            }),
+            r => base_reply(r),
+        }));
+        server.hold_baseline.store(true, Ordering::SeqCst);
+        let l = Loop::start(server.endpoint.clone());
+        let vm = VmId::new_v7();
+        assert!(l.send(ServiceCommand::Start(vm)));
+        l.wait("start received", |_| {
+            requested(&server, |r| matches!(r, Request::SubmitVm { .. }))
+        });
+        assert!(l.send(ServiceCommand::ListBaselines(vm)));
+        l.wait("list answered during the start", |s| {
+            s.baselines.get(&vm).is_some_and(|b| b.loaded)
+        });
+        assert_ne!(
+            l.state().last_outcome.as_deref(),
+            Some("start: accepted"),
+            "start still waiting"
+        );
+        server.hold_baseline.store(false, Ordering::SeqCst);
+        l.wait("start outcome", |s| {
+            s.last_outcome.as_deref() == Some("start: accepted")
+        });
+    }
+
+    /// F3: `baselines_changed` re-reads the VM list and the baselines of
+    /// the VM.
+    #[test]
+    fn baselines_changed_rereads_the_list() {
+        let vm = VmId::new_v7();
+        let b = baseline(vm, "Clean install");
+        let b2 = b.clone();
+        let server = fake::start(Arc::new(move |r: &Request| match r {
+            Request::ListBaselines { vm_id } => Ok(ResponseBody::Baselines {
+                vm_id: *vm_id,
+                baselines: vec![b2.clone()],
+            }),
+            r => base_reply(r),
+        }));
+        let l = Loop::start(server.endpoint.clone());
+        lock(&server.events).push(ServiceEvent::BaselinesChanged { vm_id: vm });
+        l.wait("list re-read after the event", |s| {
+            s.baselines.get(&vm).is_some_and(|l| l.items == [b.clone()])
+        });
+        assert!(requested(&server, |r| *r == Request::ListBaselines { vm_id: vm }));
+    }
+
+    /// A baseline operation still waiting when the supervisor goes away
+    /// fails (no view keeps waiting).
+    #[test]
+    fn pending_baseline_operation_fails_when_the_supervisor_is_gone() {
+        let server = fake::start(Arc::new(base_reply));
+        server.hold_baseline.store(true, Ordering::SeqCst);
+        let l = Loop::start(server.endpoint.clone());
+        assert!(l.send(ServiceCommand::CreateBaseline {
+            vm_id: VmId::new_v7(),
+            label: Label::parse("x").unwrap(),
+            allow_unclean: true,
+        }));
+        server.close_events.store(true, Ordering::SeqCst);
+        l.wait_thread_end();
+        assert!(matches!(
+            l.state().baseline.map(|b| b.status),
+            Some(RequestStatus::Failed(_))
+        ));
     }
 
     /// The fast lane stays bounded: pointer-only batches are dropped when

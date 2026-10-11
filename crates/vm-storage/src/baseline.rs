@@ -1029,6 +1029,27 @@ impl Catalog {
     /// header names exactly [`CatalogLayout::overlay_backing_ref`] in
     /// `qcow2`; the base has no backing file (no chains).
     pub fn guard_current_state(&mut self, vm: &VmId, run: &RunId) -> Result<Option<StartFiles>> {
+        self.current_state_files(vm, run, true)
+    }
+
+    /// [`Self::guard_current_state`] **without** the baseline hash: guard
+    /// handles opened (writer detector, links refused), overlay and base
+    /// headers checked; the caller must run [`RunGuard::verify_baseline`] on
+    /// [`StartFiles::guard`] before handing the files to QEMU (the service
+    /// does it on a worker thread, so its supervisor thread is not held for
+    /// the hash of a multi-GiB base disk). The guard's handles stay open
+    /// from before the hash until the run ends: the hashed content is the
+    /// content QEMU reads.
+    pub fn open_current_state(&mut self, vm: &VmId, run: &RunId) -> Result<Option<StartFiles>> {
+        self.current_state_files(vm, run, false)
+    }
+
+    fn current_state_files(
+        &mut self,
+        vm: &VmId,
+        run: &RunId,
+        verify: bool,
+    ) -> Result<Option<StartFiles>> {
         let found = self.read(|tx| {
             let Some(cs) = tx.current_state(vm)? else {
                 return Ok(None);
@@ -1052,7 +1073,11 @@ impl Catalog {
                 "the run does not reference the VM's current state".into(),
             ));
         }
-        let guard = self.guard_run(run)?;
+        let guard = if verify {
+            self.guard_run(run)?
+        } else {
+            self.open_run_guard(run)?
+        };
         let overlay_abs = self.layout.resolve(&overlay.managed_path)?;
         let base_abs = self.layout.resolve(&base.managed_path)?;
         let expected = CatalogLayout::overlay_backing_ref(&cs.baseline_id);

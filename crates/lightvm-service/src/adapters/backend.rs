@@ -51,6 +51,11 @@
 //!   baselines ([`QemuImageTool`]) run in their own Job Object, cancellable.
 //!   The end of every run is reported with its cause
 //!   ([`BackendPort::take_exits`]: clean only for an observed guest shutdown).
+//! - the handles through which the approved media were hashed for a start
+//!   ([`BackendPort::set_start_media`], `crate::start`) are kept with the
+//!   catalog guard until the run is released: while the run lives the media
+//!   copies cannot be written, renamed or deleted, so QEMU reads the bytes
+//!   that were verified.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -73,7 +78,7 @@ use vm_core::media::VerifiedMedia;
 use vm_core::ports::VmBackend;
 use vm_storage::CatalogLayout;
 
-use crate::engine::{BackendPort, ImageTool, StartDisks};
+use crate::engine::{BackendPort, GuardedMedia, ImageTool, StartDisks};
 use crate::supervisor::{Backend, EmergencyOutcome, EmergencyStop, ParentLossPolicy};
 
 type Registry = Arc<Mutex<BTreeMap<VmId, (RunId, qemu_backend::EmergencyStop)>>>;
@@ -130,7 +135,7 @@ pub struct QemuSetup {
     /// refused (ADR-0011). Hosts whose CPU lacks the model's features are not
     /// verified (single reference host).
     pub cpu_model: String,
-    /// Ordinary stop policy (`system_powerdown` → `quit` → kill).
+    /// Ordinary stop policy (`system_powerdown` â†’ `quit` â†’ kill).
     pub stop_policy: ShutdownPolicy,
     /// Maximum wait for the Emergency Stop and the forced stop.
     pub emergency_timeout: Duration,
@@ -194,7 +199,7 @@ fn logical_cpus() -> u32 {
 /// Job Object limits from the VM limits (ADR-0017):
 /// - CPU cap: `cpu_max_percent` of the capacity of the assigned vCPUs,
 ///   expressed as a share of the whole machine in hundredths of a percentage
-///   point (`vcpus × percent × 100 / logical processors`); 100 % = no cap;
+///   point (`vcpus Ã— percent Ã— 100 / logical processors`); 100 % = no cap;
 /// - job memory: guest RAM plus `memory_margin_mib`.
 pub fn job_limits(config: &lightvm_proto::VmConfig, logical: u32) -> JobLimits {
     let l = config.limits;
@@ -350,6 +355,7 @@ pub fn probe(setup: QemuSetup) -> Result<(QemuHost, QemuVmBackend, HostCapacity)
         priority_killed,
         stop_override,
         start_disks: BTreeMap::new(),
+        start_media: BTreeMap::new(),
         guards: BTreeMap::new(),
         exits: Vec::new(),
         image_tool,
@@ -517,8 +523,11 @@ pub struct QemuVmBackend {
     stop_override: StopOverride,
     /// Current-state files for the next start of a VM (F3), by run.
     start_disks: BTreeMap<VmId, (RunId, StartDisks)>,
-    /// Catalog guards of the running VMs (F3), dropped on release.
-    guards: BTreeMap<VmId, Box<dyn std::any::Any + Send>>,
+    /// Protected handles of the media verified for the next start of a VM.
+    start_media: BTreeMap<VmId, (RunId, Vec<Box<dyn GuardedMedia>>)>,
+    /// Guards of the running VMs (catalog guard of the current state, F3;
+    /// handles of the verified media), dropped on release.
+    guards: BTreeMap<VmId, Vec<Box<dyn Send>>>,
     /// Ends of runs not yet reported (`true` = observed guest shutdown).
     exits: Vec<(VmId, RunId, bool)>,
     /// Image operations for baselines.
@@ -852,6 +861,14 @@ impl VmBackend for QemuVmBackend {
             .remove(&vm.id)
             .filter(|(r, _)| *r == run_id)
             .map(|(_, d)| d);
+        // Handles of the media verified for this run: kept from before the
+        // hash until the run is released (dropped here if the start fails).
+        let media_guards = self
+            .start_media
+            .remove(&vm.id)
+            .filter(|(r, _)| *r == run_id)
+            .map(|(_, g)| g)
+            .unwrap_or_default();
         // From here on every error path removes the private directory.
         let private_guard = PrivateDirGuard::new(self.private_dir_for(run_id));
         let paths = self.prepare(vm, run_id, media, current.as_ref())?;
@@ -882,9 +899,16 @@ impl VmBackend for QemuVmBackend {
         lock(&self.registry).insert(vm.id, (run_id, run.emergency_stop_handle()));
         self.runs.insert(vm.id, Arc::new(run));
         self.private_dirs.insert(vm.id, private_guard.disarm());
+        let mut held: Vec<Box<dyn Send>> = Vec::new();
         if let Some(d) = current {
-            self.guards.insert(vm.id, d.guard);
+            held.push(Box::new(d.guard));
         }
+        held.extend(
+            media_guards
+                .into_iter()
+                .map(|g| Box::new(g) as Box<dyn Send>),
+        );
+        self.guards.insert(vm.id, held);
         Ok(())
     }
 
@@ -1030,6 +1054,10 @@ impl BackendPort for QemuVmBackend {
 
     fn set_start_disks(&mut self, vm_id: VmId, run_id: RunId, disks: StartDisks) {
         self.start_disks.insert(vm_id, (run_id, disks));
+    }
+
+    fn set_start_media(&mut self, vm_id: VmId, run_id: RunId, guards: Vec<Box<dyn GuardedMedia>>) {
+        self.start_media.insert(vm_id, (run_id, guards));
     }
 
     fn take_exits(&mut self) -> Vec<(VmId, RunId, bool)> {
@@ -1236,7 +1264,7 @@ impl Backend for QemuHost {
         // already revoked by the service; the core sessions arrive with F4.
     }
     fn prepare_shutdown(&mut self) {
-        // ACPI 15 s → `quit` 5 s → termination 5 s per VM: within the 30 s per
+        // ACPI 15 s â†’ `quit` 5 s â†’ termination 5 s per VM: within the 30 s per
         // VM of the service shutdown budget. A guest that powers off earlier
         // ends earlier; a `shutdown_vms` policy already set stays.
         let mut o = lock(&self.stop_override);

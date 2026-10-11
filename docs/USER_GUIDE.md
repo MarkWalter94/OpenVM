@@ -1,6 +1,6 @@
 # LightVM user guide (alpha)
 
-This guide takes you from a Windows 11 PC to an Ubuntu virtual machine (VM) installed with LightVM, and back to it after you close and reopen the app. It covers the **experimental alpha** (roadmap phase F2): read [Known limitations](#12-known-limitations-of-the-alpha) before you start.
+This guide takes you from a Windows 11 PC to an Ubuntu virtual machine (VM) installed with LightVM, and back to it after you close and reopen the app. It covers the **experimental alpha** (roadmap phase F2): read [Known limitations](#13-known-limitations-of-the-alpha) before you start.
 
 Contents:
 
@@ -13,10 +13,11 @@ Contents:
 7. [Install Ubuntu in the VM](#7-install-ubuntu-in-the-vm)
 8. [After the installation](#8-after-the-installation)
 9. [Everyday use: stop, Emergency Stop, delete](#9-everyday-use-stop-emergency-stop-delete)
-10. [Where your data lives](#10-where-your-data-lives)
-11. [Uninstall](#11-uninstall)
-12. [Known limitations of the alpha](#12-known-limitations-of-the-alpha)
-13. [Troubleshooting](#13-troubleshooting)
+10. [Baselines: save and restore the VM's disk](#10-baselines-save-and-restore-the-vms-disk)
+11. [Where your data lives](#11-where-your-data-lives)
+12. [Uninstall](#12-uninstall)
+13. [Known limitations of the alpha](#13-known-limitations-of-the-alpha)
+14. [Troubleshooting](#14-troubleshooting)
 
 ---
 
@@ -160,13 +161,13 @@ If a `LightVM-<version>-windows-x64-setup.exe` (Inno Setup, per user) is publish
 
 1. Start **LightVM** from the Start Menu.
    - On the first run, Windows SmartScreen may show *Windows protected your PC* because the app is not signed. If, and only if, you verified the checksum in section 3, choose **More info** → **Run anyway**.
-   - LightVM opens without a console window. Its diagnostic messages go to log files in `%LOCALAPPDATA%\LightVM\logs` (see [Troubleshooting](#13-troubleshooting)).
+   - LightVM opens without a console window. Its diagnostic messages go to log files in `%LOCALAPPDATA%\LightVM\logs` (see [Troubleshooting](#14-troubleshooting)).
 2. LightVM opens on the **Dashboard**. Without QEMU it cannot start VMs yet.
 3. Open **Settings** (left navigation). In the **Supervisor** section:
    - **QEMU distribution** → **Browse…** → select the QEMU folder from section 2 (the one that contains `qemu-system-x86_64.exe`).
    - **VM catalog** shows where VMs are stored (default `%LOCALAPPDATA%\LightVM\catalog`). Leave the default unless you need another drive.
    - Press **Apply and restart the supervisor** (or **Start the supervisor** if it is not running).
-4. Back on the **Dashboard**, the supervisor card at the top (**Supervisor · PID …**) shows the connection state, **Backend**, **Acceleration** and **If the UI closes**. **Acceleration** must read `whpx`; *not detected* means VMs cannot use the hardware accelerator. **Settings** → **Host capacity** → **Hardware acceleration** says the same. If it does not work, see [Troubleshooting](#13-troubleshooting).
+4. Back on the **Dashboard**, the supervisor card at the top (**Supervisor · PID …**) shows the connection state, **Backend**, **Acceleration** and **If the UI closes**. **Acceleration** must read `whpx`; *not detected* means VMs cannot use the hardware accelerator. **Settings** → **Host capacity** → **Hardware acceleration** says the same. If it does not work, see [Troubleshooting](#14-troubleshooting).
 
 Also in **Settings**: **Appearance** → **Theme** (**Dark**, the default, or **Light**); **Console** → **Guest keyboard layout** and the list of **Console shortcuts**; **If LightVM closes unexpectedly** (what happens to running VMs if the app crashes; the default, **Terminate the VMs immediately**, stops them).
 
@@ -258,12 +259,51 @@ Closing LightVM while VMs are running opens a dialog: **Stop them and quit** shu
 
 ---
 
-## 10. Where your data lives
+## 10. Baselines: save and restore the VM's disk
+
+A **baseline** is a read-only copy of the VM's disk and UEFI variables, taken **with the VM off**. It is not a snapshot of a running VM: no memory (RAM) state is saved, and after a restore the guest starts with a normal boot. Typical use: install Ubuntu, shut it down, create a baseline "clean install"; later, bring the VM back to exactly that state in a few seconds.
+
+Open it from the Dashboard: **More** → **Baselines…** on the VM's row. (If the item is disabled, the supervisor has no QEMU disk image tool: check the QEMU folder in **Settings**.) The page shows:
+
+- the VM's **current state**: *Standalone disk* (no baseline was ever restored) or *Running on baseline "…"*, with the space written since that restore;
+- the list of baselines, most recent first, each with its creation time (UTC), the space it takes on the host and its badges:
+
+| Badge | Meaning |
+| --- | --- |
+| **Current** | The VM's current state is built on this baseline (an overlay of it): it cannot be deleted. |
+| **Verified** | Taken after a clean shutdown of the guest (or before the VM ever ran). |
+| **Not verified** | Taken after a forced stop, an Emergency Stop, a crash or a supervisor restart, with your explicit consent: the disk may hold incomplete writes. It stays *Not verified* for good. |
+| **Protected** | Belongs to an agent session (later phases): it cannot be deleted. |
+| **In use** | The VM's current run uses it. |
+
+The same facts appear in one line under the VM's row on the Dashboard (for example *On baseline "Baseline 1 · 2026-10-11 09:12 UTC" · 300 MiB of changes since the restore · 2 baselines (7.0 GiB)*).
+
+**Create a baseline.** Stop the VM, ideally by shutting the guest down from its own menu. Press **Create baseline…**: the dialog shows the name LightVM gives it (*Baseline N · date and time UTC*; there is nothing to type) and **Create baseline** starts the copy. LightVM copies the whole disk and checks and hashes the copy: for a large disk this takes **several minutes**. The page shows *Creating the baseline…* with the elapsed time; meanwhile the VM cannot be started or changed (its **Start** button is disabled and its row shows *Creating baseline*). There is no time limit and no Cancel button: only the **Emergency Stop** (top right) cancels the operation, and then nothing is changed. The button is disabled if the VM never ran (it has no disk yet: start it once and install the system first).
+
+If the VM was **not shut down cleanly** last time (forced stop, Emergency Stop, crash, supervisor restart), LightVM refuses at first and explains why. The safer way is to start the VM, shut it down from the guest and try again. If you still want the baseline (for example a live session that ignores the power button), tick *I understand: the baseline is marked Not verified* and press **Create unverified baseline**.
+
+**Restore a baseline.** With the VM stopped, press **Restore…** on a baseline and confirm with **Discard and restore**. The VM's current state (everything written to its disk and UEFI variables since the last restore, or since the installation if you never restored) is **discarded** and replaced by a fresh copy of the baseline; this cannot be undone. To keep the current state, create a baseline of it first. LightVM verifies the baseline's integrity before using it (a moment for a large disk); the next **Start** boots the guest from it with a normal boot. Every start on a baseline verifies it again first: the VM's row shows *Verifying baseline… N %*, then *Launching…* (a start with installation media attached shows *Verifying installation media… N %* the same way). Changes made after a restore persist across runs until the next restore. Other baselines are kept.
+
+**Delete a baseline.** Press **Delete…** and confirm with **Delete baseline**: the files are removed from the host, the VM's current state does not change. The **Current**, **In use** and **Protected** baselines cannot be deleted (the button is disabled and its tooltip says why): restore another baseline first. Deleting the VM deletes its baselines too.
+
+If an operation is refused, the page says why in plain words, for example:
+
+| Message (beginning) | What to do |
+| --- | --- |
+| *the VM was not shut down cleanly last time* | Shut it down from the guest and retry, or give the consent (above). |
+| *the VM is busy* | A start, a stop or another baseline operation is in progress, or a disk is open in another program: wait and retry. |
+| *not enough free space on the catalog drive* / *it would exceed the VM's storage budget* | Free space on the drive, delete older baselines, or raise **Storage budget** in **Edit**. LightVM keeps 1 GiB free in reserve. |
+| *its files were changed or are missing on the host* | The baseline was altered outside LightVM: LightVM will not use it. Restore another baseline or delete this one. A VM whose current baseline is altered does not start. |
+| *cancelled by the Emergency Stop* | Nothing was changed; start the operation again if you want. |
+
+---
+
+## 11. Where your data lives
 
 | What | Where |
 | --- | --- |
 | Program files | `%LOCALAPPDATA%\Programs\LightVM` (or the `-Prefix` you chose) |
-| VM catalog: database, VM disks, UEFI variables, imported images | `%LOCALAPPDATA%\LightVM\catalog` (or the folder chosen in **Settings** → **VM catalog**) |
+| VM catalog: database, VM disks, UEFI variables, baselines, imported images | `%LOCALAPPDATA%\LightVM\catalog` (or the folder chosen in **Settings** → **VM catalog**) |
 | App settings | `%LOCALAPPDATA%\LightVM\ui-settings.json` |
 | Audit log of the supervisor | `%LOCALAPPDATA%\LightVM\audit.jsonl` |
 | Diagnostic logs | `%LOCALAPPDATA%\LightVM\logs\lightvm-desktop.log` (the app) and `lightvm-service.log` (the supervisor); each is rotated at 1 MiB, keeping three older copies (`*.1.log` … `*.3.log`) |
@@ -272,7 +312,7 @@ Closing LightVM while VMs are running opens a dialog: **Stop them and quit** shu
 
 ---
 
-## 11. Uninstall
+## 12. Uninstall
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Programs\LightVM\uninstall.ps1"
@@ -286,7 +326,7 @@ If you used the setup `.exe`, uninstall from **Settings → Apps → Installed a
 
 ---
 
-## 12. Known limitations of the alpha
+## 13. Known limitations of the alpha
 
 - **Experimental software.** Phase F2 "alpha manuale"; not a release. Feasibility items of phase F0 are still open (physical keyboard test P-4, second-user test on Windows P-5, see `docs/STATUS.md`).
 - **Windows 11 x64 only**, tested on a single PC (`docs/COMPATIBILITY.md`). Linux and macOS are not supported (the macOS build in CI only checks portability).
@@ -297,13 +337,14 @@ If you used the setup `.exe`, uninstall from **Settings → Apps → Installed a
 - **Keyboard**: Italian and English (US) layouts are the targets; other layouts and IME input are not verified.
 - **CPU model**: the VM uses a generic CPU model, not the host's (`-cpu host` does not boot on the test PC), so some guest software may run slower or detect fewer CPU features.
 - **One reference guest**: Ubuntu 26.04.1 LTS Desktop. Other guests are not tested.
-- No baselines/snapshots and no AI agent sessions yet (later phases F3–F5).
-- No console window: diagnostic messages are only in the log files (section 10).
+- Baselines are taken **with the VM off** only: no snapshot of a running VM, no RAM state (section 10). Baseline labels are generated by LightVM and cannot be renamed. Only one baseline operation at a time across all VMs.
+- No AI agent sessions yet (later phases F4–F5).
+- No console window: diagnostic messages are only in the log files (section 11).
 - Remote Desktop (RDP) sessions are not verified.
 
 ---
 
-## 13. Troubleshooting
+## 14. Troubleshooting
 
 | Symptom | Cause and fix |
 | --- | --- |

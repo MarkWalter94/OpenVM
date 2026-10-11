@@ -1,4 +1,4 @@
-//! Adapter `vm_core::ports::CatalogStore` → `vm_storage::Catalog` (SQLite).
+//! Adapter `vm_core::ports::CatalogStore` â†’ `vm_storage::Catalog` (SQLite).
 //!
 //! The core and the storage use the same identifiers from `lightvm-proto` but
 //! different records; the adapter converts both ways and covers three gaps in
@@ -7,7 +7,7 @@
 //! 1. `Tx::insert_vm` generates the `VmId` itself, while the core chooses it
 //!    through the `IdGenerator` port: the core's `VmRecord` is kept in
 //!    `config_json` (`{"core": VmRecord}`) and the adapter maintains the
-//!    mapping core `VmId` → storage `VmId`, rebuilt on open;
+//!    mapping core `VmId` â†’ storage `VmId`, rebuilt on open;
 //! 2. `Catalog` reads require `&mut self` while the port's reads are `&self`:
 //!    the catalog lives in a `RefCell` (a single thread, the supervisor, owns
 //!    the adapter);
@@ -51,8 +51,8 @@ use vm_core::ports::CatalogStore;
 use vm_storage as st;
 
 use crate::engine::{
-    BaselineOutcome, BaselinePort, CancelCheck, ImageTool, ImportCopied, ImportJob,
-    MediaImportPort as _, StartDisks, StorageWork,
+    BaselineOutcome, BaselinePort, CancelCheck, GuardedMedia, ImageTool, ImportCopied, ImportJob,
+    MediaGuardPort, MediaImportPort as _, StartDisks, StartGuard, StorageWork,
 };
 
 /// Version of the `config_json` format written by this adapter.
@@ -153,7 +153,7 @@ fn ts(s: &str) -> Result<UtcTimestamp, PublicError> {
 #[derive(Debug)]
 pub struct SqliteStore {
     cat: RefCell<st::Catalog>,
-    /// Core `VmId` → `VmId` of the row in the storage.
+    /// Core `VmId` â†’ `VmId` of the row in the storage.
     ids: BTreeMap<VmId, VmId>,
 }
 
@@ -896,19 +896,21 @@ impl BaselinePort for SqliteStore {
             .map_err(|e| baseline_error(&e))
     }
 
+    /// Guard opened here (supervisor thread), baseline hash verified later
+    /// through the same handles ([`RunStartGuard`], start worker).
     fn start_disks(&self, vm: VmId, run: RunId) -> Result<Option<StartDisks>, PublicError> {
         let sid = self.sid(vm)?;
         let files = self
             .cat
             .borrow_mut()
-            .guard_current_state(&sid, &run)
+            .open_current_state(&sid, &run)
             .map_err(|e| baseline_error(&e))?;
         Ok(files.map(|f| StartDisks {
             overlay: f.overlay,
             vars: f.vars,
             base: f.base,
             base_vars: f.base_vars,
-            guard: Box::new(f.guard),
+            guard: Box::new(RunStartGuard(f.guard)),
         }))
     }
 
@@ -974,13 +976,13 @@ pub fn validate_import_source(raw: &str, kind: MediaKind) -> Result<PathBuf, Pub
 
 /// Textual checks of the media path (no file system access, never
 /// panics: only byte-level and `Path` operations). Rejected:
-/// - empty, longer than 4096 bytes, control characters → `invalid_argument`;
+/// - empty, longer than 4096 bytes, control characters â†’ `invalid_argument`;
 /// - UNC paths (`\\server\share`) and device paths (`\\?\`, `\\.\`, `\??\`),
 ///   alternate data streams (`:` after the drive), Windows device names
-///   (`CON`, `NUL`, `COM1`, ...) → `permission_denied`;
-/// - relative paths, `.`/`..` components, names ending in `.` or space →
+///   (`CON`, `NUL`, `COM1`, ...) â†’ `permission_denied`;
+/// - relative paths, `.`/`..` components, names ending in `.` or space â†’
 ///   `invalid_argument`;
-/// - an extension other than `.iso` → `invalid_argument`.
+/// - an extension other than `.iso` â†’ `invalid_argument`.
 pub fn validate_import_path(raw: &str) -> Result<PathBuf, PublicError> {
     use std::path::{Component, Path};
     let invalid = PublicError::invalid_argument;
@@ -1055,15 +1057,15 @@ fn open_source(path: &Path) -> Result<std::fs::File, PublicError> {
 }
 
 /// File checks on the handle the copy reads from (import worker thread):
-/// - a link, junction or other reparse point on the file → `permission_denied`;
-///   anything but a regular file → `invalid_argument`;
+/// - a link, junction or other reparse point on the file â†’ `permission_denied`;
+///   anything but a regular file â†’ `invalid_argument`;
 /// - an empty file or one over the limit of the kind (16 GiB installation,
-///   8 GiB data) → `invalid_argument` / `resource_limit`;
-/// - a file without the ISO 9660 / UDF signature → `invalid_argument`;
+///   8 GiB data) â†’ `invalid_argument` / `resource_limit`;
+/// - a file without the ISO 9660 / UDF signature â†’ `invalid_argument`;
 /// - Windows, location resolved by the system on the handle
 ///   (`GetFinalPathNameByHandleW`, then `GetDriveTypeW` on the volume
 ///   root): a file on a network share or on a volume that is not a local
-///   fixed, removable or optical drive (mapped network drives included) →
+///   fixed, removable or optical drive (mapped network drives included) â†’
 ///   `permission_denied`;
 /// - Windows, **reparse traversal rule**: the final path of the handle must
 ///   be the requested path itself (compared without case, `/` as `\`). Any
@@ -1281,8 +1283,8 @@ impl crate::engine::MediaImportPort for SqliteStore {
 }
 
 /// Classification of the source by path, on the worker thread, before the
-/// open: missing → `not_found`; link, junction or reparse point →
-/// `permission_denied`; not a regular file → `invalid_argument`.
+/// open: missing â†’ `not_found`; link, junction or reparse point â†’
+/// `permission_denied`; not a regular file â†’ `invalid_argument`.
 fn precheck_source(path: &Path) -> Result<(), PublicError> {
     match std::fs::symlink_metadata(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -1335,12 +1337,38 @@ pub fn is_optical_image(path: &Path) -> bool {
         && (&id == b"CD001" || &id == b"BEA01")
 }
 
-/// Inspector of the managed media copies: SHA-256 hash and size read from the
-/// file in the catalog; the comparison with the registry is done by the core.
+/// Catalog guard of a start (F3): the baseline's hash is verified through
+/// the guard handles opened by [`SqliteStore::start_disks`].
+struct RunStartGuard(st::RunGuard);
+
+impl StartGuard for RunStartGuard {
+    fn verify_bytes(&self) -> u64 {
+        self.0.baseline_bytes()
+    }
+
+    fn verify(
+        &mut self,
+        cancel: &dyn Fn() -> bool,
+        progress: &dyn Fn(u64),
+    ) -> Result<(), PublicError> {
+        self.0
+            .verify_baseline(cancel, progress)
+            .map_err(|e| baseline_error(&e))
+    }
+}
+
+/// Inspector of the managed media copies: the copy is opened by
+/// [`vm_storage::MediaGuard`] (`FILE_SHARE_READ` only, no reparse point
+/// followed, regular file) and its SHA-256 and size are read **through that
+/// handle**; the comparison with the registry is done by the core. For a
+/// start ([`MediaGuardPort`]) the handle is opened on the supervisor thread,
+/// hashed on the start worker and kept by the backend until the run is
+/// released, so the file QEMU opens is the file verified (see
+/// `crate::start`).
 ///
-/// TODO(F1-04): the OS identity of the file and the open protected against
-/// reparse points belong to the storage (no API yet); the inspection does not
-/// happen on the same handle handed to QEMU.
+/// The OS identity of the file is not observed (`file_identity: None`): it
+/// cannot be read with stable `std` without `unsafe` (see `vm_storage`
+/// media), and the registry does not record it either.
 #[derive(Debug, Clone)]
 pub struct ManagedMediaInspector {
     root: PathBuf,
@@ -1351,6 +1379,83 @@ impl ManagedMediaInspector {
     pub fn new(root: PathBuf) -> Self {
         Self { root }
     }
+
+    fn open(&self, entry: &MediaEntry) -> Result<ManagedGuardedMedia, PublicError> {
+        let rel = st::ManagedPath::parse(entry.managed_path.as_str())
+            .map_err(|_| infra("invalid managed path"))?;
+        let guard = st::MediaGuard::open(&self.root, &rel).map_err(|e| media_open_error(&e))?;
+        if !is_optical_handle(guard.file()) {
+            return Err(PublicError::invalid_argument(
+                "the medium is not an ISO 9660 or UDF image",
+            ));
+        }
+        Ok(ManagedGuardedMedia(guard))
+    }
+}
+
+/// Public error of a managed copy that cannot be opened for a start.
+fn media_open_error(e: &st::StorageError) -> PublicError {
+    match e {
+        st::StorageError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound => {
+            PublicError::not_found("managed copy of the medium missing")
+        }
+        st::StorageError::VmBusy(_) => {
+            crate::diag!("lightvm-service: medium: {e}");
+            PublicError::vm_busy("the managed copy of the medium is open by another program")
+        }
+        st::StorageError::InvalidPath { .. } => {
+            PublicError::permission_denied("managed copy of the medium is not a regular file")
+        }
+        st::StorageError::StateConflict(m) if m == st::HASH_CANCELLED => {
+            PublicError::state_conflict(st::HASH_CANCELLED)
+        }
+        other => {
+            crate::diag!("lightvm-service: medium: {other}");
+            infra("reading the managed copy failed")
+        }
+    }
+}
+
+/// `true` if the ISO 9660 / UDF signature is read through the handle.
+fn is_optical_handle(mut f: &std::fs::File) -> bool {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let mut id = [0u8; 5];
+    f.seek(SeekFrom::Start(VOLUME_DESCRIPTOR_ID_OFFSET)).is_ok()
+        && f.read_exact(&mut id).is_ok()
+        && (&id == b"CD001" || &id == b"BEA01")
+}
+
+/// Managed copy held open by a [`vm_storage::MediaGuard`] for a start.
+#[derive(Debug)]
+struct ManagedGuardedMedia(st::MediaGuard);
+
+impl GuardedMedia for ManagedGuardedMedia {
+    fn size_bytes(&self) -> u64 {
+        self.0.size_bytes()
+    }
+
+    fn observe(
+        &mut self,
+        cancel: &dyn Fn() -> bool,
+        progress: &dyn Fn(u64),
+    ) -> Result<vm_core::media::ObservedMediaFacts, PublicError> {
+        let (hex, size) = self
+            .0
+            .sha256_with(cancel, progress)
+            .map_err(|e| media_open_error(&e))?;
+        Ok(vm_core::media::ObservedMediaFacts {
+            sha256: Sha256Digest::parse_hex(&hex).map_err(|_| infra("invalid hash"))?,
+            size_bytes: size,
+            file_identity: None,
+            read_only: self.0.read_only().map_err(|e| media_open_error(&e))?,
+        })
+    }
+}
+
+impl MediaGuardPort for ManagedMediaInspector {
+    fn open_for_start(&mut self, entry: &MediaEntry) -> Result<Box<dyn GuardedMedia>, PublicError> {
+        Ok(Box::new(self.open(entry)?))
+    }
 }
 
 impl vm_core::ports::MediaInspector for ManagedMediaInspector {
@@ -1358,31 +1463,7 @@ impl vm_core::ports::MediaInspector for ManagedMediaInspector {
         &mut self,
         entry: &MediaEntry,
     ) -> Result<vm_core::media::ObservedMediaFacts, PublicError> {
-        let path = entry
-            .managed_path
-            .as_str()
-            .split('/')
-            .fold(self.root.clone(), |p, c| p.join(c));
-        let meta = std::fs::symlink_metadata(&path)
-            .map_err(|_| PublicError::not_found("managed copy of the medium missing"))?;
-        if !meta.is_file() {
-            return Err(PublicError::permission_denied(
-                "managed copy of the medium is not a regular file",
-            ));
-        }
-        if !is_optical_image(&path) {
-            return Err(PublicError::invalid_argument(
-                "the medium is not an ISO 9660 or UDF image",
-            ));
-        }
-        let hex = qemu_backend::probe::sha256_file(&path)
-            .map_err(|_| infra("reading the managed copy failed"))?;
-        Ok(vm_core::media::ObservedMediaFacts {
-            sha256: Sha256Digest::parse_hex(&hex).map_err(|_| infra("invalid hash"))?,
-            size_bytes: meta.len(),
-            file_identity: None,
-            read_only: meta.permissions().readonly(),
-        })
+        self.open(entry)?.observe(&|| false, &|_| {})
     }
 }
 
@@ -1423,14 +1504,14 @@ mod tests {
     #[test]
     fn import_path_validation_never_panics() {
         let fixed = [
-            "€:\\a.iso",
-            "C€:\\a.iso",
-            "€",
-            "€€",
+            "â‚¬:\\a.iso",
+            "Câ‚¬:\\a.iso",
+            "â‚¬",
+            "â‚¬â‚¬",
             "\u{1F600}:\\x.iso",
-            "C:\\é:stream.iso",
-            "C:é",
-            "C:\\dir\\€.iso",
+            "C:\\Ã©:stream.iso",
+            "C:Ã©",
+            "C:\\dir\\â‚¬.iso",
             "\\\\?\\C:\\a.iso",
             "\\\\.\\PhysicalDrive0",
             "\\??\\C:\\a.iso",
@@ -1456,7 +1537,7 @@ mod tests {
             let _ = validate_import_source(s, MediaKind::InstallIso);
         }
         assert_eq!(
-            validate_import_path("€:\\a.iso").unwrap_err().code,
+            validate_import_path("â‚¬:\\a.iso").unwrap_err().code,
             if cfg!(windows) {
                 ErrorCode::PermissionDenied
             } else {
@@ -1465,7 +1546,7 @@ mod tests {
         );
         // Pseudo-random strings over an alphabet of separators, colons,
         // dots and multi-byte characters.
-        let alphabet: Vec<char> = "C:\\/.?a€é\u{1F600}\u{0301}NUL iso ".chars().collect();
+        let alphabet: Vec<char> = "C:\\/.?aâ‚¬Ã©\u{1F600}\u{0301}NUL iso ".chars().collect();
         let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
         for _ in 0..20_000 {
             let mut s = String::new();
@@ -1484,6 +1565,102 @@ mod tests {
             }
             let _ = validate_import_path(&s);
         }
+    }
+
+    /// Start checks on a real managed copy: the handle opened for the hash
+    /// keeps the file unchangeable until it is dropped (no write, rename or
+    /// delete, no rename of a directory above it), so the file QEMU opens is
+    /// the file verified; a writer already present refuses the start; a
+    /// copy changed before the start is detected by the hash.
+    #[test]
+    fn start_media_guard_pins_the_verified_file() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let root = crate::test_support::temp_dir("media-guard");
+        let dir = root.join("media");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("m.iso");
+        let mut bytes = vec![0u8; 3 << 20];
+        let o = usize::try_from(VOLUME_DESCRIPTOR_ID_OFFSET).unwrap();
+        bytes[o..o + 5].copy_from_slice(b"CD001");
+        std::fs::write(&file, &bytes).unwrap();
+        let set_ro = |ro: bool| {
+            let mut p = std::fs::metadata(&file).unwrap().permissions();
+            p.set_readonly(ro);
+            std::fs::set_permissions(&file, p).unwrap();
+        };
+        set_ro(true);
+        let hex = qemu_backend::probe::sha256_file(&file).unwrap();
+        let entry = MediaEntry {
+            record: MediaRecord {
+                id: MediaId::new_v7(),
+                kind: MediaKind::InstallIso,
+                sha256: Sha256Digest::parse_hex(&hex).unwrap(),
+                size_bytes: bytes.len() as u64,
+                declared_origin: Label::parse("test").unwrap(),
+                approved_at: UtcTimestamp::now(),
+            },
+            managed_path: ManagedRelPath::parse("media/m.iso").unwrap(),
+            file_identity: None,
+        };
+        let mut insp = ManagedMediaInspector::new(root.clone());
+        let mut g = insp.open_for_start(&entry).unwrap();
+        assert_eq!(g.size_bytes(), bytes.len() as u64);
+        #[cfg(windows)]
+        {
+            // Read-only attribute removed by the same user: writes, rename
+            // and deletion still refused by the guard's share mode.
+            set_ro(false);
+            assert!(std::fs::OpenOptions::new().write(true).open(&file).is_err());
+            assert!(std::fs::rename(&file, dir.join("other.iso")).is_err());
+            assert!(std::fs::remove_file(&file).is_err());
+            assert!(std::fs::rename(&dir, root.join("media2")).is_err());
+            set_ro(true);
+        }
+        let read = AtomicU64::new(0);
+        let facts = g
+            .observe(&|| false, &|n| {
+                read.fetch_add(n, Ordering::Relaxed);
+            })
+            .unwrap();
+        assert_eq!(read.load(Ordering::Relaxed), bytes.len() as u64);
+        vm_core::media::verify_media(&entry, &facts, UtcTimestamp::now()).unwrap();
+        // Cancellation between blocks.
+        let e = g.observe(&|| true, &|_| {}).unwrap_err();
+        assert_eq!(e.code, ErrorCode::StateConflict);
+        drop(g);
+
+        // A process already writing the copy: the start is refused.
+        set_ro(false);
+        #[cfg(windows)]
+        {
+            let w = std::fs::OpenOptions::new().write(true).open(&file).unwrap();
+            let e = insp.open_for_start(&entry).unwrap_err();
+            assert_eq!(e.code, ErrorCode::VmBusy, "{e:?}");
+            drop(w);
+        }
+        // Changed before the start: the hash read through the handle differs.
+        bytes[1 << 20] ^= 0xff;
+        std::fs::write(&file, &bytes).unwrap();
+        set_ro(true);
+        let mut g = insp.open_for_start(&entry).unwrap();
+        let facts = g.observe(&|| false, &|_| {}).unwrap();
+        let e = vm_core::media::verify_media(&entry, &facts, UtcTimestamp::now()).unwrap_err();
+        assert_eq!(e.code, ErrorCode::PermissionDenied);
+        drop(g);
+        // Not an optical image, missing copy.
+        bytes[o] = b'X';
+        set_ro(false);
+        std::fs::write(&file, &bytes).unwrap();
+        assert_eq!(
+            insp.open_for_start(&entry).unwrap_err().code,
+            ErrorCode::InvalidArgument
+        );
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(
+            insp.open_for_start(&entry).unwrap_err().code,
+            ErrorCode::NotFound
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

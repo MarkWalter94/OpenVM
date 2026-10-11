@@ -437,6 +437,7 @@ pub async fn start(
         imports: 0,
         storage_jobs: 0,
         storage_cancel: Arc::default(),
+        start_jobs: 0,
     };
     // Published before any possible subscription: no client receives it late,
     // after later events (race with `subscribe`).
@@ -858,6 +859,11 @@ async fn handle_connection(shared: Arc<Shared>, stream: BoxedStream, peer: PeerI
                     ) {
                         spawn_detached(&shared, role, connection_id, &revoke_rx, &late_tx, request_id, body);
                         Flow::Continue
+                    } else if let Some(request) = start_request(&body) {
+                        match submit_start_deferred(&shared, role, connection_id, &revoke_rx, &late_tx, request_id, request) {
+                            Some(m) => if send(&mut wr, &m, max).await.is_err() { Flow::Close(None) } else { Flow::Continue },
+                            None => Flow::Continue,
+                        }
                     } else {
                         let ctx = ReqCtx { shared: &shared, role, connection_id, revoke_rx: &mut revoke_rx };
                         match dispatch(ctx, &mut events, body).await {
@@ -1091,28 +1097,10 @@ async fn dispatch(
         }
         Request::Shutdown => return Dispatch::ReplyThenShutdown(ResponseBody::ShuttingDown),
     };
-    let Ok(permit) = shared.queue.clone().try_acquire_owned() else {
-        return Dispatch::Reply(Err(op_error(
-            ErrorCode::ResourceLimit,
-            "supervisor queue full",
-        )));
+    let reply_rx = match enqueue(shared, ctx.role, ctx.connection_id, ctx.revoke_rx, sup_req) {
+        Ok(rx) => rx,
+        Err(e) => return Dispatch::Reply(Err(e)),
     };
-    let (reply_tx, reply_rx) = oneshot::channel();
-    let sent = shared.send_cmd(Command::Request {
-        req: sup_req,
-        caller: caller_for(ctx.role),
-        connection_id: ctx.connection_id,
-        revoked: ctx.revoke_rx.clone(),
-        epoch: shared.emergency_epoch.load(Ordering::SeqCst),
-        reply: reply_tx,
-        _permit: permit,
-    });
-    if !sent {
-        return Dispatch::Reply(Err(op_error(
-            ErrorCode::StateConflict,
-            "service shutting down",
-        )));
-    }
     tokio::select! {
         biased;
         _ = flag_set(ctx.revoke_rx) => Dispatch::Interrupted(CloseReason::Revoked),
@@ -1121,6 +1109,110 @@ async fn dispatch(
             "service shutting down",
         )))),
     }
+}
+
+type ReplyRx = oneshot::Receiver<Result<ResponseBody, ReplyError>>;
+
+/// The VM request of a `submit_vm(start)`.
+fn start_request(body: &Request) -> Option<lightvm_proto::VmRequest> {
+    match body {
+        Request::SubmitVm { request } if request.action == lightvm_proto::VmAction::Start => {
+            Some(request.clone())
+        }
+        _ => None,
+    }
+}
+
+/// Queues a request for the supervisor thread (queue slot, revocation and
+/// Emergency Stop generation captured now): synchronous, so requests of a
+/// connection reach the supervisor in the order they were received.
+fn enqueue(
+    shared: &Arc<Shared>,
+    role: Role,
+    connection_id: u64,
+    revoke_rx: &watch::Receiver<bool>,
+    req: SupervisorRequest,
+) -> Result<ReplyRx, ReplyError> {
+    let Ok(permit) = shared.queue.clone().try_acquire_owned() else {
+        return Err(op_error(ErrorCode::ResourceLimit, "supervisor queue full"));
+    };
+    let (reply_tx, reply_rx) = oneshot::channel();
+    let sent = shared.send_cmd(Command::Request {
+        req,
+        caller: caller_for(role),
+        connection_id,
+        revoked: revoke_rx.clone(),
+        epoch: shared.emergency_epoch.load(Ordering::SeqCst),
+        reply: reply_tx,
+        _permit: permit,
+    });
+    if !sent {
+        return Err(op_error(ErrorCode::StateConflict, "service shutting down"));
+    }
+    Ok(reply_rx)
+}
+
+/// `submit_vm` of a start: queued now (order kept), the reply awaited in its
+/// own task and sent through `late`, because it arrives only after the
+/// start's file checks (a minute for a large ISO) and the connection must
+/// keep serving the other requests and the events meanwhile. Returns the
+/// message to send at once if the request was not queued.
+fn submit_start_deferred(
+    shared: &Arc<Shared>,
+    role: Role,
+    connection_id: u64,
+    revoke_rx: &watch::Receiver<bool>,
+    late: &tokio::sync::mpsc::Sender<ServerMessage>,
+    request_id: RequestId,
+    request: lightvm_proto::VmRequest,
+) -> Option<ServerMessage> {
+    if role != Role::Ui {
+        return Some(ServerMessage::Error {
+            request_id: Some(request_id),
+            error: op_error(
+                ErrorCode::PermissionDenied,
+                "operation submit_vm not allowed for the role",
+            ),
+        });
+    }
+    let rx = match enqueue(
+        shared,
+        role,
+        connection_id,
+        revoke_rx,
+        SupervisorRequest::SubmitVm(Box::new(request)),
+    ) {
+        Ok(rx) => rx,
+        Err(error) => {
+            return Some(ServerMessage::Error {
+                request_id: Some(request_id),
+                error,
+            });
+        }
+    };
+    let mut revoke_rx = revoke_rx.clone();
+    let late = late.clone();
+    tokio::spawn(async move {
+        let r = tokio::select! {
+            biased;
+            // The connection is closing: nobody to answer.
+            _ = flag_set(&mut revoke_rx) => return,
+            r = rx => r,
+        };
+        let m = match r {
+            Ok(Ok(result)) => ServerMessage::Response { request_id, result },
+            Ok(Err(error)) => ServerMessage::Error {
+                request_id: Some(request_id),
+                error,
+            },
+            Err(_) => ServerMessage::Error {
+                request_id: Some(request_id),
+                error: op_error(ErrorCode::StateConflict, "service shutting down"),
+            },
+        };
+        let _ = late.send(m).await;
+    });
+    None
 }
 
 /// Waits for the flag to become true (or for the sender to go away) without

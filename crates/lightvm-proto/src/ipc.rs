@@ -282,6 +282,40 @@ pub struct VmSummary {
     /// Baselines and current state of the VM (F3).
     #[serde(default)]
     pub baselines: VmBaselines,
+    /// Sub-status of a start in progress (state `starting`): verification of
+    /// the approved media and of the baseline before QEMU is launched
+    /// (ADR-0008, ADR-0025). Absent outside a start, and for a start with
+    /// nothing to verify. Additive field: older clients ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<StartProgress>,
+}
+
+/// Progress of the checks of a start, in [`VmSummary::start`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct StartProgress {
+    /// What the service is doing.
+    pub phase: StartPhase,
+    /// Bytes hashed so far, all files of the start together.
+    pub verified_bytes: u64,
+    /// Bytes to hash in total (approved media plus baseline files).
+    pub total_bytes: u64,
+}
+
+/// Phase of a start before the VM process exists.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum StartPhase {
+    /// SHA-256 of the approved media (installation and data ISO) recomputed
+    /// through the protected handles (UI: "Verifying media…").
+    VerifyingMedia,
+    /// SHA-256 of the baseline the current state is an overlay of (base disk
+    /// and UEFI variables) recomputed through the guard handles (UI:
+    /// "Verifying baseline…").
+    VerifyingBaseline,
+    /// Checks done: QEMU is being launched.
+    Launching,
 }
 
 /// Baseline facts of a VM, in [`VmSummary`] (F3).

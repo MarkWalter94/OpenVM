@@ -308,6 +308,7 @@ fn empty_states_and_ticket_request() {
             status: RequestStatus::Failed(Failure {
                 unsupported: true,
                 message: "console: unsupported".into(),
+                ..Failure::default()
             }),
         });
     });

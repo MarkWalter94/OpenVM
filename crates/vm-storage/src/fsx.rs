@@ -115,20 +115,39 @@ pub(crate) fn create_new_exclusive(path: &Path) -> Result<File> {
 }
 
 /// Hex SHA-256 and number of bytes read from the handle, from the start.
-pub(crate) fn sha256_handle(mut f: &File, path: &Path) -> Result<(String, u64)> {
+pub(crate) fn sha256_handle(f: &File, path: &Path) -> Result<(String, u64)> {
+    sha256_handle_with(f, path, &|| false, &|_| {})
+}
+
+/// Message of the error returned when a hash is cancelled.
+pub const HASH_CANCELLED: &str = "verification cancelled";
+
+/// [`sha256_handle`] polling `cancel` between 1 MiB blocks
+/// ([`StorageError::StateConflict`] with [`HASH_CANCELLED`]) and reporting
+/// the bytes read with `progress` (delta per block).
+pub(crate) fn sha256_handle_with(
+    mut f: &File,
+    path: &Path,
+    cancel: &dyn Fn() -> bool,
+    progress: &dyn Fn(u64),
+) -> Result<(String, u64)> {
     use std::io::Seek;
     f.seek(io::SeekFrom::Start(0))
         .map_err(|e| StorageError::io(path, e))?;
     let mut h = Sha256::new();
-    let mut buf = vec![0u8; 1 << 16];
+    let mut buf = vec![0u8; 1 << 20];
     let mut total = 0u64;
     loop {
+        if cancel() {
+            return Err(StorageError::StateConflict(HASH_CANCELLED.into()));
+        }
         let n = f.read(&mut buf).map_err(|e| StorageError::io(path, e))?;
         if n == 0 {
             break;
         }
         h.update(&buf[..n]);
         total = total.saturating_add(n as u64);
+        progress(n as u64);
     }
     Ok((crate::hex(&h.finalize()), total))
 }
