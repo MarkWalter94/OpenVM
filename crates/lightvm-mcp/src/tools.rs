@@ -33,7 +33,7 @@ pub struct NoParams {}
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HelpParams {
-    /// `start` (default), `workflow`, `tools`, `keys`, `errors`, `limits`
+    /// `overview` (default), `session`, `tools`, `keys`, `errors`, `limits`
     /// or a tool name such as `vm_keyboard_press`.
     #[serde(default)]
     #[schemars(length(max = 64))]
@@ -473,12 +473,10 @@ pub struct DeclareOut {
 pub struct HelpOut {
     /// Topic shown.
     pub topic: String,
-    /// The guide (Markdown).
+    /// The reference text (Markdown).
     pub guide: String,
     /// State of this adapter's session.
     pub session_state: Phase,
-    /// What to do next given the session state.
-    pub next_step: String,
     /// Other topics (tool names are topics too).
     pub topics: Vec<String>,
 }
@@ -535,14 +533,14 @@ pub fn catalogue() -> Vec<ToolDef> {
         def::<HelpParams, HelpOut>(
             "help",
             "help",
-            "START HERE. Complete guide to using the LightVM virtual machine: the steps from asking for a session to finishing, every tool with its parameters and when to use it, key names, error codes and limits. Needs no session. Call it with no topic first; topics: workflow, tools, keys, errors, limits, or a tool name.",
+            "Reference documentation of LightVM and of this adapter: how sessions work, every tool with its parameters and results, key names, error codes and limits. Works without a session. Topics: overview (default), session, tools, keys, errors, limits, or a tool name.",
             true,
             false,
         ),
         def::<SessionRequestParams, SessionOut>(
             "session_request",
             "session.request",
-            "Ask the LightVM user for a session. Nothing is accessible before the user approves it in the LightVM app: show the returned verification code to the user, who compares it with the one in the app, then call session_status. The purpose is shown to the user as the session objective.",
+            "Request a session from the LightVM user. Nothing is accessible before the user approves it in the LightVM app. The result carries a verification code that the app also shows next to the request; the user compares the two before approving. session_status reports the decision. The purpose is shown to the user as the session objective.",
             false,
             false,
         ),
@@ -584,14 +582,14 @@ pub fn catalogue() -> Vec<ToolDef> {
         def::<VmParams, OperationOut>(
             "vm_start",
             "vm.start",
-            "Start the VM (needs vm.start). Returns when QEMU is running or the start failed; the guest then boots (wait with vm_screenshot).",
+            "Start the VM (needs vm.start). Returns when QEMU is running or the start failed; the guest then boots on its own, visible in vm_screenshot.",
             false,
             false,
         ),
         def::<VmStopParams, OperationOut>(
             "vm_stop",
             "vm.stop",
-            "Stop the VM (needs vm.stop): ordinary ACPI shutdown request by default (poll vm_status until stopped), or force=true to terminate the process (unclean).",
+            "Stop the VM (needs vm.stop): ordinary ACPI shutdown request by default (vm_status shows stopping, then stopped), or force=true to terminate the process (unclean).",
             false,
             true,
         ),
@@ -640,7 +638,7 @@ pub fn catalogue() -> Vec<ToolDef> {
         def::<SnapshotParams, SnapshotOut>(
             "vm_snapshot",
             "vm.snapshot",
-            "Checkpoint of the stopped VM's disk and UEFI variables as a new baseline (needs vm.snapshot). Refused while the VM is running: stop it first (no hidden shutdown). Never replaces an existing baseline. Long operation.",
+            "Checkpoint of the stopped VM's disk and UEFI variables as a new baseline (needs vm.snapshot). Refused while the VM is running (no hidden shutdown). Never replaces an existing baseline. Long operation.",
             false,
             false,
         ),
