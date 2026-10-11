@@ -28,7 +28,9 @@
 //! The simulated framebuffer is a pattern generated in memory: it is not a
 //! real console, it is shown only on request (`--simulated-console`, or
 //! `--smoke`) and is never used in the product path (F2 exit criterion: no
-//! screen with simulated data).
+//! screen with simulated data). The switches and
+//! [`LightVmApp::set_simulated_console`] exist only with the `dev-tools`
+//! feature (tests and measurements), never in the distributed binary.
 //!
 //! The UI is separate from the eframe loop (`main.rs`) so that it can be
 //! driven headless with `egui_kittest` through the AccessKit tree, with a
@@ -551,6 +553,9 @@ impl LightVmApp {
 
     /// Enables the simulated framebuffer on the Console page when no VM
     /// console is open (`--simulated-console`; measurements and tests).
+    /// Only with the `dev-tools` feature: without it the simulated
+    /// framebuffer cannot be turned on.
+    #[cfg(feature = "dev-tools")]
     pub fn set_simulated_console(&mut self, on: bool) {
         self.simulated_console = on;
     }
@@ -3113,7 +3118,7 @@ impl LightVmApp {
                 theme::row(
                     ui,
                     "Simulated console",
-                    Some("Enabled with --simulated-console: generates a test image. Not saved."),
+                    Some("Development build only: generates a test image. Not saved."),
                     |ui| ui.checkbox(&mut self.animate, "Update the simulated framebuffer"),
                 );
             });

@@ -50,10 +50,12 @@ CloseApplications=no
 [Files]
 Source: "{#StagingDir}\lightvm-desktop.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StagingDir}\lightvm-service.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#StagingDir}\lightvm-mcp.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StagingDir}\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StagingDir}\USER_GUIDE.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StagingDir}\LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StagingDir}\THIRD-PARTY-LICENSES.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#StagingDir}\SBOM.cdx.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StagingDir}\BUILDINFO.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StagingDir}\SHA256SUMS.txt"; DestDir: "{app}"; Flags: ignoreversion
 

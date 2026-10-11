@@ -1,18 +1,26 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 //! Startup of `lightvm-desktop`.
 //!
-//! Command-line options (spike and measurements):
+//! Command-line options. Test and measurement switches, only in builds with
+//! the `dev-tools` feature (tests, CI smoke, measurements; never in the
+//! distributed package, F6-01 §6):
 //! - `--smoke SECONDS`: closes the app after N seconds and prints backend,
 //!   versions, window size and frame count on stdout. It implies
 //!   `--simulated-console`.
 //! - `--simulated-console`: without an open VM console, the Console page
 //!   shows a framebuffer generated in memory (measurements; never product
 //!   data).
+//! - `--static`: static simulated framebuffer, no periodic repaint (idle
+//!   measurement).
+//! - `--no-supervisor`: the supervisor is not started even if the automatic
+//!   start of the Settings page is on (smoke and measurements; a user turns
+//!   the automatic start off in Settings instead).
+//!
+//! Options of every build:
 //! - `--renderer auto|glow|wgpu|warp|LIST`: `auto` (default) tries glow, then
 //!   wgpu on a hardware adapter (DX12 on Windows), then wgpu on a software
 //!   rasterizer (WARP). A single name forces that backend without fallback; a
 //!   comma-separated list (for example `glow,warp`) sets the order.
-//! - `--static`: static framebuffer, no periodic repaint (idle measurement).
 //! - `--wgpu-adapter cpu|auto`: with `cpu` uses a CPU-type wgpu adapter (WARP
 //!   on DX12) instead of the hardware one; on its own it is equivalent to
 //!   `--renderer warp`.
@@ -27,8 +35,7 @@
 //! - `--settings FILE`: UI settings file (default in the user profile, see
 //!   `settings.rs`), written by the Settings page. Without `--catalog` the
 //!   supervisor starts with the settings of the Settings page, if automatic
-//!   start is on (default); `--no-supervisor` prevents it (smoke and
-//!   measurements).
+//!   start is on (default).
 //! - `--open-vm NAME [--create]` (ADR-0017): at startup opens and starts the
 //!   given VM (with `--create` it creates it if it does not exist, without
 //!   installation media); with `--vcpu N`, `--ram MIB`, `--disk GIB`,
@@ -39,7 +46,7 @@
 //! Release builds use the Windows GUI subsystem (no console window). The
 //! diagnostics are also appended to `%LOCALAPPDATA%\LightVM\logs\lightvm-desktop.log`
 //! (and the supervisor's to `lightvm-service.log`), rotated at 1 MiB, see
-//! `diag.rs`. Output (`--smoke`, `--help`, diagnostics) still reaches redirected handles: pipe
+//! `diag.rs`. Output (smoke report, `--help`, diagnostics) still reaches redirected handles: pipe
 //! it (`| Out-File`), use `cmd /c ... > file` or `Start-Process -Wait
 //! -RedirectStandardOutput`. PowerShell's `& exe ... > file` neither waits
 //! for a GUI program nor captures its output, and in an interactive console
@@ -67,6 +74,7 @@ struct Args {
     smoke: Option<Duration>,
     renderer: Option<String>,
     animate: bool,
+    #[cfg(feature = "dev-tools")]
     simulated_console: bool,
     wgpu_cpu: bool,
     glow_hw: String,
@@ -83,7 +91,8 @@ struct ServiceArgs {
     runtime_dir: Option<String>,
     audit_log: Option<String>,
     settings: Option<String>,
-    /// `--no-supervisor`: do not start the supervisor (smoke and measurements).
+    /// `--no-supervisor` (`dev-tools` only): do not start the supervisor
+    /// (smoke and measurements).
     no_supervisor: bool,
     /// `--open-vm`: VM to open at startup.
     open_vm: Option<String>,
@@ -92,6 +101,18 @@ struct ServiceArgs {
     /// `--create`: create the `--open-vm` VM if it does not exist.
     create: bool,
 }
+
+/// Usage of the options of every build.
+const USAGE: &str = "usage: lightvm-desktop [--renderer auto|glow|wgpu|warp|glow,warp...] \
+     [--wgpu-adapter cpu|auto] [--glow-hw preferred|required|off] [--skip-library-check]\n    \
+     [--catalog DIR [--service-exe PATH] [--qemu-dir DIR] [--runtime-dir DIR] [--audit-log FILE]] [--settings FILE]\n    \
+     [--open-vm NAME [--create] [--vcpu N] [--ram MIB] [--disk GIB] [--cpu-max %] [--memory-margin MIB] [--disk-budget GIB|none]]";
+
+/// Test and measurement switches (`dev-tools` builds only).
+#[cfg(feature = "dev-tools")]
+const DEV_USAGE: &str = "\n    [--smoke SECONDS] [--simulated-console] [--static] [--no-supervisor]   (dev-tools build)";
+#[cfg(not(feature = "dev-tools"))]
+const DEV_USAGE: &str = "";
 
 fn parse_number<T: std::str::FromStr>(option: &str, v: Option<String>) -> Result<T, String> {
     let v = v.ok_or_else(|| format!("{option} requires a value"))?;
@@ -105,6 +126,7 @@ fn parse_args() -> Result<Args, String> {
         renderer: None,
         skip_library_check: false,
         animate: true,
+        #[cfg(feature = "dev-tools")]
         simulated_console: false,
         wgpu_cpu: false,
         glow_hw: "preferred".to_owned(),
@@ -113,6 +135,7 @@ fn parse_args() -> Result<Args, String> {
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
+            #[cfg(feature = "dev-tools")]
             "--smoke" => {
                 let v = it.next().ok_or("--smoke requires a number of seconds")?;
                 let secs: f64 = v.parse().map_err(|_| format!("invalid seconds: {v}"))?;
@@ -121,6 +144,7 @@ fn parse_args() -> Result<Args, String> {
                 }
                 args.smoke = Some(Duration::from_secs_f64(secs));
             }
+            #[cfg(feature = "dev-tools")]
             "--simulated-console" => args.simulated_console = true,
             "--renderer" => {
                 args.renderer = Some(
@@ -129,6 +153,7 @@ fn parse_args() -> Result<Args, String> {
                 );
             }
             "--skip-library-check" => args.skip_library_check = true,
+            #[cfg(feature = "dev-tools")]
             "--static" => args.animate = false,
             "--wgpu-adapter" => {
                 let v = it.next().ok_or("--wgpu-adapter requires cpu or auto")?;
@@ -160,6 +185,7 @@ fn parse_args() -> Result<Args, String> {
                 args.service.runtime_dir =
                     Some(it.next().ok_or("--runtime-dir requires a directory")?)
             }
+            #[cfg(feature = "dev-tools")]
             "--no-supervisor" => args.service.no_supervisor = true,
             "--open-vm" => {
                 args.service.open_vm = Some(it.next().ok_or("--open-vm requires the VM name")?)
@@ -190,10 +216,7 @@ fn parse_args() -> Result<Args, String> {
                 args.service.audit_log = Some(it.next().ok_or("--audit-log requires a file")?)
             }
             "--help" | "-h" => {
-                println!(
-                    "usage: lightvm-desktop [--smoke SECONDS] [--simulated-console] [--renderer auto|glow|wgpu|warp|glow,warp...] [--static] \
-                     [--wgpu-adapter cpu|auto] [--glow-hw preferred|required|off] [--skip-library-check] \n                     [--catalog DIR [--service-exe PATH] [--qemu-dir DIR] [--runtime-dir DIR] [--audit-log FILE]] [--settings FILE] [--no-supervisor] \n                     [--open-vm NAME [--create] [--vcpu N] [--ram MIB] [--disk GIB] [--cpu-max %] [--memory-margin MIB] [--disk-budget GIB|none]]"
-                );
+                println!("{USAGE}{DEV_USAGE}");
                 std::process::exit(0);
             }
             other => return Err(format!("unknown argument: {other}")),
@@ -582,6 +605,7 @@ fn main() -> std::process::ExitCode {
         );
         return std::process::ExitCode::from(2);
     }
+    #[cfg(feature = "dev-tools")]
     if args.service.open_vm.is_some() && args.service.no_supervisor {
         lightvm_desktop::diag::log(
             "error: --open-vm requires the supervisor (incompatible with --no-supervisor)",
@@ -597,6 +621,7 @@ fn main() -> std::process::ExitCode {
     };
 
     // `--smoke` measures the simulated framebuffer, as before the flag existed.
+    #[cfg(feature = "dev-tools")]
     let simulated_console = args.simulated_console || args.smoke.is_some();
 
     // Panics due to missing libraries become a usable message (below): the
@@ -657,12 +682,15 @@ fn main() -> std::process::ExitCode {
                     if info.degraded() {
                         ui.set_console_max_fps(DEGRADED_CONSOLE_FPS);
                     }
-                    ui.set_simulated_console(simulated_console);
-                    if simulated_console {
-                        // The simulated framebuffer is what is being measured:
-                        // open on the Console page, as before the Dashboard
-                        // became the start page.
-                        ui.set_section(lightvm_desktop::Section::Console);
+                    #[cfg(feature = "dev-tools")]
+                    {
+                        ui.set_simulated_console(simulated_console);
+                        if simulated_console {
+                            // The simulated framebuffer is what is being measured:
+                            // open on the Console page, as before the Dashboard
+                            // became the start page.
+                            ui.set_section(lightvm_desktop::Section::Console);
+                        }
                     }
                     lightvm_desktop::diag::log(&format!(
                         "rendering: {}",

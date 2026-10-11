@@ -144,17 +144,16 @@ docs/{adr,verification}/
 Dependency direction (not fixed by the roadmap; recorded here and in ADR-0024):
 
 ```text
-apps/desktop ──► lightvm-proto, rfb-client, lightvm-service (IPC client only, without `supervisor`),
-                 f0-console (spike, direct console to be replaced in F2)
+apps/desktop ──► lightvm-proto, rfb-client, lightvm-service (IPC client only, without `supervisor`)
+lightvm-mcp ──► lightvm-proto, lightvm-service (IPC client only)
 rfb-client ──► (no dependency on QMP, processes, storage or supervisor)
 lightvm-service ──► vm-core, qemu-backend, vm-storage, lightvm-proto
 qemu-backend ──► vm-core
 vm-storage ──► vm-core
-mcp-server ──► lightvm-proto
 vm-core ──► (no dependency on UI, processes or I/O)
 ```
 
-The UI depends on the protocol and the RFB client, never on the backend or storage; the MCP adapter depends only on the protocol. Section 6.2 places the console in `qemu-backend`, while section 6.4 runs the RFB client in the UI process: ADR-0024 separates the client into `crates/rfb-client` and leaves the server side of the console in `qemu-backend`. New crates (`vm-network`, `ai-control-bridge`, `vm-security`, `agent-runtime`, `test-runner`) only when they have stable responsibilities and dependencies; no plugin framework or second backend in the MVP. The F0 spikes (`spikes/`) are not product code; the only temporary exception is `f0-console`, used by the UI console until the display is transported through the supervisor (F2, ADR-0013).
+The UI depends on the protocol and the RFB client, never on the backend or storage; the MCP adapter depends only on the protocol. Section 6.2 places the console in `qemu-backend`, while section 6.4 runs the RFB client in the UI process: ADR-0024 separates the client into `crates/rfb-client` and leaves the server side of the console in `qemu-backend`. New crates (`vm-network`, `ai-control-bridge`, `vm-security`, `agent-runtime`, `test-runner`) only when they have stable responsibilities and dependencies; no plugin framework or second backend in the MVP. The F0 spikes (`spikes/`) are not product code and are not in the dependency graph of any shipped binary (since 2026-10-11 `f0-console` is no longer used by the UI; the console goes through the supervisor's display ticket, ADR-0013).
 
 ## 9. Review checklist (section 6.3)
 

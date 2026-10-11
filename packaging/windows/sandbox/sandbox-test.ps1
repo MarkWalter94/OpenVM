@@ -4,8 +4,12 @@
       1. find dist\LightVM-*-windows-x64.zip and verify it against its .sha256;
       2. extract it to the sandbox desktop and run install.ps1 (default
          per-user prefix, Start Menu shortcut);
-      3. run "lightvm-desktop.exe --smoke 5 --no-supervisor" from the installed
-         location and record exit code and output;
+      3. start the installed lightvm-desktop.exe (no option: the package has
+         no test switches since F6), check after 10 s that it is still running
+         and that %LOCALAPPDATA%\LightVM\logs\lightvm-desktop.log records the
+         rendering backend and the supervisor start, then close the window
+         and record the exit code and the new log lines (desktop and
+         supervisor);
       4. write the report to Desktop\LightVM-sandbox-report.txt.
     The installation is left in place so the tester can open LightVM from the
     Start Menu (expected: QEMU "not set" in Settings, no VM can start: the
@@ -37,13 +41,31 @@ try {
     $prefix = Join-Path $env:LOCALAPPDATA 'Programs\LightVM'
     $lnk = Join-Path ([Environment]::GetFolderPath('Programs')) 'LightVM.lnk'
     Log "installed exe: $(Test-Path (Join-Path $prefix 'lightvm-desktop.exe')); shortcut: $(Test-Path $lnk)"
-    $out = Join-Path $env:TEMP 'lightvm-smoke-out.txt'
-    $err = Join-Path $env:TEMP 'lightvm-smoke-err.txt'
-    $p = Start-Process -FilePath (Join-Path $prefix 'lightvm-desktop.exe') -ArgumentList '--smoke', '5', '--no-supervisor' `
-        -RedirectStandardOutput $out -RedirectStandardError $err -PassThru -Wait
-    Log "smoke exit code: $($p.ExitCode)"
-    Get-Content $out -ErrorAction SilentlyContinue | ForEach-Object { Log "smoke stdout: $_" }
-    Get-Content $err -ErrorAction SilentlyContinue | ForEach-Object { Log "smoke stderr: $_" }
+    # Timed start and stop of the product binary (the --smoke switch exists
+    # only in dev-tools builds, never in the package).
+    $logs = Join-Path $env:LOCALAPPDATA 'LightVM\logs'
+    $uiLog = Join-Path $logs 'lightvm-desktop.log'
+    $svcLog = Join-Path $logs 'lightvm-service.log'
+    $uiBefore = if (Test-Path $uiLog) { @(Get-Content $uiLog).Count } else { 0 }
+    $svcBefore = if (Test-Path $svcLog) { @(Get-Content $svcLog).Count } else { 0 }
+    $p = Start-Process -FilePath (Join-Path $prefix 'lightvm-desktop.exe') -PassThru
+    Start-Sleep -Seconds 10
+    $alive = -not $p.HasExited
+    Log "start: running after 10 s: $alive"
+    if ($alive) {
+        [void]$p.CloseMainWindow()
+        if (-not $p.WaitForExit(15000)) { Log 'start: window close not completed in 15 s, process terminated'; $p.Kill() }
+    }
+    $p.WaitForExit()
+    Log "start: exit code $($p.ExitCode)"
+    $uiNew = @(if (Test-Path $uiLog) { Get-Content $uiLog | Select-Object -Skip $uiBefore })
+    $svcNew = @(if (Test-Path $svcLog) { Get-Content $svcLog | Select-Object -Skip $svcBefore })
+    $uiNew | ForEach-Object { Log "desktop log: $_" }
+    $svcNew | ForEach-Object { Log "service log: $_" }
+    $rendering = @($uiNew | Where-Object { $_ -match 'rendering: ' }).Count -gt 0
+    $service = @($uiNew | Where-Object { $_ -match 'lightvm-service started' }).Count -gt 0
+    Log "start: rendering backend logged: $rendering; supervisor started: $service"
+    if (-not ($alive -and $rendering)) { throw 'the installed app did not start (see the log lines above)' }
     Log 'RESULT: automated part completed; continue with the manual steps in USER_GUIDE.md / F2-03.'
 } catch {
     Log "RESULT: FAILED - $($_.Exception.Message)"

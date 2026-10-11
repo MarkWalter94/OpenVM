@@ -676,28 +676,24 @@ impl LiveConsole {
 
     /// PNG of the current framebuffer.
     pub fn screenshot_png(&self) -> Option<Result<Vec<u8>, String>> {
-        let img = if let Some(f) = &self.synthetic_copy {
+        let (width, height, data) = if let Some(f) = &self.synthetic_copy {
             let mut data = Vec::with_capacity(f.pixels.len() * 3);
             for p in &f.pixels {
                 data.extend_from_slice(&[p.r(), p.g(), p.b()]);
             }
-            f0_console::image::RgbImage {
-                width: u32::try_from(f.size[0]).ok()?,
-                height: u32::try_from(f.size[1]).ok()?,
+            (
+                u32::try_from(f.size[0]).ok()?,
+                u32::try_from(f.size[1]).ok()?,
                 data,
-            }
+            )
         } else {
             let fb = self.fb.as_ref()?.lock().ok()?;
             if fb.width() == 0 || fb.height() == 0 {
                 return None;
             }
-            f0_console::image::RgbImage {
-                width: u32::from(fb.width()),
-                height: u32::from(fb.height()),
-                data: fb.to_rgb(),
-            }
+            (u32::from(fb.width()), u32::from(fb.height()), fb.to_rgb())
         };
-        Some(f0_console::image::encode_png(&img))
+        Some(encode_png_rgb(width, height, &data))
     }
 
     fn start(&mut self, ctx: &egui::Context) {
@@ -1005,6 +1001,23 @@ impl Drop for LiveConsole {
             s.stop();
         }
     }
+}
+
+/// Encodes 8-bit RGB pixels (`width * height * 3` bytes) as PNG (console
+/// screenshots). Replaces the encoder of the F0 spike, which is no longer a
+/// dependency of the app (ADR-0023).
+fn encode_png_rgb(width: u32, height: u32, data: &[u8]) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    {
+        let mut enc = png::Encoder::new(&mut out, width, height);
+        enc.set_color(png::ColorType::Rgb);
+        enc.set_depth(png::BitDepth::Eight);
+        enc.set_compression(png::Compression::Fast);
+        let mut w = enc.write_header().map_err(|e| e.to_string())?;
+        w.write_image_data(data).map_err(|e| e.to_string())?;
+        w.finish().map_err(|e| e.to_string())?;
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -1440,5 +1453,24 @@ mod tests {
         c.queue(vec![qk("b", true)]);
         c.queue(vec![qk("b", false)]);
         assert_eq!(c.close().len(), 1);
+    }
+
+    #[test]
+    fn screenshot_png_round_trip() {
+        let data = [
+            255, 0, 0, 0, 255, 0, 0, 0, 255, 10, 20, 30, 40, 50, 60, 70, 80, 90,
+        ];
+        let png = encode_png_rgb(3, 2, &data).unwrap();
+        assert_eq!(&png[1..4], b"PNG");
+        let mut r = png::Decoder::new(std::io::Cursor::new(png))
+            .read_info()
+            .unwrap();
+        let mut buf = vec![0; r.output_buffer_size().unwrap()];
+        let info = r.next_frame(&mut buf).unwrap();
+        assert_eq!((info.width, info.height), (3, 2));
+        assert_eq!(info.color_type, png::ColorType::Rgb);
+        assert_eq!(&buf[..info.buffer_size()], &data);
+        // Wrong length: an error, never a panic.
+        assert!(encode_png_rgb(3, 2, &data[..5]).is_err());
     }
 }

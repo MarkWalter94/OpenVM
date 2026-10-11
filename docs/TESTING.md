@@ -82,6 +82,8 @@ Reference conditions: physical host ≥ 4 cores/8 threads, 16 GiB RAM, SSD; Linu
 
 First row of each measurement: F0 values on spikes (not release measurements), ADR-0018 host shared with other agents. Proposed memory metric for the target: private bytes on Windows, `RssAnon + VmSwap` on Linux; working set and `VmRSS` published separately (`F0-09` §5).
 
+Note (2026-10-11): `--smoke`, `--static`, `--simulated-console` and `--no-supervisor` are measurement switches available only in builds with the `dev-tools` feature (`cargo build --release -p lightvm-desktop --features dev-tools`); the distributed package does not accept them (`F6-01`). The measurements below were taken before the gating, with the same code paths.
+
 | Measurement | Target (sec. 13) | Method | Samples | Host / backend | p50 | p95 | Maximum | Timeouts / errors | Outcome | Evidence |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Manager CPU at idle | mean < 1% of one logical core | F0: 10 s windows (`--static`) and 60 s (console with guest stopped), UI only | 1 per configuration | Windows 11; wgpu / glow | — | — | — | — | not run in the required form (5 minutes, UI + supervisor); indications: wgpu 0.05–0.16%, glow 0.18–0.47% | `F0-01` §5; `F0-04` §7 |
