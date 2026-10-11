@@ -155,6 +155,108 @@
         "duplicate"
       ]
     },
+    "BaselineId": {
+      "description": "BaselineId: version 7 UUID, lowercase with hyphens.",
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "BaselineSummary": {
+      "description": "Baseline of a VM, for `list_baselines` and `create_baseline` (F3).",
+      "type": "object",
+      "properties": {
+        "baseline_id": {
+          "description": "Baseline.",
+          "$ref": "#/$defs/BaselineId"
+        },
+        "clean_shutdown": {
+          "description": "`true` if created after an observed clean guest shutdown (or before\nany run); `false` = **not verified**: created after a forced or\nunobserved stop with explicit consent (`allow_unclean`).",
+          "type": "boolean"
+        },
+        "config_revision": {
+          "description": "VM configuration revision at creation.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "created_at": {
+          "description": "Creation instant.",
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "current": {
+          "description": "The VM's current state is an overlay of this baseline.",
+          "type": "boolean"
+        },
+        "derived_from": {
+          "description": "Baseline the source state derived from (the VM was running on an\noverlay of it when this baseline was created); `None` = created from\nthe standalone disk. Informational only: every baseline is a\nstandalone image (no backing chain).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BaselineId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "disk_sha256": {
+          "description": "SHA-256 of the disk image, verified before every restore and start.",
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "firmware_sha256": {
+          "description": "SHA-256 of the UEFI variables, if the baseline has them.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Sha256Digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "in_use": {
+          "description": "In use (current overlay or an open run): `delete_baseline` is refused.",
+          "type": "boolean"
+        },
+        "label": {
+          "description": "Label given at creation.",
+          "$ref": "#/$defs/Label"
+        },
+        "protected": {
+          "description": "Protected baseline (initial baseline of an agent session, F4):\ncannot be deleted.",
+          "type": "boolean"
+        },
+        "size_bytes": {
+          "description": "Bytes on the host (disk image and UEFI variables).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "virtual_size_bytes": {
+          "description": "Virtual size of the disk.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "vm_id": {
+          "description": "Owning VM.",
+          "$ref": "#/$defs/VmId"
+        }
+      },
+      "required": [
+        "baseline_id",
+        "vm_id",
+        "label",
+        "created_at",
+        "clean_shutdown",
+        "protected",
+        "config_revision",
+        "virtual_size_bytes",
+        "size_bytes",
+        "disk_sha256",
+        "current",
+        "in_use"
+      ]
+    },
     "Capabilities": {
       "description": "Capabilities reported by `get_capabilities`.",
       "type": "object",
@@ -1232,6 +1334,96 @@
             "kind",
             "ticket"
           ]
+        },
+        {
+          "description": "Response to `list_baselines`, oldest first.",
+          "type": "object",
+          "properties": {
+            "baselines": {
+              "description": "Baselines of the VM.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/BaselineSummary"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "baselines"
+            },
+            "vm_id": {
+              "description": "VM.",
+              "$ref": "#/$defs/VmId"
+            }
+          },
+          "required": [
+            "kind",
+            "vm_id",
+            "baselines"
+          ]
+        },
+        {
+          "description": "Response to `create_baseline`.",
+          "type": "object",
+          "properties": {
+            "baseline": {
+              "description": "New baseline.",
+              "$ref": "#/$defs/BaselineSummary"
+            },
+            "kind": {
+              "type": "string",
+              "const": "baseline_created"
+            }
+          },
+          "required": [
+            "kind",
+            "baseline"
+          ]
+        },
+        {
+          "description": "Response to `restore_baseline`: the VM's current state is now a new\noverlay of the baseline.",
+          "type": "object",
+          "properties": {
+            "baseline_id": {
+              "description": "Restored baseline.",
+              "$ref": "#/$defs/BaselineId"
+            },
+            "kind": {
+              "type": "string",
+              "const": "baseline_restored"
+            },
+            "vm_id": {
+              "description": "VM.",
+              "$ref": "#/$defs/VmId"
+            }
+          },
+          "required": [
+            "kind",
+            "vm_id",
+            "baseline_id"
+          ]
+        },
+        {
+          "description": "Response to `delete_baseline`.",
+          "type": "object",
+          "properties": {
+            "baseline_id": {
+              "description": "Deleted baseline.",
+              "$ref": "#/$defs/BaselineId"
+            },
+            "kind": {
+              "type": "string",
+              "const": "baseline_deleted"
+            },
+            "vm_id": {
+              "description": "VM.",
+              "$ref": "#/$defs/VmId"
+            }
+          },
+          "required": [
+            "kind",
+            "vm_id",
+            "baseline_id"
+          ]
         }
       ]
     },
@@ -1339,6 +1531,24 @@
           ]
         },
         {
+          "description": "The baselines or the storage operation of a VM changed (operation\nstarted or ended, baseline created, restored or deleted): re-read\n`vm_status` and `list_baselines` (F3).",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "baselines_changed"
+            },
+            "vm_id": {
+              "description": "VM.",
+              "$ref": "#/$defs/VmId"
+            }
+          },
+          "required": [
+            "kind",
+            "vm_id"
+          ]
+        },
+        {
           "description": "Events lost because the client was too slow.",
           "type": "object",
           "properties": {
@@ -1406,10 +1616,74 @@
         }
       ]
     },
+    "StorageOperation": {
+      "description": "Long storage operation in progress on a VM.",
+      "oneOf": [
+        {
+          "description": "`create_baseline`.",
+          "type": "string",
+          "const": "create_baseline"
+        },
+        {
+          "description": "`restore_baseline`.",
+          "type": "string",
+          "const": "restore_baseline"
+        }
+      ]
+    },
     "UtcTimestamp": {
       "description": "RFC 3339 UTC instant with Z suffix, millisecond precision.",
       "type": "string",
       "format": "date-time"
+    },
+    "VmBaselines": {
+      "description": "Baseline facts of a VM, in [`VmSummary`] (F3).",
+      "type": "object",
+      "properties": {
+        "bytes": {
+          "description": "Bytes used on the host by the baselines (disk images and UEFI\nvariables).",
+          "type": "integer",
+          "format": "uint64",
+          "default": 0,
+          "minimum": 0
+        },
+        "count": {
+          "description": "Number of baselines of the VM.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
+        "current": {
+          "description": "Baseline the VM's current state is an overlay of (set by\n`restore_baseline`); `None` = the VM runs on its standalone disk\n(never restored).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BaselineId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "operation": {
+          "description": "Storage operation in progress on the VM: the VM is busy until it ends.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StorageOperation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "overlay_bytes": {
+          "description": "Bytes used on the host by the current overlay and its UEFI variables\n(0 on the standalone disk).",
+          "type": "integer",
+          "format": "uint64",
+          "default": 0,
+          "minimum": 0
+        }
+      }
     },
     "VmConfig": {
       "description": "VM configuration requested by the user. No field is a path or\na QEMU option: media are referenced by [`MediaId`] of the approved registry.",
@@ -1609,6 +1883,15 @@
       "description": "Summary of a VM for list and status.",
       "type": "object",
       "properties": {
+        "baselines": {
+          "description": "Baselines and current state of the VM (F3).",
+          "$ref": "#/$defs/VmBaselines",
+          "default": {
+            "bytes": 0,
+            "count": 0,
+            "overlay_bytes": 0
+          }
+        },
         "config": {
           "description": "Current configuration (resources and limits), for the VM settings.",
           "$ref": "#/$defs/VmConfig"

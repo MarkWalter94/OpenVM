@@ -30,6 +30,7 @@
 //! are opened without exclusion.
 
 use std::fs::File;
+use std::path::PathBuf;
 
 use crate::catalog::Catalog;
 use crate::error::{Result, StorageError};
@@ -42,6 +43,10 @@ use crate::paths::ManagedPath;
 struct GuardedFile {
     path: ManagedPath,
     _file: File,
+    /// Absolute path (for error messages of a later verification).
+    abs: PathBuf,
+    /// SHA-256 recorded in the catalog.
+    sha256: Option<String>,
 }
 
 /// Result of the checks performed when a guard is acquired.
@@ -79,6 +84,40 @@ impl BaselineGuard {
     /// Checks performed at acquisition.
     pub fn report(&self) -> &GuardReport {
         &self.report
+    }
+
+    /// Recomputes the SHA-256 of every guarded file **through the guard
+    /// handles** and compares it with the catalog (F3: a restore verifies the
+    /// baseline on its worker thread; nobody can write the files while the
+    /// handles are open). [`StorageError::IntegrityMismatch`] on a
+    /// difference or on a file without a recorded hash.
+    pub fn verify(&mut self) -> Result<()> {
+        for f in &self.files {
+            let Some(expected) = &f.sha256 else {
+                return Err(StorageError::IntegrityMismatch {
+                    path: f.path.to_string(),
+                    detail: "no recorded hash".into(),
+                });
+            };
+            let (actual, _) = fsx::sha256_handle(&f._file, &f.abs)?;
+            if &actual != expected {
+                return Err(StorageError::IntegrityMismatch {
+                    path: f.path.to_string(),
+                    detail: format!("expected SHA-256 {expected}, found {actual}"),
+                });
+            }
+            if !self.report.hash_verified.contains(&f.path) {
+                self.report.hash_verified.push(f.path.clone());
+            }
+        }
+        Ok(())
+    }
+
+    /// Guard handle of one of the baseline's files (read with
+    /// `FILE_SHARE_READ` only: copying from it reads exactly the verified
+    /// content).
+    pub(crate) fn handle(&self, rel: &ManagedPath) -> Option<&File> {
+        self.files.iter().find(|f| &f.path == rel).map(|f| &f._file)
     }
 }
 
@@ -192,6 +231,8 @@ impl Catalog {
             no_delete.push(GuardedFile {
                 path: rel,
                 _file: file,
+                abs,
+                sha256: None,
             });
         }
         Ok(RunGuard {
@@ -219,10 +260,10 @@ impl Catalog {
             let abs = self.layout.resolve(&rel)?;
             let file = fsx::open_regular(&abs, Share::ReadOnly, rel.as_str())?;
             if verify {
-                match sha {
+                match &sha {
                     Some(expected) => {
                         let (actual, _) = fsx::sha256_handle(&file, &abs)?;
-                        if actual != expected {
+                        if &actual != expected {
                             return Err(StorageError::IntegrityMismatch {
                                 path: rel.to_string(),
                                 detail: format!("expected SHA-256 {expected}, found {actual}"),
@@ -239,6 +280,8 @@ impl Catalog {
             guard.files.push(GuardedFile {
                 path: rel,
                 _file: file,
+                abs,
+                sha256: sha,
             });
         }
         Ok(guard)

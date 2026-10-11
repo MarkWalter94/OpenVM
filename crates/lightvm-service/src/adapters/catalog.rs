@@ -25,21 +25,35 @@
 //! storage journal (`remove_vm`), disk usage of a VM (`vm_disk_usage`); input
 //! operations are not stored in the `operations` table (see
 //! `upsert_operation`).
+//!
+//! F3: baselines ([`crate::engine::BaselinePort`]): creation and restore in
+//! three steps on the storage journal with the backend's image tool on the
+//! worker thread, deletion, current-state files for a start, clean exits of
+//! the runs. New VMs are stored under the core's identifier
+//! (`insert_vm_with_id`), so all their files live under one `vms/<vm_id>/`;
+//! VMs created before keep the two directories (mapping above).
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use std::any::Any;
+use std::sync::Arc;
+
+use lightvm_proto::ipc::{BaselineSummary, VmBaselines};
 use lightvm_proto::{
-    ErrorCode, Label, ManagedRelPath, MediaEntry, MediaId, MediaKind, MediaRecord, OperationId,
-    OperationKind, OperationRecord, OperationStatus, PublicError, RunEndReason, RunId, RunRecord,
-    Sha256Digest, UtcTimestamp, VmId, VmRecord, VmState,
+    BaselineId, ErrorCode, Label, ManagedRelPath, MediaEntry, MediaId, MediaKind, MediaRecord,
+    OperationId, OperationKind, OperationRecord, OperationStatus, PublicError, RunEndReason, RunId,
+    RunRecord, Sha256Digest, UtcTimestamp, VmId, VmRecord, VmState,
 };
 use serde::{Deserialize, Serialize};
 use vm_core::ports::CatalogStore;
 use vm_storage as st;
 
-use crate::engine::{ImportCopied, ImportJob, MediaImportPort as _};
+use crate::engine::{
+    BaselineOutcome, BaselinePort, CancelCheck, ImageTool, ImportCopied, ImportJob,
+    MediaImportPort as _, StartDisks, StorageWork,
+};
 
 /// Version of the `config_json` format written by this adapter.
 const CONFIG_VERSION: u32 = 1;
@@ -238,8 +252,9 @@ impl CatalogStore for SqliteStore {
             config,
         };
         let state = lifecycle(vm.persisted_state);
+        let id = vm.id;
         let sid = self.write(|tx| {
-            let sid = tx.insert_vm(&new)?;
+            let sid = tx.insert_vm_with_id(&id, &new)?;
             tx.set_vm_lifecycle(&sid, state)?;
             Ok(sid)
         })?;
@@ -406,13 +421,19 @@ impl CatalogStore for SqliteStore {
 
     fn insert_run(&mut self, run: &RunRecord) -> Result<(), PublicError> {
         let sid = self.sid(run.vm_id)?;
+        // F3: a run of a VM restored from a baseline references the current
+        // overlay, its UEFI variables and the baseline (checked at start).
+        let (baseline_id, overlay_disk_id, vars_fw_id) = self
+            .cat
+            .borrow_mut()
+            .current_state_run_refs(&sid)
+            .map_err(|e| storage_error(&e))?;
         let rec = st::RunRecord {
             run_id: run.id,
             vm_id: sid,
-            // Per-run baseline, overlay and firmware arrive with F3.
-            baseline_id: None,
-            overlay_disk_id: None,
-            vars_fw_id: None,
+            baseline_id,
+            overlay_disk_id,
+            vars_fw_id,
             state: st::RunState::Starting,
             started_at: run.started_at.to_string(),
             ended_at: None,
@@ -499,6 +520,402 @@ impl CatalogStore for SqliteStore {
             total += tree_bytes(&root.join("runs").join(r.to_string()));
         }
         Some(total)
+    }
+}
+
+/// Free space that must remain on the catalog volume after a baseline (the
+/// reserve for manifests and the minimal outcome, ROADMAP 8).
+const BASELINE_FREE_MARGIN: u64 = 1 << 30;
+
+/// Public error of a baseline operation, without paths.
+fn baseline_error(e: &st::StorageError) -> PublicError {
+    match e {
+        st::StorageError::Referenced(r @ ("baseline_referenced" | "baseline_protected")) => {
+            PublicError::state_conflict(if *r == "baseline_referenced" {
+                "the baseline is in use by the VM's current state"
+            } else {
+                "the baseline is protected"
+            })
+            .with_detail("reason", *r)
+        }
+        st::StorageError::IntegrityMismatch { .. } => {
+            crate::diag!("lightvm-service: baseline integrity: {e}");
+            PublicError::state_conflict("baseline files altered or missing: verification failed")
+                .with_detail("reason", "integrity")
+        }
+        st::StorageError::InvalidPath { .. } => {
+            crate::diag!("lightvm-service: baseline integrity: {e}");
+            PublicError::state_conflict("baseline files replaced by a link")
+                .with_detail("reason", "integrity")
+        }
+        st::StorageError::VmBusy(_) => {
+            crate::diag!("lightvm-service: baseline: {e}");
+            PublicError::vm_busy(
+                "a disk of the VM is open by another program, or another storage operation is in progress",
+            )
+        }
+        st::StorageError::NotFound { kind, .. } => {
+            PublicError::not_found(format!("{kind} not found"))
+        }
+        st::StorageError::StateConflict(m) if m.contains("no working disk") => {
+            PublicError::state_conflict(
+                "the VM has no disk yet: start it once before taking a baseline",
+            )
+        }
+        st::StorageError::Io { source, .. } if source.kind() == std::io::ErrorKind::StorageFull => {
+            PublicError::resource_limit("not enough free space in the catalog")
+        }
+        other => {
+            crate::diag!("lightvm-service: baseline: {other}");
+            storage_error(other)
+        }
+    }
+}
+
+/// Error of the image tool kept beside the storage error of a job.
+type ToolError = Arc<std::sync::Mutex<Option<PublicError>>>;
+
+fn stash(slot: &ToolError, e: PublicError) -> st::StorageError {
+    *slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(e);
+    st::StorageError::Unsupported("image tool failed")
+}
+
+/// Result of the worker step of a baseline job on the SQLite catalog.
+enum SqliteJobDone {
+    Create(st::BaselineJobDone, ToolError),
+    Restore(st::RestoreJobDone, ToolError),
+}
+
+fn tool_error(slot: &ToolError) -> Option<PublicError> {
+    slot.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+}
+
+fn parse_sha(s: &str) -> Result<Sha256Digest, PublicError> {
+    Sha256Digest::parse_hex(s).map_err(|_| infra("invalid hash"))
+}
+
+impl SqliteStore {
+    /// Standalone working files of a VM (F2 layout, core identifier): they
+    /// are produced by the backend.
+    fn standalone(vm: VmId) -> st::CurrentStateFiles {
+        st::CurrentStateFiles {
+            disk: st::CatalogLayout::primary_disk(&vm),
+            vars: Some(st::CatalogLayout::primary_vars(&vm)),
+        }
+    }
+
+    fn summary_of(vm: VmId, i: st::BaselineInfo) -> Result<BaselineSummary, PublicError> {
+        let label = Label::parse(i.record.label.clone())
+            .or_else(|_| Label::parse("baseline"))
+            .map_err(|_| infra("invalid label"))?;
+        Ok(BaselineSummary {
+            baseline_id: i.record.baseline_id,
+            vm_id: vm,
+            label,
+            created_at: ts(&i.record.created_at)?,
+            clean_shutdown: i.record.clean_shutdown,
+            protected: i.record.protected,
+            derived_from: i.derived_from,
+            config_revision: i.config_revision.unwrap_or(0),
+            virtual_size_bytes: i.disk.virtual_size_bytes,
+            size_bytes: i
+                .disk
+                .allocated_bytes
+                .saturating_add(i.vars.as_ref().map_or(0, |v| v.size_bytes)),
+            disk_sha256: parse_sha(i.disk.sha256.as_deref().unwrap_or_default())?,
+            firmware_sha256: i
+                .vars
+                .as_ref()
+                .and_then(|v| v.sha256.as_deref())
+                .map(parse_sha)
+                .transpose()?,
+            current: i.current,
+            in_use: i.in_use,
+        })
+    }
+
+    /// Bytes the VM uses on the host besides its standalone disk (overlays,
+    /// baselines, UEFI variables): what `limits.storage_budget_gib` covers.
+    fn budget_usage(&self, vm: VmId) -> u64 {
+        let total = self.vm_disk_usage(vm).unwrap_or(0);
+        let primary = managed_abs(&self.root(), st::CatalogLayout::primary_disk(&vm).as_str());
+        let primary = std::fs::metadata(primary).map_or(0, |m| m.len());
+        total.saturating_sub(primary)
+    }
+
+    /// Budget and free-space check before a baseline of `estimate` bytes.
+    fn check_baseline_space(&self, vm: &VmRecord, estimate: u64) -> Result<(), PublicError> {
+        if let Some(gib) = vm.config.limits.storage_budget_gib {
+            let need = self.budget_usage(vm.id).saturating_add(estimate);
+            if need > gib << 30 {
+                return Err(PublicError::resource_limit(
+                    "VM storage budget not enough for the baseline",
+                )
+                .with_detail("needed_bytes", need.to_string())
+                .with_detail("budget_gib", gib.to_string()));
+            }
+        }
+        let free = qemu_backend::ManagedPath::verify(self.root())
+            .and_then(|r| qemu_backend::prepare::host_resources(&r))
+            .map(|r| r.free_disk_bytes);
+        if let Ok(free) = free
+            && free < estimate.saturating_add(BASELINE_FREE_MARGIN)
+        {
+            return Err(PublicError::resource_limit(
+                "not enough free space in the catalog for the baseline",
+            )
+            .with_detail("needed_bytes", estimate.to_string())
+            .with_detail("free_bytes", free.to_string()));
+        }
+        Ok(())
+    }
+}
+
+impl BaselinePort for SqliteStore {
+    fn list_baselines(&self, vm: VmId) -> Result<Vec<BaselineSummary>, PublicError> {
+        let sid = self.sid(vm)?;
+        let infos = self
+            .cat
+            .borrow_mut()
+            .baseline_infos(&sid)
+            .map_err(|e| baseline_error(&e))?;
+        infos.into_iter().map(|i| Self::summary_of(vm, i)).collect()
+    }
+
+    fn baseline_facts(&self, vm: VmId) -> VmBaselines {
+        let Ok(sid) = self.sid(vm) else {
+            return VmBaselines::default();
+        };
+        match self.cat.borrow_mut().baseline_overview(&sid) {
+            Ok(o) => VmBaselines {
+                current: o.current,
+                count: o.count,
+                bytes: o.bytes,
+                overlay_bytes: o.overlay_bytes,
+                operation: None,
+            },
+            Err(e) => {
+                crate::diag!("lightvm-service: baseline facts: {e}");
+                VmBaselines::default()
+            }
+        }
+    }
+
+    fn begin_create_baseline(
+        &mut self,
+        vm: &VmRecord,
+        label: &Label,
+        allow_unclean: bool,
+        tool: Arc<dyn ImageTool>,
+        cancel: CancelCheck,
+    ) -> Result<StorageWork, PublicError> {
+        let sid = self.sid(vm.id)?;
+        let clean = self
+            .cat
+            .borrow_mut()
+            .last_exit_clean(&sid)
+            .map_err(|e| baseline_error(&e))?;
+        if !clean && !allow_unclean {
+            return Err(PublicError::state_conflict(
+                "the last stop of the VM was not an observed clean shutdown: the baseline would not be verified",
+            )
+            .with_detail("reason", "unclean_shutdown"));
+        }
+        // A VM that never started has no UEFI variables yet: they are
+        // created from the firmware template (as the first start would), so
+        // that every baseline carries its firmware state.
+        let has_overlay = self
+            .cat
+            .borrow_mut()
+            .baseline_overview(&sid)
+            .map(|o| o.current.is_some())
+            .unwrap_or(false);
+        if !has_overlay && let Some(template) = tool.firmware_vars_template() {
+            let vars = managed_abs(
+                &self.root(),
+                st::CatalogLayout::primary_vars(&vm.id).as_str(),
+            );
+            let disk = managed_abs(
+                &self.root(),
+                st::CatalogLayout::primary_disk(&vm.id).as_str(),
+            );
+            if std::fs::symlink_metadata(&disk).is_ok() {
+                crate::adapters::backend::ensure_vm_vars(&template, &vars).map_err(|e| {
+                    crate::diag!("lightvm-service: UEFI variables for the baseline: {e}");
+                    PublicError::infrastructure("UEFI variables of the VM not created")
+                })?;
+            }
+        }
+        let job = self
+            .cat
+            .borrow_mut()
+            .begin_create_baseline(st::CreateBaseline {
+                vm_id: sid,
+                label: label.as_str().to_owned(),
+                clean_shutdown: clean,
+                protected: false,
+                standalone: Self::standalone(vm.id),
+            })
+            .map_err(|e| baseline_error(&e))?;
+        // Upper bound of the image: the source (and its base for an overlay).
+        let current = self
+            .cat
+            .borrow_mut()
+            .baseline_overview(&sid)
+            .ok()
+            .and_then(|o| o.current);
+        let base = current
+            .and_then(|b| {
+                self.list_baselines(vm.id)
+                    .ok()?
+                    .into_iter()
+                    .find(|s| s.baseline_id == b)
+            })
+            .map_or(0, |s| s.size_bytes);
+        let estimate = job.source_bytes().saturating_add(base);
+        if let Err(e) = self.check_baseline_space(vm, estimate) {
+            let done = job.run(|_, _| Err(st::StorageError::ResourceLimit("refused".into())));
+            let _ = self.cat.borrow_mut().abort_baseline_job(done);
+            return Err(e);
+        }
+        let slot: ToolError = Arc::default();
+        Ok(Box::new(move || {
+            let s2 = slot.clone();
+            let done = job.run(move |src, dst| {
+                let c = || cancel();
+                tool.convert(src, dst, &c).map_err(|e| stash(&s2, e))?;
+                let same = tool.compare(src, dst, &c).map_err(|e| stash(&s2, e))?;
+                if !same {
+                    return Err(stash(
+                        &s2,
+                        PublicError::infrastructure("the baseline image differs from the source"),
+                    ));
+                }
+                tool.check(dst, &c).map_err(|e| stash(&s2, e))?;
+                tool.virtual_size(dst).map_err(|e| stash(&s2, e))
+            });
+            Box::new(SqliteJobDone::Create(done, slot)) as Box<dyn Any + Send>
+        }))
+    }
+
+    fn begin_restore_baseline(
+        &mut self,
+        vm: &VmRecord,
+        baseline: BaselineId,
+        tool: Arc<dyn ImageTool>,
+        cancel: CancelCheck,
+    ) -> Result<StorageWork, PublicError> {
+        let sid = self.sid(vm.id)?;
+        let job = self
+            .cat
+            .borrow_mut()
+            .begin_restore(st::RestoreBaseline {
+                vm_id: sid,
+                baseline_id: baseline,
+                standalone: Self::standalone(vm.id),
+            })
+            .map_err(|e| baseline_error(&e))?;
+        let slot: ToolError = Arc::default();
+        Ok(Box::new(move || {
+            let s2 = slot.clone();
+            let done = job.run(move |backing, size, dst| {
+                if cancel() {
+                    return Err(stash(
+                        &s2,
+                        PublicError::state_conflict("operation cancelled"),
+                    ));
+                }
+                tool.create_overlay(backing, size, dst)
+                    .map_err(|e| stash(&s2, e))
+            });
+            Box::new(SqliteJobDone::Restore(done, slot)) as Box<dyn Any + Send>
+        }))
+    }
+
+    fn finish_storage_job(
+        &mut self,
+        done: Box<dyn Any + Send>,
+    ) -> Result<BaselineOutcome, PublicError> {
+        let done = done
+            .downcast::<SqliteJobDone>()
+            .map_err(|_| infra("baseline job of another catalog"))?;
+        match *done {
+            SqliteJobDone::Create(done, slot) => {
+                let rec = self
+                    .cat
+                    .borrow_mut()
+                    .finish_create_baseline(done)
+                    .map_err(|e| tool_error(&slot).unwrap_or_else(|| baseline_error(&e)))?;
+                let core_vm = self
+                    .core_id(rec.vm_id)
+                    .ok_or_else(|| infra("baseline of an unknown VM"))?;
+                let summary = self
+                    .list_baselines(core_vm)?
+                    .into_iter()
+                    .find(|s| s.baseline_id == rec.baseline_id)
+                    .ok_or_else(|| infra("new baseline not listed"))?;
+                Ok(BaselineOutcome::Created(summary))
+            }
+            SqliteJobDone::Restore(done, slot) => {
+                let state = self
+                    .cat
+                    .borrow_mut()
+                    .finish_restore(done)
+                    .map_err(|e| tool_error(&slot).unwrap_or_else(|| baseline_error(&e)))?;
+                let core_vm = self
+                    .core_id(state.vm_id)
+                    .ok_or_else(|| infra("restore of an unknown VM"))?;
+                Ok(BaselineOutcome::Restored {
+                    vm_id: core_vm,
+                    baseline_id: state.baseline_id,
+                })
+            }
+        }
+    }
+
+    fn abort_storage_job(&mut self, done: Box<dyn Any + Send>) -> Result<(), PublicError> {
+        let done = done
+            .downcast::<SqliteJobDone>()
+            .map_err(|_| infra("baseline job of another catalog"))?;
+        let r = match *done {
+            SqliteJobDone::Create(d, _) => self.cat.borrow_mut().abort_baseline_job(d),
+            SqliteJobDone::Restore(d, _) => self.cat.borrow_mut().abort_restore_job(d),
+        };
+        r.map_err(|e| storage_error(&e))
+    }
+
+    fn delete_baseline(&mut self, vm: VmId, baseline: BaselineId) -> Result<(), PublicError> {
+        let sid = self.sid(vm)?;
+        self.cat
+            .borrow_mut()
+            .delete_baseline_files(&sid, &baseline)
+            .map_err(|e| baseline_error(&e))
+    }
+
+    fn start_disks(&self, vm: VmId, run: RunId) -> Result<Option<StartDisks>, PublicError> {
+        let sid = self.sid(vm)?;
+        let files = self
+            .cat
+            .borrow_mut()
+            .guard_current_state(&sid, &run)
+            .map_err(|e| baseline_error(&e))?;
+        Ok(files.map(|f| StartDisks {
+            overlay: f.overlay,
+            vars: f.vars,
+            base: f.base,
+            base_vars: f.base_vars,
+            guard: Box::new(f.guard),
+        }))
+    }
+
+    fn record_exit(&self, run: RunId, clean: bool) {
+        if let Err(e) = self.cat.borrow_mut().record_run_exit(&run, clean) {
+            crate::diag!("lightvm-service: end of run not recorded: {e}");
+        }
     }
 }
 

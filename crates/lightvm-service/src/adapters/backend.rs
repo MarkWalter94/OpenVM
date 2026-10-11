@@ -41,7 +41,16 @@
 //!   ([`PrivateDirGuard`]);
 //! - screenshot (`screendump`, metadata only over IPC), input
 //!   (`input-send-event`), reset and the display socket of the run (for the
-//!   console proxy, `crate::display`) are connected (F2).
+//!   console proxy, `crate::display`) are connected (F2);
+//! - F3: a VM restored from a baseline starts on its current overlay
+//!   ([`BackendPort::set_start_disks`]): overlay and UEFI variables of the
+//!   current state, the baseline's base disk as an explicit read-only
+//!   backing node, base and baseline variables protected read-only for the
+//!   whole run, the catalog guard kept until the run is released; the
+//!   standalone disk is neither created nor used. `qemu-img` operations for
+//!   baselines ([`QemuImageTool`]) run in their own Job Object, cancellable.
+//!   The end of every run is reported with its cause
+//!   ([`BackendPort::take_exits`]: clean only for an observed guest shutdown).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -56,14 +65,15 @@ use lightvm_proto::{
 use qemu_backend::cmdline::{DiskFormat, DiskSpec};
 use qemu_backend::probe::{ProbeConfig, probe_accelerator, probe_host};
 use qemu_backend::{
-    Accelerator, BackendError, CpuModel, HostCapabilities, JobLimits, MachineType, ManagedPath,
-    ManagedPaths, ProcessState, QemuRun, RunConfig, ShutdownPolicy, VmLaunchSpec, prepare,
+    Accelerator, BackendError, CpuModel, ExitCause, HostCapabilities, JobLimits, MachineType,
+    ManagedPath, ManagedPaths, ProcessState, QemuRun, RunConfig, ShutdownPolicy, VmLaunchSpec,
+    image, prepare,
 };
 use vm_core::media::VerifiedMedia;
 use vm_core::ports::VmBackend;
 use vm_storage::CatalogLayout;
 
-use crate::engine::BackendPort;
+use crate::engine::{BackendPort, ImageTool, StartDisks};
 use crate::supervisor::{Backend, EmergencyOutcome, EmergencyStop, ParentLossPolicy};
 
 type Registry = Arc<Mutex<BTreeMap<VmId, (RunId, qemu_backend::EmergencyStop)>>>;
@@ -235,7 +245,8 @@ fn host_capacity(caps: &HostCapabilities, free_storage_gib: u64) -> HostCapacity
         // `screendump` and `input-send-event` through QMP (F2).
         screenshot_available: true,
         input_available: true,
-        baseline_available: false,
+        // `qemu-img` image operations and overlays (F3).
+        baseline_available: true,
     }
 }
 
@@ -288,6 +299,30 @@ pub fn probe(setup: QemuSetup) -> Result<(QemuHost, QemuVmBackend, HostCapacity)
             setup.free_storage_gib
         });
     let capacity = host_capacity(&caps, free_storage_gib);
+    // Private directory for the outputs of the `qemu-img` commands (F3).
+    let img_dir = setup.private_root.join("img");
+    std::fs::create_dir_all(&img_dir).map_err(|e| io_public("image log directory", &e))?;
+    // Outputs left by `qemu-img` commands of a previous service that died
+    // (prudent cleanup: only our own file names, regular files).
+    if let Ok(rd) = std::fs::read_dir(&img_dir) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let ours =
+                name.starts_with("img-") && (name.ends_with(".out") || name.ends_with(".err"));
+            if ours && e.file_type().is_ok_and(|t| t.is_file()) {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+    let img_dir = ManagedPath::verify(img_dir).map_err(|e| public(&e))?;
+    if cfg!(windows) {
+        prepare::restrict_to_current_user(&img_dir).map_err(|e| public(&e))?;
+    }
+    let image_tool = Arc::new(QemuImageTool {
+        qemu_img: caps.qemu_img.clone(),
+        log_dir: img_dir,
+        vars_template: caps.firmware.as_ref().map(|f| f.vars_template.clone()),
+    });
     let registry: Registry = Arc::default();
     let priority_killed: PriorityKilled = Arc::default();
     let stop_override: StopOverride = Arc::default();
@@ -314,8 +349,77 @@ pub fn probe(setup: QemuSetup) -> Result<(QemuHost, QemuVmBackend, HostCapacity)
         registry,
         priority_killed,
         stop_override,
+        start_disks: BTreeMap::new(),
+        guards: BTreeMap::new(),
+        exits: Vec::new(),
+        image_tool,
     };
     Ok((host, backend, capacity))
+}
+
+/// `qemu-img` operations for baselines (F3), each in its own Job Object
+/// (`qemu_backend::image`). Paths are catalog paths decided by the storage.
+#[derive(Debug)]
+pub struct QemuImageTool {
+    qemu_img: ManagedPath,
+    log_dir: ManagedPath,
+    vars_template: Option<PathBuf>,
+}
+
+impl QemuImageTool {
+    fn cmd(&self, long: bool) -> image::ImageCommand<'_> {
+        image::ImageCommand {
+            qemu_img: &self.qemu_img,
+            log_dir: &self.log_dir,
+            timeout: if long {
+                image::LONG_IMAGE_TIMEOUT
+            } else {
+                image::SHORT_IMAGE_TIMEOUT
+            },
+        }
+    }
+}
+
+fn image_error(e: &BackendError) -> PublicError {
+    match e {
+        BackendError::StateConflict(m) if m.contains("cancelled") => {
+            PublicError::state_conflict("operation cancelled")
+        }
+        other => public(other),
+    }
+}
+
+fn verified(p: &Path) -> Result<ManagedPath, PublicError> {
+    ManagedPath::verify(p).map_err(|e| public(&e))
+}
+
+impl ImageTool for QemuImageTool {
+    fn convert(
+        &self,
+        src: &Path,
+        dst: &Path,
+        cancel: &dyn Fn() -> bool,
+    ) -> Result<(), PublicError> {
+        image::convert_standalone(&self.cmd(true), &verified(src)?, &verified(dst)?, cancel)
+            .map_err(|e| image_error(&e))
+    }
+    fn compare(&self, a: &Path, b: &Path, cancel: &dyn Fn() -> bool) -> Result<bool, PublicError> {
+        image::images_identical(&self.cmd(true), &verified(a)?, &verified(b)?, cancel)
+            .map_err(|e| image_error(&e))
+    }
+    fn check(&self, p: &Path, cancel: &dyn Fn() -> bool) -> Result<(), PublicError> {
+        image::check_image(&self.cmd(true), &verified(p)?, cancel).map_err(|e| image_error(&e))
+    }
+    fn virtual_size(&self, p: &Path) -> Result<u64, PublicError> {
+        image::virtual_size(&self.cmd(false), &verified(p)?).map_err(|e| image_error(&e))
+    }
+    fn create_overlay(&self, backing_ref: &str, size: u64, dst: &Path) -> Result<(), PublicError> {
+        image::create_overlay_ref(&self.cmd(false), backing_ref, size, &verified(dst)?)
+            .map_err(|e| image_error(&e))
+    }
+    fn firmware_vars_template(&self) -> Option<PathBuf> {
+        self.vars_template.clone()
+    }
 }
 
 /// Paths of a run for `qemu-backend`, all decided by the service.
@@ -326,6 +430,10 @@ struct RunPaths {
     firmware_code: ManagedPath,
     firmware_vars: ManagedPath,
     disk: ManagedPath,
+    /// Base of the overlay (F3), explicit backing node.
+    backing: Option<ManagedPath>,
+    /// Base and baseline variables, protected read-only (F3).
+    readonly: Vec<ManagedPath>,
     run_dir: ManagedPath,
     private_dir: ManagedPath,
     media: BTreeMap<MediaId, ManagedPath>,
@@ -358,7 +466,11 @@ impl ManagedPaths for RunPaths {
     }
     fn protected_readonly(&self, run: &RunId) -> qemu_backend::error::Result<Vec<ManagedPath>> {
         self.check(run)?;
-        Ok(Vec::new())
+        Ok(self.readonly.clone())
+    }
+    fn disk_backing(&self, run: &RunId) -> qemu_backend::error::Result<Option<ManagedPath>> {
+        self.check(run)?;
+        Ok(self.backing.clone())
     }
     fn media(&self, media: &MediaId) -> qemu_backend::error::Result<ManagedPath> {
         self.media
@@ -403,6 +515,14 @@ pub struct QemuVmBackend {
     registry: Registry,
     priority_killed: PriorityKilled,
     stop_override: StopOverride,
+    /// Current-state files for the next start of a VM (F3), by run.
+    start_disks: BTreeMap<VmId, (RunId, StartDisks)>,
+    /// Catalog guards of the running VMs (F3), dropped on release.
+    guards: BTreeMap<VmId, Box<dyn std::any::Any + Send>>,
+    /// Ends of runs not yet reported (`true` = observed guest shutdown).
+    exits: Vec<(VmId, RunId, bool)>,
+    /// Image operations for baselines.
+    image_tool: Arc<QemuImageTool>,
 }
 
 /// Route of a graceful stop task that ended.
@@ -491,6 +611,17 @@ impl QemuVmBackend {
         if let Some((_, task)) = self.stops.remove(&vm_id) {
             let _ = self.rt.block_on(task);
         }
+        if let Some(run) = self.runs.get(&vm_id) {
+            // F3: only an observed guest shutdown is a clean end.
+            let clean = matches!(
+                run.state(),
+                ProcessState::Exited {
+                    cause: ExitCause::GuestShutdown,
+                    ..
+                }
+            );
+            self.exits.push((vm_id, run.run_id(), clean));
+        }
         if let Some(run) = self.runs.remove(&vm_id) {
             let Ok(run) = Arc::try_unwrap(run) else {
                 crate::diag!("lightvm-service: run still referenced, not closed");
@@ -508,6 +639,8 @@ impl QemuVmBackend {
         if let Some(dir) = self.private_dirs.remove(&vm_id) {
             remove_private_dir(&dir);
         }
+        // Catalog guard released after QEMU has closed the files.
+        self.guards.remove(&vm_id);
     }
 
     /// The priority path (Emergency Stop) terminated this run.
@@ -553,22 +686,7 @@ impl QemuVmBackend {
             .checked_mul(1024)
             .ok_or_else(|| PublicError::resource_limit("disk out of range"))?;
         if std::fs::symlink_metadata(&path).is_ok() {
-            // Existing disk: brought to the configured size if it was increased
-            // in the VM settings (never shrunk).
-            if prepare::grow_disk(
-                &self.caps.qemu_img,
-                &disk,
-                DiskFormat::Qcow2,
-                size_mib,
-                prepare::QEMU_IMG_TIMEOUT,
-            )
-            .map_err(|e| public(&e))?
-            {
-                crate::diag!(
-                    "lightvm-service: VM disk grown to {} GiB",
-                    vm.config.disk_gib
-                );
-            }
+            self.grow(vm, &disk)?;
             return Ok(disk);
         }
         if let Some(dir) = path.parent() {
@@ -585,11 +703,37 @@ impl QemuVmBackend {
         Ok(disk)
     }
 
+    /// Existing disk (standalone or overlay): brought to the configured size
+    /// if it was increased in the VM settings (never shrunk).
+    fn grow(&self, vm: &VmRecord, disk: &ManagedPath) -> Result<(), PublicError> {
+        let size_mib = vm
+            .config
+            .disk_gib
+            .checked_mul(1024)
+            .ok_or_else(|| PublicError::resource_limit("disk out of range"))?;
+        if prepare::grow_disk(
+            &self.caps.qemu_img,
+            disk,
+            DiskFormat::Qcow2,
+            size_mib,
+            prepare::QEMU_IMG_TIMEOUT,
+        )
+        .map_err(|e| public(&e))?
+        {
+            crate::diag!(
+                "lightvm-service: VM disk grown to {} GiB",
+                vm.config.disk_gib
+            );
+        }
+        Ok(())
+    }
+
     fn prepare(
         &self,
         vm: &VmRecord,
         run_id: RunId,
         media: &[VerifiedMedia],
+        current: Option<&StartDisks>,
     ) -> Result<RunPaths, PublicError> {
         let fw = self.caps.firmware.as_ref().ok_or_else(|| {
             PublicError::unsupported("UEFI firmware not found in the QEMU distribution")
@@ -610,6 +754,39 @@ impl QemuVmBackend {
             std::fs::create_dir_all(&private_dir)
                 .map_err(|e| io_public("private directory", &e))?;
         }
+        let mut media_paths = BTreeMap::new();
+        for m in media {
+            let p = managed_abs(&self.setup.catalog_root, m.entry().managed_path.as_str());
+            media_paths.insert(
+                m.record().id,
+                ManagedPath::verify(p).map_err(|e| public(&e))?,
+            );
+        }
+        if let Some(d) = current {
+            // F3: current state = overlay of a baseline, files verified and
+            // guarded by the catalog; the standalone disk is not touched.
+            let vars = d.vars.clone().ok_or_else(|| {
+                PublicError::state_conflict("current state without UEFI variables")
+            })?;
+            let disk = ManagedPath::verify(d.overlay.clone()).map_err(|e| public(&e))?;
+            self.grow(vm, &disk)?;
+            let mut readonly = vec![ManagedPath::verify(d.base.clone()).map_err(|e| public(&e))?];
+            if let Some(bv) = &d.base_vars {
+                readonly.push(ManagedPath::verify(bv.clone()).map_err(|e| public(&e))?);
+            }
+            return Ok(RunPaths {
+                run_id,
+                qemu_system: self.caps.qemu_system.clone(),
+                firmware_code: ManagedPath::verify(fw.code.clone()).map_err(|e| public(&e))?,
+                firmware_vars: ManagedPath::verify(vars).map_err(|e| public(&e))?,
+                disk,
+                backing: Some(readonly[0].clone()),
+                readonly,
+                run_dir: ManagedPath::verify(run_dir).map_err(|e| public(&e))?,
+                private_dir: ManagedPath::verify(private_dir).map_err(|e| public(&e))?,
+                media: media_paths,
+            });
+        }
         // Firmware state of the VM: created from the template on the first
         // start, then reused (boot entries written by an installer persist).
         let vars = managed_abs(
@@ -621,14 +798,6 @@ impl QemuVmBackend {
         {
             crate::diag!("lightvm-service: UEFI variables of the VM created from the template");
         }
-        let mut media_paths = BTreeMap::new();
-        for m in media {
-            let p = managed_abs(&self.setup.catalog_root, m.entry().managed_path.as_str());
-            media_paths.insert(
-                m.record().id,
-                ManagedPath::verify(p).map_err(|e| public(&e))?,
-            );
-        }
         let disk = self.primary_disk(vm)?;
         Ok(RunPaths {
             run_id,
@@ -636,6 +805,8 @@ impl QemuVmBackend {
             firmware_code: ManagedPath::verify(fw.code.clone()).map_err(|e| public(&e))?,
             firmware_vars: ManagedPath::verify(vars).map_err(|e| public(&e))?,
             disk,
+            backing: None,
+            readonly: Vec::new(),
             run_dir: ManagedPath::verify(run_dir).map_err(|e| public(&e))?,
             private_dir: ManagedPath::verify(private_dir).map_err(|e| public(&e))?,
             media: media_paths,
@@ -674,9 +845,16 @@ impl VmBackend for QemuVmBackend {
                     .with_detail("budget_gib", budget.to_string()));
             }
         }
+        // F3: files of the current state for this run, if the catalog gave
+        // them (with its guard, kept until the run is released).
+        let current = self
+            .start_disks
+            .remove(&vm.id)
+            .filter(|(r, _)| *r == run_id)
+            .map(|(_, d)| d);
         // From here on every error path removes the private directory.
         let private_guard = PrivateDirGuard::new(self.private_dir_for(run_id));
-        let paths = self.prepare(vm, run_id, media)?;
+        let paths = self.prepare(vm, run_id, media, current.as_ref())?;
         let spec = VmLaunchSpec {
             run_id,
             machine: self.machine.clone(),
@@ -704,6 +882,9 @@ impl VmBackend for QemuVmBackend {
         lock(&self.registry).insert(vm.id, (run_id, run.emergency_stop_handle()));
         self.runs.insert(vm.id, Arc::new(run));
         self.private_dirs.insert(vm.id, private_guard.disarm());
+        if let Some(d) = current {
+            self.guards.insert(vm.id, d.guard);
+        }
         Ok(())
     }
 
@@ -843,6 +1024,18 @@ fn remove_private_dir(dir: &Path) {
 }
 
 impl BackendPort for QemuVmBackend {
+    fn image_tool(&self) -> Option<Arc<dyn ImageTool>> {
+        Some(self.image_tool.clone())
+    }
+
+    fn set_start_disks(&mut self, vm_id: VmId, run_id: RunId, disks: StartDisks) {
+        self.start_disks.insert(vm_id, (run_id, disks));
+    }
+
+    fn take_exits(&mut self) -> Vec<(VmId, RunId, bool)> {
+        std::mem::take(&mut self.exits)
+    }
+
     fn display_socket(&self, vm_id: VmId, run_id: RunId) -> Option<PathBuf> {
         self.run(vm_id, run_id)
             .ok()

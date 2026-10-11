@@ -103,6 +103,14 @@ pub trait ManagedPaths: Send + Sync {
     /// (overlay base, baseline variables).
     fn protected_readonly(&self, run: &RunId) -> Result<Vec<ManagedPath>>;
 
+    /// Base disk of the run's overlay (F3), passed to QEMU as an explicit
+    /// read-only `qcow2` node referenced by the overlay (`backing=`): the
+    /// path written in the overlay header is not used to open it, so no
+    /// other chain can be substituted. `None`: the disk has no backing file.
+    fn disk_backing(&self, _run: &RunId) -> Result<Option<ManagedPath>> {
+        Ok(None)
+    }
+
     /// Approved medium from the media registry (read-only managed copy).
     fn media(&self, media: &MediaId) -> Result<ManagedPath>;
 

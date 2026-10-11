@@ -110,6 +110,9 @@ pub struct VmStatus {
     pub queued: usize,
     /// Forwarded operations awaiting an outcome.
     pub in_flight: Vec<OperationId>,
+    /// Long storage operation in progress (F3: baseline creation
+    /// `snapshot` or restore `restore`): the VM is busy until it ends.
+    pub storage_operation: Option<OperationKind>,
 }
 
 /// Data for starting a run.
@@ -215,6 +218,17 @@ struct VmRuntime {
     history: BTreeMap<OperationId, Pending>,
     history_order: VecDeque<OperationId>,
     pending_end: Option<RunEndReason>,
+    /// Long storage operation in progress (F3), outside the queue.
+    storage_op: Option<StorageOp>,
+}
+
+/// Storage operation in progress on a VM (baseline creation or restore):
+/// it runs outside the per-VM queue (on a worker of the supervisor) and
+/// keeps the VM busy until [`Core::finish_storage_operation`].
+#[derive(Clone, Debug)]
+struct StorageOp {
+    record: OperationRecord,
+    caller: Caller,
 }
 
 impl VmRuntime {
@@ -229,6 +243,7 @@ impl VmRuntime {
             history: BTreeMap::new(),
             history_order: VecDeque::new(),
             pending_end: None,
+            storage_op: None,
         }
     }
 
@@ -274,7 +289,8 @@ fn audit_action_for(kind: OperationKind) -> AuditAction {
         OperationKind::Reset => AuditAction::VmReset,
         OperationKind::Screenshot => AuditAction::VmScreenshot,
         OperationKind::Input => AuditAction::VmInput,
-        OperationKind::Snapshot | OperationKind::Restore => AuditAction::VmStateObserved,
+        OperationKind::Snapshot => AuditAction::BaselineCreate,
+        OperationKind::Restore => AuditAction::BaselineRestore,
         OperationKind::EmergencyStop => AuditAction::EmergencyStop,
     }
 }
@@ -642,7 +658,9 @@ where
                 "only a stopped VM can be deleted",
             )
             .with_detail("state", rt.state.as_str())),
-            Some(rt) if !rt.queue.is_empty() || !rt.in_flight.is_empty() => {
+            Some(rt)
+                if !rt.queue.is_empty() || !rt.in_flight.is_empty() || rt.storage_op.is_some() =>
+            {
                 Err(PublicError::vm_busy("operations in progress on the VM"))
             }
             Some(rt) if rt.record.config_revision != expected_revision => Err(
@@ -852,7 +870,11 @@ where
             return Err(self.deny(actor, AuditAction::VmConfigure, ev, err));
         };
         let current = rt.record.clone();
-        let check = if rt.state != VmState::Stopped || rt.lifecycle_pending() {
+        let check = if rt.storage_op.is_some() {
+            Err(PublicError::vm_busy(
+                "storage operation in progress on the VM",
+            ))
+        } else if rt.state != VmState::Stopped || rt.lifecycle_pending() {
             Err(PublicError::state_conflict(
                 "the VM must be stopped with no operations in progress",
             )
@@ -900,6 +922,7 @@ where
             geometry: rt.geometry,
             queued: rt.queue.len(),
             in_flight: rt.in_flight.iter().map(|p| p.record.id).collect(),
+            storage_operation: rt.storage_op.as_ref().map(|o| o.record.kind),
         }
     }
 
@@ -1180,6 +1203,12 @@ where
             );
         }
 
+        // Occupancy: a long storage operation (F3) keeps the VM busy.
+        if rt.storage_op.is_some() {
+            return Err(PublicError::vm_busy(
+                "storage operation in progress on the VM",
+            ));
+        }
         // Occupancy: one lifecycle mutation at a time.
         if kind == OperationKind::ForceStop {
             if rt.force_stop_pending() {
@@ -1677,6 +1706,263 @@ where
                 .map(|()| DispatchOutcome::Done),
         };
         self.finish_dispatch(vm_id, d.operation_id, result)
+    }
+
+    /// Start refused **before** the backend was called (F3: the disks of
+    /// the current state failed verification, a writer holds them open...):
+    /// the operation fails with `err`, the run is closed and the VM goes back
+    /// to `stopped` instead of `failed`, since no process was started (the
+    /// user can restore another baseline or delete the bad one).
+    pub fn refuse_start(
+        &mut self,
+        vm_id: VmId,
+        operation_id: OperationId,
+        err: PublicError,
+    ) -> Result<OperationRecord, PublicError> {
+        let now = self.clock.now();
+        let rt = self
+            .vms
+            .get_mut(&vm_id)
+            .ok_or_else(|| PublicError::not_found("VM does not exist"))?;
+        let idx = rt
+            .in_flight
+            .iter()
+            .position(|p| p.record.id == operation_id && p.record.kind == OperationKind::Start)
+            .ok_or_else(|| PublicError::not_found("start not forwarded"))?;
+        let mut p = rt.in_flight.remove(idx);
+        let is_current = p.record.run_id.is_some() && p.record.run_id == rt.run_id;
+        p.record.status = OperationStatus::Failed;
+        p.record.error = Some(err.code);
+        p.record.updated_at = now;
+        let persisted = self.store.upsert_operation(&p.record);
+        let record = p.record.clone();
+        let actor = p.caller.actor();
+        let session_id = p.session_id();
+        if let Some(rt) = self.vms.get_mut(&vm_id) {
+            rt.remember(p);
+        }
+        if is_current {
+            self.end_run(vm_id, VmState::Stopped, RunEndReason::StartFailed);
+        }
+        self.emit_after(
+            actor,
+            AuditAction::VmStart,
+            AuditOutcome::Failed,
+            Ev {
+                vm_id: Some(vm_id),
+                run_id: record.run_id,
+                operation_id: Some(operation_id),
+                session_id,
+                error: Some(err.code),
+                ..Ev::default()
+            },
+        );
+        persisted?;
+        Ok(record)
+    }
+
+    // ----- baselines (F3) -------------------------------------------------
+
+    /// Checks shared by the baseline requests: user only (agent tools are
+    /// F4/F5), VM `stopped`, nothing queued or forwarded, no storage
+    /// operation in progress. Refusals are audited as `denied`.
+    fn check_baseline_request(
+        &mut self,
+        caller: &Caller,
+        vm_id: VmId,
+        action: AuditAction,
+    ) -> Result<VmRecord, PublicError> {
+        let actor = caller.actor();
+        let ev = || Ev {
+            vm_id: Some(vm_id),
+            ..Ev::default()
+        };
+        if matches!(caller, Caller::Agent { .. }) {
+            let err = PublicError::permission_denied("baselines not available to agent sessions");
+            return Err(self.deny(actor, action, ev(), err));
+        }
+        let check = match self.vms.get(&vm_id) {
+            None => Err(PublicError::not_found("VM does not exist")),
+            Some(rt) if rt.storage_op.is_some() => Err(PublicError::vm_busy(
+                "storage operation in progress on the VM",
+            )),
+            Some(rt) if rt.state != VmState::Stopped => Err(PublicError::state_conflict(
+                "baselines require a stopped VM",
+            )
+            .with_detail("state", rt.state.as_str())),
+            Some(rt) if !rt.queue.is_empty() || !rt.in_flight.is_empty() => {
+                Err(PublicError::vm_busy("operations in progress on the VM"))
+            }
+            Some(rt) => Ok(rt.record.clone()),
+        };
+        check.map_err(|err| self.deny(actor, action, ev(), err))
+    }
+
+    /// First step of a long storage operation on a stopped VM (F3):
+    /// `kind` is [`OperationKind::Snapshot`] (baseline creation) or
+    /// [`OperationKind::Restore`]. After the checks of
+    /// [`Self::check_baseline_request`], `begin` runs on the catalog (journal
+    /// intents, guards); on success the VM stays busy (`vm_busy` for every
+    /// other mutation, [`VmStatus::storage_operation`] set) until
+    /// [`Self::finish_storage_operation`]. Audited: `accepted`, or `failed`
+    /// if `begin` fails.
+    pub fn begin_storage_operation<T>(
+        &mut self,
+        caller: &Caller,
+        vm_id: VmId,
+        kind: OperationKind,
+        begin: impl FnOnce(&mut S, &VmRecord, OperationId) -> Result<T, PublicError>,
+    ) -> Result<(OperationId, T), PublicError> {
+        if !matches!(kind, OperationKind::Snapshot | OperationKind::Restore) {
+            return Err(PublicError::invalid_argument(
+                "not a storage operation kind",
+            ));
+        }
+        let action = audit_action_for(kind);
+        let actor = caller.actor();
+        let vm = self.check_baseline_request(caller, vm_id, action)?;
+        let op = self.ids.operation_id();
+        let ev = |error| Ev {
+            vm_id: Some(vm_id),
+            operation_id: Some(op),
+            error,
+            ..Ev::default()
+        };
+        let out = match begin(&mut self.store, &vm, op) {
+            Ok(t) => t,
+            Err(err) => {
+                self.emit_after(actor, action, AuditOutcome::Failed, ev(Some(err.code)));
+                return Err(err);
+            }
+        };
+        let now = self.clock.now();
+        let record = OperationRecord {
+            id: op,
+            vm_id,
+            run_id: None,
+            session_id: None,
+            kind,
+            status: OperationStatus::Forwarded,
+            error: None,
+            requested_at: now,
+            updated_at: now,
+        };
+        let _ = self.store.upsert_operation(&record);
+        self.op_index.insert(op, vm_id);
+        if let Some(rt) = self.vms.get_mut(&vm_id) {
+            rt.storage_op = Some(StorageOp {
+                record,
+                caller: caller.clone(),
+            });
+        }
+        self.emit_after(actor, action, AuditOutcome::Accepted, ev(None));
+        Ok((op, out))
+    }
+
+    /// Last step of a storage operation started with
+    /// [`Self::begin_storage_operation`]: `finish` publishes (or discards)
+    /// the result on the catalog; the operation is recorded and audited
+    /// (`succeeded`/`failed`) and the VM is free again. A successful restore
+    /// closes the control sessions of the VM (ROADMAP 8: the old run's
+    /// requests are invalid; cause `restored`).
+    pub fn finish_storage_operation<T>(
+        &mut self,
+        vm_id: VmId,
+        operation_id: OperationId,
+        finish: impl FnOnce(&mut S) -> Result<T, PublicError>,
+    ) -> Result<T, PublicError> {
+        let op = self
+            .vms
+            .get_mut(&vm_id)
+            .and_then(|rt| {
+                if rt.storage_op.as_ref().map(|o| o.record.id) == Some(operation_id) {
+                    rt.storage_op.take()
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| PublicError::not_found("storage operation not in progress"))?;
+        let result = finish(&mut self.store);
+        let now = self.clock.now();
+        let StorageOp { mut record, caller } = op;
+        record.status = if result.is_ok() {
+            OperationStatus::Succeeded
+        } else {
+            OperationStatus::Failed
+        };
+        record.error = result.as_ref().err().map(|e| e.code);
+        record.updated_at = now;
+        let _ = self.store.upsert_operation(&record);
+        // Not kept in the idempotency history (not a queue request); the
+        // identifier stays reserved in the operation index.
+        let kind = record.kind;
+        let error = record.error;
+        if kind == OperationKind::Restore && result.is_ok() {
+            for s in self.sessions.live_for_vm(vm_id) {
+                self.revoke_inner(s, TerminationCause::Restored);
+            }
+            if let Some(rt) = self.vms.get_mut(&vm_id) {
+                rt.geometry = None;
+            }
+        }
+        let outcome = if result.is_ok() {
+            AuditOutcome::Succeeded
+        } else {
+            AuditOutcome::Failed
+        };
+        self.emit_after(
+            caller.actor(),
+            audit_action_for(kind),
+            outcome,
+            Ev {
+                vm_id: Some(vm_id),
+                operation_id: Some(operation_id),
+                error,
+                ..Ev::default()
+            },
+        );
+        result
+    }
+
+    /// Deletion of a baseline (F3): user only, VM `stopped` and free; `f`
+    /// deletes rows and files through the catalog journal (refusing a
+    /// baseline in use or protected). Audited (`baseline_delete`).
+    pub fn delete_baseline_with(
+        &mut self,
+        caller: &Caller,
+        vm_id: VmId,
+        f: impl FnOnce(&mut S) -> Result<(), PublicError>,
+    ) -> Result<(), PublicError> {
+        let action = AuditAction::BaselineDelete;
+        self.check_baseline_request(caller, vm_id, action)?;
+        let r = f(&mut self.store);
+        let (outcome, error) = match &r {
+            Ok(()) => (AuditOutcome::Succeeded, None),
+            Err(e) => (AuditOutcome::Failed, Some(e.code)),
+        };
+        self.emit_after(
+            caller.actor(),
+            action,
+            outcome,
+            Ev {
+                vm_id: Some(vm_id),
+                error,
+                ..Ev::default()
+            },
+        );
+        r
+    }
+
+    /// Read access to the catalog for a caller allowed to see the VM (the
+    /// user; agents need `vm.status` on the VM).
+    pub fn with_visible_vm<T>(
+        &mut self,
+        caller: &Caller,
+        vm_id: VmId,
+        f: impl FnOnce(&S) -> Result<T, PublicError>,
+    ) -> Result<T, PublicError> {
+        self.vm_status(caller, vm_id)?;
+        f(&self.store)
     }
 
     // ----- observations and reconciliation --------------------------------

@@ -253,6 +253,21 @@
           "description": "Revocation of a console display ticket (run ended, UI connection\nclosed or revoked, Emergency Stop, new ticket, shutdown); the cause is\nin `termination`.",
           "type": "string",
           "const": "console_revoke"
+        },
+        {
+          "description": "Creation of a baseline with the VM off (F3).",
+          "type": "string",
+          "const": "baseline_create"
+        },
+        {
+          "description": "Restore of a baseline: the previous current state (disk or overlay\nand UEFI variables) is discarded (F3).",
+          "type": "string",
+          "const": "baseline_restore"
+        },
+        {
+          "description": "Deletion of a baseline (F3).",
+          "type": "string",
+          "const": "baseline_delete"
         }
       ]
     },

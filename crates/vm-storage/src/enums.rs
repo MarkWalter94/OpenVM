@@ -253,6 +253,11 @@ str_enum!(
         DeleteFile => "delete_file",
         /// Export to a user-chosen destination (outside the catalog).
         Export => "export",
+        /// Discard of a file of the VM's previous current state inside a
+        /// restore (schema v6): unlike `delete_file` it never rolls forward
+        /// on its own; until the whole restore commits, reconciliation puts
+        /// the file back.
+        DiscardFile => "discard_file",
     }
 );
 

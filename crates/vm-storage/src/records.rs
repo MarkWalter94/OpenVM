@@ -163,6 +163,22 @@ pub struct BaselineRecord {
     pub created_at: String,
 }
 
+/// Current state of a VM after a restore (schema v6): overlay of a baseline
+/// plus a writable copy of the baseline's UEFI variables.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CurrentStateRecord {
+    /// VM.
+    pub vm_id: VmId,
+    /// Baseline the overlay is backed by.
+    pub baseline_id: BaselineId,
+    /// Overlay disk (role `overlay`).
+    pub overlay_disk_id: DiskId,
+    /// UEFI variables (scope `vm`), if the baseline has them.
+    pub vars_fw_id: Option<FirmwareId>,
+    /// Restore time (UTC).
+    pub restored_at: String,
+}
+
 /// Run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunRecord {
@@ -319,7 +335,14 @@ impl Tx<'_> {
 
     /// Creates a VM. The name is unique, case-insensitively.
     pub fn insert_vm(&self, vm: &NewVm) -> Result<VmId> {
-        let id = VmId::new_v7();
+        self.insert_vm_with_id(&VmId::new_v7(), vm)
+    }
+
+    /// Creates a VM with a given identifier (the core chooses it through its
+    /// own generator, F3: the files of the VM then live under a single
+    /// `vms/<vm_id>/`).
+    pub fn insert_vm_with_id(&self, id: &VmId, vm: &NewVm) -> Result<VmId> {
+        let id = *id;
         let now = now_rfc3339();
         self.inner
             .execute(
@@ -792,13 +815,16 @@ impl Tx<'_> {
         rows.collect::<rusqlite::Result<Vec<_>>>().db()
     }
 
-    /// `true` if the baseline is referenced by runs or overlays.
+    /// `true` if the baseline is referenced: by an open run, by an overlay
+    /// backed by its base or by the VM's current state (F3). Ended runs do
+    /// not count: their reference is cleared when the baseline is deleted.
     pub fn baseline_referenced(&self, id: &BaselineId) -> Result<bool> {
         self.inner
             .query_row(
-                "SELECT EXISTS (SELECT 1 FROM runs WHERE baseline_id = ?1)
+                "SELECT EXISTS (SELECT 1 FROM runs WHERE baseline_id = ?1 AND ended_at IS NULL)
                      OR EXISTS (SELECT 1 FROM disks d JOIN baselines b ON d.backing_disk_id = b.base_disk_id
-                                WHERE b.baseline_id = ?1)",
+                                WHERE b.baseline_id = ?1)
+                     OR EXISTS (SELECT 1 FROM vm_current_state WHERE baseline_id = ?1)",
                 params![id.sql()],
                 |r| r.get(0),
             )
@@ -809,6 +835,14 @@ impl Tx<'_> {
     /// disk and its firmware state. References: [`StorageError::Referenced`].
     pub fn delete_baseline(&self, id: &BaselineId) -> Result<()> {
         let b = self.baseline(id)?;
+        // History of ended runs: the reference is cleared (the audit keeps
+        // the trace); an open run still blocks the deletion (trigger).
+        self.inner
+            .execute(
+                "UPDATE runs SET baseline_id = NULL WHERE baseline_id = ?1 AND ended_at IS NOT NULL",
+                params![id.sql()],
+            )
+            .db()?;
         self.inner
             .execute(
                 "DELETE FROM baselines WHERE baseline_id = ?1",
@@ -818,6 +852,127 @@ impl Tx<'_> {
         self.delete_disk(&b.base_disk_id)?;
         if let Some(fw) = &b.vars_fw_id {
             self.delete_firmware(fw)?;
+        }
+        Ok(())
+    }
+
+    /// Baseline the source state of `id` was an overlay of (schema v6).
+    pub fn baseline_derived_from(&self, id: &BaselineId) -> Result<Option<BaselineId>> {
+        let v: Option<String> = self
+            .inner
+            .query_row(
+                "SELECT derived_from FROM baselines WHERE baseline_id = ?1",
+                params![id.sql()],
+                |r| r.get(0),
+            )
+            .db()?;
+        Ok(v.and_then(|s| s.parse().ok()))
+    }
+
+    /// VM configuration revision recorded at the creation of a baseline
+    /// (schema v6; `None` for older baselines).
+    pub fn baseline_config_revision(&self, id: &BaselineId) -> Result<Option<u64>> {
+        let v: Option<i64> = self
+            .inner
+            .query_row(
+                "SELECT config_revision FROM baselines WHERE baseline_id = ?1",
+                params![id.sql()],
+                |r| r.get(0),
+            )
+            .db()?;
+        Ok(v.map(to_u64))
+    }
+
+    /// Records the configuration revision of a baseline (schema v6).
+    pub fn set_baseline_config_revision(&self, id: &BaselineId, revision: u64) -> Result<()> {
+        self.inner
+            .execute(
+                "UPDATE baselines SET config_revision = ?1 WHERE baseline_id = ?2",
+                params![to_i64(revision)?, id.sql()],
+            )
+            .db()?;
+        Ok(())
+    }
+
+    /// Records the parent of a baseline (schema v6).
+    pub fn set_baseline_derived_from(&self, id: &BaselineId, parent: &BaselineId) -> Result<()> {
+        self.inner
+            .execute(
+                "UPDATE baselines SET derived_from = ?1 WHERE baseline_id = ?2",
+                params![parent.sql(), id.sql()],
+            )
+            .db()?;
+        Ok(())
+    }
+
+    // ------------------------------------------------------- current state
+
+    /// Current state of a VM (overlay of a baseline after a restore, schema
+    /// v6); `None` = the VM runs on its standalone working disk.
+    pub fn current_state(&self, vm: &VmId) -> Result<Option<CurrentStateRecord>> {
+        self.inner
+            .query_row(
+                "SELECT vm_id, baseline_id, overlay_disk_id, vars_fw_id, restored_at
+                 FROM vm_current_state WHERE vm_id = ?1",
+                params![vm.sql()],
+                |r| {
+                    Ok(CurrentStateRecord {
+                        vm_id: idc(r, 0)?,
+                        baseline_id: idc(r, 1)?,
+                        overlay_disk_id: idc(r, 2)?,
+                        vars_fw_id: idc(r, 3)?,
+                        restored_at: r.get(4)?,
+                    })
+                },
+            )
+            .optional()
+            .db()
+    }
+
+    /// Sets (or replaces) the current state of a VM.
+    pub fn set_current_state(&self, c: &CurrentStateRecord) -> Result<()> {
+        self.inner
+            .execute(
+                "INSERT INTO vm_current_state(vm_id, baseline_id, overlay_disk_id, vars_fw_id, restored_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(vm_id) DO UPDATE SET baseline_id = excluded.baseline_id,
+                     overlay_disk_id = excluded.overlay_disk_id, vars_fw_id = excluded.vars_fw_id,
+                     restored_at = excluded.restored_at",
+                params![
+                    c.vm_id.sql(),
+                    c.baseline_id.sql(),
+                    c.overlay_disk_id.sql(),
+                    c.vars_fw_id.sql(),
+                    c.restored_at
+                ],
+            )
+            .db()?;
+        Ok(())
+    }
+
+    /// Clears the references of ended runs to a disk and a firmware state
+    /// about to be discarded (history only; an open run blocks the discard).
+    pub fn clear_ended_run_refs(
+        &self,
+        disk: Option<&DiskId>,
+        fw: Option<&FirmwareId>,
+    ) -> Result<()> {
+        if let Some(d) = disk {
+            self.inner
+                .execute(
+                    "UPDATE runs SET overlay_disk_id = NULL
+                     WHERE overlay_disk_id = ?1 AND ended_at IS NOT NULL",
+                    params![d.sql()],
+                )
+                .db()?;
+        }
+        if let Some(f) = fw {
+            self.inner
+                .execute(
+                    "UPDATE runs SET vars_fw_id = NULL WHERE vars_fw_id = ?1 AND ended_at IS NOT NULL",
+                    params![f.sql()],
+                )
+                .db()?;
         }
         Ok(())
     }
@@ -881,6 +1036,33 @@ impl Tx<'_> {
             .db()?;
         let rows = st.query_map(params![vm.sql()], |r| idc(r, 0)).db()?;
         rows.collect::<rusqlite::Result<Vec<RunId>>>().db()
+    }
+
+    /// Records whether the run ended with an observed clean guest shutdown
+    /// (schema v6).
+    pub fn set_run_clean_exit(&self, id: &RunId, clean: bool) -> Result<()> {
+        self.inner
+            .execute(
+                "UPDATE runs SET clean_exit = ?1 WHERE run_id = ?2",
+                params![clean, id.sql()],
+            )
+            .db()?;
+        Ok(())
+    }
+
+    /// End of the VM's most recent run: `None` = the VM never ran;
+    /// `Some(None)` = unknown (not observed, e.g. supervisor restart);
+    /// `Some(Some(clean))` otherwise.
+    pub fn last_run_clean_exit(&self, vm: &VmId) -> Result<Option<Option<bool>>> {
+        self.inner
+            .query_row(
+                "SELECT clean_exit FROM runs WHERE vm_id = ?1
+                 ORDER BY started_at DESC, run_id DESC LIMIT 1",
+                params![vm.sql()],
+                |r| r.get::<_, Option<bool>>(0),
+            )
+            .optional()
+            .db()
     }
 
     /// Updates the state of an unfinished run.

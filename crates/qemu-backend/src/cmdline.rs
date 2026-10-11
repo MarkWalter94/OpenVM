@@ -313,14 +313,40 @@ impl VmLaunchSpec {
             let disk = paths
                 .disk(run)?
                 .ok_or_else(|| BackendError::invalid("disk", "no managed disk for this run"))?;
-            a.opt(
-                "-blockdev",
-                format!(
-                    "driver={},node-name=disk0,file.driver={proto},file.filename={}",
-                    spec.format.driver(),
-                    disk.qemu_value()
+            match paths.disk_backing(run)? {
+                Some(base) => {
+                    if spec.format != DiskFormat::Qcow2 {
+                        return Err(BackendError::invalid(
+                            "disk",
+                            "only a qcow2 overlay can have a backing file",
+                        ));
+                    }
+                    // Explicit read-only base node and overlay bound to it
+                    // (F3): one level, the header reference is not used.
+                    a.opt(
+                        "-blockdev",
+                        format!(
+                            "driver=qcow2,node-name=disk0-base,read-only=on,file.driver={proto},file.filename={},file.read-only=on",
+                            base.qemu_value()
+                        ),
+                    );
+                    a.opt(
+                        "-blockdev",
+                        format!(
+                            "driver=qcow2,node-name=disk0,backing=disk0-base,file.driver={proto},file.filename={}",
+                            disk.qemu_value()
+                        ),
+                    );
+                }
+                None => a.opt(
+                    "-blockdev",
+                    format!(
+                        "driver={},node-name=disk0,file.driver={proto},file.filename={}",
+                        spec.format.driver(),
+                        disk.qemu_value()
+                    ),
                 ),
-            );
+            }
             a.opt(
                 "-device",
                 format!("virtio-blk-pci,drive=disk0,bootindex={next_boot}"),
@@ -547,6 +573,7 @@ pub(crate) mod tests {
                 "file.driver",
                 "file.filename",
                 "file.read-only",
+                "backing",
             ]),
         );
         t.insert("-device", Some(&["drive", "bootindex", "bus"]));
@@ -705,6 +732,62 @@ pub(crate) mod tests {
             assert!(joined.contains("filename=C:/lightvm-fake/fw/code.fd,read-only=on"));
         }
         assert!(cmd.vnc_socket.is_some());
+    }
+
+    /// F3: overlay with an explicit read-only base node (`backing=`).
+    #[test]
+    fn overlay_with_explicit_backing_node() {
+        struct WithBase(FakePaths);
+        impl ManagedPaths for WithBase {
+            fn qemu_system(&self) -> Result<ManagedPath> {
+                self.0.qemu_system()
+            }
+            fn firmware_code(&self) -> Result<ManagedPath> {
+                self.0.firmware_code()
+            }
+            fn firmware_vars(&self, run: &RunId) -> Result<ManagedPath> {
+                self.0.firmware_vars(run)
+            }
+            fn disk(&self, run: &RunId) -> Result<Option<ManagedPath>> {
+                self.0.disk(run)
+            }
+            fn protected_readonly(&self, run: &RunId) -> Result<Vec<ManagedPath>> {
+                self.0.protected_readonly(run)
+            }
+            fn media(&self, media: &MediaId) -> Result<ManagedPath> {
+                self.0.media(media)
+            }
+            fn run_dir(&self, run: &RunId) -> Result<ManagedPath> {
+                self.0.run_dir(run)
+            }
+            fn private_dir(&self, run: &RunId) -> Result<ManagedPath> {
+                self.0.private_dir(run)
+            }
+            fn disk_backing(&self, _run: &RunId) -> Result<Option<ManagedPath>> {
+                ManagedPath::verify(self.0.root.join("base").join("disk.qcow2")).map(Some)
+            }
+        }
+        let c = spec().build(&WithBase(FakePaths::new())).unwrap();
+        audit_args(&c.args).unwrap();
+        let s = strs(&c);
+        let base = s
+            .iter()
+            .position(|a| a.contains("node-name=disk0-base"))
+            .expect("base node");
+        assert!(s[base].contains("read-only=on") && s[base].contains("file.read-only=on"));
+        assert!(s[base].starts_with("driver=qcow2,"));
+        let ov = s
+            .iter()
+            .position(|a| a.contains("node-name=disk0,"))
+            .expect("overlay node");
+        assert!(ov > base, "base declared before the overlay");
+        assert!(s[ov].contains("backing=disk0-base"));
+        // A raw disk cannot have a backing node.
+        let mut raw = spec();
+        raw.disk = Some(DiskSpec {
+            format: DiskFormat::Raw,
+        });
+        assert!(raw.build(&WithBase(FakePaths::new())).is_err());
     }
 
     #[test]

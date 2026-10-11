@@ -2048,6 +2048,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "lightvm-fixture"
+version = "0.0.0"
+
+[[package]]
 name = "lightvm-mcp"
 version = "0.0.0"
 dependencies = [
@@ -2076,6 +2080,7 @@ version = "0.0.0"
 dependencies = [
  "getrandom 0.4.3",
  "interprocess",
+ "lightvm-fixture",
  "lightvm-proto",
  "qemu-backend",
  "rfb-client",

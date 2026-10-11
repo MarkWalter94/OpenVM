@@ -228,8 +228,17 @@ impl Catalog {
                     IntentState::Aborted,
                 ))
             }
-            IntentKind::DeleteFile if i.target_kind == TargetKind::Vm => {
+            IntentKind::DeleteFile
+                if matches!(i.target_kind, TargetKind::Vm | TargetKind::Baseline) =>
+            {
                 self.recover_vm_file(i, prior, temp_exists, final_exists, row_exists)
+            }
+            // A restore that did not commit: the file of the previous
+            // current state goes back in place (the new overlay is removed
+            // by its own creation intent).
+            IntentKind::DiscardFile => {
+                let d = self.rollback_fs(i, prior)?;
+                Ok((RolledBack, d, IntentState::Aborted))
             }
             IntentKind::DeleteFile => {
                 if temp_exists && !final_exists {
@@ -289,9 +298,10 @@ impl Catalog {
         }
     }
 
-    /// One file of a VM deletion (target `vm`). The group rolls forward as
-    /// soon as one file was moved: the first moved file deletes the rows,
-    /// the following ones (moved or still in place) are removed.
+    /// One file of a group deletion (target `vm`: VM deletion; target
+    /// `baseline`: baseline deletion, F3). The group rolls forward as soon as
+    /// one file was moved: the first moved file deletes the rows, the
+    /// following ones (moved or still in place) are removed.
     fn recover_vm_file(
         &mut self,
         i: &Intent,
@@ -305,7 +315,8 @@ impl Catalog {
             // Moved, rows still present: complete the deletion.
             (true, false, true) => {
                 let tid = i.target_id.clone().unwrap_or_default();
-                match self.with_tx(|tx| delete_target_rows(tx, TargetKind::Vm, &tid)) {
+                let tk = i.target_kind;
+                match self.with_tx(|tx| delete_target_rows(tx, tk, &tid)) {
                     Ok(()) => {
                         remove_temp(&self.layout, &i.temp_rel)?;
                         Ok((
@@ -341,6 +352,9 @@ impl Catalog {
                 }
                 if let Some(rel) = &i.final_rel {
                     remove_managed_file(&self.layout, rel)?;
+                    if i.target_kind == TargetKind::Baseline {
+                        crate::catalog::remove_empty_parent(&self.layout, rel);
+                    }
                 }
                 Ok((
                     RolledForward,
@@ -413,7 +427,7 @@ impl Catalog {
                 .conn
                 .prepare(
                     "SELECT intent_id FROM journal
-                     WHERE state = 'committed' AND kind IN ('delete_file','export')
+                     WHERE state = 'committed' AND kind IN ('delete_file','export','discard_file')
                        AND resolution IS NULL",
                 )
                 .db()?;

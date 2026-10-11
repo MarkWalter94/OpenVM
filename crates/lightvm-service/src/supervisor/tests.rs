@@ -81,6 +81,8 @@ fn supervisor(engine: Box<dyn VmEngine>) -> (SupervisorThread, mpsc::Receiver<Co
         display,
         self_tx: tx,
         imports: 0,
+        storage_jobs: 0,
+        storage_cancel: Arc::default(),
     };
     (sup, rx)
 }
@@ -427,7 +429,7 @@ fn exits_are_observed_within_the_deadline_under_steady_traffic() {
     let mut events = sup.events.subscribe();
     let tx = sup.self_tx.clone();
     let t = std::thread::spawn(move || sup.run(rx));
-    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop = Arc::new(AtomicBool::new(false));
     let pinger = {
         let (tx, stop) = (tx.clone(), stop.clone());
         std::thread::spawn(move || {
