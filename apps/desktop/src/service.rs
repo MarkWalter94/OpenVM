@@ -38,10 +38,14 @@ use lightvm_proto::ipc::{
     ServerMessage, ServiceEvent, SessionApproval, SessionInfo, SessionRequestId,
     SessionRequestInfo, SessionRequestOutcome, VmSummary,
 };
+use lightvm_proto::report::{
+    ReportEvent, ReportFormat, SessionReport, SessionReportSummary, SessionVerifier,
+};
 use lightvm_proto::{
     BaselineId, ErrorCode, HostCapacity, InputBatch, InputEvent, KeyAction, Label, MediaKind,
     MediaRecord, MouseButton, OperationId, OperationStatus, PointerButton, ReplyError, RunId,
-    SessionId, SessionState, TerminationCause, UtcTimestamp, VmAction, VmConfig, VmId, VmRequest,
+    SessionId, SessionState, Sha256Digest, TerminationCause, TestOutcome, UtcTimestamp, VmAction,
+    VmConfig, VmId, VmRequest,
 };
 use lightvm_service::client::Client;
 use lightvm_service::credential::Credential;
@@ -460,6 +464,216 @@ impl AgentState {
     }
 }
 
+/// Action on a session report requested by the UI (F5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReportOp {
+    /// Verdict of the local user.
+    Verdict(SessionId),
+    /// Automatic verifier.
+    Verify(SessionId),
+    /// Export to a file chosen by the user.
+    Export(SessionId),
+    /// Deletion of the report and its screenshots.
+    Delete(SessionId),
+}
+
+impl ReportOp {
+    /// Session of the report.
+    pub fn session(self) -> SessionId {
+        match self {
+            Self::Verdict(s) | Self::Verify(s) | Self::Export(s) | Self::Delete(s) => s,
+        }
+    }
+}
+
+/// Export written by the supervisor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExportDone {
+    /// File chosen by the user.
+    pub path: PathBuf,
+    /// Format.
+    pub format: ReportFormat,
+    /// Bytes of the report file.
+    pub bytes: u64,
+    /// SHA-256 of the report file.
+    pub sha256: Sha256Digest,
+    /// Screenshots written next to it.
+    pub screenshots: u32,
+}
+
+/// Outcome of a report action.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReportOutcome {
+    /// Verdict or verification recorded: the report was re-read.
+    Updated,
+    /// Export written.
+    Exported(ExportDone),
+    /// Report deleted.
+    Deleted,
+}
+
+/// Last report action and its outcome.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReportControl {
+    /// Action.
+    pub op: ReportOp,
+    /// Outcome.
+    pub status: RequestStatus<ReportOutcome>,
+}
+
+/// A page of the events of a report.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct EventsPage {
+    /// Events recorded in total.
+    pub total: u32,
+    /// First event of the page (0-based).
+    pub offset: u32,
+    /// Events.
+    pub events: Vec<ReportEvent>,
+}
+
+/// Stored screenshot of a report, read on demand, checked against its
+/// SHA-256 and decoded. Kept in memory only (never written by the app).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShotImage {
+    /// SHA-256 of the PNG, checked.
+    pub sha256: Sha256Digest,
+    /// Size of the PNG in bytes.
+    pub png_bytes: usize,
+    /// Width and height.
+    pub size: [usize; 2],
+    /// RGBA pixels.
+    pub rgba: Arc<Vec<u8>>,
+}
+
+/// Screenshots kept in memory at once (the oldest one is forgotten).
+pub const REPORT_SHOTS_KEPT: usize = 3;
+/// Largest screenshot read for display.
+pub const MAX_SHOT_BYTES: usize = 64 << 20;
+/// Events per page on the session page.
+pub const EVENTS_PAGE: u32 = lightvm_proto::report::MAX_REPORT_EVENTS_PAGE;
+/// Recent events shown for a live session in the AI Workspace.
+pub const TAIL_EVENTS: u32 = 5;
+
+/// Session reports known to the UI (F5).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ReportsState {
+    /// The list was received at least once.
+    pub loaded: bool,
+    /// Reports, newest first.
+    pub list: Vec<SessionReportSummary>,
+    /// Last list read error.
+    pub error: Option<Failure>,
+    /// Headers read (events empty).
+    pub headers: BTreeMap<SessionId, SessionReport>,
+    /// Last header read error per report.
+    pub header_errors: BTreeMap<SessionId, Failure>,
+    /// Page of events shown on the session page.
+    pub events: BTreeMap<SessionId, EventsPage>,
+    /// Last events read error per report.
+    pub events_errors: BTreeMap<SessionId, Failure>,
+    /// Last events of live sessions (AI Workspace).
+    pub tail: BTreeMap<SessionId, EventsPage>,
+    /// Screenshots read on demand, oldest first (at most
+    /// [`REPORT_SHOTS_KEPT`]).
+    pub shots: Vec<((SessionId, u32), RequestStatus<ShotImage>)>,
+    /// Last action (verdict, verification, export, deletion).
+    pub action: Option<ReportControl>,
+}
+
+impl ReportsState {
+    /// Summary of a report.
+    pub fn summary(&self, id: SessionId) -> Option<&SessionReportSummary> {
+        self.list.iter().find(|r| r.session_id == id)
+    }
+
+    /// Screenshot read for display, if requested.
+    pub fn shot(&self, id: SessionId, shot: u32) -> Option<&RequestStatus<ShotImage>> {
+        self.shots
+            .iter()
+            .find(|(k, _)| *k == (id, shot))
+            .map(|(_, v)| v)
+    }
+
+    /// Records the state of a screenshot read, forgetting the oldest one.
+    pub fn set_shot(&mut self, id: SessionId, shot: u32, status: RequestStatus<ShotImage>) {
+        self.shots.retain(|(k, _)| *k != (id, shot));
+        while self.shots.len() >= REPORT_SHOTS_KEPT {
+            self.shots.remove(0);
+        }
+        self.shots.push(((id, shot), status));
+    }
+
+    /// Forgets everything about a deleted report.
+    pub fn forget(&mut self, id: SessionId) {
+        self.list.retain(|r| r.session_id != id);
+        self.headers.remove(&id);
+        self.events.remove(&id);
+        self.events_errors.remove(&id);
+        self.tail.remove(&id);
+        self.shots.retain(|((s, _), _)| *s != id);
+    }
+}
+
+/// Verifies and decodes a PNG read from a report: the SHA-256 must be the
+/// one the supervisor announced (the stored file may have been altered).
+pub fn decode_shot(png: &[u8], sha256: Sha256Digest) -> Result<ShotImage, String> {
+    use sha2::Digest as _;
+    let got: [u8; 32] = sha2::Sha256::digest(png).into();
+    if got != *sha256.as_bytes() {
+        return Err("the screenshot does not match its SHA-256: not shown".into());
+    }
+    let (size, rgba) = decode_png(png)?;
+    Ok(ShotImage {
+        sha256,
+        png_bytes: png.len(),
+        size,
+        rgba: Arc::new(rgba),
+    })
+}
+
+/// Decodes a PNG to RGBA pixels (8-bit; palette, grey and 16-bit expanded).
+pub fn decode_png(png: &[u8]) -> Result<([usize; 2], Vec<u8>), String> {
+    let mut d = png::Decoder::new(std::io::Cursor::new(png));
+    d.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let mut r = d
+        .read_info()
+        .map_err(|e| format!("not a readable PNG: {e}"))?;
+    let len = r
+        .output_buffer_size()
+        .ok_or_else(|| "PNG too large".to_owned())?;
+    if len > 4 * 16384 * 16384 {
+        return Err("PNG too large".into());
+    }
+    let mut buf = vec![0; len];
+    let info = r
+        .next_frame(&mut buf)
+        .map_err(|e| format!("not a readable PNG: {e}"))?;
+    let (w, h) = (info.width as usize, info.height as usize);
+    let px = &buf[..info.buffer_size()];
+    let rgba = match info.color_type {
+        png::ColorType::Rgba => px.to_vec(),
+        png::ColorType::Rgb => px
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .flat_map(|&[r, g, b]| [r, g, b, 255])
+            .collect(),
+        png::ColorType::Grayscale => px.iter().flat_map(|&g| [g, g, g, 255]).collect(),
+        png::ColorType::GrayscaleAlpha => px
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .flat_map(|&[g, a]| [g, g, g, a])
+            .collect(),
+        png::ColorType::Indexed => return Err("PNG palette not expanded".into()),
+    };
+    if rgba.len() != w * h * 4 {
+        return Err("PNG with an unexpected layout".into());
+    }
+    Ok(([w, h], rgba))
+}
+
 /// Plain description of a termination cause.
 pub fn termination_text(c: TerminationCause) -> &'static str {
     match c {
@@ -514,6 +728,8 @@ pub struct ServiceState {
     pub baseline: Option<BaselineRequest>,
     /// Agent access and sessions (F4).
     pub agents: AgentState,
+    /// Session reports (F5).
+    pub reports: ReportsState,
 }
 
 impl ServiceState {
@@ -655,6 +871,59 @@ pub enum ServiceCommand {
     },
     /// Issues a pairing credential and writes it to the pairing file.
     CreatePairing,
+    /// Re-reads the session reports (F5).
+    ListSessionReports,
+    /// Reads the header of a report.
+    GetSessionReport(SessionId),
+    /// Reads a page of the events of a report.
+    GetSessionReportEvents {
+        /// Session.
+        session_id: SessionId,
+        /// First event (0-based).
+        offset: u32,
+        /// Events (1..=50).
+        limit: u32,
+        /// For the AI Workspace (last events), not the session page.
+        tail: bool,
+    },
+    /// Reads a stored screenshot of a report (all its chunks), on demand.
+    GetReportScreenshot {
+        /// Session.
+        session_id: SessionId,
+        /// Screenshot index in the report.
+        shot: u32,
+    },
+    /// Records the verdict of the local user.
+    SetSessionVerdict {
+        /// Session.
+        session_id: SessionId,
+        /// Outcome.
+        outcome: TestOutcome,
+        /// Rationale (plain text).
+        rationale: String,
+    },
+    /// Runs an automatic verifier on the session's evidence.
+    VerifySession {
+        /// Session.
+        session_id: SessionId,
+        /// Verifier.
+        verifier: SessionVerifier,
+    },
+    /// Exports a report to the file the user chose in the save dialog.
+    ExportSessionReport {
+        /// Session.
+        session_id: SessionId,
+        /// Format.
+        format: ReportFormat,
+        /// File chosen by the user (absolute).
+        destination: PathBuf,
+        /// Replace an existing file (the user confirmed it).
+        overwrite: bool,
+        /// Also write the stored screenshots next to it.
+        include_screenshots: bool,
+    },
+    /// Deletes the report and the screenshots of a terminated session.
+    DeleteSessionReport(SessionId),
 }
 
 impl ServiceCommand {
@@ -673,6 +942,17 @@ impl ServiceCommand {
 }
 
 impl ServiceCommand {
+    /// Report action of the command, if it is one (reads excluded).
+    pub fn report_op(&self) -> Option<ReportOp> {
+        Some(match self {
+            Self::SetSessionVerdict { session_id, .. } => ReportOp::Verdict(*session_id),
+            Self::VerifySession { session_id, .. } => ReportOp::Verify(*session_id),
+            Self::ExportSessionReport { session_id, .. } => ReportOp::Export(*session_id),
+            Self::DeleteSessionReport(id) => ReportOp::Delete(*id),
+            _ => return None,
+        })
+    }
+
     /// Baseline operation of the command, if it is one (list excluded).
     pub fn baseline_op(&self) -> Option<(VmId, BaselineOp)> {
         match self {
@@ -1061,8 +1341,17 @@ pub fn mark_pending(
             });
         }
         ServiceCommand::CreatePairing => s.agents.pairing = RequestStatus::Pending,
+        ServiceCommand::GetReportScreenshot { session_id, shot } => {
+            s.reports
+                .set_shot(*session_id, *shot, RequestStatus::Pending);
+        }
         c => {
-            if let Some((vm_id, op)) = c.baseline_op() {
+            if let Some(op) = c.report_op() {
+                s.reports.action = Some(ReportControl {
+                    op,
+                    status: RequestStatus::Pending,
+                });
+            } else if let Some((vm_id, op)) = c.baseline_op() {
                 s.baseline = Some(BaselineRequest {
                     vm_id,
                     op,
@@ -1102,6 +1391,12 @@ fn fail_pending(s: &mut ServiceState, why: &str) {
         fail(&mut r.status, why);
     }
     fail(&mut s.agents.pairing, why);
+    for (_, r) in &mut s.reports.shots {
+        fail(r, why);
+    }
+    if let Some(r) = &mut s.reports.action {
+        fail(&mut r.status, why);
+    }
     s.connected = false;
 }
 
@@ -1130,6 +1425,33 @@ fn mark_failed(s: &mut ServiceState, c: &ServiceCommand, f: Failure) {
             });
         }
         ServiceCommand::CreatePairing => s.agents.pairing = RequestStatus::Failed(f),
+        ServiceCommand::ListSessionReports => s.reports.error = Some(f),
+        ServiceCommand::GetSessionReport(id) => {
+            if f.code == Some(ErrorCode::NotFound) {
+                // Deleted (or pruned) meanwhile.
+                s.reports.forget(*id);
+            }
+            s.reports.header_errors.insert(*id, f);
+        }
+        ServiceCommand::GetSessionReportEvents {
+            session_id, tail, ..
+        } => {
+            if !tail {
+                s.reports.events_errors.insert(*session_id, f);
+            }
+        }
+        ServiceCommand::GetReportScreenshot { session_id, shot } => {
+            s.reports
+                .set_shot(*session_id, *shot, RequestStatus::Failed(f));
+        }
+        c if c.report_op().is_some() => {
+            if let Some(op) = c.report_op() {
+                s.reports.action = Some(ReportControl {
+                    op,
+                    status: RequestStatus::Failed(f),
+                });
+            }
+        }
         c if c.agent_op().is_some() => {
             if let Some(op) = c.agent_op() {
                 s.agents.control = Some(AgentControl {
@@ -1323,6 +1645,7 @@ async fn ipc_loop(
     lanes.queue(ServiceCommand::GetAgentAccess);
     lanes.queue(ServiceCommand::ListSessionRequests);
     lanes.queue(ServiceCommand::ListSessions);
+    lanes.queue(ServiceCommand::ListSessionReports);
 
     let ev_lanes = lanes.clone();
     let event_reader = async move {
@@ -1383,7 +1706,9 @@ async fn ipc_loop(
                 | ServiceCommand::RevokeSession(_)
                 | ServiceCommand::SetInputOwner { .. }
                 | ServiceCommand::SetAgentAccess(_) => fast_in.push(c),
-                ServiceCommand::ImportMedia { .. } => {
+                // Imports and exports copy files (an export can write
+                // hundreds of MiB of screenshots).
+                ServiceCommand::ImportMedia { .. } | ServiceCommand::ExportSessionReport { .. } => {
                     let _ = slow_tx.send(c);
                 }
                 ServiceCommand::CreateBaseline { .. } | ServiceCommand::RestoreBaseline { .. } => {
@@ -1525,9 +1850,35 @@ fn agent_event(lanes: &Lanes, ev: ServiceEvent) {
             lanes.queue(ServiceCommand::GetAgentAccess);
             lanes.queue(ServiceCommand::ListSessionRequests);
             lanes.queue(ServiceCommand::ListSessions);
+            lanes.queue(ServiceCommand::ListSessionReports);
+        }
+        ServiceEvent::SessionReportChanged { session_id } => {
+            let follow = report_changed(&lock(&lanes.state), session_id);
+            for c in follow {
+                lanes.queue(c);
+            }
         }
         _ => {}
     }
+}
+
+/// Re-reads after `session_report_changed`: the list, and the header and
+/// the events page of that report if the app shows them.
+pub fn report_changed(s: &ServiceState, session_id: SessionId) -> Vec<ServiceCommand> {
+    let mut v = vec![ServiceCommand::ListSessionReports];
+    let r = &s.reports;
+    if r.headers.contains_key(&session_id) || r.events.contains_key(&session_id) {
+        v.push(ServiceCommand::GetSessionReport(session_id));
+    }
+    if let Some(p) = r.events.get(&session_id) {
+        v.push(ServiceCommand::GetSessionReportEvents {
+            session_id,
+            offset: p.offset,
+            limit: EVENTS_PAGE,
+            tail: false,
+        });
+    }
+    v
 }
 
 /// Applies a `session_changed` event and records it once.
@@ -2193,6 +2544,184 @@ async fn execute(c: &mut Client, lanes: &Lanes, command: ServiceCommand) -> Resu
                 m => Err(context("pairing", failure(&m))),
             }
         }
+        ServiceCommand::ListSessionReports => {
+            match request(c, Request::ListSessionReports).await? {
+                ServerMessage::Response {
+                    result: ResponseBody::SessionReports { reports },
+                    ..
+                } => {
+                    let mut s = lock(state);
+                    s.reports.list = reports;
+                    s.reports.loaded = true;
+                    s.reports.error = None;
+                    Ok(())
+                }
+                m => Err(context("session reports", failure(&m))),
+            }
+        }
+        ServiceCommand::GetSessionReport(session_id) => {
+            match request(c, Request::GetSessionReport { session_id }).await? {
+                ServerMessage::Response {
+                    result: ResponseBody::SessionReport { report },
+                    ..
+                } => {
+                    let mut s = lock(state);
+                    let r = &mut s.reports;
+                    let summary = report.summary();
+                    match r.list.iter_mut().find(|x| x.session_id == session_id) {
+                        Some(x) => *x = summary,
+                        None => {
+                            r.list.push(summary);
+                            r.list.sort_by_key(|x| std::cmp::Reverse(x.started_at));
+                        }
+                    }
+                    r.header_errors.remove(&session_id);
+                    r.headers.insert(session_id, *report);
+                    Ok(())
+                }
+                m => Err(context("session report", failure(&m))),
+            }
+        }
+        ServiceCommand::GetSessionReportEvents {
+            session_id,
+            offset,
+            limit,
+            tail,
+        } => {
+            let body = Request::GetSessionReportEvents {
+                session_id,
+                offset,
+                limit,
+            };
+            match request(c, body).await? {
+                ServerMessage::Response {
+                    result:
+                        ResponseBody::SessionReportEvents {
+                            total,
+                            offset,
+                            events,
+                            ..
+                        },
+                    ..
+                } => {
+                    let page = EventsPage {
+                        total,
+                        offset,
+                        events,
+                    };
+                    let mut s = lock(state);
+                    if tail {
+                        s.reports.tail.insert(session_id, page);
+                    } else {
+                        s.reports.events_errors.remove(&session_id);
+                        s.reports.events.insert(session_id, page);
+                    }
+                    Ok(())
+                }
+                m => Err(context("report events", failure(&m))),
+            }
+        }
+        ServiceCommand::GetReportScreenshot { session_id, shot } => {
+            let (png, sha256) = read_shot(c, session_id, shot).await?;
+            let image = tokio::task::spawn_blocking(move || decode_shot(&png, sha256))
+                .await
+                .map_err(|e| Failure::new(format!("screenshot not decoded: {e}")))?
+                .map_err(Failure::new)?;
+            lock(state)
+                .reports
+                .set_shot(session_id, shot, RequestStatus::Done(image));
+            Ok(())
+        }
+        ServiceCommand::SetSessionVerdict {
+            session_id,
+            outcome,
+            rationale,
+        } => {
+            let body = Request::SetSessionVerdict {
+                session_id,
+                outcome,
+                rationale,
+            };
+            report_reply(c, lanes, body, ReportOp::Verdict(session_id), "verdict").await
+        }
+        ServiceCommand::VerifySession {
+            session_id,
+            verifier,
+        } => {
+            let body = Request::VerifySession {
+                session_id,
+                verifier,
+            };
+            report_reply(c, lanes, body, ReportOp::Verify(session_id), "verification").await
+        }
+        ServiceCommand::ExportSessionReport {
+            session_id,
+            format,
+            destination,
+            overwrite,
+            include_screenshots,
+        } => {
+            let Some(path) = destination.to_str().map(str::to_owned) else {
+                return Err(Failure::coded(
+                    ErrorCode::InvalidArgument,
+                    "export: the chosen path is not valid Unicode; choose another name or folder",
+                ));
+            };
+            let body = Request::ExportSessionReport {
+                session_id,
+                format,
+                destination: path,
+                overwrite,
+                include_screenshots,
+            };
+            match request(c, body).await? {
+                ServerMessage::Response {
+                    result:
+                        ResponseBody::SessionReportExported {
+                            format,
+                            bytes,
+                            sha256,
+                            screenshots,
+                            ..
+                        },
+                    ..
+                } => {
+                    let mut s = lock(state);
+                    s.reports.action = Some(ReportControl {
+                        op: ReportOp::Export(session_id),
+                        status: RequestStatus::Done(ReportOutcome::Exported(ExportDone {
+                            path: destination,
+                            format,
+                            bytes,
+                            sha256,
+                            screenshots,
+                        })),
+                    });
+                    Ok(())
+                }
+                m => Err(context("export", failure(&m))),
+            }
+        }
+        ServiceCommand::DeleteSessionReport(session_id) => {
+            match request(c, Request::DeleteSessionReport { session_id }).await? {
+                ServerMessage::Response {
+                    result: ResponseBody::SessionReportDeleted { .. },
+                    ..
+                } => {
+                    {
+                        let mut s = lock(state);
+                        s.reports.forget(session_id);
+                        s.reports.action = Some(ReportControl {
+                            op: ReportOp::Delete(session_id),
+                            status: RequestStatus::Done(ReportOutcome::Deleted),
+                        });
+                    }
+                    lanes.queue(ServiceCommand::ListSessionReports);
+                    Ok(())
+                }
+                m => Err(context("deletion", failure(&m))),
+            }
+        }
         ServiceCommand::EmergencyStop => match request(c, Request::EmergencyStop).await? {
             ServerMessage::Response {
                 result: ResponseBody::EmergencyStop(r),
@@ -2216,6 +2745,98 @@ async fn execute(c: &mut Client, lanes: &Lanes, command: ServiceCommand) -> Resu
             }
             m => Err(failure(&m)),
         },
+    }
+}
+
+/// Verdict or verification: the reply carries the updated report.
+async fn report_reply(
+    c: &mut Client,
+    lanes: &Lanes,
+    body: Request,
+    op: ReportOp,
+    what: &str,
+) -> Result<(), Failure> {
+    match request(c, body).await? {
+        ServerMessage::Response {
+            result: ResponseBody::SessionReport { report },
+            ..
+        } => {
+            let follow = {
+                let mut s = lock(&lanes.state);
+                let id = report.session_id;
+                let summary = report.summary();
+                if let Some(x) = s.reports.list.iter_mut().find(|x| x.session_id == id) {
+                    *x = summary;
+                }
+                s.reports.headers.insert(id, *report);
+                s.reports.action = Some(ReportControl {
+                    op,
+                    status: RequestStatus::Done(ReportOutcome::Updated),
+                });
+                // The verdict appears among the events.
+                report_changed(&s, op.session())
+            };
+            for c in follow {
+                lanes.queue(c);
+            }
+            Ok(())
+        }
+        m => Err(context(what, failure(&m))),
+    }
+}
+
+/// Reads every chunk of a stored screenshot: PNG bytes and announced
+/// SHA-256 (checked by [`decode_shot`]).
+async fn read_shot(
+    c: &mut Client,
+    session_id: SessionId,
+    shot: u32,
+) -> Result<(Vec<u8>, Sha256Digest), Failure> {
+    let mut png = Vec::new();
+    let mut index = 0;
+    let mut expected: Option<(u32, Sha256Digest)> = None;
+    loop {
+        let body = Request::GetReportScreenshotChunk {
+            session_id,
+            shot,
+            index,
+        };
+        match request(c, body).await? {
+            ServerMessage::Response {
+                result:
+                    ResponseBody::ReportScreenshotChunk {
+                        session_id: sid,
+                        shot: n,
+                        index: i,
+                        chunks,
+                        sha256,
+                        data,
+                    },
+                ..
+            } => {
+                if sid != session_id || n != shot || i != index {
+                    return Err(Failure::new("screenshot: chunk of another screenshot"));
+                }
+                match expected {
+                    None => expected = Some((chunks, sha256)),
+                    Some(e) if e != (chunks, sha256) => {
+                        return Err(Failure::new("screenshot changed while it was read"));
+                    }
+                    Some(_) => {}
+                }
+                let bytes = lightvm_proto::ipc::base64_decode(&data)
+                    .ok_or_else(|| Failure::new("screenshot: malformed chunk"))?;
+                png.extend_from_slice(&bytes);
+                if png.len() > MAX_SHOT_BYTES {
+                    return Err(Failure::new("screenshot too large to show"));
+                }
+                index += 1;
+                if index >= chunks {
+                    return Ok((png, sha256));
+                }
+            }
+            m => return Err(context("screenshot", failure(&m))),
+        }
     }
 }
 
@@ -2864,7 +3485,7 @@ mod tests {
             config_revision: 1,
             virtual_size_bytes: 8 << 30,
             size_bytes: 3 << 30,
-            disk_sha256: lightvm_proto::Sha256Digest::from_bytes([7; 32]),
+            disk_sha256: Sha256Digest::from_bytes([7; 32]),
             firmware_sha256: None,
             current: false,
             in_use: false,
@@ -3263,5 +3884,242 @@ mod tests {
         l.wait("access off", |s| s.agents.access == Some(false));
         assert!(!f.path.exists());
         let _ = std::fs::remove_dir_all(&l.pairing_dir);
+    }
+    fn test_report(id: SessionId, outcome: TestOutcome) -> SessionReport {
+        use lightvm_proto::report::{OutcomeSource, ReportVersions};
+        let t = UtcTimestamp::from_unix_millis(1_791_709_920_000).unwrap();
+        SessionReport {
+            report_format: lightvm_proto::report::REPORT_FORMAT.into(),
+            session_id: id,
+            vm_id: VmId::new_v7(),
+            vm_name: "lab".into(),
+            client_name: "test-agent".into(),
+            objective: "Check the editor".into(),
+            started_at: t,
+            ended_at: Some(t),
+            state: SessionState::Terminated,
+            termination: Some(TerminationCause::Completed),
+            outcome,
+            outcome_source: if outcome == TestOutcome::Inconclusive {
+                OutcomeSource::Termination
+            } else {
+                OutcomeSource::User
+            },
+            run_ids: Vec::new(),
+            baseline_id: None,
+            baseline: None,
+            guest_os: lightvm_proto::GuestOs::UbuntuLtsX86_64,
+            vm_manifest_sha256: Sha256Digest::from_bytes([1; 32]),
+            vm_config_revision: 1,
+            policy_revision: lightvm_proto::PolicyRevision(1),
+            capabilities: Default::default(),
+            quotas: lightvm_proto::ipc::AGENT_DEFAULT_QUOTAS,
+            expires_at: t,
+            versions: ReportVersions::default(),
+            agent_declaration: None,
+            verdicts: Vec::new(),
+            errors: Default::default(),
+            screenshots_retained: 2,
+            screenshots_dropped: 0,
+            events_total: 1,
+            events_dropped: 0,
+            events: Vec::new(),
+            report_sha256: None,
+        }
+    }
+
+    /// F5: reports list, header, events, a screenshot read in two chunks,
+    /// checked and decoded, an altered one refused, verdict, export with
+    /// the existing file confirmed, deletion, and `session_report_changed`.
+    #[test]
+    fn session_reports_over_ipc() {
+        use sha2::Digest as _;
+        let sid = SessionId::new_v7();
+        let mut png_bytes = Vec::new();
+        {
+            let mut e = png::Encoder::new(&mut png_bytes, 3, 2);
+            e.set_color(png::ColorType::Rgb);
+            e.set_depth(png::BitDepth::Eight);
+            let mut w = e.write_header().unwrap();
+            w.write_image_data(&[10, 20, 30].repeat(6)).unwrap();
+        }
+        let sha = Sha256Digest::from_bytes(sha2::Sha256::digest(&png_bytes).into());
+        let half = png_bytes.len() / 2;
+        let parts = [png_bytes[..half].to_vec(), png_bytes[half..].to_vec()];
+        // Outcome kept by the stand-in supervisor.
+        let current = Arc::new(Mutex::new(TestOutcome::Inconclusive));
+        let server = fake::start(Arc::new(move |r: &Request| match r {
+            Request::ListSessionReports => Ok(ResponseBody::SessionReports {
+                reports: vec![test_report(sid, *lock(&current)).summary()],
+            }),
+            Request::GetSessionReport { session_id } => Ok(ResponseBody::SessionReport {
+                report: Box::new(test_report(*session_id, *lock(&current))),
+            }),
+            Request::GetSessionReportEvents {
+                session_id, offset, ..
+            } => Ok(ResponseBody::SessionReportEvents {
+                session_id: *session_id,
+                total: 1,
+                offset: *offset,
+                events: vec![ReportEvent {
+                    seq: 1,
+                    at: UtcTimestamp::now(),
+                    body: lightvm_proto::report::ReportEventBody::Note {
+                        text: "hello".into(),
+                    },
+                }],
+            }),
+            Request::GetReportScreenshotChunk {
+                session_id,
+                shot,
+                index,
+            } => Ok(ResponseBody::ReportScreenshotChunk {
+                session_id: *session_id,
+                shot: *shot,
+                index: *index,
+                chunks: 2,
+                // Screenshot 1: its file no longer matches the hash.
+                sha256: if *shot == 0 {
+                    sha
+                } else {
+                    Sha256Digest::from_bytes([0; 32])
+                },
+                data: lightvm_proto::ipc::base64_encode(&parts[*index as usize]),
+            }),
+            Request::SetSessionVerdict {
+                session_id,
+                outcome,
+                ..
+            } => {
+                *lock(&current) = *outcome;
+                Ok(ResponseBody::SessionReport {
+                    report: Box::new(test_report(*session_id, *outcome)),
+                })
+            }
+            Request::ExportSessionReport {
+                session_id,
+                format,
+                overwrite,
+                ..
+            } => {
+                if *overwrite {
+                    Ok(ResponseBody::SessionReportExported {
+                        session_id: *session_id,
+                        format: *format,
+                        bytes: 1234,
+                        sha256: Sha256Digest::from_bytes([7; 32]),
+                        screenshots: 2,
+                    })
+                } else {
+                    Err(ReplyError::Operational(lightvm_proto::PublicError::new(
+                        ErrorCode::StateConflict,
+                        "destination exists",
+                    )))
+                }
+            }
+            Request::DeleteSessionReport { session_id } => Ok(ResponseBody::SessionReportDeleted {
+                session_id: *session_id,
+            }),
+            r => base_reply(r),
+        }));
+        let l = Loop::start(server.endpoint.clone());
+        l.wait("reports listed", |s| {
+            s.reports.loaded && s.reports.list.len() == 1
+        });
+
+        assert!(l.send(ServiceCommand::GetSessionReport(sid)));
+        assert!(l.send(ServiceCommand::GetSessionReportEvents {
+            session_id: sid,
+            offset: 0,
+            limit: EVENTS_PAGE,
+            tail: false,
+        }));
+        l.wait("header and events", |s| {
+            s.reports.headers.contains_key(&sid) && s.reports.events.contains_key(&sid)
+        });
+
+        for shot in [0, 1] {
+            assert!(l.send(ServiceCommand::GetReportScreenshot {
+                session_id: sid,
+                shot
+            }));
+        }
+        l.wait("screenshots", |s| {
+            [0, 1].iter().all(|n| {
+                matches!(
+                    s.reports.shot(sid, *n),
+                    Some(RequestStatus::Done(_) | RequestStatus::Failed(_))
+                )
+            })
+        });
+        let st = l.state();
+        let Some(RequestStatus::Done(img)) = st.reports.shot(sid, 0) else {
+            panic!("{:?}", st.reports.shots)
+        };
+        assert_eq!(img.size, [3, 2]);
+        assert_eq!(img.sha256, sha);
+        assert_eq!(&img.rgba[..4], &[10, 20, 30, 255]);
+        let Some(RequestStatus::Failed(f)) = st.reports.shot(sid, 1) else {
+            panic!("{:?}", st.reports.shots)
+        };
+        assert!(f.message.contains("does not match its SHA-256"), "{f:?}");
+
+        assert!(l.send(ServiceCommand::SetSessionVerdict {
+            session_id: sid,
+            outcome: TestOutcome::Passed,
+            rationale: "r".into(),
+        }));
+        l.wait("verdict", |s| {
+            s.reports
+                .headers
+                .get(&sid)
+                .is_some_and(|h| h.outcome == TestOutcome::Passed)
+                && s.reports.list[0].outcome == TestOutcome::Passed
+        });
+
+        let dest = std::env::temp_dir().join("lightvm-report-test.md");
+        let export = |overwrite| ServiceCommand::ExportSessionReport {
+            session_id: sid,
+            format: ReportFormat::Markdown,
+            destination: dest.clone(),
+            overwrite,
+            include_screenshots: true,
+        };
+        assert!(l.send(export(false)));
+        l.wait("conflict", |s| {
+            matches!(&s.reports.action, Some(a)
+                if matches!(&a.status, RequestStatus::Failed(f) if f.code == Some(ErrorCode::StateConflict)))
+        });
+        assert!(l.send(export(true)));
+        l.wait("exported", |s| {
+            matches!(&s.reports.action, Some(a)
+                if matches!(&a.status, RequestStatus::Done(ReportOutcome::Exported(x)) if x.path == dest && x.screenshots == 2))
+        });
+        assert!(
+            lock(&server.requests).contains(&Request::ExportSessionReport {
+                session_id: sid,
+                format: ReportFormat::Markdown,
+                destination: dest.to_str().unwrap().into(),
+                overwrite: true,
+                include_screenshots: true,
+            })
+        );
+
+        // The event re-reads the list and the report shown.
+        let header_reads = || {
+            lock(&server.requests)
+                .iter()
+                .filter(|r| matches!(r, Request::GetSessionReport { .. }))
+                .count()
+        };
+        let before = header_reads();
+        lock(&server.events).push(ServiceEvent::SessionReportChanged { session_id: sid });
+        l.wait("re-read", |_| header_reads() > before);
+
+        assert!(l.send(ServiceCommand::DeleteSessionReport(sid)));
+        l.wait("deleted", |s| {
+            matches!(&s.reports.action, Some(a) if a.status == RequestStatus::Done(ReportOutcome::Deleted))
+                && !s.reports.headers.contains_key(&sid)
+        });
     }
 }

@@ -589,9 +589,10 @@ fn snapshot_dashboard_with_session_request() {
 #[test]
 fn snapshot_agent_session_page() {
     let _serial = serial();
-    let (mut app, _hs) = agents_app(false, Some(true));
+    let (mut app, hs) = agents_app(false, Some(true));
+    with_reports(&hs);
     app.set_section(Section::Agents);
-    let mut h = harness(app, egui::vec2(1100.0, 1200.0));
+    let mut h = harness(app, egui::vec2(1100.0, 2700.0));
     h.get_by_role_and_label(Role::Button, "Open the agent session")
         .click_accesskit();
     h.run();
@@ -630,4 +631,186 @@ fn snapshot_dialog_revoke() {
         .click_accesskit();
     h.run();
     h.snapshot("dialog_revoke");
+}
+
+/// F5: reports of the catalog of `agents_app`: the live session (pending),
+/// the lease-expired one (timed out, from the termination) and older ones
+/// with a verifier and a user verdict; the ended one has its events and a
+/// declaration.
+fn with_reports(hs: &common::Handles) {
+    use lightvm_proto::TerminationCause as T;
+    use lightvm_proto::TestOutcome as O;
+    use lightvm_proto::report::OutcomeSource as S;
+    hs.update(|s| {
+        s.reports.loaded = true;
+        let live = common::report(1, 1, "claude-desktop", None, O::Inconclusive, S::Pending);
+        let mut ended = common::report(
+            2,
+            1,
+            "test-runner",
+            Some(T::LeaseExpired),
+            O::TimedOut,
+            S::Termination,
+        );
+        ended.started_at = common::at(-50 * 60);
+        ended.ended_at = Some(common::at(-31 * 60));
+        ended.agent_declaration = Some(lightvm_proto::report::AgentDeclaration {
+            claimed_outcome: O::Passed,
+            summary: "The file was saved in the home folder.".into(),
+            at: common::at(-32 * 60),
+        });
+        let mut verified = common::report(
+            3,
+            1,
+            "claude-code",
+            Some(T::Completed),
+            O::Passed,
+            S::Verifier,
+        );
+        verified.started_at = common::at(-26 * 3600);
+        verified.ended_at = Some(common::at(-25 * 3600));
+        let mut judged = common::report(4, 1, "claude-code", Some(T::Revoked), O::Failed, S::User);
+        judged.started_at = common::at(-50 * 3600);
+        judged.ended_at = Some(common::at(-49 * 3600));
+        let mut broken = common::report(
+            5,
+            1,
+            "test-runner",
+            Some(T::VmTerminated),
+            O::InfrastructureError,
+            S::Termination,
+        );
+        broken.started_at = common::at(-74 * 3600);
+        broken.ended_at = Some(common::at(-73 * 3600));
+        s.reports.list = [&live, &ended, &verified, &judged, &broken]
+            .iter()
+            .map(|r| r.summary())
+            .collect();
+        s.reports.tail.insert(
+            live.session_id,
+            lightvm_desktop::service::EventsPage {
+                total: 42,
+                offset: 37,
+                events: common::report_events(37)[1..].to_vec(),
+            },
+        );
+        s.reports.events.insert(
+            live.session_id,
+            lightvm_desktop::service::EventsPage {
+                total: 42,
+                offset: 0,
+                events: common::report_events(1)[..5].to_vec(),
+            },
+        );
+        s.reports.events.insert(
+            ended.session_id,
+            lightvm_desktop::service::EventsPage {
+                total: 42,
+                offset: 0,
+                events: common::report_events(1),
+            },
+        );
+        for r in [live, ended, verified, judged, broken] {
+            s.reports.headers.insert(r.session_id, r);
+        }
+    });
+}
+
+/// Deterministic test image (not a real guest screen) as a decoded shot.
+fn test_shot(w: usize, h: usize) -> lightvm_desktop::service::ShotImage {
+    let img = deterministic_frame(w, h);
+    let rgba: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
+    lightvm_desktop::service::ShotImage {
+        sha256: lightvm_proto::Sha256Digest::from_bytes([0x3e; 32]),
+        png_bytes: 245_760,
+        size: [w, h],
+        rgba: std::sync::Arc::new(rgba),
+    }
+}
+
+#[test]
+fn snapshot_agents_workspace() {
+    let _serial = serial();
+    let (mut app, hs) = agents_app(false, Some(true));
+    with_reports(&hs);
+    app.set_section(Section::Agents);
+    let mut h = harness(app, egui::vec2(1100.0, 1500.0));
+    h.get_by_role_and_label(Role::Button, "Show the latest screenshot of claude-desktop")
+        .click_accesskit();
+    h.run_steps(2);
+    hs.update(|s| {
+        s.reports.set_shot(
+            common::session_id(1),
+            2,
+            lightvm_desktop::service::RequestStatus::Done(test_shot(640, 400)),
+        );
+    });
+    h.run();
+    h.snapshot("agents_workspace");
+}
+
+#[test]
+fn snapshot_report_page() {
+    let _serial = serial();
+    let (mut app, hs) = agents_app(false, Some(true));
+    with_reports(&hs);
+    app.set_section(Section::Agents);
+    let mut h = harness(app, egui::vec2(1100.0, 3000.0));
+    h.get_by_role_and_label(
+        Role::Button,
+        &lightvm_desktop::reports::open_report_name("test-runner", common::at(-50 * 60)),
+    )
+    .click_accesskit();
+    h.run();
+    h.get_by_role_and_label(Role::Button, "Show screenshot 1")
+        .click_accesskit();
+    h.run_steps(2);
+    hs.update(|s| {
+        s.reports.set_shot(
+            common::session_id(2),
+            0,
+            lightvm_desktop::service::RequestStatus::Done(test_shot(640, 400)),
+        );
+    });
+    h.run();
+    h.snapshot("report_page");
+}
+
+#[test]
+fn snapshot_report_dialogs() {
+    let _serial = serial();
+    let (mut app, hs) = agents_app(false, Some(true));
+    with_reports(&hs);
+    app.set_section(Section::Agents);
+    let mut h = harness(app, egui::vec2(1100.0, 900.0));
+    h.get_by_role_and_label(
+        Role::Button,
+        &lightvm_desktop::reports::open_report_name("test-runner", common::at(-50 * 60)),
+    )
+    .click_accesskit();
+    h.run();
+    h.get_by_role_and_label(Role::Button, "Set your verdict")
+        .click_accesskit();
+    h.run();
+    h.get_by_label("Passed: the objective was met")
+        .click_accesskit();
+    h.run();
+    h.snapshot("dialog_report_verdict");
+    h.get_by_role_and_label(Role::Button, "Cancel")
+        .click_accesskit();
+    h.run();
+    h.get_by_role_and_label(Role::Button, "Export the report")
+        .click_accesskit();
+    h.run();
+    h.get_by_label("Also save the 2 stored screenshots in a folder next to it")
+        .click_accesskit();
+    h.run();
+    h.snapshot("dialog_report_export");
+    h.get_by_role_and_label(Role::Button, "Cancel")
+        .click_accesskit();
+    h.run();
+    h.get_by_role_and_label(Role::Button, "Delete the report and its screenshots")
+        .click_accesskit();
+    h.run();
+    h.snapshot("dialog_report_delete");
 }

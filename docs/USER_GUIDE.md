@@ -330,9 +330,36 @@ Then tick **The agent shows the code …** (after comparing it) and press **Appr
 - **Take control** / **Give control**: keyboard and mouse belong either to you or to the agent, never both. While the agent has them, the console shows *Input controlled by the agent …* and nothing you type or click is sent to the VM; **Take control** gives them back at once (keys the agent was holding are released).
 - **Revoke…**: ends the session at once after a confirmation; the agent's connection is closed and it needs a new approval to come back. Actions it already sent may still complete. The VM keeps running.
 - **Emergency Stop**: stops **all** VMs and ends every session immediately. It stays clickable even while a dialog is open.
-- **Details**: the session page with the stated objective, the VM, what was allowed, the time window, how much of the limits was used, and the session events LightVM saw (request, start, pause, keyboard handover, end). Every action of the agent is also recorded in the audit log (section 12).
+- **Details**: the session page with the stated objective, the state and its controls, the session report (see below) and the session events this app saw while it was open (request, start, pause, keyboard handover, end). Every action of the agent is also recorded in the audit log (section 12).
 
-The Agents page lists the active session with the same controls and the last ended sessions with the reason they ended (for example *revoked by you*, *time limit reached*, *the agent stopped responding; its VM was stopped*).
+**6. The AI Workspace.** The Agents page is titled **AI Workspace**. From the top:
+
+- **Current session**: the session running now, with the client, the VM, the time left, the **objective** the agent stated, **So far** (actions, input events and screenshots used against the limits) and the last five actions recorded by LightVM. **Show the agent's latest screenshot** shows the last screenshot the agent took (re-read every few seconds while shown); **Hide** removes it. It is never shown unless you press the button, and never saved by the app. Below are the same controls as the bar at the top.
+- **Session requests** and **Agent access**, as described above.
+- **Session history**: every session report kept by LightVM, newest first (also after LightVM restarts), with the client, the VM, start and end time in UTC, the reason it ended, the number of actions and screenshots, and the **outcome** with where it comes from. **Report** opens it.
+
+**7. Session reports and outcomes.** LightVM (not the agent) writes a report for every approved session: the objective, the VM and what was allowed, the limits, the policy revision, the versions of LightVM and of the MCP protocol, the backend and accelerator, the baseline the VM started from, every call the agent made (refused ones included), the results of its tools, its screenshots by SHA-256, errors and how the session ended. Text the agent typed into the VM is never stored: only its length and SHA-256.
+
+The **outcome** is one of **Passed**, **Failed**, **Inconclusive**, **Cancelled**, **Timed out** and **Infrastructure error**, always with its source:
+
+| Source | Meaning |
+| --- | --- |
+| *pending: session running* | The session is still live; the outcome reads inconclusive until it ends. |
+| *from how the session ended* | Default: ended by the agent, disconnected or baseline restored → Inconclusive; revoked, Emergency Stop or LightVM closed → Cancelled; time limit or lease expired → Timed out; the VM or the supervisor stopped → Infrastructure error. Finishing the conversation never gives Passed. |
+| *by the automatic verifier* | The result of **Run automatic check…** (below). |
+| *your verdict* | The verdict you set, recorded as decided by *local user* with the time. |
+
+The report page also shows the **Agent's declaration**: what the agent says about its own result (for example *The agent claims: passed* and its summary). It is clearly marked as a claim: **it never sets the outcome**.
+
+On the report page:
+
+- **Set verdict…**: choose *Passed*, *Failed* or *Inconclusive* and press **Record verdict**. Your verdict replaces the current outcome; earlier verdicts stay in the **Verdict history**. There is nothing to type.
+- **Run automatic check…**: for LightVM test VMs that show the test fixture screen, checks the agent's last stored screenshot for the reference blocks and the marker (choose whether the marker should be on screen or not). The result replaces the outcome and is attributed to the verifier. On any other screen the result is failed or inconclusive.
+- **Actions recorded**: the events in order, 50 at a time (**Previous** / **Next**). A stored screenshot has a **Show** button: the screenshot is read only then, checked against its SHA-256 (an altered file is not shown), kept in memory and never saved by the app; **Hide** removes it.
+
+**8. Export.** **Export…** → choose **Markdown** (to read) or **JSON** (the canonical report, for tools) and, if you want, **Also save the stored screenshots in a folder next to it** (screenshots can show anything that was on the guest screen, passwords included) → **Choose where to save…** opens the Windows save dialog. Only you choose where the file goes; agents can never export. If a file with that name already exists, LightVM asks before replacing it (**Replace the file**). When it is done, LightVM shows where it wrote the report, its size and SHA-256, and how many screenshots it saved in the folder `<name>-screenshots`.
+
+**9. Retention and deletion.** Reports and their screenshots are kept in the VM catalog (`sessions\<session>\` inside the catalog folder) until you delete them. At most 300 screenshots (512 MiB) are stored per session; later ones keep only their hash (*not stored*). The 100 most recent reports are kept; older ended ones are removed automatically. **Delete report…** (ended sessions only) removes the report **and its stored screenshots** after a confirmation; copies you exported are not touched. Screenshots cannot be deleted on their own: delete the report, or export it first if you need to keep a copy.
 
 **If LightVM itself stops responding** while an agent works, run in a terminal `& "$env:LOCALAPPDATA\Programs\LightVM\lightvm-service.exe" --emergency-stop --catalog "$env:LOCALAPPDATA\LightVM\catalog"` (PowerShell; use your catalog folder if you moved it): it stops every VM and agent session of that catalog without going through the app.
 

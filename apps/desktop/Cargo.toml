@@ -43,6 +43,11 @@ lightvm-service = { path = "../../crates/lightvm-service", default-features = fa
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 tokio = { version = "=1.53.2", features = ["rt", "sync", "time", "macros"] }
+# Session reports (F5): screenshots read on demand are checked against their
+# SHA-256 and decoded for display (same versions as the rest of the
+# workspace; the UI never writes them to disk).
+sha2 = "=0.11.0"
+png = "=0.18.1"
 
 # Native folder picker for the Settings page (no text field): Windows only,
 # the MVP target; elsewhere the paths come from the command line.
@@ -53,9 +58,6 @@ rfd = { version = "=0.15.4", default-features = false }
 # `snapshot` + `wgpu`: graphical snapshots compared with the files in
 # `tests/snapshots/` (F1-19, ADR-0022); tolerance in `kittest.toml`.
 egui_kittest = { workspace = true, features = ["snapshot", "wgpu"] }
-# Real agent session test (F4 UI): SHA-256 of the agent's screenshots,
-# same version as the rest of the workspace.
-sha2 = "=0.11.0"
 
 [lints]
 workspace = true

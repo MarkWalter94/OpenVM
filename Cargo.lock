@@ -2040,6 +2040,7 @@ dependencies = [
  "f0-console",
  "lightvm-proto",
  "lightvm-service",
+ "png",
  "rfb-client",
  "rfd",
  "serde",

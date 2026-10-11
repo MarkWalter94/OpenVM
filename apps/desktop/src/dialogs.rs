@@ -65,7 +65,38 @@ pub fn confirm_with_consent(
     pending: bool,
     error: Option<&str>,
     focus_cancel: bool,
-    mut consent: Option<(&str, &mut bool)>,
+    consent: Option<(&str, &mut bool)>,
+) -> Option<Choice> {
+    confirm_custom(
+        ui,
+        id,
+        spec,
+        pending,
+        error,
+        focus_cancel,
+        |ui, enabled| match consent {
+            Some((text, value)) => {
+                ui.add_space(10.0);
+                ui.add_enabled(enabled, egui::Checkbox::new(value, text));
+                *value
+            }
+            None => true,
+        },
+    )
+}
+
+/// As [`confirm`], with content of the caller between the explanation and
+/// the buttons (choices, never text fields): `content` receives whether
+/// the controls are enabled and returns whether the action can be
+/// confirmed.
+pub fn confirm_custom(
+    ui: &egui::Ui,
+    id: &str,
+    spec: &ConfirmSpec,
+    pending: bool,
+    error: Option<&str>,
+    focus_cancel: bool,
+    content: impl FnOnce(&mut egui::Ui, bool) -> bool,
 ) -> Option<Choice> {
     let ctx = ui.ctx().clone();
     let mut choice = None;
@@ -77,10 +108,7 @@ pub fn confirm_with_consent(
             ui.label(egui::RichText::new(&spec.title).size(17.0).color(p.text));
             ui.add_space(6.0);
             ui.add(egui::Label::new(egui::RichText::new(&spec.body).color(p.text_weak)).wrap());
-            if let Some((text, value)) = consent.as_mut() {
-                ui.add_space(10.0);
-                ui.add_enabled(!pending, egui::Checkbox::new(value, *text));
-            }
+            let ready = content(ui, !pending);
             if let Some(e) = error {
                 ui.add_space(8.0);
                 theme::notice(ui, e, Tone::Danger);
@@ -93,13 +121,12 @@ pub fn confirm_with_consent(
                 });
             }
             ui.add_space(16.0);
-            let consented = consent.as_ref().is_none_or(|(_, v)| **v);
             buttons(
                 ui,
                 &spec.confirm,
                 spec.destructive,
                 !pending,
-                consented,
+                ready,
                 focus_cancel,
                 &mut choice,
             );

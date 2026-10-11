@@ -630,7 +630,13 @@ fn sessions_ui_with_a_real_agent_and_qemu() {
     click(&mut h, "Agents");
     h.get_by_label_contains("revoked by you");
     // The session page lists what the app saw, request included.
-    click(&mut h, "Details of the session of f4-ui-e2e-agent");
+    // F5: the ended session is in the history through its report.
+    let open = h
+        .query_all_by_role(Role::Button)
+        .filter_map(|n| n.accesskit_node().label())
+        .find(|l| l.starts_with("Open the report of f4-ui-e2e-agent"))
+        .unwrap_or_else(|| "Details of the session of f4-ui-e2e-agent".into());
+    click(&mut h, &open);
     for t in [
         "Session started",
         "Keyboard and mouse handed to the agent",

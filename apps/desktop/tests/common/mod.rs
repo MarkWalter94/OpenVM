@@ -325,3 +325,168 @@ pub(crate) fn session(
         input_owner: input,
     }
 }
+
+/// Report of session `n` of `client` on VM `vm` ("lab"), started 8 minutes
+/// before `now()`; ended 2 minutes before it with `termination` (live and
+/// pending when `None`). 3 screenshots (2 stored), 42 events, verdicts as
+/// given by `outcome`/`source`.
+pub(crate) fn report(
+    n: u8,
+    vm: u8,
+    client: &str,
+    termination: Option<lightvm_proto::TerminationCause>,
+    outcome: lightvm_proto::TestOutcome,
+    source: lightvm_proto::report::OutcomeSource,
+) -> lightvm_proto::report::SessionReport {
+    use lightvm_proto::Capability;
+    use lightvm_proto::report::{OutcomeSource, ReportVersions, SessionReport, Verdict};
+    let verdicts = match source {
+        OutcomeSource::Pending => vec![],
+        OutcomeSource::Termination => vec![Verdict {
+            outcome,
+            source,
+            verifier: None,
+            decided_by: "service".into(),
+            rationale: "default from the termination cause".into(),
+            at: at(-2 * 60),
+        }],
+        OutcomeSource::Verifier => vec![Verdict {
+            outcome,
+            source,
+            verifier: Some("fixture_marker v1".into()),
+            decided_by: "verifier".into(),
+            rationale: "fixture marker present on the last screenshot".into(),
+            at: at(-60),
+        }],
+        OutcomeSource::User => vec![Verdict {
+            outcome,
+            source,
+            verifier: None,
+            decided_by: "local user".into(),
+            rationale: lightvm_desktop::reports::USER_VERDICT_RATIONALE.into(),
+            at: at(-60),
+        }],
+    };
+    SessionReport {
+        report_format: lightvm_proto::report::REPORT_FORMAT.into(),
+        session_id: session_id(n),
+        vm_id: vm_id(vm),
+        vm_name: "lab".into(),
+        client_name: client.into(),
+        objective: "Check that the text editor saves a file in the home folder".into(),
+        started_at: at(-8 * 60),
+        ended_at: termination.map(|_| at(-2 * 60)),
+        state: if termination.is_some() {
+            lightvm_proto::SessionState::Terminated
+        } else {
+            lightvm_proto::SessionState::Active
+        },
+        termination,
+        outcome,
+        outcome_source: source,
+        run_ids: vec![run_id(vm)],
+        baseline_id: Some(baseline_id(1)),
+        baseline: Some(lightvm_proto::report::ReportBaseline {
+            baseline_id: baseline_id(1),
+            label: "Clean install".into(),
+            created_at: at(-24 * 3600),
+            clean_shutdown: true,
+            disk_sha256: Sha256Digest::from_bytes([0xab; 32]),
+            firmware_sha256: None,
+        }),
+        guest_os: lightvm_proto::GuestOs::UbuntuLtsX86_64,
+        vm_manifest_sha256: Sha256Digest::from_bytes([0x5c; 32]),
+        vm_config_revision: 3,
+        policy_revision: lightvm_proto::PolicyRevision(4),
+        capabilities: [
+            Capability::VmList,
+            Capability::VmStatus,
+            Capability::VmScreenshot,
+            Capability::VmInput,
+        ]
+        .into(),
+        quotas: lightvm_proto::ipc::AGENT_DEFAULT_QUOTAS,
+        expires_at: at(52 * 60),
+        versions: ReportVersions {
+            service: "0.0.0".into(),
+            ipc_protocol: 1,
+            mcp_protocol: Some("2025-11-25".into()),
+            backend: Some("qemu".into()),
+            accelerator: Some("whpx".into()),
+        },
+        agent_declaration: None,
+        verdicts,
+        errors: [("permission_denied".to_owned(), 1)].into(),
+        screenshots_retained: 2,
+        screenshots_dropped: 1,
+        events_total: 42,
+        events_dropped: 0,
+        events: Vec::new(),
+        report_sha256: Some(Sha256Digest::from_bytes([0x11; 32])),
+    }
+}
+
+/// A few report events of session `n`: start, a screenshot (stored), an
+/// input refused, a tool note, a declaration; `seq` from `first`.
+pub(crate) fn report_events(first: u64) -> Vec<lightvm_proto::report::ReportEvent> {
+    use lightvm_proto::report::{ReportEvent, ReportEventBody};
+    let bodies = vec![
+        ReportEventBody::Session {
+            state: lightvm_proto::SessionState::Active,
+            termination: None,
+        },
+        ReportEventBody::Call {
+            call: "screenshot".into(),
+            vm_id: Some(vm_id(1)),
+            run_id: Some(run_id(1)),
+            operation_id: None,
+            ok: true,
+            error_code: None,
+        },
+        ReportEventBody::Screenshot {
+            shot: 0,
+            run_id: run_id(1),
+            width: 1280,
+            height: 800,
+            sha256: Sha256Digest::from_bytes([0x3e; 32]),
+            bytes: 245_760,
+            retained: true,
+        },
+        ReportEventBody::Call {
+            call: "submit.reset".into(),
+            vm_id: Some(vm_id(1)),
+            run_id: Some(run_id(1)),
+            operation_id: None,
+            ok: false,
+            error_code: Some(lightvm_proto::ErrorCode::PermissionDenied),
+        },
+        ReportEventBody::Tool {
+            tool: "vm_keyboard_type".into(),
+            ok: true,
+            error_code: None,
+            detail: serde_json::json!({"chars": 12, "layout": "us"}),
+        },
+        ReportEventBody::Declaration {
+            claimed_outcome: lightvm_proto::TestOutcome::Passed,
+        },
+    ];
+    bodies
+        .into_iter()
+        .enumerate()
+        .map(|(i, body)| ReportEvent {
+            seq: first + i as u64,
+            at: at(-7 * 60 + i as i64 * 30),
+            body,
+        })
+        .collect()
+}
+
+/// 4×3 red PNG screenshot, decoded as the app would.
+pub(crate) fn shot_image() -> lightvm_desktop::service::ShotImage {
+    lightvm_desktop::service::ShotImage {
+        sha256: Sha256Digest::from_bytes([0x3e; 32]),
+        png_bytes: 245_760,
+        size: [4, 3],
+        rgba: Arc::new([200u8, 40, 40, 255].repeat(12)),
+    }
+}
