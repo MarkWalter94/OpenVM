@@ -34,13 +34,14 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use lightvm_proto::ipc::{
-    BaselineSummary, ConsoleTicket, ParentLossPolicy, Request, ResponseBody, ServerMessage,
-    ServiceEvent, VmSummary,
+    BaselineSummary, ConsoleTicket, InputOwner, ParentLossPolicy, Request, ResponseBody,
+    ServerMessage, ServiceEvent, SessionApproval, SessionInfo, SessionRequestId,
+    SessionRequestInfo, SessionRequestOutcome, VmSummary,
 };
 use lightvm_proto::{
     BaselineId, ErrorCode, HostCapacity, InputBatch, InputEvent, KeyAction, Label, MediaKind,
     MediaRecord, MouseButton, OperationId, OperationStatus, PointerButton, ReplyError, RunId,
-    VmAction, VmConfig, VmId, VmRequest,
+    SessionId, SessionState, TerminationCause, UtcTimestamp, VmAction, VmConfig, VmId, VmRequest,
 };
 use lightvm_service::client::Client;
 use lightvm_service::credential::Credential;
@@ -75,6 +76,9 @@ pub struct ServiceConfig {
     pub audit_log: Option<PathBuf>,
     /// Fate of the VMs if the UI terminates without a controlled stop.
     pub policy: ParentLossPolicy,
+    /// Folder of the pairing file for agent clients (F4); `None`: the
+    /// per-user default ([`crate::pairing::default_dir`]).
+    pub pairing_dir: Option<PathBuf>,
 }
 
 impl ServiceConfig {
@@ -265,6 +269,214 @@ pub struct BaselineRequest {
     pub status: RequestStatus<BaselineId>,
 }
 
+/// Control of the agent sessions requested by the UI (F4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentOp {
+    /// Agent access switch.
+    SetAccess(bool),
+    /// Denial of a session request.
+    Deny(SessionRequestId),
+    /// Pause of a session.
+    Pause(SessionId),
+    /// Resume of a paused session.
+    Resume(SessionId),
+    /// Revocation of a session.
+    Revoke(SessionId),
+    /// Input ownership of a VM.
+    InputOwner(VmId, InputOwner),
+}
+
+/// Last agent control requested by the UI and its outcome.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentControl {
+    /// Operation.
+    pub op: AgentOp,
+    /// Outcome.
+    pub status: RequestStatus<()>,
+}
+
+/// Last session approval sent by the UI and its outcome (the session).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Approval {
+    /// Request approved.
+    pub request_id: SessionRequestId,
+    /// Outcome.
+    pub status: RequestStatus<SessionId>,
+}
+
+/// Session event seen by the app, for the session page.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentLogEntry {
+    /// Instant the app saw it.
+    pub at: UtcTimestamp,
+    /// Session concerned, if any.
+    pub session_id: Option<SessionId>,
+    /// Agent connection of a session request, until the session it led to
+    /// is known (then [`Self::session_id`] is set).
+    pub connection_id: Option<lightvm_proto::ipc::ConnectionId>,
+    /// Readable description (plain text).
+    pub text: String,
+}
+
+/// Entries kept in [`AgentState::log`].
+pub const AGENT_LOG_ENTRIES: usize = 200;
+
+/// Agent access, session requests and sessions known to the UI (F4).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AgentState {
+    /// Agent access switch, once read (off at every supervisor start).
+    pub access: Option<bool>,
+    /// Pending session requests, oldest first.
+    pub requests: Vec<SessionRequestInfo>,
+    /// Sessions: live first, then the most recent terminated ones.
+    pub sessions: Vec<SessionInfo>,
+    /// The session list was received at least once.
+    pub sessions_loaded: bool,
+    /// Input owner of the VMs, as last reported by the supervisor.
+    pub input_owners: BTreeMap<VmId, InputOwner>,
+    /// Last approval.
+    pub approval: Option<Approval>,
+    /// Last control (switch, deny, pause, resume, revoke, input).
+    pub control: Option<AgentControl>,
+    /// Last pairing file written for an agent client.
+    pub pairing: RequestStatus<crate::pairing::PairingFile>,
+    /// Last read error (access, requests, sessions).
+    pub error: Option<Failure>,
+    /// Session events seen by the app, oldest first (at most
+    /// [`AGENT_LOG_ENTRIES`]).
+    pub log: VecDeque<AgentLogEntry>,
+    /// Last state of each session recorded in [`Self::log`] (events and
+    /// replies can arrive in either order: each change is recorded once).
+    pub logged: BTreeMap<SessionId, SessionState>,
+}
+
+impl AgentState {
+    /// Sessions not terminated (active or paused).
+    pub fn live(&self) -> impl Iterator<Item = &SessionInfo> {
+        self.sessions
+            .iter()
+            .filter(|s| s.state != SessionState::Terminated)
+    }
+
+    /// Session by identifier.
+    pub fn session(&self, id: SessionId) -> Option<&SessionInfo> {
+        self.sessions.iter().find(|s| s.session_id == id)
+    }
+
+    /// Pending request by identifier.
+    pub fn request(&self, id: SessionRequestId) -> Option<&SessionRequestInfo> {
+        self.requests.iter().find(|r| r.request_id == id)
+    }
+
+    /// Live session that owns the input of `vm`, if any. An owner reported
+    /// for a session known to be terminated counts as the user.
+    pub fn input_session(&self, vm: VmId) -> Option<&SessionInfo> {
+        match self.input_owners.get(&vm) {
+            Some(InputOwner::Agent { session_id }) => self
+                .session(*session_id)
+                .filter(|s| s.state != SessionState::Terminated),
+            Some(InputOwner::User) => None,
+            None => self.live().find(|s| s.vm_id == vm && s.input_owner),
+        }
+    }
+
+    /// An agent owns the input of `vm` (the user's input is not sent).
+    pub fn agent_has_input(&self, vm: VmId) -> bool {
+        match self.input_owners.get(&vm) {
+            // Not listed yet (event before the list): still the agent's.
+            Some(InputOwner::Agent { session_id }) => self
+                .session(*session_id)
+                .is_none_or(|s| s.state != SessionState::Terminated),
+            Some(InputOwner::User) => false,
+            None => self.input_session(vm).is_some(),
+        }
+    }
+
+    /// Records a session event seen by the app.
+    pub fn record(&mut self, at: UtcTimestamp, session_id: Option<SessionId>, text: String) {
+        self.push_log(AgentLogEntry {
+            at,
+            session_id,
+            connection_id: None,
+            text,
+        });
+    }
+
+    /// Records an event of a session request of an agent connection; it
+    /// joins the session's events once the session is known.
+    pub fn record_request(
+        &mut self,
+        at: UtcTimestamp,
+        connection_id: lightvm_proto::ipc::ConnectionId,
+        text: String,
+    ) {
+        self.push_log(AgentLogEntry {
+            at,
+            session_id: None,
+            connection_id: Some(connection_id),
+            text,
+        });
+        self.adopt_log();
+    }
+
+    fn push_log(&mut self, e: AgentLogEntry) {
+        if self.log.len() >= AGENT_LOG_ENTRIES {
+            self.log.pop_front();
+        }
+        self.log.push_back(e);
+    }
+
+    /// Request events of a connection become events of the session bound
+    /// to that connection.
+    fn adopt_log(&mut self) {
+        for s in &self.sessions {
+            let Some(c) = s.connection_id else { continue };
+            for e in &mut self.log {
+                if e.session_id.is_none() && e.connection_id == Some(c) {
+                    e.session_id = Some(s.session_id);
+                }
+            }
+        }
+    }
+
+    /// Replaces the session list (re-read).
+    pub fn set_sessions(&mut self, sessions: Vec<SessionInfo>) {
+        self.sessions = sessions;
+        self.sessions_loaded = true;
+        self.adopt_log();
+    }
+
+    /// Replaces or adds a session in the list.
+    pub fn upsert(&mut self, session: SessionInfo) {
+        match self
+            .sessions
+            .iter_mut()
+            .find(|s| s.session_id == session.session_id)
+        {
+            Some(s) => *s = session,
+            None => self.sessions.insert(0, session),
+        }
+        self.adopt_log();
+    }
+}
+
+/// Plain description of a termination cause.
+pub fn termination_text(c: TerminationCause) -> &'static str {
+    match c {
+        TerminationCause::Completed => "ended by the agent",
+        TerminationCause::Revoked => "revoked by you",
+        TerminationCause::EmergencyStop => "Emergency Stop",
+        TerminationCause::GrantExpired => "time limit reached",
+        TerminationCause::LeaseExpired => "the agent stopped responding; its VM was stopped",
+        TerminationCause::ClientLost => "the agent disconnected; its VM was stopped",
+        TerminationCause::UiClosed => "LightVM closed; the VM was stopped",
+        TerminationCause::SupervisorLost => "supervisor restarted",
+        TerminationCause::HostResumed => "host resumed from sleep",
+        TerminationCause::VmTerminated => "the VM stopped",
+        TerminationCause::Restored => "baseline restored",
+    }
+}
+
 /// State seen by the UI, updated by the IPC threads.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ServiceState {
@@ -300,6 +512,8 @@ pub struct ServiceState {
     pub baselines: BTreeMap<VmId, BaselineList>,
     /// Last baseline operation (creation, restore, deletion).
     pub baseline: Option<BaselineRequest>,
+    /// Agent access and sessions (F4).
+    pub agents: AgentState,
 }
 
 impl ServiceState {
@@ -408,6 +622,54 @@ pub enum ServiceCommand {
         /// Baseline.
         baseline_id: BaselineId,
     },
+    /// Re-reads the agent access switch (F4).
+    GetAgentAccess,
+    /// Turns agent access on or off (off: pending requests denied, live
+    /// sessions revoked, pairing file removed).
+    SetAgentAccess(bool),
+    /// Re-reads the pending session requests.
+    ListSessionRequests,
+    /// Re-reads the sessions.
+    ListSessions,
+    /// Approves a session request.
+    ApproveSession {
+        /// Request.
+        request_id: SessionRequestId,
+        /// What the user grants.
+        approval: SessionApproval,
+    },
+    /// Denies a session request.
+    DenySession(SessionRequestId),
+    /// Pauses a session (agent mutations refused, VM running).
+    PauseSession(SessionId),
+    /// Resumes a paused session.
+    ResumeSession(SessionId),
+    /// Revokes a session (VM not stopped).
+    RevokeSession(SessionId),
+    /// Sets the input owner of a VM (user, or a session of that VM).
+    SetInputOwner {
+        /// VM.
+        vm_id: VmId,
+        /// New owner.
+        owner: InputOwner,
+    },
+    /// Issues a pairing credential and writes it to the pairing file.
+    CreatePairing,
+}
+
+impl ServiceCommand {
+    /// Agent control of the command, if it is one.
+    pub fn agent_op(&self) -> Option<AgentOp> {
+        Some(match self {
+            Self::SetAgentAccess(on) => AgentOp::SetAccess(*on),
+            Self::DenySession(id) => AgentOp::Deny(*id),
+            Self::PauseSession(id) => AgentOp::Pause(*id),
+            Self::ResumeSession(id) => AgentOp::Resume(*id),
+            Self::RevokeSession(id) => AgentOp::Revoke(*id),
+            Self::SetInputOwner { vm_id, owner } => AgentOp::InputOwner(*vm_id, *owner),
+            _ => return None,
+        })
+    }
 }
 
 impl ServiceCommand {
@@ -537,6 +799,8 @@ pub struct Service {
     commands: mpsc::UnboundedSender<ServiceCommand>,
     state: Arc<Mutex<ServiceState>>,
     ticket: TicketSlot,
+    /// Folder of the pairing file, removed when the service stops.
+    pairing_dir: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for Service {
@@ -611,6 +875,12 @@ impl Service {
             endpoint,
             credential,
         } = ready;
+        let pairing_dir = cfg.pairing_dir.clone().or_else(crate::pairing::default_dir);
+        // A pairing file of a previous run holds a credential that did not
+        // survive it.
+        if let Some(d) = &pairing_dir {
+            crate::pairing::remove(d);
+        }
         // The IPC tasks keep only a weak sender: when the `Service` is
         // dropped the command channel closes and the IPC thread ends.
         let lanes = Lanes {
@@ -618,6 +888,8 @@ impl Service {
             ticket: ticket.clone(),
             repaint,
             tx: commands.downgrade(),
+            endpoint: Arc::from(endpoint.as_str()),
+            pairing_dir: pairing_dir.clone(),
         };
         std::thread::Builder::new()
             .name("service-ipc".into())
@@ -642,6 +914,7 @@ impl Service {
             commands,
             state,
             ticket,
+            pairing_dir,
         })
     }
 
@@ -672,6 +945,9 @@ impl Service {
     /// pipe; once `timeout` has expired, forced termination. Returns the exit
     /// code and whether forcing was necessary.
     pub fn stop(&mut self, timeout: Duration) -> (Option<i32>, bool) {
+        if let Some(d) = &self.pairing_dir {
+            crate::pairing::remove(d);
+        }
         if let Some(mut s) = self.stdin.take() {
             let _ = s.write_all(b"shutdown\n").and_then(|()| s.flush());
         }
@@ -749,6 +1025,9 @@ fn send_command(
 
 impl Drop for Service {
     fn drop(&mut self) {
+        if let Some(d) = &self.pairing_dir {
+            crate::pairing::remove(d);
+        }
         if self.is_alive() {
             let _ = self.stop(STOP_TIMEOUT);
         } else {
@@ -775,10 +1054,22 @@ pub fn mark_pending(
                 status: RequestStatus::Pending,
             });
         }
+        ServiceCommand::ApproveSession { request_id, .. } => {
+            s.agents.approval = Some(Approval {
+                request_id: *request_id,
+                status: RequestStatus::Pending,
+            });
+        }
+        ServiceCommand::CreatePairing => s.agents.pairing = RequestStatus::Pending,
         c => {
             if let Some((vm_id, op)) = c.baseline_op() {
                 s.baseline = Some(BaselineRequest {
                     vm_id,
+                    op,
+                    status: RequestStatus::Pending,
+                });
+            } else if let Some(op) = c.agent_op() {
+                s.agents.control = Some(AgentControl {
                     op,
                     status: RequestStatus::Pending,
                 });
@@ -804,6 +1095,13 @@ fn fail_pending(s: &mut ServiceState, why: &str) {
     if let Some(r) = &mut s.baseline {
         fail(&mut r.status, why);
     }
+    if let Some(r) = &mut s.agents.approval {
+        fail(&mut r.status, why);
+    }
+    if let Some(r) = &mut s.agents.control {
+        fail(&mut r.status, why);
+    }
+    fail(&mut s.agents.pairing, why);
     s.connected = false;
 }
 
@@ -821,6 +1119,24 @@ fn mark_failed(s: &mut ServiceState, c: &ServiceCommand, f: Failure) {
         ServiceCommand::Input(_) => s.input_error = Some(f.message),
         ServiceCommand::ListBaselines(vm_id) => {
             s.baselines.entry(*vm_id).or_default().error = Some(f);
+        }
+        ServiceCommand::GetAgentAccess
+        | ServiceCommand::ListSessionRequests
+        | ServiceCommand::ListSessions => s.agents.error = Some(f),
+        ServiceCommand::ApproveSession { request_id, .. } => {
+            s.agents.approval = Some(Approval {
+                request_id: *request_id,
+                status: RequestStatus::Failed(f),
+            });
+        }
+        ServiceCommand::CreatePairing => s.agents.pairing = RequestStatus::Failed(f),
+        c if c.agent_op().is_some() => {
+            if let Some(op) = c.agent_op() {
+                s.agents.control = Some(AgentControl {
+                    op,
+                    status: RequestStatus::Failed(f),
+                });
+            }
         }
         c => match c.baseline_op() {
             Some((vm_id, op)) => {
@@ -885,6 +1201,10 @@ struct Lanes {
     repaint: Arc<dyn Fn() + Send + Sync>,
     /// Weak: the IPC tasks must not keep the command channel open.
     tx: mpsc::WeakUnboundedSender<ServiceCommand>,
+    /// IPC endpoint (not a secret), for the pairing file.
+    endpoint: Arc<str>,
+    /// Folder of the pairing file.
+    pairing_dir: Option<PathBuf>,
 }
 
 impl Lanes {
@@ -1000,6 +1320,9 @@ async fn ipc_loop(
     });
     lanes.queue(ServiceCommand::Refresh);
     lanes.queue(ServiceCommand::ListMedia);
+    lanes.queue(ServiceCommand::GetAgentAccess);
+    lanes.queue(ServiceCommand::ListSessionRequests);
+    lanes.queue(ServiceCommand::ListSessions);
 
     let ev_lanes = lanes.clone();
     let event_reader = async move {
@@ -1021,7 +1344,7 @@ async fn ipc_loop(
                     ev_lanes.queue(ServiceCommand::Refresh);
                     ev_lanes.queue(ServiceCommand::ListBaselines(vm_id));
                 }
-                Ok(Ok(_)) => {}
+                Ok(Ok(ev)) => agent_event(&ev_lanes, ev),
                 Ok(Err(m)) => {
                     let d = describe_error(&m);
                     ev_lanes.update(|s| {
@@ -1051,7 +1374,15 @@ async fn ipc_loop(
     let executor = async move {
         while let Some(c) = rx.recv().await {
             match c {
-                ServiceCommand::Input(_) | ServiceCommand::OpenConsole(_) => fast_in.push(c),
+                // Input, tickets and the user's control over agents are
+                // never queued behind a start, a stop or a long request.
+                ServiceCommand::Input(_)
+                | ServiceCommand::OpenConsole(_)
+                | ServiceCommand::PauseSession(_)
+                | ServiceCommand::ResumeSession(_)
+                | ServiceCommand::RevokeSession(_)
+                | ServiceCommand::SetInputOwner { .. }
+                | ServiceCommand::SetAgentAccess(_) => fast_in.push(c),
                 ServiceCommand::ImportMedia { .. } => {
                     let _ = slow_tx.send(c);
                 }
@@ -1108,6 +1439,165 @@ async fn ipc_loop(
         _ = async { tokio::join!(executor, fast_lane, slow_lane, storage_lane, start_lane) } => {}
     }
     lanes.update(|s| fail_pending(s, "supervisor connection closed"));
+}
+
+/// Agent events (F4): the state the event carries is applied at once, the
+/// lists are re-read, the event is recorded for the session page.
+fn agent_event(lanes: &Lanes, ev: ServiceEvent) {
+    let now = UtcTimestamp::now();
+    match ev {
+        ServiceEvent::AgentAccess { enabled } => {
+            lanes.update(|s| {
+                s.agents.access = Some(enabled);
+                let text = if enabled {
+                    "Agent access turned on"
+                } else {
+                    "Agent access turned off"
+                };
+                s.agents.record(now, None, text.into());
+            });
+            if !enabled && let Some(d) = &lanes.pairing_dir {
+                crate::pairing::remove(d);
+                lanes.update(|s| s.agents.pairing = RequestStatus::Idle);
+            }
+            lanes.queue(ServiceCommand::ListSessionRequests);
+            lanes.queue(ServiceCommand::ListSessions);
+        }
+        ServiceEvent::SessionRequest { request } => lanes.update(|s| {
+            let text = format!(
+                "Session request from \u{201c}{}\u{201d}, code {}",
+                request.client_name, request.verification_code
+            );
+            s.agents.record_request(now, request.connection_id, text);
+            s.agents
+                .requests
+                .retain(|r| r.request_id != request.request_id);
+            s.agents.requests.push(request);
+        }),
+        ServiceEvent::SessionRequestClosed {
+            request_id,
+            outcome,
+        } => {
+            lanes.update(|s| {
+                let request = s.agents.request(request_id).map(|r| {
+                    (
+                        format!("\u{201c}{}\u{201d}", r.client_name),
+                        r.connection_id,
+                    )
+                });
+                s.agents.requests.retain(|r| r.request_id != request_id);
+                let what = match outcome {
+                    SessionRequestOutcome::Approved => "approved",
+                    SessionRequestOutcome::Denied => "denied",
+                    SessionRequestOutcome::Expired => "expired",
+                    SessionRequestOutcome::Withdrawn => "withdrawn by the agent",
+                };
+                match request {
+                    Some((c, conn)) => {
+                        s.agents
+                            .record_request(now, conn, format!("Request from {c} {what}"));
+                    }
+                    None => s
+                        .agents
+                        .record(now, None, format!("Session request {what}")),
+                }
+            });
+            lanes.queue(ServiceCommand::ListSessions);
+        }
+        ServiceEvent::SessionChanged {
+            session_id,
+            state,
+            termination,
+        } => {
+            lanes.update(|s| session_changed(s, session_id, state, termination, now));
+            lanes.queue(ServiceCommand::ListSessions);
+        }
+        ServiceEvent::InputOwner { vm_id, owner } => {
+            lanes.update(|s| set_input_owner(s, vm_id, owner, now));
+            lanes.queue(ServiceCommand::ListSessions);
+        }
+        ServiceEvent::AgentSessionsStopped { .. } => {
+            lanes.queue(ServiceCommand::ListSessionRequests);
+            lanes.queue(ServiceCommand::ListSessions);
+        }
+        ServiceEvent::EventsLost { .. } => {
+            lanes.queue(ServiceCommand::Refresh);
+            lanes.queue(ServiceCommand::GetAgentAccess);
+            lanes.queue(ServiceCommand::ListSessionRequests);
+            lanes.queue(ServiceCommand::ListSessions);
+        }
+        _ => {}
+    }
+}
+
+/// Applies a `session_changed` event and records it once.
+fn session_changed(
+    s: &mut ServiceState,
+    session_id: SessionId,
+    state: SessionState,
+    termination: Option<TerminationCause>,
+    now: UtcTimestamp,
+) {
+    let known = s.agents.logged.insert(session_id, state);
+    let text = match (state, known) {
+        (SessionState::Active, None) => "Session started".to_owned(),
+        (SessionState::Active, Some(SessionState::Active))
+        | (SessionState::Paused, Some(SessionState::Paused))
+        | (SessionState::Terminated, Some(SessionState::Terminated)) => return,
+        (SessionState::Active, Some(_)) => "Session resumed".to_owned(),
+        (SessionState::Paused, _) => "Session paused".to_owned(),
+        (SessionState::Terminated, _) => match termination {
+            Some(c) => format!("Session ended: {}", termination_text(c)),
+            None => "Session ended".to_owned(),
+        },
+    };
+    if let Some(x) = s
+        .agents
+        .sessions
+        .iter_mut()
+        .find(|x| x.session_id == session_id)
+    {
+        x.state = state;
+        x.termination = termination.or(x.termination);
+    }
+    s.agents.record(now, Some(session_id), text);
+}
+
+/// Records a new input owner of a VM (event or reply), once.
+fn set_input_owner(s: &mut ServiceState, vm_id: VmId, owner: InputOwner, now: UtcTimestamp) {
+    let previous = s.agents.input_owners.insert(vm_id, owner);
+    for x in &mut s.agents.sessions {
+        if x.vm_id == vm_id {
+            x.input_owner =
+                matches!(owner, InputOwner::Agent { session_id } if session_id == x.session_id);
+        }
+    }
+    if previous == Some(owner) {
+        return;
+    }
+    let (session, text) = match owner {
+        InputOwner::Agent { session_id } => {
+            (Some(session_id), "Keyboard and mouse handed to the agent")
+        }
+        InputOwner::User => (
+            match previous {
+                Some(InputOwner::Agent { session_id }) => Some(session_id),
+                _ => None,
+            },
+            "Keyboard and mouse back to you",
+        ),
+    };
+    if session.is_some() {
+        s.agents.record(now, session, text.into());
+    }
+}
+
+/// Records a successful agent control.
+fn control_done(s: &mut ServiceState, op: AgentOp) {
+    s.agents.control = Some(AgentControl {
+        op,
+        status: RequestStatus::Done(()),
+    });
 }
 
 /// Executes a command and records the failure where the views look for it.
@@ -1508,20 +1998,246 @@ async fn execute(c: &mut Client, lanes: &Lanes, command: ServiceCommand) -> Resu
                 m => Err(context("baseline deletion", failure(&m))),
             }
         }
+        ServiceCommand::GetAgentAccess => match request(c, Request::GetAgentAccess).await? {
+            ServerMessage::Response {
+                result: ResponseBody::AgentAccess { enabled },
+                ..
+            } => {
+                lock(state).agents.access = Some(enabled);
+                Ok(())
+            }
+            m => Err(context("agent access", failure(&m))),
+        },
+        ServiceCommand::SetAgentAccess(on) => {
+            match request(c, Request::SetAgentAccess { enabled: on }).await? {
+                ServerMessage::Response {
+                    result: ResponseBody::AgentAccess { enabled },
+                    ..
+                } => {
+                    if !enabled && let Some(d) = &lanes.pairing_dir {
+                        crate::pairing::remove(d);
+                    }
+                    {
+                        let mut s = lock(state);
+                        s.agents.access = Some(enabled);
+                        if !enabled {
+                            s.agents.pairing = RequestStatus::Idle;
+                        }
+                        control_done(&mut s, AgentOp::SetAccess(on));
+                    }
+                    lanes.queue(ServiceCommand::ListSessionRequests);
+                    lanes.queue(ServiceCommand::ListSessions);
+                    Ok(())
+                }
+                m => Err(context("agent access", failure(&m))),
+            }
+        }
+        ServiceCommand::ListSessionRequests => {
+            match request(c, Request::ListSessionRequests).await? {
+                ServerMessage::Response {
+                    result: ResponseBody::SessionRequests { requests },
+                    ..
+                } => {
+                    lock(state).agents.requests = requests;
+                    Ok(())
+                }
+                m => Err(context("session requests", failure(&m))),
+            }
+        }
+        ServiceCommand::ListSessions => match request(c, Request::ListSessions).await? {
+            ServerMessage::Response {
+                result: ResponseBody::Sessions { sessions },
+                ..
+            } => {
+                let mut s = lock(state);
+                s.agents.set_sessions(sessions);
+                s.agents.error = None;
+                Ok(())
+            }
+            m => Err(context("agent sessions", failure(&m))),
+        },
+        ServiceCommand::ApproveSession {
+            request_id,
+            approval,
+        } => {
+            let body = Request::ApproveSession {
+                request_id,
+                approval,
+            };
+            match request(c, body).await? {
+                ServerMessage::Response {
+                    result: ResponseBody::Session { session },
+                    ..
+                } => {
+                    {
+                        let mut s = lock(state);
+                        let id = session.session_id;
+                        let (vm, give) = (session.vm_id, session.input_owner);
+                        s.last_outcome =
+                            Some(format!("agent session approved: {}", session.client_name));
+                        s.agents.upsert(session);
+                        if give {
+                            set_input_owner(
+                                &mut s,
+                                vm,
+                                InputOwner::Agent { session_id: id },
+                                UtcTimestamp::now(),
+                            );
+                        }
+                        s.agents.approval = Some(Approval {
+                            request_id,
+                            status: RequestStatus::Done(id),
+                        });
+                    }
+                    // The request leaves the list with its `closed` event.
+                    lanes.queue(ServiceCommand::ListSessionRequests);
+                    lanes.queue(ServiceCommand::ListSessions);
+                    Ok(())
+                }
+                m => Err(context("approval", failure(&m))),
+            }
+        }
+        ServiceCommand::DenySession(request_id) => {
+            match request(c, Request::DenySession { request_id }).await? {
+                ServerMessage::Response {
+                    result: ResponseBody::SessionDenied { .. },
+                    ..
+                } => {
+                    control_done(&mut lock(state), AgentOp::Deny(request_id));
+                    // The request leaves the list with its `closed` event.
+                    lanes.queue(ServiceCommand::ListSessionRequests);
+                    Ok(())
+                }
+                m => Err(context("denial", failure(&m))),
+            }
+        }
+        ServiceCommand::PauseSession(session_id) => {
+            let body = Request::PauseSession { session_id };
+            session_reply(c, state, body, AgentOp::Pause(session_id), "pause").await
+        }
+        ServiceCommand::ResumeSession(session_id) => {
+            let body = Request::ResumeSession { session_id };
+            session_reply(c, state, body, AgentOp::Resume(session_id), "resume").await
+        }
+        ServiceCommand::RevokeSession(session_id) => {
+            match request(c, Request::RevokeSession { session_id }).await? {
+                ServerMessage::Response {
+                    result: ResponseBody::SessionRevoked { report, .. },
+                    ..
+                } => {
+                    {
+                        let mut s = lock(state);
+                        s.last_outcome = Some(format!(
+                            "agent session revoked: {} queued operations discarded, {} already sent",
+                            report.discarded.len(),
+                            report.already_forwarded.len()
+                        ));
+                        control_done(&mut s, AgentOp::Revoke(session_id));
+                    }
+                    lanes.queue(ServiceCommand::ListSessions);
+                    Ok(())
+                }
+                m => Err(context("revocation", failure(&m))),
+            }
+        }
+        ServiceCommand::SetInputOwner { vm_id, owner } => {
+            match request(c, Request::SetInputOwner { vm_id, owner }).await? {
+                ServerMessage::Response {
+                    result: ResponseBody::InputOwner { vm_id, owner },
+                    ..
+                } => {
+                    {
+                        let mut s = lock(state);
+                        set_input_owner(&mut s, vm_id, owner, UtcTimestamp::now());
+                        control_done(&mut s, AgentOp::InputOwner(vm_id, owner));
+                    }
+                    lanes.queue(ServiceCommand::ListSessions);
+                    Ok(())
+                }
+                m => Err(context("input control", failure(&m))),
+            }
+        }
+        ServiceCommand::CreatePairing => {
+            let dir = lanes
+                .pairing_dir
+                .clone()
+                .ok_or_else(|| Failure::new("no folder for the pairing file"))?;
+            match request(c, Request::CreatePairingCredential).await? {
+                ServerMessage::Response {
+                    result:
+                        ResponseBody::PairingCredential {
+                            credential,
+                            expires_in_s,
+                        },
+                    ..
+                } => {
+                    let secs = i64::try_from(expires_in_s).unwrap_or(i64::MAX / 1000);
+                    let expires_at = UtcTimestamp::now()
+                        .checked_add_millis(secs.saturating_mul(1000))
+                        .unwrap_or_else(UtcTimestamp::now);
+                    let endpoint = lanes.endpoint.clone();
+                    // File system and `icacls`: off the IPC task.
+                    let written = tokio::task::spawn_blocking(move || {
+                        crate::pairing::write(&dir, &endpoint, credential, expires_at)
+                    })
+                    .await
+                    .map_err(|e| Failure::new(format!("pairing file not written: {e}")))?
+                    .map_err(Failure::new)?;
+                    let mut s = lock(state);
+                    s.agents.pairing = RequestStatus::Done(crate::pairing::PairingFile {
+                        path: written,
+                        expires_at,
+                    });
+                    Ok(())
+                }
+                m => Err(context("pairing", failure(&m))),
+            }
+        }
         ServiceCommand::EmergencyStop => match request(c, Request::EmergencyStop).await? {
             ServerMessage::Response {
                 result: ResponseBody::EmergencyStop(r),
                 ..
             } => {
-                lock(state).last_outcome = Some(format!(
+                // The Emergency Stop revokes every non-UI credential: the
+                // pairing file is useless.
+                if let Some(d) = &lanes.pairing_dir {
+                    crate::pairing::remove(d);
+                }
+                let mut s = lock(state);
+                s.agents.pairing = RequestStatus::Idle;
+                s.last_outcome = Some(format!(
                     "Emergency Stop: {} processes terminated, completed: {}",
                     r.processes_terminated,
                     if r.completed { "yes" } else { "no" }
                 ));
+                lanes.queue(ServiceCommand::ListSessionRequests);
+                lanes.queue(ServiceCommand::ListSessions);
                 Ok(())
             }
             m => Err(failure(&m)),
         },
+    }
+}
+
+/// Pause or resume: the reply carries the session.
+async fn session_reply(
+    c: &mut Client,
+    state: &Mutex<ServiceState>,
+    body: Request,
+    op: AgentOp,
+    what: &str,
+) -> Result<(), Failure> {
+    match request(c, body).await? {
+        ServerMessage::Response {
+            result: ResponseBody::Session { session },
+            ..
+        } => {
+            let mut s = lock(state);
+            s.agents.upsert(session);
+            control_done(&mut s, op);
+            Ok(())
+        }
+        m => Err(context(what, failure(&m))),
     }
 }
 
@@ -1876,6 +2592,7 @@ mod tests {
         state: Arc<Mutex<ServiceState>>,
         ticket: TicketSlot,
         thread: std::thread::JoinHandle<()>,
+        pairing_dir: PathBuf,
     }
 
     impl Loop {
@@ -1886,11 +2603,18 @@ mod tests {
             }));
             let ticket: TicketSlot = Arc::new(Mutex::new(None));
             let (commands, rx) = mpsc::unbounded_channel();
+            let pairing_dir = std::env::temp_dir().join(format!(
+                "lightvm-fake-pairing-{}-{}",
+                std::process::id(),
+                OperationId::new_v7()
+            ));
             let lanes = Lanes {
                 state: state.clone(),
                 ticket: ticket.clone(),
                 repaint: Arc::new(|| {}),
                 tx: commands.downgrade(),
+                endpoint: Arc::from(endpoint.as_str()),
+                pairing_dir: Some(pairing_dir.clone()),
             };
             let cred = Credential::generate().unwrap();
             let thread = std::thread::spawn(move || {
@@ -1905,6 +2629,7 @@ mod tests {
                 state,
                 ticket,
                 thread,
+                pairing_dir,
             };
             l.wait("connection", |s| s.connected);
             l
@@ -2132,7 +2857,7 @@ mod tests {
             baseline_id: BaselineId::new_v7(),
             vm_id,
             label: Label::parse(label).unwrap(),
-            created_at: lightvm_proto::UtcTimestamp::from_unix_millis(1_791_710_000_000).unwrap(),
+            created_at: UtcTimestamp::from_unix_millis(1_791_710_000_000).unwrap(),
             clean_shutdown: true,
             protected: false,
             derived_from: None,
@@ -2351,6 +3076,7 @@ mod tests {
             pid: 1,
             commands,
             state: Arc::new(Mutex::new(ServiceState::default())),
+            pairing_dir: None,
             ticket: Arc::new(Mutex::new(Some(ConsoleTicket {
                 vm_id: VmId::new_v7(),
                 run_id: RunId::new_v7(),
@@ -2364,5 +3090,178 @@ mod tests {
         assert!(shown.contains("<redacted>"));
         s.discard_console_ticket();
         assert!(lock(&s.ticket).is_none());
+    }
+
+    fn session_info(id: SessionId, vm: VmId, state: SessionState, input: bool) -> SessionInfo {
+        SessionInfo {
+            session_id: id,
+            vm_id: vm,
+            connection_id: Some(7),
+            client_name: "test-agent".into(),
+            purpose: "Check the editor".into(),
+            state,
+            termination: None,
+            capabilities: [lightvm_proto::Capability::VmInput].into(),
+            quotas: lightvm_proto::ipc::AGENT_DEFAULT_QUOTAS,
+            usage: Default::default(),
+            created_at: UtcTimestamp::from_unix_millis(1_791_709_920_000).unwrap(),
+            expires_at: UtcTimestamp::from_unix_millis(1_791_713_520_000).unwrap(),
+            lease_expires_at: UtcTimestamp::from_unix_millis(1_791_709_930_000).unwrap(),
+            input_owner: input,
+        }
+    }
+
+    /// F4: agent access, approval, input owner, revocation and pairing go
+    /// through the IPC with the expected requests; the events update the
+    /// state and the session log; the pairing credential lands only in the
+    /// private file, never in the state.
+    #[test]
+    fn agent_sessions_over_ipc() {
+        let vm = VmId::new_v7();
+        let sid = SessionId::new_v7();
+        let cred = "5a".repeat(32);
+        let cred2 = cred.clone();
+        let server = fake::start(Arc::new(move |r: &Request| match r {
+            Request::GetAgentAccess => Ok(ResponseBody::AgentAccess { enabled: false }),
+            Request::SetAgentAccess { enabled } => {
+                Ok(ResponseBody::AgentAccess { enabled: *enabled })
+            }
+            Request::ListSessionRequests => Ok(ResponseBody::SessionRequests {
+                requests: Vec::new(),
+            }),
+            Request::ListSessions => Ok(ResponseBody::Sessions {
+                sessions: Vec::new(),
+            }),
+            Request::ApproveSession { approval, .. } => Ok(ResponseBody::Session {
+                session: session_info(
+                    sid,
+                    approval.vm_id,
+                    SessionState::Active,
+                    approval.give_input,
+                ),
+            }),
+            Request::SetInputOwner { vm_id, owner } => Ok(ResponseBody::InputOwner {
+                vm_id: *vm_id,
+                owner: *owner,
+            }),
+            Request::RevokeSession { session_id } => Ok(ResponseBody::SessionRevoked {
+                session_id: *session_id,
+                report: Default::default(),
+            }),
+            Request::CreatePairingCredential => Ok(ResponseBody::PairingCredential {
+                credential: cred2.clone(),
+                expires_in_s: 600,
+            }),
+            r => base_reply(r),
+        }));
+        let l = Loop::start(server.endpoint.clone());
+        l.wait("access read", |s| s.agents.access == Some(false));
+
+        assert!(l.send(ServiceCommand::SetAgentAccess(true)));
+        l.wait("access on", |s| s.agents.access == Some(true));
+
+        // A request arrives as an event.
+        let request = SessionRequestInfo {
+            request_id: 3,
+            connection_id: 7,
+            client_name: "test-agent".into(),
+            peer_pid: None,
+            purpose: "Check the editor".into(),
+            requested_vms: vec![vm],
+            requested_capabilities: Default::default(),
+            verification_code: "482-913".into(),
+            requested_at: UtcTimestamp::now(),
+            expires_at: UtcTimestamp::now(),
+        };
+        lock(&server.events).push(ServiceEvent::SessionRequest { request });
+        l.wait("request listed", |s| s.agents.requests.len() == 1);
+
+        let approval = SessionApproval {
+            vm_id: vm,
+            capabilities: [lightvm_proto::Capability::VmInput].into(),
+            duration_s: 3600,
+            quotas: None,
+            lease_ms: None,
+            give_input: true,
+        };
+        assert!(l.send(ServiceCommand::ApproveSession {
+            request_id: 3,
+            approval: approval.clone(),
+        }));
+        l.wait(
+            "approved",
+            |s| matches!(&s.agents.approval, Some(a) if a.status == RequestStatus::Done(sid)),
+        );
+        // The request leaves the list with the re-read that follows.
+        l.wait("request gone", |s| s.agents.requests.is_empty());
+        let st = l.state();
+        assert!(st.agents.agent_has_input(vm));
+        assert!(lock(&server.requests).contains(&Request::ApproveSession {
+            request_id: 3,
+            approval
+        }));
+
+        // Taking control back: reply and event both say user.
+        assert!(l.send(ServiceCommand::SetInputOwner {
+            vm_id: vm,
+            owner: InputOwner::User
+        }));
+        l.wait("input back", |s| !s.agents.agent_has_input(vm));
+        lock(&server.events).push(ServiceEvent::InputOwner {
+            vm_id: vm,
+            owner: InputOwner::User,
+        });
+        lock(&server.events).push(ServiceEvent::SessionChanged {
+            session_id: sid,
+            state: SessionState::Paused,
+            termination: None,
+        });
+        l.wait("pause recorded", |s| {
+            s.agents.log.iter().any(|e| e.text == "Session paused")
+        });
+        let st = l.state();
+        let texts: Vec<&str> = st
+            .agents
+            .log
+            .iter()
+            .filter(|e| e.session_id == Some(sid))
+            .map(|e| e.text.as_str())
+            .collect();
+        // The input owner change is recorded once, though seen twice.
+        assert_eq!(
+            texts,
+            [
+                "Session request from \u{201c}test-agent\u{201d}, code 482-913",
+                "Keyboard and mouse handed to the agent",
+                "Keyboard and mouse back to you",
+                "Session paused"
+            ],
+            "{:?}",
+            st.agents.log
+        );
+
+        // Pairing: file written, state without the credential.
+        assert!(l.send(ServiceCommand::CreatePairing));
+        l.wait("pairing", |s| !s.agents.pairing.is_pending());
+        let st = l.state();
+        let RequestStatus::Done(f) = &st.agents.pairing else {
+            panic!("{:?}", st.agents.pairing)
+        };
+        assert_eq!(f.path, l.pairing_dir.join(crate::pairing::FILE_NAME));
+        let text = std::fs::read_to_string(&f.path).unwrap();
+        assert!(text.contains(&cred));
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["endpoint"], server.endpoint.as_str());
+        assert!(!format!("{st:?}").contains(&cred));
+
+        // Revocation, then access off: the pairing file is removed.
+        assert!(l.send(ServiceCommand::RevokeSession(sid)));
+        l.wait("revoked", |s| {
+            matches!(&s.agents.control, Some(c) if c.op == AgentOp::Revoke(sid) && c.status == RequestStatus::Done(()))
+        });
+        assert!(l.send(ServiceCommand::SetAgentAccess(false)));
+        l.wait("access off", |s| s.agents.access == Some(false));
+        assert!(!f.path.exists());
+        let _ = std::fs::remove_dir_all(&l.pairing_dir);
     }
 }

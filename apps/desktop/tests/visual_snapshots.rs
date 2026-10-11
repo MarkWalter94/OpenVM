@@ -471,3 +471,163 @@ fn snapshot_baseline_dialogs() {
     h.run();
     h.snapshot("dialog_baseline_restore");
 }
+
+/// F4: catalog with agent access on and, optionally, a pending request and
+/// a live session (with the agent holding the input), at a fixed instant.
+fn agents_app(request: bool, live: Option<bool>) -> (LightVmApp, common::Handles) {
+    let mut s = catalog();
+    s.last_outcome = None;
+    s.agents.access = Some(true);
+    s.agents.sessions_loaded = true;
+    if request {
+        s.agents.requests = vec![common::session_request(3, "claude-desktop")];
+    }
+    if let Some(input) = live {
+        let mut x = common::session(
+            1,
+            1,
+            "claude-desktop",
+            lightvm_proto::SessionState::Active,
+            input,
+        );
+        x.capabilities.insert(lightvm_proto::Capability::VmReset);
+        s.agents.sessions = vec![x];
+        let mut ended = common::session(
+            2,
+            1,
+            "test-runner",
+            lightvm_proto::SessionState::Terminated,
+            false,
+        );
+        ended.termination = Some(lightvm_proto::TerminationCause::LeaseExpired);
+        s.agents.sessions.push(ended);
+        if input {
+            s.agents.input_owners.insert(
+                common::vm_id(1),
+                lightvm_proto::ipc::InputOwner::Agent {
+                    session_id: common::session_id(1),
+                },
+            );
+        }
+        let sid = Some(common::session_id(1));
+        s.agents
+            .record(common::at(-8 * 60), sid, "Session started".into());
+        s.agents.record(
+            common::at(-7 * 60),
+            sid,
+            "Keyboard and mouse handed to the agent".into(),
+        );
+        s.agents
+            .record(common::at(-3 * 60), sid, "Session paused".into());
+        s.agents
+            .record(common::at(-2 * 60), sid, "Session resumed".into());
+    }
+    let (mut app, hs) = app(s);
+    app.set_fixed_time(Some(common::now()));
+    (app, hs)
+}
+
+#[test]
+fn snapshot_agents_request() {
+    let _serial = serial();
+    let (mut app, _hs) = agents_app(true, None);
+    app.set_section(Section::Agents);
+    let mut h = harness(app, egui::vec2(1100.0, 900.0));
+    h.snapshot("agents_request");
+}
+
+#[test]
+fn snapshot_agents_request_light_theme() {
+    let _serial = serial();
+    let (mut app, _hs) = agents_app(true, None);
+    app.set_section(Section::Agents);
+    app.set_theme(UiTheme::Light);
+    let mut h = harness(app, egui::vec2(1100.0, 900.0));
+    h.snapshot("agents_request_light");
+}
+
+#[test]
+fn snapshot_agents_approval_form() {
+    let _serial = serial();
+    let (mut app, _hs) = agents_app(true, None);
+    app.set_section(Section::Agents);
+    let mut h = harness(app, egui::vec2(1100.0, 1700.0));
+    h.get_by_role_and_label(Role::Button, "Review the request of claude-desktop")
+        .click_accesskit();
+    h.run();
+    h.get_by_label("The agent shows the code 482-913")
+        .click_accesskit();
+    h.run();
+    h.snapshot("agents_approval_form");
+}
+
+#[test]
+fn snapshot_agents_sessions() {
+    let _serial = serial();
+    let (mut app, _hs) = agents_app(false, Some(true));
+    app.set_section(Section::Agents);
+    let mut h = harness(app, egui::vec2(1100.0, 1000.0));
+    h.snapshot("agents_sessions");
+}
+
+#[test]
+fn snapshot_dashboard_with_agent_session() {
+    let _serial = serial();
+    let (app, _hs) = agents_app(false, Some(true));
+    let mut h = harness(app, egui::vec2(1100.0, 640.0));
+    h.snapshot("dashboard_agent_session");
+}
+
+#[test]
+fn snapshot_dashboard_with_session_request() {
+    let _serial = serial();
+    let (app, _hs) = agents_app(true, None);
+    let mut h = harness(app, egui::vec2(1100.0, 640.0));
+    h.snapshot("dashboard_session_request");
+}
+
+#[test]
+fn snapshot_agent_session_page() {
+    let _serial = serial();
+    let (mut app, _hs) = agents_app(false, Some(true));
+    app.set_section(Section::Agents);
+    let mut h = harness(app, egui::vec2(1100.0, 1200.0));
+    h.get_by_role_and_label(Role::Button, "Open the agent session")
+        .click_accesskit();
+    h.run();
+    h.snapshot("agent_session_page");
+}
+
+#[test]
+fn snapshot_console_agent_input() {
+    let _serial = serial();
+    let (fake, _hs) =
+        FakeSupervisor::new(agents_app(false, Some(true)).0.service().unwrap().state());
+    let console = LiveConsole::synthetic(
+        ConsoleTarget {
+            vm_id: common::vm_id(1),
+            vm_name: "ubuntu-dev".into(),
+            run_id: common::run_id(1),
+        },
+        deterministic_frame(1280, 800),
+    );
+    let mut app = LightVmApp::with_live_console(console);
+    app.set_supervisor(fake);
+    app.rendering = glow_info();
+    app.set_fixed_time(Some(common::now()));
+    app.set_section(Section::Console);
+    let mut h = harness(app, egui::vec2(1100.0, 760.0));
+    h.snapshot("console_agent_input");
+}
+
+#[test]
+fn snapshot_dialog_revoke() {
+    let _serial = serial();
+    let (mut app, _hs) = agents_app(false, Some(false));
+    app.set_section(Section::Agents);
+    let mut h = harness(app, egui::vec2(1100.0, 760.0));
+    h.get_by_role_and_label(Role::Button, "Revoke the agent session")
+        .click_accesskit();
+    h.run();
+    h.snapshot("dialog_revoke");
+}

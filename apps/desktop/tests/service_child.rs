@@ -66,6 +66,7 @@ fn ui_starts_the_supervisor_and_stops_it() {
         runtime_dir: Some(dir.join("run")),
         audit_log: Some(dir.join("audit.jsonl")),
         policy: ParentLossPolicy::default(),
+        pairing_dir: Some(dir.join("pairing")),
     };
     let mut s = Service::start(&cfg, Arc::new(|| {})).expect("supervisor start");
     assert!(s.pid() > 0);
@@ -121,6 +122,7 @@ fn vm_settings_and_open_vm_without_qemu() {
         runtime_dir: Some(dir.join("run")),
         audit_log: Some(dir.join("audit.jsonl")),
         policy: ParentLossPolicy::default(),
+        pairing_dir: Some(dir.join("pairing")),
     };
     let mut s = Service::start(&cfg, Arc::new(|| {})).expect("supervisor start");
     wait_for(&s, "connection", |s| s.state().connected);
@@ -228,6 +230,7 @@ fn missing_executable_is_a_start_error() {
         runtime_dir: None,
         audit_log: None,
         policy: ParentLossPolicy::default(),
+        pairing_dir: Some(dir.join("pairing")),
     };
     match Service::start(&cfg, Arc::new(|| {})) {
         Err(StartError::Spawn(_)) => {}
@@ -280,6 +283,7 @@ fn ui_role(qemu_dir: PathBuf) -> ! {
         runtime_dir: Some(dir.join("run")),
         audit_log: Some(dir.join("audit.jsonl")),
         policy: p2_policy(),
+        pairing_dir: Some(dir.join("pairing")),
     };
     let s = Service::start(&cfg, Arc::new(|| {})).expect("supervisor start");
     wait_for(&s, "connection", |s| s.state().connected);

@@ -68,6 +68,8 @@ use crate::engine::{
     BaselineOutcome, BaselineRequest, CancelCheck, ImportCopied, NewSession, StartDone, StartJob,
     StorageDone, VmEngine,
 };
+use crate::reports::{CallRecord, OpenReport, ReportStore};
+use lightvm_proto::report::{ReportFormat, SessionVerifier};
 
 /// Media imports copying at the same time (each holds a worker thread).
 pub const MAX_CONCURRENT_IMPORTS: usize = 2;
@@ -179,6 +181,42 @@ pub(crate) enum SupervisorRequest {
     },
     /// Call of an agent session (the caller carries the session).
     Agent(Box<AgentCall>),
+    /// Session reports (UI, F5).
+    Report(Box<ReportRequest>),
+}
+
+/// Requests of the UI on the session reports (F5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReportRequest {
+    List,
+    Header(SessionId),
+    Events {
+        session_id: SessionId,
+        offset: u32,
+        limit: u32,
+    },
+    ShotChunk {
+        session_id: SessionId,
+        shot: u32,
+        index: u32,
+    },
+    Verdict {
+        session_id: SessionId,
+        outcome: lightvm_proto::TestOutcome,
+        rationale: String,
+    },
+    Verify {
+        session_id: SessionId,
+        verifier: SessionVerifier,
+    },
+    Export {
+        session_id: SessionId,
+        format: ReportFormat,
+        destination: String,
+        overwrite: bool,
+        include_screenshots: bool,
+    },
+    Delete(SessionId),
 }
 
 impl SupervisorRequest {
@@ -201,22 +239,49 @@ impl SupervisorRequest {
         ) || matches!(self, Self::Agent(call) if call.is_mutation())
     }
 
-    /// Baseline request served as a long storage operation (F3).
-    fn baseline_job(&self) -> Option<BaselineRequest> {
+    /// Baseline request served as a long storage operation (F3; F5 for the
+    /// agent calls `snapshot` and `restore`).
+    fn baseline_job(&self) -> Option<Result<BaselineRequest, PublicError>> {
         match self {
+            Self::Agent(call) => match call.as_ref() {
+                AgentCall::Snapshot { vm_id, label, .. } => Some(
+                    Label::parse(format!(
+                        "agent: {}",
+                        crate::reports::plain(label.trim(), 200)
+                    ))
+                    .map(|label| BaselineRequest::Create {
+                        vm_id: *vm_id,
+                        label,
+                        // No hidden decision: an unclean last stop refuses
+                        // the checkpoint (`unclean_shutdown`).
+                        allow_unclean: false,
+                    })
+                    .map_err(|_| {
+                        PublicError::invalid_argument("label not valid")
+                            .with_detail("field", "label")
+                    }),
+                ),
+                AgentCall::Restore {
+                    vm_id, baseline_id, ..
+                } => Some(Ok(BaselineRequest::Restore {
+                    vm_id: *vm_id,
+                    baseline_id: *baseline_id,
+                })),
+                _ => None,
+            },
             Self::CreateBaseline {
                 vm_id,
                 label,
                 allow_unclean,
-            } => Some(BaselineRequest::Create {
+            } => Some(Ok(BaselineRequest::Create {
                 vm_id: *vm_id,
                 label: label.clone(),
                 allow_unclean: *allow_unclean,
-            }),
-            Self::RestoreBaseline { vm_id, baseline_id } => Some(BaselineRequest::Restore {
+            })),
+            Self::RestoreBaseline { vm_id, baseline_id } => Some(Ok(BaselineRequest::Restore {
                 vm_id: *vm_id,
                 baseline_id: *baseline_id,
-            }),
+            })),
             _ => None,
         }
     }
@@ -321,6 +386,10 @@ pub(crate) enum Command {
         cause: TerminationCause,
         stop: bool,
     },
+    /// An agent call and its outcome, for the session report (F5). Sent by
+    /// the connection right before the reply, so it is recorded before any
+    /// later request of the same agent.
+    AgentCallDone(Box<CallRecord>),
 }
 
 impl std::fmt::Debug for Command {
@@ -343,6 +412,7 @@ impl std::fmt::Debug for Command {
             Self::EndSessions { ids, cause, .. } => {
                 write!(f, "EndSessions({}, {cause:?})", ids.len())
             }
+            Self::AgentCallDone(c) => write!(f, "AgentCallDone({})", c.call),
         }
     }
 }
@@ -382,6 +452,8 @@ pub(crate) struct SupervisorThread {
     pub(crate) start_jobs: usize,
     /// Agent sessions on the service side (gate, connections), F4.
     pub(crate) agents: Arc<AgentRegistry>,
+    /// Session reports (F5).
+    pub(crate) reports: ReportStore,
 }
 
 /// Maximum interval between two observations of the process exits (shutdown
@@ -467,6 +539,9 @@ impl SupervisorThread {
                     self.engine.tick_sessions();
                 }
                 self.publish_state_changes();
+                if observe {
+                    self.reports.flush();
+                }
             }));
             if let Err(p) = r {
                 crate::diag!(
@@ -514,7 +589,14 @@ impl SupervisorThread {
                 } else if let Some(job) = req.baseline_job() {
                     // The reply is sent when the work ends.
                     if let Some(reply) = slot.take() {
-                        self.start_storage_job(caller, job, (reply, revoked, epoch));
+                        match job {
+                            Ok(job) => {
+                                self.start_storage_job(caller, job, (reply, revoked, epoch));
+                            }
+                            Err(e) => {
+                                let _ = reply.send(Err(ReplyError::Operational(e)));
+                            }
+                        }
                     }
                     return Served::Continue;
                 } else if let SupervisorRequest::ImportMedia {
@@ -687,6 +769,7 @@ impl SupervisorThread {
                     }
                 }
             }
+            Command::AgentCallDone(rec) => self.record_call(&rec),
             Command::ParentLost { policy, done } => {
                 // ROADMAP 7.3: UI lost → the agent sessions end and their VMs
                 // are stopped through the emergency path.
@@ -739,6 +822,7 @@ impl SupervisorThread {
         self.backend.prepare_shutdown();
         self.engine.stop_all();
         self.publish_state_changes();
+        self.reports.flush();
         self.backend.shutdown();
     }
 
@@ -807,6 +891,315 @@ impl SupervisorThread {
                         let _ = self.engine.end_session(id, cause, stop);
                     }
                 }
+                Command::AgentCallDone(rec) => self.record_call(&rec),
+            }
+        }
+    }
+
+    /// Records an agent call in its session report; a successful screenshot
+    /// is copied (PNG) from the engine into the session artefacts.
+    fn record_call(&mut self, rec: &CallRecord) {
+        if !self.reports.is_live(rec.session_id) {
+            return;
+        }
+        self.reports.call(rec);
+        if rec.screenshot
+            && let Some(op) = rec.operation_id
+            && let Some((meta, png)) = self.engine.session_screenshot(rec.session_id, op)
+        {
+            self.reports.screenshot(rec.session_id, &meta, &png);
+        }
+    }
+
+    /// Opens the report of a session just approved.
+    fn open_report(&mut self, c: &crate::engine::CreatedSession) {
+        let info = &c.info;
+        let Some(ctx) = self.engine.report_context(info.vm_id) else {
+            crate::diag!("lightvm-service: reports: VM facts not available");
+            return;
+        };
+        let manifest = {
+            use sha2::Digest as _;
+            let bytes = serde_json::to_vec(&ctx.config).unwrap_or_default();
+            lightvm_proto::Sha256Digest::from_bytes(sha2::Sha256::digest(&bytes).into())
+        };
+        self.reports.open(OpenReport {
+            session_id: info.session_id,
+            vm_id: info.vm_id,
+            vm_name: ctx.name,
+            client_name: info.client_name.clone(),
+            objective: info.purpose.clone(),
+            started_at: info.created_at,
+            capabilities: c.grant.capabilities.clone(),
+            quotas: c.grant.quotas,
+            expires_at: c.grant.expires_at,
+            policy_revision: c.grant.policy_revision,
+            guest_os: ctx.config.guest_os,
+            vm_manifest_sha256: manifest,
+            vm_config_revision: ctx.config_revision,
+            baseline: ctx.baseline.map(|b| lightvm_proto::report::ReportBaseline {
+                baseline_id: b.baseline_id,
+                label: b.label.to_string(),
+                created_at: b.created_at,
+                clean_shutdown: b.clean_shutdown,
+                disk_sha256: b.disk_sha256,
+                firmware_sha256: b.firmware_sha256,
+            }),
+            run_id: ctx.run_id,
+            versions: lightvm_proto::report::ReportVersions {
+                service: env!("CARGO_PKG_VERSION").to_owned(),
+                ipc_protocol: lightvm_proto::PROTOCOL_VERSION,
+                mcp_protocol: None,
+                backend: Some(self.backend.name()),
+                accelerator: self.backend.accelerator(),
+            },
+        });
+        let _ = self.events.send(ServiceEvent::SessionReportChanged {
+            session_id: info.session_id,
+        });
+    }
+
+    /// Agent calls served from the reports and the core's checks, outside
+    /// the VM queue (F5): logs, declaration, tool note, report summary.
+    fn report_agent_call(
+        &mut self,
+        caller: &Caller,
+        call: &AgentCall,
+    ) -> Option<Result<ResponseBody, PublicError>> {
+        use lightvm_proto::Capability;
+        let r = match call {
+            AgentCall::Logs {
+                vm_id,
+                after_seq,
+                limit,
+            } => self
+                .engine
+                .agent_check(caller, Some(*vm_id), Some(Capability::VmLogs))
+                .map(|sid| {
+                    let (entries, last_seq) = self.reports.log_entries(sid, *after_seq, *limit);
+                    let now = lightvm_proto::UtcTimestamp::now();
+                    let qemu = self
+                        .engine
+                        .qemu_log(*vm_id)
+                        .map(|raw| crate::reports::sanitize_qemu_lines(&raw))
+                        .unwrap_or_default()
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, text)| lightvm_proto::report::LogEntry {
+                            seq: i as u64 + 1,
+                            at: now,
+                            source: lightvm_proto::report::LogSource::Qemu,
+                            text,
+                        })
+                        .collect();
+                    ResponseBody::AgentLogs {
+                        vm_id: *vm_id,
+                        entries,
+                        last_seq,
+                        qemu,
+                    }
+                }),
+            AgentCall::Declare {
+                claimed_outcome,
+                summary,
+            } => self
+                .engine
+                .agent_check(caller, None, None)
+                .map(|sid| ResponseBody::Recorded {
+                    seq: self.reports.declare(sid, *claimed_outcome, summary),
+                }),
+            AgentCall::ToolNote {
+                tool,
+                ok,
+                error_code,
+                detail,
+            } => self
+                .engine
+                .agent_check(caller, None, None)
+                .map(|sid| ResponseBody::Recorded {
+                    seq: self.reports.tool_note(
+                        sid,
+                        tool,
+                        *ok,
+                        error_code.as_deref(),
+                        detail.clone(),
+                    ),
+                }),
+            AgentCall::Report { session_id } => {
+                self.engine.agent_check(caller, None, None).and_then(|sid| {
+                    if session_id.is_some_and(|s| s != sid) {
+                        return Err(PublicError::not_found("session report not found"));
+                    }
+                    self.reports
+                        .summary(sid)
+                        .map(|report| ResponseBody::AgentReport { report })
+                        .ok_or_else(|| PublicError::not_found("session report not found"))
+                })
+            }
+            _ => return None,
+        };
+        Some(r)
+    }
+
+    /// Requests of the UI on the reports (the caller is the user).
+    fn report_request(&mut self, req: ReportRequest) -> Result<ResponseBody, PublicError> {
+        let audit = |engine: &mut Box<dyn VmEngine>,
+                     action: AuditAction,
+                     sid: SessionId,
+                     r: &Result<ResponseBody, PublicError>| {
+            let (outcome, error) = match r {
+                Ok(_) => (AuditOutcome::Succeeded, None),
+                Err(e) => (AuditOutcome::Failed, Some(e.code)),
+            };
+            engine.record_event(Actor::User, action, outcome, Some(sid), error);
+        };
+        match req {
+            ReportRequest::List => Ok(ResponseBody::SessionReports {
+                reports: self.reports.list(),
+            }),
+            ReportRequest::Header(id) => {
+                self.reports
+                    .header(id)
+                    .map(|r| ResponseBody::SessionReport {
+                        report: Box::new(r),
+                    })
+            }
+            ReportRequest::Events {
+                session_id,
+                offset,
+                limit,
+            } => self
+                .reports
+                .events(session_id, offset, limit)
+                .map(|(total, events)| ResponseBody::SessionReportEvents {
+                    session_id,
+                    total,
+                    offset,
+                    events,
+                }),
+            ReportRequest::ShotChunk {
+                session_id,
+                shot,
+                index,
+            } => self
+                .reports
+                .screenshot_png(session_id, shot)
+                .and_then(|(png, sha256)| {
+                    let size = lightvm_proto::ipc::SCREENSHOT_CHUNK_BYTES as usize;
+                    let chunks = u32::try_from(png.len().div_ceil(size)).unwrap_or(u32::MAX);
+                    if index >= chunks.max(1) {
+                        return Err(PublicError::invalid_argument("chunk index out of range"));
+                    }
+                    let start = index as usize * size;
+                    let end = (start + size).min(png.len());
+                    Ok(ResponseBody::ReportScreenshotChunk {
+                        session_id,
+                        shot,
+                        index,
+                        chunks,
+                        sha256,
+                        data: lightvm_proto::ipc::base64_encode(&png[start..end]),
+                    })
+                }),
+            ReportRequest::Verdict {
+                session_id,
+                outcome,
+                rationale,
+            } => {
+                if rationale.chars().count() > lightvm_proto::report::MAX_RATIONALE_CHARS {
+                    return Err(PublicError::invalid_argument("rationale too long"));
+                }
+                let r = self
+                    .reports
+                    .set_verdict(
+                        session_id,
+                        lightvm_proto::report::Verdict {
+                            outcome,
+                            source: lightvm_proto::report::OutcomeSource::User,
+                            verifier: None,
+                            decided_by: "local user".into(),
+                            rationale,
+                            at: lightvm_proto::UtcTimestamp::now(),
+                        },
+                    )
+                    .map(|r| ResponseBody::SessionReport {
+                        report: Box::new(r),
+                    });
+                audit(
+                    &mut self.engine,
+                    AuditAction::SessionVerdict,
+                    session_id,
+                    &r,
+                );
+                if r.is_ok() {
+                    let _ = self
+                        .events
+                        .send(ServiceEvent::SessionReportChanged { session_id });
+                }
+                r
+            }
+            ReportRequest::Verify {
+                session_id,
+                verifier,
+            } => {
+                let r = self.reports.verify(session_id, verifier).map(|r| {
+                    ResponseBody::SessionReport {
+                        report: Box::new(r),
+                    }
+                });
+                audit(
+                    &mut self.engine,
+                    AuditAction::SessionVerdict,
+                    session_id,
+                    &r,
+                );
+                if r.is_ok() {
+                    let _ = self
+                        .events
+                        .send(ServiceEvent::SessionReportChanged { session_id });
+                }
+                r
+            }
+            ReportRequest::Export {
+                session_id,
+                format,
+                destination,
+                overwrite,
+                include_screenshots,
+            } => {
+                let r = self
+                    .reports
+                    .export(
+                        session_id,
+                        format,
+                        &destination,
+                        overwrite,
+                        include_screenshots,
+                    )
+                    .map(
+                        |(bytes, sha256, screenshots)| ResponseBody::SessionReportExported {
+                            session_id,
+                            format,
+                            bytes,
+                            sha256,
+                            screenshots,
+                        },
+                    );
+                audit(&mut self.engine, AuditAction::ReportExport, session_id, &r);
+                r
+            }
+            ReportRequest::Delete(session_id) => {
+                let r = self
+                    .reports
+                    .delete(session_id)
+                    .map(|()| ResponseBody::SessionReportDeleted { session_id });
+                audit(&mut self.engine, AuditAction::ReportDelete, session_id, &r);
+                if r.is_ok() {
+                    let _ = self
+                        .events
+                        .send(ServiceEvent::SessionReportChanged { session_id });
+                }
+                r
             }
         }
     }
@@ -833,6 +1226,8 @@ impl SupervisorThread {
                 .console_revoked(Actor::System, &revoked, TerminationCause::VmTerminated);
         }
         for (vm_id, state) in changes {
+            let run = runs.iter().find(|(v, _)| *v == vm_id).and_then(|(_, r)| *r);
+            self.reports.vm_state(vm_id, state, run);
             let _ = self.events.send(ServiceEvent::VmState { vm_id, state });
         }
         // F4: sessions terminated by the core for any cause close their gate
@@ -840,6 +1235,11 @@ impl SupervisorThread {
         for (session_id, state, termination) in self.engine.session_changes() {
             if state == SessionState::Terminated {
                 self.agents.terminated(session_id);
+            }
+            if self.reports.session_changed(session_id, state, termination) {
+                let _ = self
+                    .events
+                    .send(ServiceEvent::SessionReportChanged { session_id });
             }
             let _ = self.events.send(ServiceEvent::SessionChanged {
                 session_id,
@@ -1237,14 +1637,15 @@ impl SupervisorThread {
                 // The token goes back to the service only to be delivered to
                 // the waiting agent (never logged: `Debug` redacts it).
                 let token = new.token.clone();
-                self.engine
-                    .create_session(*new)
-                    .map(|c| ResponseBody::SessionGranted {
+                self.engine.create_session(*new).map(|c| {
+                    self.open_report(&c);
+                    ResponseBody::SessionGranted {
                         session_id: c.grant.session_id,
                         token,
                         grant: c.grant,
                         lease: c.lease,
-                    })
+                    }
+                })
             }
             SupervisorRequest::ListSessions => {
                 who()?;
@@ -1282,8 +1683,15 @@ impl SupervisorThread {
                     .set_input_owner(vm_id, owner)
                     .map(|()| ResponseBody::InputOwner { vm_id, owner })
             }
+            SupervisorRequest::Report(req) => {
+                who()?;
+                self.report_request(*req)
+            }
             SupervisorRequest::Agent(call) => {
                 let c = who()?;
+                if let Some(r) = self.report_agent_call(c, &call) {
+                    return r.map_err(ReplyError::Operational);
+                }
                 let end = matches!(*call, AgentCall::EndSession);
                 let r = self.engine.agent_call(c, *call);
                 if end

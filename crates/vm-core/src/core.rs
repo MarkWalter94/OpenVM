@@ -1976,9 +1976,37 @@ where
             vm_id: Some(vm_id),
             ..Ev::default()
         };
-        if matches!(caller, Caller::Agent { .. }) {
-            let err = PublicError::permission_denied("baselines not available to agent sessions");
-            return Err(self.deny(actor, action, ev(), err));
+        if let Caller::Agent { session_id, .. } = caller {
+            // F5: an agent session may create a checkpoint (`vm.snapshot`)
+            // or restore (`vm.restore`) on the VM of its grant, with the
+            // explicit capability; deleting baselines stays with the user.
+            let capability = match action {
+                AuditAction::BaselineCreate => Some(Capability::VmSnapshot),
+                AuditAction::BaselineRestore => Some(Capability::VmRestore),
+                _ => None,
+            };
+            let Some(capability) = capability else {
+                let err =
+                    PublicError::permission_denied("baselines not available to agent sessions");
+                return Err(self.deny(actor, action, ev(), err));
+            };
+            let now = self.clock.now();
+            if let Err(err) = self.authorize(caller, Some(vm_id), capability, now) {
+                let ev = Ev {
+                    session_id: Some(*session_id),
+                    capability: Some(capability),
+                    ..ev()
+                };
+                return Err(self.deny(actor, action, ev, err));
+            }
+            if self
+                .sessions
+                .get(*session_id)
+                .is_some_and(|s| s.state == SessionState::Paused)
+            {
+                let err = PublicError::permission_denied("session paused");
+                return Err(self.deny(actor, action, ev(), err));
+            }
         }
         let check = match self.vms.get(&vm_id) {
             None => Err(PublicError::not_found("VM does not exist")),
@@ -2097,8 +2125,17 @@ where
         let kind = record.kind;
         let error = record.error;
         if kind == OperationKind::Restore && result.is_ok() {
+            // The control sessions of the VM close (ROADMAP 8), except the
+            // agent session that asked for the restore itself (F5: the
+            // `vm.restore` tool works within the session's limits).
+            let requester = match &caller {
+                Caller::Agent { session_id, .. } => Some(*session_id),
+                Caller::User => None,
+            };
             for s in self.sessions.live_for_vm(vm_id) {
-                self.revoke_inner(s, TerminationCause::Restored);
+                if Some(s) != requester {
+                    self.revoke_inner(s, TerminationCause::Restored);
+                }
             }
             if let Some(rt) = self.vms.get_mut(&vm_id) {
                 rt.geometry = None;

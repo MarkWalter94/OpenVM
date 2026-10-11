@@ -225,6 +225,201 @@
           "required": [
             "call"
           ]
+        },
+        {
+          "description": "Baselines of the VM of the grant (`vm.status`, F5).",
+          "type": "object",
+          "properties": {
+            "call": {
+              "type": "string",
+              "const": "list_baselines"
+            },
+            "vm_id": {
+              "description": "VM.",
+              "$ref": "#/$defs/VmId"
+            }
+          },
+          "required": [
+            "call",
+            "vm_id"
+          ]
+        },
+        {
+          "description": "Checkpoint with the VM off (`vm.snapshot`, F5): a new baseline,\nnever a replacement; refused unless the VM is `stopped` (no hidden\nshutdown). Long: the reply arrives when done\n([`ResponseBody::BaselineCreated`]).",
+          "type": "object",
+          "properties": {
+            "call": {
+              "type": "string",
+              "const": "snapshot"
+            },
+            "label": {
+              "description": "Label (1..=200 characters, plain text; stored with the prefix\n`agent: `).",
+              "type": "string"
+            },
+            "operation_id": {
+              "description": "Idempotency key of the request (recorded in the report).",
+              "$ref": "#/$defs/OperationId"
+            },
+            "vm_id": {
+              "description": "VM.",
+              "$ref": "#/$defs/VmId"
+            }
+          },
+          "required": [
+            "call",
+            "operation_id",
+            "vm_id",
+            "label"
+          ]
+        },
+        {
+          "description": "Restore with the VM off (`vm.restore`, F5): only the session's\ninitial baseline or one created by this session; refused unless the\nVM is `stopped`. Long ([`ResponseBody::BaselineRestored`]).",
+          "type": "object",
+          "properties": {
+            "baseline_id": {
+              "description": "Baseline.",
+              "$ref": "#/$defs/BaselineId"
+            },
+            "call": {
+              "type": "string",
+              "const": "restore"
+            },
+            "operation_id": {
+              "description": "Idempotency key of the request (recorded in the report).",
+              "$ref": "#/$defs/OperationId"
+            },
+            "vm_id": {
+              "description": "VM.",
+              "$ref": "#/$defs/VmId"
+            }
+          },
+          "required": [
+            "call",
+            "operation_id",
+            "vm_id",
+            "baseline_id"
+          ]
+        },
+        {
+          "description": "LightVM events of the session and QEMU diagnostics of the current run,\nhost paths removed (`vm.logs`, F5).",
+          "type": "object",
+          "properties": {
+            "after_seq": {
+              "description": "Only events after this sequence number.",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "default": null,
+              "minimum": 0
+            },
+            "call": {
+              "type": "string",
+              "const": "logs"
+            },
+            "limit": {
+              "description": "Entries, 1..=[`crate::report::MAX_LOG_ENTRIES`] (default 50).",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "default": null,
+              "minimum": 0
+            },
+            "vm_id": {
+              "description": "VM.",
+              "$ref": "#/$defs/VmId"
+            }
+          },
+          "required": [
+            "call",
+            "vm_id"
+          ]
+        },
+        {
+          "description": "Declaration of the agent about its result (F5): recorded as a claim,\nnever as the outcome.",
+          "type": "object",
+          "properties": {
+            "call": {
+              "type": "string",
+              "const": "declare"
+            },
+            "claimed_outcome": {
+              "description": "Outcome the agent claims.",
+              "$ref": "#/$defs/TestOutcome"
+            },
+            "summary": {
+              "description": "Summary (at most 2000 characters kept, plain text).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "call",
+            "claimed_outcome",
+            "summary"
+          ]
+        },
+        {
+          "description": "Note of the adapter for the report: MCP tool name and a bounded\nsummary (never typed text).",
+          "type": "object",
+          "properties": {
+            "call": {
+              "type": "string",
+              "const": "tool_note"
+            },
+            "detail": {
+              "description": "Summary (at most 512 bytes serialized, otherwise replaced).",
+              "default": null
+            },
+            "error_code": {
+              "description": "Error code, if any (at most 64 characters kept).",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "ok": {
+              "description": "Outcome.",
+              "type": "boolean"
+            },
+            "tool": {
+              "description": "MCP tool name (at most 64 characters kept).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "call",
+            "tool",
+            "ok"
+          ]
+        },
+        {
+          "description": "Summary of this session's report (only the own session).",
+          "type": "object",
+          "properties": {
+            "call": {
+              "type": "string",
+              "const": "report"
+            },
+            "session_id": {
+              "description": "Session (absent = this session).",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SessionId"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            }
+          },
+          "required": [
+            "call"
+          ]
         }
       ]
     },
@@ -320,6 +515,21 @@
           "description": "UEFI (OVMF) with per-VM NVRAM.",
           "type": "string",
           "const": "uefi"
+        }
+      ]
+    },
+    "FixtureMarker": {
+      "description": "Marker expected by the fixture verifier.",
+      "oneOf": [
+        {
+          "description": "`LIGHTVM-FX1` on the data disk (after `fx.sh scrivi`).",
+          "type": "string",
+          "const": "present"
+        },
+        {
+          "description": "No marker.",
+          "type": "string",
+          "const": "absent"
         }
       ]
     },
@@ -682,6 +892,21 @@
         "max_screenshots",
         "max_screenshot_bytes",
         "max_queued_operations"
+      ]
+    },
+    "ReportFormat": {
+      "description": "Export format.",
+      "oneOf": [
+        {
+          "description": "Canonical JSON.",
+          "type": "string",
+          "const": "json"
+        },
+        {
+          "description": "Markdown view (texts escaped).",
+          "type": "string",
+          "const": "markdown"
+        }
       ]
     },
     "Request": {
@@ -1350,6 +1575,208 @@
             "vm_id",
             "owner"
           ]
+        },
+        {
+          "description": "Session reports, newest first (UI only, F5). Reports survive service\nrestarts; sessions do not.",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "list_session_reports"
+            }
+          },
+          "required": [
+            "op"
+          ]
+        },
+        {
+          "description": "Header of a report, without events (UI only).",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "get_session_report"
+            },
+            "session_id": {
+              "description": "Session.",
+              "$ref": "#/$defs/SessionId"
+            }
+          },
+          "required": [
+            "op",
+            "session_id"
+          ]
+        },
+        {
+          "description": "A page of the events of a report (UI only).",
+          "type": "object",
+          "properties": {
+            "limit": {
+              "description": "Events, 1..=[`crate::report::MAX_REPORT_EVENTS_PAGE`].",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "offset": {
+              "description": "First event (0-based).",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "op": {
+              "type": "string",
+              "const": "get_session_report_events"
+            },
+            "session_id": {
+              "description": "Session.",
+              "$ref": "#/$defs/SessionId"
+            }
+          },
+          "required": [
+            "op",
+            "session_id",
+            "offset",
+            "limit"
+          ]
+        },
+        {
+          "description": "Chunk of a stored screenshot of a report (UI only).",
+          "type": "object",
+          "properties": {
+            "index": {
+              "description": "Chunk index, from 0.",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "op": {
+              "type": "string",
+              "const": "get_report_screenshot_chunk"
+            },
+            "session_id": {
+              "description": "Session.",
+              "$ref": "#/$defs/SessionId"
+            },
+            "shot": {
+              "description": "Screenshot index in the report.",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "op",
+            "session_id",
+            "shot",
+            "index"
+          ]
+        },
+        {
+          "description": "Explicit judgement of the local user on a session (UI only): sets the\noutcome with the rationale, attributed to the user.",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "set_session_verdict"
+            },
+            "outcome": {
+              "description": "Outcome.",
+              "$ref": "#/$defs/TestOutcome"
+            },
+            "rationale": {
+              "description": "Rationale (1..=2000 characters, plain text).",
+              "type": "string"
+            },
+            "session_id": {
+              "description": "Session.",
+              "$ref": "#/$defs/SessionId"
+            }
+          },
+          "required": [
+            "op",
+            "session_id",
+            "outcome",
+            "rationale"
+          ]
+        },
+        {
+          "description": "Runs an automatic verifier on the session's evidence (UI only).",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "verify_session"
+            },
+            "session_id": {
+              "description": "Session.",
+              "$ref": "#/$defs/SessionId"
+            },
+            "verifier": {
+              "description": "Verifier.",
+              "$ref": "#/$defs/SessionVerifier"
+            }
+          },
+          "required": [
+            "op",
+            "session_id",
+            "verifier"
+          ]
+        },
+        {
+          "description": "Export of a report to a file chosen by the user with the native save\ndialog (UI only; MCP can never choose a destination).",
+          "type": "object",
+          "properties": {
+            "destination": {
+              "description": "Absolute path of the new file.",
+              "type": "string"
+            },
+            "format": {
+              "description": "Format.",
+              "$ref": "#/$defs/ReportFormat"
+            },
+            "include_screenshots": {
+              "description": "Also write the stored screenshots next to the file.",
+              "type": "boolean",
+              "default": false
+            },
+            "op": {
+              "type": "string",
+              "const": "export_session_report"
+            },
+            "overwrite": {
+              "description": "Replace an existing file (the user confirmed it).",
+              "type": "boolean",
+              "default": false
+            },
+            "session_id": {
+              "description": "Session.",
+              "$ref": "#/$defs/SessionId"
+            }
+          },
+          "required": [
+            "op",
+            "session_id",
+            "format",
+            "destination"
+          ]
+        },
+        {
+          "description": "Deletion of the report and screenshots of a terminated session (UI only).",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "delete_session_report"
+            },
+            "session_id": {
+              "description": "Session.",
+              "$ref": "#/$defs/SessionId"
+            }
+          },
+          "required": [
+            "op",
+            "session_id"
+          ]
         }
       ]
     },
@@ -1444,6 +1871,64 @@
       "type": "string",
       "pattern": "^[0-9a-f]{64}$",
       "writeOnly": true
+    },
+    "SessionVerifier": {
+      "description": "Automatic verifier the user can run on a session.",
+      "oneOf": [
+        {
+          "description": "ADR-0019 pixel verifier on the last screenshot of the session.",
+          "type": "object",
+          "properties": {
+            "expected": {
+              "description": "Expected marker.",
+              "$ref": "#/$defs/FixtureMarker"
+            },
+            "kind": {
+              "type": "string",
+              "const": "fixture_marker"
+            }
+          },
+          "required": [
+            "kind",
+            "expected"
+          ]
+        }
+      ]
+    },
+    "TestOutcome": {
+      "description": "Outcome of a test (ROADMAP 9). Completing the conversation does not\nautomatically produce `passed`.",
+      "oneOf": [
+        {
+          "description": "Criteria verified.",
+          "type": "string",
+          "const": "passed"
+        },
+        {
+          "description": "Criteria not met.",
+          "type": "string",
+          "const": "failed"
+        },
+        {
+          "description": "No reliable verifier or insufficient evidence.",
+          "type": "string",
+          "const": "inconclusive"
+        },
+        {
+          "description": "Cancelled by the user.",
+          "type": "string",
+          "const": "cancelled"
+        },
+        {
+          "description": "Time ran out.",
+          "type": "string",
+          "const": "timed_out"
+        },
+        {
+          "description": "Infrastructure failure, distinct from a model failure.",
+          "type": "string",
+          "const": "infrastructure_error"
+        }
+      ]
     },
     "VmAction": {
       "description": "Action requested on an existing VM.",

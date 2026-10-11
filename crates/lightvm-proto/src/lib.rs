@@ -24,6 +24,7 @@ mod ids;
 mod input;
 pub mod ipc;
 mod model;
+pub mod report;
 mod request;
 pub mod schema;
 mod session;

@@ -81,6 +81,13 @@ pub enum AuditAction {
     VmStatus,
     /// Screenshot bytes read by an agent session (F4, never the bytes).
     ScreenshotRead,
+    /// Verdict on a session report: user judgement or automatic verifier (F5).
+    SessionVerdict,
+    /// Export of a session report to a file chosen by the user (F5, never
+    /// the path).
+    ReportExport,
+    /// Deletion of a session report and its screenshots (F5).
+    ReportDelete,
 }
 
 /// Recorded outcome.

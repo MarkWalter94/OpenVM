@@ -2044,6 +2044,7 @@ dependencies = [
  "rfd",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
 ]
 
@@ -2055,10 +2056,15 @@ version = "0.0.0"
 name = "lightvm-mcp"
 version = "0.0.0"
 dependencies = [
+ "lightvm-fixture",
+ "lightvm-proto",
+ "lightvm-service",
+ "png",
  "rmcp",
  "schemars",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
 ]
 

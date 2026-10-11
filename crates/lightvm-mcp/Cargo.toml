@@ -1,31 +1,48 @@
 [package]
 name = "lightvm-mcp"
-description = "LightVM: F1-19 spike of the MCP SDK (rmcp) with stdio transport and fake tools; not the product adapter (F5)"
+description = "LightVM: MCP stdio adapter (F5): MCP 2025-11-25 tools over the supervisor's authenticated IPC, pairing and session approval in the app"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
-# SDK selection spike (ADR-0021, docs/verification/F1-06-mcp-sdk.md).
-# The product crate `mcp-server` is born in F5 (ROADMAP 6.2): this crate only
-# serves to try the SDK with MCP revision 2025-11-25 over stdio.
+# Product adapter (ROADMAP 9, ADR-0006, ADR-0021). F1-19 started this crate
+# as the SDK trial (spike with fake tools); F5 turns it into the adapter that
+# the MCP client launches over stdio. It does not open disks, does not run
+# QEMU and has no host path parameter: it forwards to `lightvm-service`
+# through the per-user named pipe / socket with the pairing credential.
 
 [lib]
 path = "src/lib.rs"
 
 [[bin]]
-name = "lightvm-mcp-spike"
+name = "lightvm-mcp"
 path = "src/main.rs"
 
 # Exact versions (`=`), no git dependencies, no network features:
-# no HTTP, no OAuth, no client-side child process.
+# no HTTP, no OAuth, no client-side child process (ADR-0021).
 [dependencies]
+lightvm-proto = { path = "../lightvm-proto" }
+# Client side only (IPC client, credential, frame, transport): the
+# supervisor and `qemu-backend` stay out of the adapter (ADR-0024).
+lightvm-service = { path = "../lightvm-service", default-features = false }
+# Optional half-size screenshots for the model (same version as qemu-backend).
+png = "=0.18.1"
 rmcp = { version = "=3.5.1", default-features = false, features = ["server", "macros", "transport-io"] }
 schemars = { version = "=1.2.2", default-features = false, features = ["derive", "std"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
-tokio = { version = "=1.53.2", features = ["io-std", "macros", "rt"] }
+# SHA-256 of screenshots and of typed text (the report records length and
+# hash, never the text).
+sha2 = "=0.11.0"
+tokio = { version = "=1.53.2", features = ["io-std", "io-util", "macros", "rt", "rt-multi-thread", "sync", "time"] }
+
+[dev-dependencies]
+# Protocol tests over stdio against a real service with the fake backend.
+lightvm-service = { path = "../lightvm-service" }
+# Real-client test: fixture ISO and pixel verifier (ADR-0019).
+lightvm-fixture = { path = "../lightvm-fixture" }
 
 [lints]
 workspace = true

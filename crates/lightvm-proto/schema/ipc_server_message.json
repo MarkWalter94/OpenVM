@@ -155,6 +155,77 @@
         "duplicate"
       ]
     },
+    "AgentBaselineView": {
+      "description": "A baseline as seen by an agent session (no host details).",
+      "type": "object",
+      "properties": {
+        "baseline_id": {
+          "description": "Baseline.",
+          "$ref": "#/$defs/BaselineId"
+        },
+        "clean_shutdown": {
+          "description": "Created after an observed clean shutdown.",
+          "type": "boolean"
+        },
+        "created_at": {
+          "description": "Creation instant.",
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "created_by_session": {
+          "description": "Created by this session (`vm.snapshot`).",
+          "type": "boolean"
+        },
+        "current": {
+          "description": "The VM's current state is an overlay of it.",
+          "type": "boolean"
+        },
+        "initial": {
+          "description": "Initial baseline of the session (protected: never replaced by agents).",
+          "type": "boolean"
+        },
+        "label": {
+          "description": "Label (plain text).",
+          "type": "string"
+        },
+        "restorable": {
+          "description": "The session may restore it (initial or created by the session).",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "baseline_id",
+        "label",
+        "created_at",
+        "clean_shutdown",
+        "initial",
+        "created_by_session",
+        "current",
+        "restorable"
+      ]
+    },
+    "AgentDeclaration": {
+      "description": "Declaration of the agent at the end of its work: a claim, never an outcome.",
+      "type": "object",
+      "properties": {
+        "at": {
+          "description": "Instant.",
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "claimed_outcome": {
+          "description": "Outcome the agent claims.",
+          "$ref": "#/$defs/TestOutcome"
+        },
+        "summary": {
+          "description": "Summary (plain text).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "claimed_outcome",
+        "summary",
+        "at"
+      ]
+    },
     "AgentVmView": {
       "description": "A VM as seen by an agent session (no host details).",
       "type": "object",
@@ -834,6 +905,51 @@
         "expires_at"
       ]
     },
+    "LogEntry": {
+      "description": "Entry of `vm.logs`.",
+      "type": "object",
+      "properties": {
+        "at": {
+          "description": "Instant (for QEMU lines: the instant of the read).",
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "seq": {
+          "description": "Sequence (report event `seq` for LightVM entries, line number for QEMU).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "source": {
+          "description": "Source.",
+          "$ref": "#/$defs/LogSource"
+        },
+        "text": {
+          "description": "Text (plain text, control characters removed).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "seq",
+        "at",
+        "source",
+        "text"
+      ]
+    },
+    "LogSource": {
+      "description": "Source of a log entry.",
+      "oneOf": [
+        {
+          "description": "LightVM events of the session.",
+          "type": "string",
+          "const": "lightvm"
+        },
+        {
+          "description": "QEMU diagnostics of the current run (host paths removed).",
+          "type": "string",
+          "const": "qemu"
+        }
+      ]
+    },
     "MediaId": {
       "description": "MediaId: version 7 UUID, lowercase with hyphens.",
       "type": "string",
@@ -1067,6 +1183,31 @@
         }
       ]
     },
+    "OutcomeSource": {
+      "description": "Where the current outcome of a report comes from.",
+      "oneOf": [
+        {
+          "description": "Live session: not decided yet (the outcome reads `inconclusive`).",
+          "type": "string",
+          "const": "pending"
+        },
+        {
+          "description": "Default from the termination cause.",
+          "type": "string",
+          "const": "termination"
+        },
+        {
+          "description": "Automatic verifier (named in the verdict).",
+          "type": "string",
+          "const": "verifier"
+        },
+        {
+          "description": "Explicit judgement of the local user in the app.",
+          "type": "string",
+          "const": "user"
+        }
+      ]
+    },
     "ParentLossPolicy": {
       "description": "Fate of the VMs when the UI that started the service ends without a\ncontrolled shutdown (crash, forced termination). ADR-0015 part B.",
       "oneOf": [
@@ -1279,6 +1420,402 @@
             "kind"
           ]
         }
+      ]
+    },
+    "ReportBaseline": {
+      "description": "Baseline the session started from.",
+      "type": "object",
+      "properties": {
+        "baseline_id": {
+          "description": "Baseline.",
+          "$ref": "#/$defs/BaselineId"
+        },
+        "clean_shutdown": {
+          "description": "Created after an observed clean shutdown.",
+          "type": "boolean"
+        },
+        "created_at": {
+          "description": "Creation instant.",
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "disk_sha256": {
+          "description": "SHA-256 of the disk image.",
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "firmware_sha256": {
+          "description": "SHA-256 of the UEFI variables.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Sha256Digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "label": {
+          "description": "Label (plain text).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "baseline_id",
+        "label",
+        "created_at",
+        "clean_shutdown",
+        "disk_sha256"
+      ]
+    },
+    "ReportEvent": {
+      "description": "Event of a report.",
+      "type": "object",
+      "properties": {
+        "at": {
+          "description": "UTC instant.",
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "seq": {
+          "description": "Order in the report, from 1.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "oneOf": [
+        {
+          "description": "Session lifecycle step.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "session"
+            },
+            "state": {
+              "description": "State now.",
+              "$ref": "#/$defs/SessionState"
+            },
+            "termination": {
+              "description": "Termination cause.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TerminationCause"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "state"
+          ]
+        },
+        {
+          "description": "Agent call seen by the service (refusals included).",
+          "type": "object",
+          "properties": {
+            "call": {
+              "description": "Call name.",
+              "type": "string"
+            },
+            "error_code": {
+              "description": "Error code, if refused or failed.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ErrorCode"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "call"
+            },
+            "ok": {
+              "description": "Outcome.",
+              "type": "boolean"
+            },
+            "operation_id": {
+              "description": "Operation.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/OperationId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "run_id": {
+              "description": "Run.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RunId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "vm_id": {
+              "description": "VM.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/VmId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "call",
+            "ok"
+          ]
+        },
+        {
+          "description": "Tool note of the adapter (MCP tool name and a bounded summary).",
+          "type": "object",
+          "properties": {
+            "detail": {
+              "description": "Bounded summary (never typed text: length and SHA-256 only).",
+              "default": null
+            },
+            "error_code": {
+              "description": "Error code (operational or adapter), if any.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "tool"
+            },
+            "ok": {
+              "description": "Outcome.",
+              "type": "boolean"
+            },
+            "tool": {
+              "description": "MCP tool.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "tool",
+            "ok"
+          ]
+        },
+        {
+          "description": "Screenshot taken by the agent.",
+          "type": "object",
+          "properties": {
+            "bytes": {
+              "description": "PNG size.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "height": {
+              "description": "Height.",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "screenshot"
+            },
+            "retained": {
+              "description": "Stored in the session artefacts (retention limits).",
+              "type": "boolean"
+            },
+            "run_id": {
+              "description": "Run.",
+              "$ref": "#/$defs/RunId"
+            },
+            "sha256": {
+              "description": "SHA-256 of the PNG.",
+              "$ref": "#/$defs/Sha256Digest"
+            },
+            "shot": {
+              "description": "Index among the screenshots of the report, from 0.",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "width": {
+              "description": "Width.",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "kind",
+            "shot",
+            "run_id",
+            "width",
+            "height",
+            "sha256",
+            "bytes",
+            "retained"
+          ]
+        },
+        {
+          "description": "State change of the session's VM.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "vm_state"
+            },
+            "run_id": {
+              "description": "Run.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RunId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "state": {
+              "description": "State now.",
+              "$ref": "#/$defs/VmState"
+            }
+          },
+          "required": [
+            "kind",
+            "state"
+          ]
+        },
+        {
+          "description": "A verdict was recorded.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "verdict"
+            },
+            "outcome": {
+              "description": "Outcome.",
+              "$ref": "#/$defs/TestOutcome"
+            },
+            "source": {
+              "description": "Source.",
+              "$ref": "#/$defs/OutcomeSource"
+            }
+          },
+          "required": [
+            "kind",
+            "outcome",
+            "source"
+          ]
+        },
+        {
+          "description": "The agent declared its result.",
+          "type": "object",
+          "properties": {
+            "claimed_outcome": {
+              "description": "Claimed outcome.",
+              "$ref": "#/$defs/TestOutcome"
+            },
+            "kind": {
+              "type": "string",
+              "const": "declaration"
+            }
+          },
+          "required": [
+            "kind",
+            "claimed_outcome"
+          ]
+        },
+        {
+          "description": "Service note (plain text).",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "note"
+            },
+            "text": {
+              "description": "Text.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "text"
+          ]
+        }
+      ],
+      "required": [
+        "seq",
+        "at"
+      ]
+    },
+    "ReportFormat": {
+      "description": "Export format.",
+      "oneOf": [
+        {
+          "description": "Canonical JSON.",
+          "type": "string",
+          "const": "json"
+        },
+        {
+          "description": "Markdown view (texts escaped).",
+          "type": "string",
+          "const": "markdown"
+        }
+      ]
+    },
+    "ReportVersions": {
+      "description": "Versions of the components that served the session.",
+      "type": "object",
+      "properties": {
+        "accelerator": {
+          "description": "Accelerator in use.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "backend": {
+          "description": "Backend name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ipc_protocol": {
+          "description": "IPC protocol version.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "mcp_protocol": {
+          "description": "MCP protocol revision declared by the adapter, if any.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "service": {
+          "description": "`lightvm-service` version.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "service",
+        "ipc_protocol"
       ]
     },
     "ResponseBody": {
@@ -2085,6 +2622,299 @@
             "session_id",
             "report"
           ]
+        },
+        {
+          "description": "Response to `list_session_reports`.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "session_reports"
+            },
+            "reports": {
+              "description": "Reports, newest first.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/SessionReportSummary"
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "reports"
+          ]
+        },
+        {
+          "description": "A report header (events empty: read them by page).",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "session_report"
+            },
+            "report": {
+              "description": "Report.",
+              "$ref": "#/$defs/SessionReport"
+            }
+          },
+          "required": [
+            "kind",
+            "report"
+          ]
+        },
+        {
+          "description": "Response to `get_session_report_events`.",
+          "type": "object",
+          "properties": {
+            "events": {
+              "description": "Events.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ReportEvent"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "session_report_events"
+            },
+            "offset": {
+              "description": "First event of the page.",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "session_id": {
+              "description": "Session.",
+              "$ref": "#/$defs/SessionId"
+            },
+            "total": {
+              "description": "Events recorded in total.",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "kind",
+            "session_id",
+            "total",
+            "offset",
+            "events"
+          ]
+        },
+        {
+          "description": "Response to `get_report_screenshot_chunk`.",
+          "type": "object",
+          "properties": {
+            "chunks": {
+              "description": "Number of chunks.",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "data": {
+              "description": "Bytes of the chunk, standard base64 with padding.",
+              "type": "string"
+            },
+            "index": {
+              "description": "Chunk index.",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "report_screenshot_chunk"
+            },
+            "session_id": {
+              "description": "Session.",
+              "$ref": "#/$defs/SessionId"
+            },
+            "sha256": {
+              "description": "SHA-256 of the whole PNG.",
+              "$ref": "#/$defs/Sha256Digest"
+            },
+            "shot": {
+              "description": "Screenshot index.",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "kind",
+            "session_id",
+            "shot",
+            "index",
+            "chunks",
+            "sha256",
+            "data"
+          ]
+        },
+        {
+          "description": "Response to `export_session_report`.",
+          "type": "object",
+          "properties": {
+            "bytes": {
+              "description": "Bytes written (report file).",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "format": {
+              "description": "Format.",
+              "$ref": "#/$defs/ReportFormat"
+            },
+            "kind": {
+              "type": "string",
+              "const": "session_report_exported"
+            },
+            "screenshots": {
+              "description": "Screenshots written next to it.",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "session_id": {
+              "description": "Session.",
+              "$ref": "#/$defs/SessionId"
+            },
+            "sha256": {
+              "description": "SHA-256 of the report file.",
+              "$ref": "#/$defs/Sha256Digest"
+            }
+          },
+          "required": [
+            "kind",
+            "session_id",
+            "format",
+            "bytes",
+            "sha256",
+            "screenshots"
+          ]
+        },
+        {
+          "description": "Response to `delete_session_report`.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "session_report_deleted"
+            },
+            "session_id": {
+              "description": "Session.",
+              "$ref": "#/$defs/SessionId"
+            }
+          },
+          "required": [
+            "kind",
+            "session_id"
+          ]
+        },
+        {
+          "description": "Response to the agent call `list_baselines`.",
+          "type": "object",
+          "properties": {
+            "baselines": {
+              "description": "Baselines, oldest first.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/AgentBaselineView"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "agent_baselines"
+            },
+            "vm_id": {
+              "description": "VM.",
+              "$ref": "#/$defs/VmId"
+            }
+          },
+          "required": [
+            "kind",
+            "vm_id",
+            "baselines"
+          ]
+        },
+        {
+          "description": "Response to the agent call `logs`.",
+          "type": "object",
+          "properties": {
+            "entries": {
+              "description": "LightVM entries after `after_seq`, oldest first.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/LogEntry"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "agent_logs"
+            },
+            "last_seq": {
+              "description": "Last sequence returned (pass it as `after_seq` next time).",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "qemu": {
+              "description": "QEMU diagnostics of the current run (last lines, host paths removed).",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/LogEntry"
+              }
+            },
+            "vm_id": {
+              "description": "VM.",
+              "$ref": "#/$defs/VmId"
+            }
+          },
+          "required": [
+            "kind",
+            "vm_id",
+            "entries",
+            "last_seq",
+            "qemu"
+          ]
+        },
+        {
+          "description": "Response to the agent calls `declare` and `tool_note`.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "recorded"
+            },
+            "seq": {
+              "description": "Report event recorded (0 if dropped by the limit).",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "kind",
+            "seq"
+          ]
+        },
+        {
+          "description": "Response to the agent call `report`.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "agent_report"
+            },
+            "report": {
+              "description": "Summary of the session's report.",
+              "$ref": "#/$defs/SessionReportSummary"
+            }
+          },
+          "required": [
+            "kind",
+            "report"
+          ]
         }
       ]
     },
@@ -2415,6 +3245,24 @@
             "vm_id",
             "owner"
           ]
+        },
+        {
+          "description": "A session report was created or changed (termination, verdict,\nverification, deletion): re-read the list or the header (F5).",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "session_report_changed"
+            },
+            "session_id": {
+              "description": "Session.",
+              "$ref": "#/$defs/SessionId"
+            }
+          },
+          "required": [
+            "kind",
+            "session_id"
+          ]
         }
       ]
     },
@@ -2529,6 +3377,327 @@
         "expires_at",
         "lease_expires_at",
         "input_owner"
+      ]
+    },
+    "SessionReport": {
+      "description": "Canonical report of an agent session (`report.json`). In\n`get_session_report` replies `events` is empty: events are read by page.",
+      "type": "object",
+      "properties": {
+        "agent_declaration": {
+          "description": "Declaration of the agent (claim only).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AgentDeclaration"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "baseline": {
+          "description": "Facts of that baseline.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReportBaseline"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "baseline_id": {
+          "description": "Baseline the VM's current state was an overlay of at approval\n(`None` = standalone disk).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BaselineId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "capabilities": {
+          "description": "Granted capabilities.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Capability"
+          },
+          "uniqueItems": true
+        },
+        "client_name": {
+          "description": "Client name declared by the agent (plain text).",
+          "type": "string"
+        },
+        "ended_at": {
+          "description": "Termination instant.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcTimestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "errors": {
+          "description": "Errors of agent calls and tools, by code.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          },
+          "default": {}
+        },
+        "events": {
+          "description": "Events (empty in header replies).",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ReportEvent"
+          }
+        },
+        "events_dropped": {
+          "description": "Events not recorded (limit).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "events_total": {
+          "description": "Events recorded.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "expires_at": {
+          "description": "Grant expiry.",
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "guest_os": {
+          "description": "Declared guest OS.",
+          "$ref": "#/$defs/GuestOs"
+        },
+        "objective": {
+          "description": "Objective (purpose declared by the agent and approved by the user).",
+          "type": "string"
+        },
+        "outcome": {
+          "description": "Current outcome.",
+          "$ref": "#/$defs/TestOutcome"
+        },
+        "outcome_source": {
+          "description": "Source of the current outcome.",
+          "$ref": "#/$defs/OutcomeSource"
+        },
+        "policy_revision": {
+          "description": "Policy revision of the grant.",
+          "$ref": "#/$defs/PolicyRevision"
+        },
+        "quotas": {
+          "description": "Granted quotas.",
+          "$ref": "#/$defs/Quotas"
+        },
+        "report_format": {
+          "description": "[`REPORT_FORMAT`].",
+          "type": "string"
+        },
+        "report_sha256": {
+          "description": "SHA-256 of the canonical JSON with this field absent: detects\nalterations, it is not a tamper-proof seal.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Sha256Digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "run_ids": {
+          "description": "Runs used, in order of first use.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RunId"
+          }
+        },
+        "screenshots_dropped": {
+          "description": "Screenshots not stored (retention limits): hash only.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "screenshots_retained": {
+          "description": "Screenshots stored.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "session_id": {
+          "description": "Session.",
+          "$ref": "#/$defs/SessionId"
+        },
+        "started_at": {
+          "description": "Approval instant.",
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "state": {
+          "description": "Session state.",
+          "$ref": "#/$defs/SessionState"
+        },
+        "termination": {
+          "description": "Termination cause.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TerminationCause"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "verdicts": {
+          "description": "Verdicts in order (the last one is the current outcome).",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Verdict"
+          }
+        },
+        "versions": {
+          "description": "Component versions.",
+          "$ref": "#/$defs/ReportVersions"
+        },
+        "vm_config_revision": {
+          "description": "VM configuration revision at approval.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "vm_id": {
+          "description": "VM of the grant.",
+          "$ref": "#/$defs/VmId"
+        },
+        "vm_manifest_sha256": {
+          "description": "SHA-256 of the canonical JSON of the VM configuration at approval.",
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "vm_name": {
+          "description": "VM name at approval.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "report_format",
+        "session_id",
+        "vm_id",
+        "vm_name",
+        "client_name",
+        "objective",
+        "started_at",
+        "state",
+        "outcome",
+        "outcome_source",
+        "run_ids",
+        "guest_os",
+        "vm_manifest_sha256",
+        "vm_config_revision",
+        "policy_revision",
+        "capabilities",
+        "quotas",
+        "expires_at",
+        "versions",
+        "screenshots_retained",
+        "screenshots_dropped",
+        "events_total",
+        "events_dropped"
+      ]
+    },
+    "SessionReportSummary": {
+      "description": "Summary of a report, for lists.",
+      "type": "object",
+      "properties": {
+        "client_name": {
+          "description": "Client name (plain text).",
+          "type": "string"
+        },
+        "ended_at": {
+          "description": "Termination instant.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcTimestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "events": {
+          "description": "Events recorded.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "objective": {
+          "description": "Objective (plain text).",
+          "type": "string"
+        },
+        "outcome": {
+          "description": "Current outcome.",
+          "$ref": "#/$defs/TestOutcome"
+        },
+        "outcome_source": {
+          "description": "Source of the outcome.",
+          "$ref": "#/$defs/OutcomeSource"
+        },
+        "screenshots": {
+          "description": "Screenshots taken.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "session_id": {
+          "description": "Session.",
+          "$ref": "#/$defs/SessionId"
+        },
+        "started_at": {
+          "description": "Approval instant.",
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "state": {
+          "description": "Session state.",
+          "$ref": "#/$defs/SessionState"
+        },
+        "termination": {
+          "description": "Termination cause.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TerminationCause"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "vm_id": {
+          "description": "VM.",
+          "$ref": "#/$defs/VmId"
+        },
+        "vm_name": {
+          "description": "VM name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "vm_id",
+        "vm_name",
+        "client_name",
+        "objective",
+        "started_at",
+        "state",
+        "outcome",
+        "outcome_source",
+        "events",
+        "screenshots"
       ]
     },
     "SessionRequestInfo": {
@@ -2831,10 +4000,85 @@
         }
       ]
     },
+    "TestOutcome": {
+      "description": "Outcome of a test (ROADMAP 9). Completing the conversation does not\nautomatically produce `passed`.",
+      "oneOf": [
+        {
+          "description": "Criteria verified.",
+          "type": "string",
+          "const": "passed"
+        },
+        {
+          "description": "Criteria not met.",
+          "type": "string",
+          "const": "failed"
+        },
+        {
+          "description": "No reliable verifier or insufficient evidence.",
+          "type": "string",
+          "const": "inconclusive"
+        },
+        {
+          "description": "Cancelled by the user.",
+          "type": "string",
+          "const": "cancelled"
+        },
+        {
+          "description": "Time ran out.",
+          "type": "string",
+          "const": "timed_out"
+        },
+        {
+          "description": "Infrastructure failure, distinct from a model failure.",
+          "type": "string",
+          "const": "infrastructure_error"
+        }
+      ]
+    },
     "UtcTimestamp": {
       "description": "RFC 3339 UTC instant with Z suffix, millisecond precision.",
       "type": "string",
       "format": "date-time"
+    },
+    "Verdict": {
+      "description": "A verdict on the session, with its source and rationale.",
+      "type": "object",
+      "properties": {
+        "at": {
+          "description": "Instant.",
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "decided_by": {
+          "description": "Who decided: `service`, `verifier`, `local user`.",
+          "type": "string"
+        },
+        "outcome": {
+          "description": "Outcome.",
+          "$ref": "#/$defs/TestOutcome"
+        },
+        "rationale": {
+          "description": "Reason (plain text).",
+          "type": "string"
+        },
+        "source": {
+          "description": "Source.",
+          "$ref": "#/$defs/OutcomeSource"
+        },
+        "verifier": {
+          "description": "Verifier name and version, for [`OutcomeSource::Verifier`].",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "outcome",
+        "source",
+        "decided_by",
+        "rationale",
+        "at"
+      ]
     },
     "VmBaselines": {
       "description": "Baseline facts of a VM, in [`VmSummary`] (F3).",

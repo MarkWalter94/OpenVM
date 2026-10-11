@@ -636,6 +636,14 @@ impl BackendPort for FakeVmBackend {
     fn release_input(&mut self, _vm_id: VmId, _run_id: RunId) {
         push(&self.calls, "vm_release_input");
     }
+    fn qemu_log(&mut self, _vm_id: VmId, run_id: RunId) -> Option<String> {
+        // A host path, as a real QEMU message would carry: the service must
+        // remove it before an agent sees it (F5 `vm.logs`).
+        Some(format!(
+            "C:\\lightvm\\qemu\\qemu-system-x86_64.exe: fake run {run_id} started\n\
+             qemu-system-x86_64.exe: warning: C:\\Users\\someone\\catalog\\vms\\disk.qcow2 opened\n"
+        ))
+    }
     fn take_screenshot(&mut self, vm_id: VmId, run_id: RunId) -> Option<(Screenshot, Vec<u8>)> {
         let (meta, png) = self.last_shots.remove(&vm_id)?;
         (meta.run_id == run_id).then_some((meta, png))

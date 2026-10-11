@@ -53,6 +53,9 @@ rfd = { version = "=0.15.4", default-features = false }
 # `snapshot` + `wgpu`: graphical snapshots compared with the files in
 # `tests/snapshots/` (F1-19, ADR-0022); tolerance in `kittest.toml`.
 egui_kittest = { workspace = true, features = ["snapshot", "wgpu"] }
+# Real agent session test (F4 UI): SHA-256 of the agent's screenshots,
+# same version as the rest of the workspace.
+sha2 = "=0.11.0"
 
 [lints]
 workspace = true

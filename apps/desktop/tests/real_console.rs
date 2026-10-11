@@ -92,6 +92,7 @@ fn wizard_start_and_console_with_real_qemu() {
         runtime_dir: Some(dir.join("run")),
         audit_log: Some(dir.join("audit.jsonl")),
         policy: ParentLossPolicy::KillVms,
+        pairing_dir: Some(dir.join("pairing")),
     };
     let ctx_holder: Arc<std::sync::Mutex<Option<egui::Context>>> = Arc::default();
     let c2 = ctx_holder.clone();

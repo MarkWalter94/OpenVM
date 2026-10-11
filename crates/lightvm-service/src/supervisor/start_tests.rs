@@ -3,6 +3,7 @@
 //! Stop and revocation cancel it; a tampered copy is refused; the media
 //! handles live as long as the run.
 
+use crate::reports::ReportStore;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
@@ -99,6 +100,7 @@ fn fixture() -> Fx {
         storage_cancel: Arc::default(),
         start_jobs: 0,
         agents: Arc::default(),
+        reports: ReportStore::default(),
     };
     sup.engine.offload_start_checks(true);
     Fx {

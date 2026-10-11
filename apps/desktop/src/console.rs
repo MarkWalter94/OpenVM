@@ -432,6 +432,9 @@ pub struct LiveConsole {
     /// A popup (layout list) was open in the previous frame: the click that
     /// closes it does not reach the guest either.
     popup_was_open: bool,
+    /// An agent session owns the input of the VM (F4): nothing the user
+    /// types or clicks is queued.
+    input_blocked: bool,
     /// Counters.
     pub stats: ConsoleStats,
 }
@@ -469,6 +472,7 @@ impl LiveConsole {
             image_rect: None,
             disconnected_at: None,
             popup_was_open: false,
+            input_blocked: false,
             stats: ConsoleStats::default(),
         }
     }
@@ -626,6 +630,24 @@ impl LiveConsole {
                 }),
             }
         }
+    }
+
+    /// An agent owns the input of the VM (`true`) or the user again
+    /// (`false`). On the handover the keys and buttons the user held are
+    /// forgotten and the input not sent yet is dropped: the supervisor
+    /// releases them in the guest and would refuse the user's input anyway.
+    pub fn set_input_blocked(&mut self, blocked: bool) {
+        if blocked && !self.input_blocked {
+            let _ = self.input.release_all();
+            self.pending.clear();
+            self.had_focus = false;
+        }
+        self.input_blocked = blocked;
+    }
+
+    /// The input of the VM belongs to an agent session.
+    pub fn input_blocked(&self) -> bool {
+        self.input_blocked
     }
 
     /// Releases all keys pressed towards the guest.
@@ -841,7 +863,12 @@ impl LiveConsole {
                 .sense(egui::Sense::click_and_drag())
                 .alt_text(&name),
         );
-        if resp.clicked() || resp.drag_started() {
+        if self.input_blocked {
+            // The agent has control: the image takes no keyboard focus.
+            if resp.has_focus() {
+                resp.surrender_focus();
+            }
+        } else if resp.clicked() || resp.drag_started() {
             resp.request_focus();
         }
         // With focus, Tab, arrows and Esc go to the guest and not to egui navigation.
@@ -860,7 +887,7 @@ impl LiveConsole {
             resp.surrender_focus();
         }
         let window_focused = ctx.input(|i| i.focused);
-        let focused = resp.has_focus() && window_focused && !chords.leave;
+        let focused = resp.has_focus() && window_focused && !chords.leave && !self.input_blocked;
         if self.had_focus && !focused {
             self.release_all();
         }
@@ -874,7 +901,7 @@ impl LiveConsole {
             // dialog drawn above it, and not while a dialog is open.
             let layer = ui.layer_id();
             let popup_open = ctx.any_popup_open();
-            let blocked = modal_open || popup_open || self.popup_was_open;
+            let blocked = modal_open || popup_open || self.popup_was_open || self.input_blocked;
             self.popup_was_open = popup_open;
             let ctx2 = ctx.clone();
             let to_fb = move |p: egui::Pos2| {

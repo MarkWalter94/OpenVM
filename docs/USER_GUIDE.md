@@ -1,6 +1,6 @@
 # LightVM user guide (alpha)
 
-This guide takes you from a Windows 11 PC to an Ubuntu virtual machine (VM) installed with LightVM, and back to it after you close and reopen the app. It covers the **experimental alpha** (roadmap phase F2): read [Known limitations](#13-known-limitations-of-the-alpha) before you start.
+This guide takes you from a Windows 11 PC to an Ubuntu virtual machine (VM) installed with LightVM, and back to it after you close and reopen the app. It covers the **experimental alpha** (roadmap phase F2): read [Known limitations](#14-known-limitations-of-the-alpha) before you start.
 
 Contents:
 
@@ -14,10 +14,11 @@ Contents:
 8. [After the installation](#8-after-the-installation)
 9. [Everyday use: stop, Emergency Stop, delete](#9-everyday-use-stop-emergency-stop-delete)
 10. [Baselines: save and restore the VM's disk](#10-baselines-save-and-restore-the-vms-disk)
-11. [Where your data lives](#11-where-your-data-lives)
-12. [Uninstall](#12-uninstall)
-13. [Known limitations of the alpha](#13-known-limitations-of-the-alpha)
-14. [Troubleshooting](#14-troubleshooting)
+11. [Agent sessions](#11-agent-sessions)
+12. [Where your data lives](#12-where-your-data-lives)
+13. [Uninstall](#13-uninstall)
+14. [Known limitations of the alpha](#14-known-limitations-of-the-alpha)
+15. [Troubleshooting](#15-troubleshooting)
 
 ---
 
@@ -298,7 +299,46 @@ If an operation is refused, the page says why in plain words, for example:
 
 ---
 
-## 11. Where your data lives
+## 11. Agent sessions
+
+An **agent session** lets an AI agent (for example an MCP client running on this PC) look at and use **one** VM, for a limited time, with the actions you allow. Nothing happens without you: the agent can only *ask*, and you approve or deny in LightVM. Open the **Agents** page from the side bar.
+
+> LightVM limits what an agent can do **through LightVM**. It does not limit what the agent's own app can already do on this computer (files, network, other programs).
+
+**1. Agent access.** The switch **Allow agents to request sessions** is **off every time LightVM starts**. While it is off, agents cannot even ask. Turn it on only when you want to use an agent. Turning it off again denies the requests still waiting and ends the active sessions at once (the VMs keep running).
+
+**2. Pair a client.** With agent access on, press **Pair a client…** → **Write pairing file**. LightVM writes a pairing credential, valid for **10 minutes**, to `%LOCALAPPDATA%\LightVM\pairing\pairing.json`, a folder that only your Windows user account can read. The LightVM MCP adapter reads it from there. The credential is never shown on screen, never copied to the clipboard and never written to the logs, and on its own it gives **no access to any VM**. The file is removed when you turn agent access off, after an Emergency Stop and when LightVM closes; a new pairing replaces the previous one.
+
+**3. A request arrives.** The Agents page (and a blue bar at the top of every other page, with **Review**) shows the request: the client's name and its stated purpose (exactly as the agent wrote them), what it asks for, how long the request stays valid (5 minutes), and a large **verification code** such as `482-913`. The agent shows the same code on its side. **If the codes differ, press Deny**: someone else is asking.
+
+**4. Approve or deny.** **Deny** tells the agent no. **Review and approve…** opens the choices (there is nothing to type):
+
+| Choice | What it means |
+| --- | --- |
+| **Virtual machine** | Exactly one VM. Every other VM stays out of the agent's reach. If the agent asked for one VM, it is preselected. |
+| **What it may do** | Tick only what is needed: see the VM in its list, read its state, see the screen (screenshots), type and use the mouse, start it, stop or force-stop it, reset it. Stop and reset are marked **Can lose unsaved work** and are never ticked for you. Anything not ticked is refused by the supervisor. |
+| **Keyboard and mouse** | **Give keyboard and mouse to the agent now**: only one of you types at a time (see below). You can also hand them over later. |
+| **Duration** | 15 min, 1 hour, 4 hours or 8 hours; the session then ends by itself. |
+| **Limits** | Small, Standard or Large: how many actions, input events and screenshots the agent may use in the session. |
+| **If the agent stops answering** | 10, 5 or 3 seconds. An agent that stops checking in for this long loses the session **and its VM is stopped**. |
+
+Then tick **The agent shows the code …** (after comparing it) and press **Approve session**. If LightVM answers that another session is active, end that one first: one session at a time.
+
+**5. While a session is active**, an orange bar at the top of **every page** (also over the full-screen console) says *Agent session active on <VM> · <client> · keyboard and mouse: agent/you · time left*, with:
+
+- **Pause** / **Resume**: while paused the agent can still look (status, screenshots) but every action it tries is refused; the VM keeps running.
+- **Take control** / **Give control**: keyboard and mouse belong either to you or to the agent, never both. While the agent has them, the console shows *Input controlled by the agent …* and nothing you type or click is sent to the VM; **Take control** gives them back at once (keys the agent was holding are released).
+- **Revoke…**: ends the session at once after a confirmation; the agent's connection is closed and it needs a new approval to come back. Actions it already sent may still complete. The VM keeps running.
+- **Emergency Stop**: stops **all** VMs and ends every session immediately. It stays clickable even while a dialog is open.
+- **Details**: the session page with the stated objective, the VM, what was allowed, the time window, how much of the limits was used, and the session events LightVM saw (request, start, pause, keyboard handover, end). Every action of the agent is also recorded in the audit log (section 12).
+
+The Agents page lists the active session with the same controls and the last ended sessions with the reason they ended (for example *revoked by you*, *time limit reached*, *the agent stopped responding; its VM was stopped*).
+
+**If LightVM itself stops responding** while an agent works, run in a terminal `& "$env:LOCALAPPDATA\Programs\LightVM\lightvm-service.exe" --emergency-stop --catalog "$env:LOCALAPPDATA\LightVM\catalog"` (PowerShell; use your catalog folder if you moved it): it stops every VM and agent session of that catalog without going through the app.
+
+---
+
+## 12. Where your data lives
 
 | What | Where |
 | --- | --- |
@@ -306,13 +346,14 @@ If an operation is refused, the page says why in plain words, for example:
 | VM catalog: database, VM disks, UEFI variables, baselines, imported images | `%LOCALAPPDATA%\LightVM\catalog` (or the folder chosen in **Settings** → **VM catalog**) |
 | App settings | `%LOCALAPPDATA%\LightVM\ui-settings.json` |
 | Audit log of the supervisor | `%LOCALAPPDATA%\LightVM\audit.jsonl` |
+| Pairing file for an agent client (only after **Pair a client…**, removed when agent access is turned off, after an Emergency Stop and when LightVM closes) | `%LOCALAPPDATA%\LightVM\pairing\pairing.json` |
 | Diagnostic logs | `%LOCALAPPDATA%\LightVM\logs\lightvm-desktop.log` (the app) and `lightvm-service.log` (the supervisor); each is rotated at 1 MiB, keeping three older copies (`*.1.log` … `*.3.log`) |
 
 `%LOCALAPPDATA%` is usually `C:\Users\<you>\AppData\Local`. Do not edit or move files in the catalog by hand while LightVM is running; LightVM keeps a journal to recover from interruptions, but manual changes are not supported. To back up VMs, close LightVM and copy the whole catalog folder.
 
 ---
 
-## 12. Uninstall
+## 13. Uninstall
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Programs\LightVM\uninstall.ps1"
@@ -326,7 +367,7 @@ If you used the setup `.exe`, uninstall from **Settings → Apps → Installed a
 
 ---
 
-## 13. Known limitations of the alpha
+## 14. Known limitations of the alpha
 
 - **Experimental software.** Phase F2 "alpha manuale"; not a release. Feasibility items of phase F0 are still open (physical keyboard test P-4, second-user test on Windows P-5, see `docs/STATUS.md`).
 - **Windows 11 x64 only**, tested on a single PC (`docs/COMPATIBILITY.md`). Linux and macOS are not supported (the macOS build in CI only checks portability).
@@ -338,13 +379,13 @@ If you used the setup `.exe`, uninstall from **Settings → Apps → Installed a
 - **CPU model**: the VM uses a generic CPU model, not the host's (`-cpu host` does not boot on the test PC), so some guest software may run slower or detect fewer CPU features.
 - **One reference guest**: Ubuntu 26.04.1 LTS Desktop. Other guests are not tested.
 - Baselines are taken **with the VM off** only: no snapshot of a running VM, no RAM state (section 10). Baseline labels are generated by LightVM and cannot be renamed. Only one baseline operation at a time across all VMs.
-- No AI agent sessions yet (later phases F4–F5).
-- No console window: diagnostic messages are only in the log files (section 11).
+- Agent sessions (section 11): the app side is in place, but the LightVM MCP adapter that AI clients such as Claude Desktop use arrives with phase F5; until then only test clients speak to the supervisor. One agent session at a time; sessions never survive a restart of LightVM.
+- No console window: diagnostic messages are only in the log files (section 12).
 - Remote Desktop (RDP) sessions are not verified.
 
 ---
 
-## 14. Troubleshooting
+## 15. Troubleshooting
 
 | Symptom | Cause and fix |
 | --- | --- |
