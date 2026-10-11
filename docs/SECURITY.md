@@ -63,7 +63,7 @@ Status at the F0 review: Windows tested with the F0 spikes, Linux deferred to R2
 | 7 | Sessions with expiry, VM allowlist, allowed actions, quotas, revocation, input ownership | planned | F4 | Sessions and VM negative tests; F4 exit criterion (ADR-0006) |
 | 8 | CPU/memory limits on the process tree; storage budget and host reserve with the nature of the control declared | planned, feasibility proven in F0-08 (job CPU hard cap and memory limit with real effect on QEMU/WHPX; no hard storage quota without administrator: application-level budget) | F0 identification; F3 catalog quotas; F4 enforcement on sessions | Resources negative test; tests under pressure (ADR-0017) |
 | 9 | Audit of actions and denials, minimisation of secrets and sensitive content | planned | F1 minimal; F3 storage; F4 complete | Review of the logs produced by the negative tests; absence of secrets in reports |
-| 10 | Stop and revocation independent of the model and of the client's response | planned, feasibility proven in F0-06 for the Emergency Stop (`TerminateJobObject`, independent of QMP: p95 640.2 ms over 30 samples at desktop, 273.3 ms over 100 samples during boot); revocation from F4 | F0 termination test; F4 implementation | Revocation and Lifecycle negative tests; revocation and Emergency Stop measurements of section 13 (ADR-0009) |
+| 10 | Stop and revocation independent of the model and of the client's response | implemented and verified in simulation/test and on hardware (F4-01): service-side gate plus the core's two checks; with an agent flooding input at the rate limit, revoke closes the agent connection p95 0.1 ms and Emergency Stop ends QEMU p95 298.2 ms; stuck supervisor with full queue: 0 inputs forwarded after termination; local emergency endpoint without credential (same-user ACL, ADR-0009) | F0 termination test; F4 implementation | Revocation and Lifecycle negative tests; revocation and Emergency Stop measurements of section 13 (ADR-0009) |
 
 Statuses used in this table: `planned`, `implemented`, `verified in simulation/test`, `verified on hardware`, `missing (blocks AI Mode)`. Every status change refers to a file in `docs/verification/`.
 
@@ -77,7 +77,7 @@ Checklist to be completed with a reference to the verification file on the produ
 - [ ] **Network** — guest to host, LAN, Internet, IPv6 in the offline profile: no path.
 - [ ] **IPC/console** — local process without credential towards IPC or display channel: connection refused. *F0-04 §6: low-integrity process of the same user refused on the QMP and VNC sockets; second user not tested (P-5).*
 - [ ] **Policy** — text in the guest asks to disable the controls: authorizations unchanged.
-- [ ] **Revocation** — input flood during Emergency Stop: no forwarding after revocation, requests already sent identified, process termination verified.
+- [x] **Revocation** — input flood during Emergency Stop: no forwarding after revocation, requests already sent identified, process termination verified (`F4-01`, real QEMU, Windows).
 - [ ] **Storage** — concurrent restore at boot; deletion of a referenced base: operation prevented. *F0-05 §7: with the supervisor's handle in `FILE_SHARE_READ`, writing, renaming and deleting the base are refused.*
 - [ ] **Crash** — process killed during creation, rollback or DB update: safe state, baseline intact. *F0-05 §8: base unchanged after killing QEMU while writing and `qemu-img convert`; the partial file passes `qemu-img check`.*
 - [ ] **Resources** — oversized VM; screenshot/log flood: refusal or containment.

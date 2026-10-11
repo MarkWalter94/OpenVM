@@ -18,6 +18,10 @@ A stuck QMP, an unresponsive guest or a client that keeps sending requests must 
 - A local emergency command usable if the UI is frozen is provided.
 - The report distinguishes discarded queue, requests already forwarded and observed effects; no retroactive undo is promised.
 
+### Local emergency command (F4, 2026-10-11)
+
+ROADMAP 7.3 asks for a local emergency command usable when the UI does not respond. The supervisor publishes a second endpoint (same per-user ACL as the IPC pipe, path in `<catalog>/emergency.endpoint`) that accepts exactly one message, `{"type":"emergency_stop"}`, and runs the same priority path as the UI's Emergency Stop. It requires **no credential**: any process of the same user can trigger it. This is a deliberate trade-off (the only effect is stopping VMs and revoking agent sessions, which a same-user process could also obtain by killing the supervisor; a malicious same-user process is outside the absolute guarantees of the threat model, ROADMAP 7.1). Command: `lightvm-service --emergency-stop --catalog <dir>` (exit 0 completed, 5 not completed, 6 no running service). Evidence: `docs/verification/F4-01-sessions-bridge.md` (deviation D-2).
+
 ## Alternatives considered
 
 - Stop via QMP `quit` or `system_powerdown`: permitted for ordinary shutdown, not as the emergency path.

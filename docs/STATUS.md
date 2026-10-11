@@ -86,6 +86,21 @@ Decisions taken in F2: default CPU model `Skylake-Client-v4` (with `qemu64` the 
 
 Open for the F2 exit criterion: a user follows `docs/USER_GUIDE.md`, installs Ubuntu, reopens LightVM and finds the VM; Italian/English keyboard and coordinates after resize checked by hand; screen reader, DPI and multi-monitor; clean-machine installer test.
 
+## F3 and F4 work started in parallel
+
+Started on 2026-10-11 at the owner's request; like F1 and F2, **not usable for their exit criteria** until the previous phases are closed (section 10).
+
+| Item | Evidence | Declared outcome |
+| --- | --- | --- |
+| F3: baseline with the VM off (standalone image + UEFI variables + manifest), restore by overlay, deletion, crash reconciliation, quotas, audit; baseline screen | `F3-01`, `F3-02` | 30/30 modify-restore cycles on real QEMU (second run; first run 29/30 because of a guest kernel panic after the check); base hashes unchanged over 60 cycles; injected crashes at every critical point and a real service kill during `qemu-img convert` without loss; UI verified headless and with real QEMU |
+| F3: deterministic fixture (ADR-0019) as a reproducible data ISO | `F3-01` | built by `crates/lightvm-fixture` (pure-Rust ISO 9660), verified in the 30 cycles |
+| Start-time verification off the supervisor thread | `F2-01`, `F3-01` | verified on hardware (6.4 GB ISO, other requests p50 0.47 ms during verification) |
+| F4: agent sessions (pairing, approval with code, one VM, capabilities, quotas, lease), input ownership, pause/revoke, Emergency Stop, local emergency endpoint, audit | `F4-01` | verified on real QEMU (agent-driven fixture through its own screenshots; revoke closes a flooding agent in < 1 ms, Emergency Stop ends QEMU p95 298 ms; stuck supervisor with full queue: 0 inputs forwarded) |
+
+Deviations recorded in `F4-01` (D-1…D-6): service-side gate in addition to the core checks; **credential-less local emergency endpoint** (only verb Emergency Stop, same-user ACL; see ADR-0009); revocation keeps the pairing credential; lease expiry, client loss and UI loss stop the session's VM; screenshots in 32 KiB chunks; input ownership defaults to the user, one live session.
+
+Open: the service does not report the last run id of a stopped VM (`VmSummary.run_id` is `None`), unlike its doc comment; the UI relies on disk usage for the install-media hint.
+
 ## Linux lab outcome
 
 **"Verified on Windows only"**, confirmed by the project owner on 2026-10-10 (ADR-0016); the physical Linux server for R2a will be obtained later. With this outcome Windows is the only MVP target, the Ubuntu cell of `docs/COMPATIBILITY.md` stays "not verified" and Linux qualification is deferred to R2a, which does not close without the test on a physical host. WSL2 was used only for builds and accelerator-independent tests (`F0-07`).
