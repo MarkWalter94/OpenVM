@@ -1,5 +1,10 @@
-//! Agents page and agent session indicator (F4; ROADMAP 7.3, 9, 10 F4/F5).
+//! Agents page (the AI Workspace) and agent session indicator (F4, F5;
+//! ROADMAP 7.3, 9, 10 F4/F5).
 //!
+//! - AI Workspace: the session running now at the top (objective, what the
+//!   agent did so far as recorded by the supervisor, its latest screenshot
+//!   only when the user asks for it), then the requests, the access switch
+//!   and the session history ([`crate::reports`]).
 //! - Agent access switch (off at every supervisor start), with what turning
 //!   it on allows, and "Pair a client…" (pairing file, [`crate::pairing`]).
 //! - Pending session requests: client name and purpose as plain text, what
@@ -9,7 +14,8 @@
 //!   handover; denial.
 //! - Sessions: VM, client, state, time left, limits used, input owner;
 //!   pause/resume, input control, revocation (confirmed by the app), detail
-//!   page with objective, limits and the session events seen by the app.
+//!   page with objective, limits, the session report (F5) and the session
+//!   events seen by the app.
 //! - [`banner_ui`]: indicator on every page (full screen console included)
 //!   while a session is live, with Pause, Revoke, Take control and the
 //!   Emergency Stop always reachable.
@@ -29,6 +35,9 @@ use lightvm_proto::{Capability, Quotas, SessionId, SessionState, UtcTimestamp, V
 
 use crate::service::{AgentOp, RequestStatus, ServiceState, termination_text};
 use crate::theme::{self, Tone};
+
+/// Title of the Agents page.
+pub const TITLE: &str = "AI Workspace";
 
 /// Description under the Agents title.
 pub const DESCRIPTION: &str =
@@ -274,8 +283,47 @@ pub enum AgentAction {
     Open,
     /// Emergency Stop.
     EmergencyStop,
-    /// Re-read access, requests and sessions.
+    /// Re-read access, requests, sessions and reports.
     Refresh,
+    /// Read another page of the events of a report (offset).
+    EventsPage(SessionId, u32),
+    /// Show a stored screenshot of a report (read on demand).
+    ShowShot(SessionId, u32),
+    /// Hide the screenshot shown on the session page.
+    HideShot,
+    /// Show (`Some`) or hide the latest screenshot of a live session in the
+    /// AI Workspace.
+    WatchScreen(Option<SessionId>),
+    /// Open the verdict dialog.
+    Verdict(SessionId),
+    /// Open the automatic check dialog.
+    Verify(SessionId),
+    /// Open the export dialog.
+    Export(SessionId),
+    /// Open the report deletion dialog.
+    DeleteReport(SessionId),
+}
+
+/// A screenshot of a report the user asked to see, and its texture once
+/// read and decoded.
+#[derive(Clone, Copy)]
+pub struct Shown<'a> {
+    /// Session.
+    pub session_id: SessionId,
+    /// Screenshot index in the report.
+    pub shot: u32,
+    /// Texture, once the screenshot is read.
+    pub texture: Option<&'a egui::TextureHandle>,
+}
+
+impl std::fmt::Debug for Shown<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Shown")
+            .field("session_id", &self.session_id)
+            .field("shot", &self.shot)
+            .field("texture", &self.texture.map(egui::TextureHandle::id))
+            .finish()
+    }
 }
 
 /// What the Agents views need besides the supervisor state.
@@ -287,10 +335,29 @@ pub struct AgentsEnv<'a> {
     pub active: bool,
     /// Current instant (fixed in tests).
     pub now: UtcTimestamp,
+    /// Screenshot shown on the session page.
+    pub shown: Option<Shown<'a>>,
+    /// Live session whose latest screenshot the AI Workspace shows.
+    pub watch: Option<SessionId>,
+    /// That screenshot, once its index is known.
+    pub watch_shot: Option<Shown<'a>>,
 }
 
-impl AgentsEnv<'_> {
-    fn vm_name(&self, id: VmId) -> String {
+impl<'a> AgentsEnv<'a> {
+    /// Environment without screenshots.
+    pub fn new(state: &'a ServiceState, active: bool, now: UtcTimestamp) -> Self {
+        Self {
+            state,
+            active,
+            now,
+            shown: None,
+            watch: None,
+            watch_shot: None,
+        }
+    }
+
+    /// Name of a VM of the catalog.
+    pub fn vm_name(&self, id: VmId) -> String {
         self.state
             .vm(id)
             .map_or_else(|| "a deleted VM".into(), |v| v.name.as_str().to_owned())
@@ -362,7 +429,8 @@ fn small(ui: &mut egui::Ui, text: &str) {
     ui.add(egui::Label::new(egui::RichText::new(text).small().color(p.text_weak)).wrap());
 }
 
-/// Agent access, pairing, requests, sessions and history.
+/// AI Workspace: the session running now, requests, agent access and
+/// pairing, session history.
 pub fn agents_ui(
     ui: &mut egui::Ui,
     env: &AgentsEnv<'_>,
@@ -370,7 +438,7 @@ pub fn agents_ui(
 ) -> Option<AgentAction> {
     let mut choice = None;
     let st = &env.state.agents;
-    theme::page_header(ui, "Agents", DESCRIPTION, |ui| {
+    theme::page_header(ui, TITLE, DESCRIPTION, |ui| {
         if ui
             .add_enabled(env.active, egui::Button::new("Refresh"))
             .clicked()
@@ -388,9 +456,38 @@ pub fn agents_ui(
         theme::notice(ui, &control_error(c.op, f), Tone::Danger);
         ui.add_space(10.0);
     }
+    if let Some(a) = &env.state.reports.action
+        && let crate::service::ReportOp::Delete(_) = a.op
+        && let RequestStatus::Done(_) = a.status
+    {
+        theme::notice(
+            ui,
+            "Report deleted, with its stored screenshots.",
+            Tone::Positive,
+        );
+        ui.add_space(10.0);
+    }
 
-    theme::group_title(ui, "Agent access");
-    theme::card(ui, |ui| access_ui(ui, env, &mut choice));
+    theme::group_title(ui, "Current session");
+    let live: Vec<&SessionInfo> = st.live().collect();
+    theme::card(ui, |ui| {
+        if live.is_empty() {
+            crate::empty_state(
+                ui,
+                "No agent session is active.",
+                "One session at a time; it ends when its time runs out, when you revoke it or with the Emergency Stop.",
+            );
+            return;
+        }
+        for (i, s) in live.iter().enumerate() {
+            if i > 0 {
+                theme::divider(ui);
+            }
+            ui.push_id(("session", s.session_id), |ui| {
+                workspace_session(ui, env, s, &mut choice);
+            });
+        }
+    });
 
     ui.add_space(14.0);
     theme::group_title(ui, "Session requests");
@@ -418,46 +515,12 @@ pub fn agents_ui(
     });
 
     ui.add_space(14.0);
-    theme::group_title(ui, "Active sessions");
-    let live: Vec<&SessionInfo> = st.live().collect();
-    theme::card(ui, |ui| {
-        if live.is_empty() {
-            crate::empty_state(
-                ui,
-                "No agent session is active.",
-                "One session at a time; it ends when its time runs out, when you revoke it or with the Emergency Stop.",
-            );
-            return;
-        }
-        for (i, s) in live.iter().enumerate() {
-            if i > 0 {
-                theme::divider(ui);
-            }
-            ui.push_id(("session", s.session_id), |ui| {
-                session_row(ui, env, s, &mut choice);
-            });
-        }
-    });
+    theme::group_title(ui, "Agent access");
+    theme::card(ui, |ui| access_ui(ui, env, &mut choice));
 
-    let ended: Vec<&SessionInfo> = st
-        .sessions
-        .iter()
-        .filter(|s| s.state == SessionState::Terminated)
-        .collect();
-    if !ended.is_empty() {
-        ui.add_space(14.0);
-        theme::group_title(ui, "Ended sessions");
-        theme::card(ui, |ui| {
-            for (i, s) in ended.iter().enumerate() {
-                if i > 0 {
-                    theme::divider(ui);
-                }
-                ui.push_id(("ended", s.session_id), |ui| {
-                    ended_row(ui, env, s, &mut choice);
-                });
-            }
-        });
-    }
+    ui.add_space(14.0);
+    theme::group_title(ui, "Session history");
+    theme::card(ui, |ui| crate::reports::history_ui(ui, env, &mut choice));
     choice
 }
 
@@ -990,7 +1053,10 @@ fn session_controls(
     }
 }
 
-fn session_row(
+/// A live session in the AI Workspace: who, on which VM, the objective,
+/// what the agent did so far (recorded by the supervisor), its latest
+/// screenshot when the user asks for it, and the controls.
+fn workspace_session(
     ui: &mut egui::Ui,
     env: &AgentsEnv<'_>,
     s: &SessionInfo,
@@ -1022,7 +1088,41 @@ fn session_row(
             time_left(env.now, s.expires_at)
         ),
     );
+    ui.add_space(4.0);
+    ui.label(
+        egui::RichText::new("Objective stated by the agent")
+            .small()
+            .color(p.text_weak),
+    );
+    ui.add(egui::Label::new(egui::RichText::new(&s.purpose).color(p.text)).wrap());
+    ui.add_space(4.0);
+    ui.label(egui::RichText::new("So far").small().color(p.text_weak));
     small(ui, &usage_text(s));
+    let reports = &env.state.reports;
+    if let Some(tail) = reports.tail.get(&s.session_id)
+        && !tail.events.is_empty()
+    {
+        let mut ignore = None;
+        crate::reports::events_grid(
+            ui,
+            "lightvm_workspace_events",
+            s.session_id,
+            &tail.events,
+            false,
+            &mut ignore,
+        );
+        small(
+            ui,
+            &format!(
+                "Last {} of {} actions recorded by LightVM; all of them are in the report.",
+                tail.events.len(),
+                thousands(u64::from(tail.total))
+            ),
+        );
+    }
+    ui.add_space(4.0);
+    screen_ui(ui, env, s, choice);
+    ui.add_space(4.0);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         session_controls(ui, env, s, false, choice);
@@ -1031,75 +1131,151 @@ fn session_row(
             true,
             theme::subtle("Details"),
             &format!("Details of the session of {}", s.client_name),
-            "Objective, limits and events of the session",
+            "Objective, limits, actions, screenshots and outcome of the session",
         ) {
             *choice = Some(AgentAction::Details(s.session_id));
         }
     });
 }
 
-fn ended_row(
+/// Latest screenshot of the agent, only after the user asked for it.
+fn screen_ui(
     ui: &mut egui::Ui,
     env: &AgentsEnv<'_>,
     s: &SessionInfo,
     choice: &mut Option<AgentAction>,
 ) {
-    let p = theme::Palette::of(ui);
+    let header = env.state.reports.headers.get(&s.session_id);
+    let taken = header.map_or(s.usage.screenshots, |h| {
+        h.screenshots_retained + h.screenshots_dropped
+    });
+    if !s.capabilities.contains(&Capability::VmScreenshot) && taken == 0 {
+        return;
+    }
+    if env.watch != Some(s.session_id) {
+        if taken == 0 {
+            small(ui, "The agent has taken no screenshot yet.");
+        } else if button(
+            ui,
+            true,
+            egui::Button::new("Show the agent's latest screenshot"),
+            &format!("Show the latest screenshot of {}", s.client_name),
+            "Shown here only, kept in memory, never saved by the app; it can show anything on the guest screen",
+        ) {
+            *choice = Some(AgentAction::WatchScreen(Some(s.session_id)));
+        }
+        return;
+    }
     ui.horizontal(|ui| {
-        ui.add(egui::Label::new(egui::RichText::new(&s.client_name).color(p.text)).truncate());
-        state_pill(ui, s);
+        ui.label("Latest screenshot taken by the agent");
         if button(
             ui,
             true,
-            theme::subtle("Details"),
-            &format!("Details of the session of {}", s.client_name),
-            "Objective, limits and events of the session",
+            theme::subtle("Hide"),
+            &format!("Hide the screenshots of {}", s.client_name),
+            "Stop showing the agent's screenshots",
         ) {
-            *choice = Some(AgentAction::Details(s.session_id));
+            *choice = Some(AgentAction::WatchScreen(None));
         }
     });
-    let cause = s.termination.map_or("ended", termination_text);
-    small(
-        ui,
-        &format!(
-            "VM {} \u{b7} started {} \u{b7} {cause}",
-            env.vm_name(s.vm_id),
-            crate::baselines::format_time(s.created_at)
+    let Some(shown) = env.watch_shot.filter(|w| w.session_id == s.session_id) else {
+        small(
+            ui,
+            if taken == 0 {
+                "The agent has taken no screenshot yet."
+            } else {
+                "Reading the report\u{2026}"
+            },
+        );
+        return;
+    };
+    match env.state.reports.shot(shown.session_id, shown.shot) {
+        Some(RequestStatus::Done(img)) => {
+            if let Some(tex) = shown.texture {
+                crate::reports::shot_image(ui, tex, img, 360.0);
+            }
+            small(
+                ui,
+                &format!(
+                    "Screenshot {} \u{b7} {}\u{d7}{} \u{b7} SHA-256 {}",
+                    shown.shot + 1,
+                    img.size[0],
+                    img.size[1],
+                    crate::reports::short_hash(&img.sha256)
+                ),
+            );
+        }
+        Some(RequestStatus::Failed(f)) => small(
+            ui,
+            &format!("Screenshot {} not shown: {}", shown.shot + 1, f.message),
         ),
-    );
+        _ => {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Reading the screenshot\u{2026}");
+            });
+        }
+    }
 }
 
-/// Session page: objective, state and controls, limits, events.
+/// Session page: objective, state and controls, the session report
+/// (outcome, declaration, limits, versions, actions, screenshots, export,
+/// deletion) and the session events seen by the app.
 pub fn session_page_ui(
     ui: &mut egui::Ui,
     env: &AgentsEnv<'_>,
     id: SessionId,
 ) -> Option<AgentAction> {
     let mut choice = None;
-    let Some(s) = env.state.agents.session(id) else {
-        theme::page_header(
-            ui,
-            "Agent session",
-            "The session is no longer listed.",
-            |ui| {
-                if ui.button("Back to Agents").clicked() {
-                    choice = Some(AgentAction::Back);
-                }
-            },
-        );
+    let info = env.state.agents.session(id);
+    let reports = &env.state.reports;
+    let report = reports.headers.get(&id);
+    let summary = reports.summary(id);
+    let client = info
+        .map(|s| s.client_name.clone())
+        .or_else(|| report.map(|r| r.client_name.clone()))
+        .or_else(|| summary.map(|r| r.client_name.clone()));
+    let Some(client) = client else {
+        let why = match reports.header_errors.get(&id) {
+            Some(f) if f.code == Some(lightvm_proto::ErrorCode::NotFound) => {
+                "The report of this session no longer exists."
+            }
+            Some(_) => "The report of this session could not be read.",
+            None => "The session is no longer listed.",
+        };
+        theme::page_header(ui, "Agent session", why, |ui| {
+            if ui.button("Back to Agents").clicked() {
+                choice = Some(AgentAction::Back);
+            }
+        });
+        if let Some(f) = reports.header_errors.get(&id) {
+            theme::notice(ui, &f.message, Tone::Warning);
+        }
         return choice;
     };
     let p = theme::Palette::of(ui);
+    let vm_name = match (info, report, summary) {
+        (Some(s), _, _) if env.state.vm(s.vm_id).is_some() => env.vm_name(s.vm_id),
+        (_, Some(r), _) => r.vm_name.clone(),
+        (_, _, Some(r)) => r.vm_name.clone(),
+        (Some(s), _, _) => env.vm_name(s.vm_id),
+        _ => "a VM".into(),
+    };
     theme::page_header(
         ui,
-        &format!("Session \u{b7} {}", s.client_name),
-        &format!("Agent session on {}", env.vm_name(s.vm_id)),
+        &format!("Session \u{b7} {client}"),
+        &format!("Agent session on {vm_name}"),
         |ui| {
             if ui.button("Back to Agents").clicked() {
                 choice = Some(AgentAction::Back);
             }
         },
     );
+    let purpose = info
+        .map(|s| s.purpose.as_str())
+        .or_else(|| report.map(|r| r.objective.as_str()))
+        .or_else(|| summary.map(|r| r.objective.as_str()))
+        .unwrap_or_default();
     theme::group_title(ui, "Objective");
     theme::card(ui, |ui| {
         ui.label(
@@ -1107,94 +1283,109 @@ pub fn session_page_ui(
                 .small()
                 .color(p.text_weak),
         );
-        ui.add(egui::Label::new(egui::RichText::new(&s.purpose).color(p.text)).wrap());
+        ui.add(egui::Label::new(egui::RichText::new(purpose).color(p.text)).wrap());
     });
 
-    ui.add_space(14.0);
-    theme::group_title(ui, "State");
-    theme::card(ui, |ui| {
-        ui.horizontal(|ui| {
-            state_pill(ui, s);
-            if s.state == SessionState::Terminated {
-                ui.label(s.termination.map_or("ended", termination_text));
-            } else {
-                ui.label(time_left(env.now, s.expires_at));
-                ui.label(format!("\u{b7} keyboard and mouse: {}", input_text(env, s)));
-            }
-        });
-        if s.state != SessionState::Terminated {
+    if let Some(s) = info {
+        ui.add_space(14.0);
+        theme::group_title(ui, "State");
+        theme::card(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                session_controls(ui, env, s, false, &mut choice);
-            });
-        }
-    });
-
-    ui.add_space(14.0);
-    theme::group_title(ui, "Limits");
-    theme::card(ui, |ui| {
-        theme::row(ui, "Virtual machine", None, |ui| {
-            ui.label(env.vm_name(s.vm_id));
-        });
-        theme::row(ui, "Allowed", None, |ui| {
-            for c in &s.capabilities {
-                ui.horizontal(|ui| {
-                    ui.label(capability_text(*c));
-                    if capability_dangerous(*c) {
-                        theme::pill(ui, "Can lose unsaved work", Tone::Danger);
-                    }
-                });
-            }
-        });
-        theme::row(ui, "Time", None, |ui| {
-            ui.label(format!(
-                "From {} to {}",
-                crate::baselines::format_time(s.created_at),
-                crate::baselines::format_time(s.expires_at)
-            ));
-        });
-        theme::row(ui, "Used", None, |ui| {
-            ui.add(egui::Label::new(usage_text(s)).wrap());
-            small(
-                ui,
-                &format!(
-                    "Screenshots up to {} each \u{b7} at most {} actions waiting",
-                    crate::dashboard::format_bytes(s.quotas.max_screenshot_bytes),
-                    s.quotas.max_queued_operations
-                ),
-            );
-        });
-    });
-
-    ui.add_space(14.0);
-    theme::group_title(ui, "Activity");
-    theme::card(ui, |ui| {
-        let entries: Vec<_> = env
-            .state
-            .agents
-            .log
-            .iter()
-            .filter(|e| e.session_id == Some(id))
-            .collect();
-        if entries.is_empty() {
-            small(ui, "No session events seen by this app yet.");
-        }
-        egui::Grid::new("lightvm_session_log")
-            .num_columns(2)
-            .spacing([18.0, 4.0])
-            .show(ui, |ui| {
-                for e in entries {
-                    ui.label(egui::RichText::new(clock(e.at)).color(p.text_weak));
-                    ui.add(egui::Label::new(&e.text).wrap());
-                    ui.end_row();
+                state_pill(ui, s);
+                if s.state == SessionState::Terminated {
+                    ui.label(s.termination.map_or("ended", termination_text));
+                } else {
+                    ui.label(time_left(env.now, s.expires_at));
+                    ui.label(format!("\u{b7} keyboard and mouse: {}", input_text(env, s)));
                 }
             });
-        ui.add_space(4.0);
-        small(
-            ui,
-            "Session events seen by this app. Every action of the agent is also recorded in the supervisor's audit log.",
-        );
-    });
+            if s.state != SessionState::Terminated {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    session_controls(ui, env, s, false, &mut choice);
+                });
+                ui.add(egui::Label::new(usage_text(s)).wrap());
+            }
+        });
+    }
+
+    ui.add_space(14.0);
+    match report {
+        Some(r) => crate::reports::report_sections(ui, env, r, &mut choice),
+        None => {
+            theme::group_title(ui, "Report");
+            theme::card(ui, |ui| match reports.header_errors.get(&id) {
+                Some(f) => {
+                    theme::notice(
+                        ui,
+                        &format!("Report not read: {}", f.message),
+                        Tone::Warning,
+                    );
+                }
+                None => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Reading the report\u{2026}");
+                    });
+                }
+            });
+            if let Some(s) = info {
+                ui.add_space(14.0);
+                theme::group_title(ui, "Limits");
+                theme::card(ui, |ui| {
+                    theme::row(ui, "Virtual machine", None, |ui| {
+                        ui.label(env.vm_name(s.vm_id));
+                    });
+                    theme::row(ui, "Allowed", None, |ui| {
+                        for c in &s.capabilities {
+                            ui.horizontal(|ui| {
+                                ui.label(capability_text(*c));
+                                if capability_dangerous(*c) {
+                                    theme::pill(ui, "Can lose unsaved work", Tone::Danger);
+                                }
+                            });
+                        }
+                    });
+                    theme::row(ui, "Time", None, |ui| {
+                        ui.label(format!(
+                            "From {} to {}",
+                            crate::baselines::format_time(s.created_at),
+                            crate::baselines::format_time(s.expires_at)
+                        ));
+                    });
+                });
+            }
+        }
+    }
+
+    let entries: Vec<_> = env
+        .state
+        .agents
+        .log
+        .iter()
+        .filter(|e| e.session_id == Some(id))
+        .collect();
+    if !entries.is_empty() {
+        ui.add_space(14.0);
+        theme::group_title(ui, "Seen by this app");
+        theme::card(ui, |ui| {
+            egui::Grid::new("lightvm_session_log")
+                .num_columns(2)
+                .spacing([18.0, 4.0])
+                .show(ui, |ui| {
+                    for e in entries {
+                        ui.label(egui::RichText::new(clock(e.at)).color(p.text_weak));
+                        ui.add(egui::Label::new(&e.text).wrap());
+                        ui.end_row();
+                    }
+                });
+            ui.add_space(4.0);
+            small(
+                ui,
+                "Session events this app saw while it was open (request, approval, input handovers, pause, end).",
+            );
+        });
+    }
     choice
 }
 

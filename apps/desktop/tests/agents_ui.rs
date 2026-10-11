@@ -108,6 +108,9 @@ fn actions(hs: &common::Handles) -> Vec<ServiceCommand> {
                 ServiceCommand::GetAgentAccess
                     | ServiceCommand::ListSessionRequests
                     | ServiceCommand::ListSessions
+                    | ServiceCommand::ListSessionReports
+                    | ServiceCommand::GetSessionReport(_)
+                    | ServiceCommand::GetSessionReportEvents { .. }
             )
         })
         .collect()
@@ -371,7 +374,7 @@ fn session_can_be_paused_resumed_and_revoked_with_confirmation() {
     assert!(!h.state().dialog_open());
     // The indicator is gone with the session; it is in the history.
     assert!(h.query_by_label(BANNER_STOP).is_none());
-    h.get_by_label("Ended sessions");
+    h.get_by_label("Session history");
     h.get_by_label_contains("revoked by you");
 }
 

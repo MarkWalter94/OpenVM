@@ -17,6 +17,14 @@
 //! input control, session page) and the agent session indicator on every
 //! page, full screen console included, with the Emergency Stop.
 //!
+//! F5: the Agents page reads as the AI Workspace (session running now with
+//! what the agent did so far, then requests, access and the session
+//! history from the supervisor's reports); the session page shows the
+//! report (outcome with its source, the agent's declaration as a claim,
+//! limits, versions, actions by page, screenshots on request) with the
+//! user's verdict, the automatic check, export to a file chosen in the
+//! native save dialog and deletion, each confirmed.
+//!
 //! The simulated framebuffer is a pattern generated in memory: it is not a
 //! real console, it is shown only on request (`--simulated-console`, or
 //! `--smoke`) and is never used in the product path (F2 exit criterion: no
@@ -39,6 +47,7 @@ pub mod keymap;
 pub mod libraries;
 pub mod pairing;
 pub mod render;
+pub mod reports;
 pub mod service;
 pub mod settings;
 pub mod theme;
@@ -63,6 +72,35 @@ pub type FolderPicker = Box<dyn FnMut(&str) -> Option<std::path::PathBuf>>;
 pub type FilePicker = Box<dyn FnMut(&str) -> Option<std::path::PathBuf>>;
 /// Save dialog: receives the proposed file name, returns the destination.
 pub type SavePicker = Box<dyn FnMut(&str) -> Option<std::path::PathBuf>>;
+
+/// Save dialog for a session report: receives the proposed file name and
+/// the format, returns the destination chosen by the user.
+pub type ReportPicker =
+    Box<dyn FnMut(&str, lightvm_proto::report::ReportFormat) -> Option<std::path::PathBuf>>;
+
+/// Native save dialog for session reports (Windows only).
+pub fn native_report_picker() -> Option<ReportPicker> {
+    #[cfg(windows)]
+    {
+        Some(Box::new(
+            |name: &str, format: lightvm_proto::report::ReportFormat| {
+                let (what, ext) = match format {
+                    lightvm_proto::report::ReportFormat::Json => ("JSON report", "json"),
+                    lightvm_proto::report::ReportFormat::Markdown => ("Markdown report", "md"),
+                };
+                rfd::FileDialog::new()
+                    .set_title("Export the session report")
+                    .set_file_name(name)
+                    .add_filter(what, &[ext])
+                    .save_file()
+            },
+        ))
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
 
 /// Native folder picker (Windows only; elsewhere no picker).
 pub fn native_folder_picker() -> Option<FolderPicker> {
@@ -253,6 +291,75 @@ struct RevokeDialog {
     focus: bool,
 }
 
+/// Action on a session report to confirm (F5).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ReportDialogKind {
+    /// Verdict of the user: the outcome chosen (none at first).
+    Verdict(Option<lightvm_proto::TestOutcome>),
+    /// Automatic check: the marker expected (none at first).
+    Verify(Option<lightvm_proto::report::FixtureMarker>),
+    /// Export: format, screenshots, file chosen, overwrite sent.
+    Export {
+        format: lightvm_proto::report::ReportFormat,
+        screenshots: bool,
+        path: Option<std::path::PathBuf>,
+        overwrite: bool,
+    },
+    /// Deletion of the report and its screenshots.
+    Delete,
+}
+
+/// Report dialog open.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ReportDialog {
+    session_id: SessionId,
+    client: String,
+    started: UtcTimestamp,
+    kind: ReportDialogKind,
+    sent: bool,
+    focus: bool,
+    /// Problem found by the app itself (no save dialog).
+    note: Option<String>,
+}
+
+impl ReportDialog {
+    fn op(&self) -> service::ReportOp {
+        use service::ReportOp as O;
+        match self.kind {
+            ReportDialogKind::Verdict(_) => O::Verdict(self.session_id),
+            ReportDialogKind::Verify(_) => O::Verify(self.session_id),
+            ReportDialogKind::Export { .. } => O::Export(self.session_id),
+            ReportDialogKind::Delete => O::Delete(self.session_id),
+        }
+    }
+}
+
+/// Re-read of the reports of live sessions (the supervisor publishes no
+/// event for each agent action).
+const REPORT_POLL: Duration = Duration::from_secs(3);
+
+/// Proposed name of an exported report:
+/// `lightvm-session-<client>-<yyyymmdd-hhmm>.json`.
+pub fn report_file_name(
+    client: &str,
+    started: UtcTimestamp,
+    format: lightvm_proto::report::ReportFormat,
+) -> String {
+    let stamp: String = started
+        .to_string()
+        .chars()
+        .take(16)
+        .filter(char::is_ascii_digit)
+        .collect();
+    let (date, time) = stamp.split_at(stamp.len().min(8));
+    let client: String = sanitize_file_name(client).chars().take(40).collect();
+    let ext = match format {
+        lightvm_proto::report::ReportFormat::Json => "json",
+        lightvm_proto::report::ReportFormat::Markdown => "md",
+    };
+    format!("lightvm-session-{client}-{date}-{time}.{ext}")
+}
+
 /// "Pair a client" dialog.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PairingDialog {
@@ -322,6 +429,7 @@ pub struct LightVmApp {
     folder_picker: Option<FolderPicker>,
     file_picker: Option<FilePicker>,
     save_picker: Option<SavePicker>,
+    report_picker: Option<ReportPicker>,
     /// Supervisor configuration given on the command line (`--catalog`):
     /// takes precedence over the Settings page, restarts included.
     cli_config: Option<ServiceConfig>,
@@ -341,6 +449,16 @@ pub struct LightVmApp {
     approve_form: Option<agents::ApproveForm>,
     revoke_dialog: Option<RevokeDialog>,
     pairing_dialog: Option<PairingDialog>,
+    /// Report screenshot shown on the session page (F5).
+    shown_shot: Option<(SessionId, u32)>,
+    /// Live session whose latest screenshot the AI Workspace shows.
+    watch_screen: Option<SessionId>,
+    /// Textures of the report screenshots shown (at most
+    /// [`service::REPORT_SHOTS_KEPT`]).
+    shot_textures: Vec<((SessionId, u32), egui::TextureHandle)>,
+    report_dialog: Option<ReportDialog>,
+    /// Last re-read of the live sessions' reports.
+    report_poll: Option<Instant>,
     /// Fixed clock for the generated baseline labels (tests).
     fixed_now: Option<UtcTimestamp>,
     /// Last re-read of the VM list for the progress of a start.
@@ -394,6 +512,7 @@ impl LightVmApp {
             folder_picker: None,
             file_picker: None,
             save_picker: None,
+            report_picker: None,
             cli_config: None,
             restart: None,
             vm_edit: None,
@@ -406,6 +525,11 @@ impl LightVmApp {
             approve_form: None,
             revoke_dialog: None,
             pairing_dialog: None,
+            shown_shot: None,
+            watch_screen: None,
+            shot_textures: Vec::new(),
+            report_dialog: None,
+            report_poll: None,
             fixed_now: None,
             start_poll: None,
             closing: None,
@@ -474,6 +598,11 @@ impl LightVmApp {
     /// Save dialog of the console screenshot (native in the app, fake in tests).
     pub fn set_save_picker(&mut self, s: Option<SavePicker>) {
         self.save_picker = s;
+    }
+
+    /// Save dialog of the report export (native in the app, fake in tests).
+    pub fn set_report_picker(&mut self, s: Option<ReportPicker>) {
+        self.report_picker = s;
     }
 
     /// Supervisor configuration given on the command line: it stays in use
@@ -847,6 +976,12 @@ impl LightVmApp {
             || self.baseline_dialog.is_some()
             || self.revoke_dialog.is_some()
             || self.pairing_dialog.is_some()
+            || self.report_dialog.is_some()
+    }
+
+    /// Report screenshot shown on the session page, if any.
+    pub fn shown_shot(&self) -> Option<(SessionId, u32)> {
+        self.shown_shot
     }
 
     /// Agent session whose page is open, if any.
@@ -1023,6 +1158,7 @@ impl LightVmApp {
         self.baseline_dialog_ui(ui);
         self.revoke_dialog_ui(ui);
         self.pairing_dialog_ui(ui);
+        self.report_dialog_ui(ui);
         self.close_dialog_ui(ui, &ctx);
         self.emergency_stop_over_dialogs(&ctx);
         // Second defence: no widget writes the host clipboard.
@@ -1148,11 +1284,7 @@ impl LightVmApp {
         if live || waiting {
             ui.ctx().request_repaint_after(Duration::from_secs(1));
         }
-        let env = agents::AgentsEnv {
-            state: &state,
-            active: alive && state.connected,
-            now: self.now(),
-        };
+        let env = agents::AgentsEnv::new(&state, alive && state.connected, self.now());
         let tone = if live { p.warning } else { p.accent };
         let mut action = None;
         egui::Panel::top("lightvm_agent_banner")
@@ -1215,7 +1347,7 @@ impl LightVmApp {
 
     fn agents_page(&mut self, ui: &mut egui::Ui) {
         let Some(srv) = &mut self.service else {
-            theme::page_header(ui, "Agents", agents::DESCRIPTION, |_| {});
+            theme::page_header(ui, agents::TITLE, agents::DESCRIPTION, |_| {});
             theme::card(ui, |ui| {
                 empty_state(
                     ui,
@@ -1227,11 +1359,6 @@ impl LightVmApp {
         };
         let alive = srv.is_alive();
         let state = srv.state();
-        let env = agents::AgentsEnv {
-            state: &state,
-            active: alive && state.connected,
-            now: self.now(),
-        };
         // A form whose request is gone (decided, expired, withdrawn) closes,
         // unless its own approval just succeeded or failed.
         if let Some(f) = &self.approve_form {
@@ -1248,6 +1375,29 @@ impl LightVmApp {
                 self.approve_form = None;
             }
         }
+        let active = alive && state.connected;
+        if active {
+            self.poll_reports(&state);
+        }
+        let watch_shot = self.watched_shot(&state, active);
+        self.sync_shot_textures(ui.ctx(), &state, watch_shot);
+        let texture = |key: Option<(SessionId, u32)>| {
+            key.map(|(session_id, shot)| agents::Shown {
+                session_id,
+                shot,
+                texture: self
+                    .shot_textures
+                    .iter()
+                    .find(|(k, _)| *k == (session_id, shot))
+                    .map(|(_, t)| t),
+            })
+        };
+        let env = agents::AgentsEnv {
+            shown: texture(self.shown_shot),
+            watch: self.watch_screen,
+            watch_shot: texture(watch_shot),
+            ..agents::AgentsEnv::new(&state, active, self.now())
+        };
         let action = match self.agent_session {
             Some(id) => agents::session_page_ui(ui, &env, id),
             None => agents::agents_ui(ui, &env, &mut self.approve_form),
@@ -1255,6 +1405,105 @@ impl LightVmApp {
         if let Some(a) = action {
             self.run_agent_action(a, &state);
         }
+    }
+
+    /// Re-reads, every [`REPORT_POLL`], the header and the last events of
+    /// the live sessions' reports and the events page of the session page
+    /// when its session is live: the supervisor publishes an event only
+    /// when a report opens, ends or gets a verdict.
+    fn poll_reports(&mut self, state: &ServiceState) {
+        if self.report_poll.is_some_and(|t| t.elapsed() < REPORT_POLL) {
+            return;
+        }
+        self.report_poll = Some(Instant::now());
+        let live: Vec<SessionId> = state.agents.live().map(|s| s.session_id).collect();
+        for id in &live {
+            let total = state.reports.headers.get(id).map_or(0, |h| h.events_total);
+            self.send(ServiceCommand::GetSessionReport(*id));
+            self.send(ServiceCommand::GetSessionReportEvents {
+                session_id: *id,
+                offset: total.saturating_sub(service::TAIL_EVENTS),
+                limit: service::TAIL_EVENTS,
+                tail: true,
+            });
+        }
+        if let Some(id) = self.agent_session
+            && live.contains(&id)
+        {
+            let offset = state.reports.events.get(&id).map_or(0, |p| p.offset);
+            self.send(ServiceCommand::GetSessionReportEvents {
+                session_id: id,
+                offset,
+                limit: service::EVENTS_PAGE,
+                tail: false,
+            });
+        }
+    }
+
+    /// Latest screenshot of the watched live session: requested once its
+    /// index is known (the header counts the screenshots taken).
+    fn watched_shot(&mut self, state: &ServiceState, active: bool) -> Option<(SessionId, u32)> {
+        let id = self.watch_screen?;
+        if state
+            .agents
+            .session(id)
+            .is_none_or(|s| s.state == lightvm_proto::SessionState::Terminated)
+        {
+            self.watch_screen = None;
+            return None;
+        }
+        let h = state.reports.headers.get(&id)?;
+        let n = (h.screenshots_retained + h.screenshots_dropped).checked_sub(1)?;
+        if active && state.reports.shot(id, n).is_none() {
+            self.send(ServiceCommand::GetReportScreenshot {
+                session_id: id,
+                shot: n,
+            });
+        }
+        Some((id, n))
+    }
+
+    /// Textures of the screenshots shown, made once each from the decoded
+    /// pixels; the ones no longer shown are dropped.
+    fn sync_shot_textures(
+        &mut self,
+        ctx: &egui::Context,
+        state: &ServiceState,
+        watch: Option<(SessionId, u32)>,
+    ) {
+        let wanted: Vec<(SessionId, u32)> =
+            [self.shown_shot, watch].into_iter().flatten().collect();
+        self.shot_textures.retain(|(k, _)| wanted.contains(k));
+        for key in wanted {
+            if self.shot_textures.iter().any(|(k, _)| *k == key) {
+                continue;
+            }
+            if let Some(RequestStatus::Done(img)) = state.reports.shot(key.0, key.1) {
+                let image = egui::ColorImage::from_rgba_unmultiplied(img.size, &img.rgba);
+                let tex = ctx.load_texture(
+                    format!("lightvm_report_shot_{}_{}", key.0, key.1),
+                    image,
+                    egui::TextureOptions::LINEAR,
+                );
+                self.shot_textures.push((key, tex));
+            }
+        }
+    }
+
+    /// Opens a report dialog for a session whose report is known.
+    fn open_report_dialog(&mut self, state: &ServiceState, id: SessionId, kind: ReportDialogKind) {
+        let Some(r) = state.reports.summary(id) else {
+            return;
+        };
+        self.report_dialog = Some(ReportDialog {
+            session_id: id,
+            client: r.client_name.clone(),
+            started: r.started_at,
+            kind,
+            sent: false,
+            focus: true,
+            note: None,
+        });
     }
 
     /// Executes a choice of the Agents views.
@@ -1322,13 +1571,28 @@ impl LightVmApp {
                 });
             }
             A::Details(id) => {
+                if self.agent_session != Some(id) {
+                    self.shown_shot = None;
+                }
                 self.agent_session = Some(id);
                 self.section = Section::Agents;
+                self.send(ServiceCommand::GetSessionReport(id));
+                let offset = state.reports.events.get(&id).map_or(0, |p| p.offset);
+                self.send(ServiceCommand::GetSessionReportEvents {
+                    session_id: id,
+                    offset,
+                    limit: service::EVENTS_PAGE,
+                    tail: false,
+                });
             }
-            A::Back => self.agent_session = None,
+            A::Back => {
+                self.agent_session = None;
+                self.shown_shot = None;
+            }
             // Leaving the Console page also leaves full screen.
             A::Open => {
                 self.agent_session = None;
+                self.shown_shot = None;
                 self.section = Section::Agents;
             }
             A::EmergencyStop => self.send(ServiceCommand::EmergencyStop),
@@ -1336,7 +1600,51 @@ impl LightVmApp {
                 self.send(ServiceCommand::GetAgentAccess);
                 self.send(ServiceCommand::ListSessionRequests);
                 self.send(ServiceCommand::ListSessions);
+                self.send(ServiceCommand::ListSessionReports);
+                if let Some(id) = self.agent_session {
+                    self.send(ServiceCommand::GetSessionReport(id));
+                }
             }
+            A::EventsPage(session_id, offset) => {
+                self.send(ServiceCommand::GetSessionReportEvents {
+                    session_id,
+                    offset,
+                    limit: service::EVENTS_PAGE,
+                    tail: false,
+                });
+            }
+            A::ShowShot(session_id, shot) => {
+                self.shown_shot = Some((session_id, shot));
+                if !matches!(
+                    state.reports.shot(session_id, shot),
+                    Some(RequestStatus::Done(_) | RequestStatus::Pending)
+                ) {
+                    self.send(ServiceCommand::GetReportScreenshot { session_id, shot });
+                }
+            }
+            A::HideShot => self.shown_shot = None,
+            A::WatchScreen(id) => {
+                self.watch_screen = id;
+                if let Some(id) = id {
+                    // The index of the latest screenshot is in the header.
+                    self.send(ServiceCommand::GetSessionReport(id));
+                }
+            }
+            A::Verdict(id) => {
+                self.open_report_dialog(state, id, ReportDialogKind::Verdict(None));
+            }
+            A::Verify(id) => self.open_report_dialog(state, id, ReportDialogKind::Verify(None)),
+            A::Export(id) => self.open_report_dialog(
+                state,
+                id,
+                ReportDialogKind::Export {
+                    format: lightvm_proto::report::ReportFormat::Markdown,
+                    screenshots: false,
+                    path: None,
+                    overwrite: false,
+                },
+            ),
+            A::DeleteReport(id) => self.open_report_dialog(state, id, ReportDialogKind::Delete),
         }
     }
 
@@ -1398,6 +1706,266 @@ impl LightVmApp {
                 self.send(ServiceCommand::RevokeSession(id));
             }
             _ => {}
+        }
+    }
+
+    /// Confirmation of a report action: verdict, automatic check, export
+    /// (format, screenshots, then the native save dialog) or deletion.
+    fn report_dialog_ui(&mut self, ui: &egui::Ui) {
+        use lightvm_proto::report::{FixtureMarker, ReportFormat};
+        let Some(d) = &mut self.report_dialog else {
+            return;
+        };
+        let state = self.service.as_ref().map(|s| s.state()).unwrap_or_default();
+        let op = d.op();
+        let status = state
+            .reports
+            .action
+            .as_ref()
+            .filter(|a| a.op == op)
+            .map(|a| a.status.clone());
+        let mut pending = false;
+        let mut error = d.note.clone();
+        let mut exported = None;
+        let mut conflict = false;
+        if d.sent {
+            match status {
+                Some(RequestStatus::Pending) => pending = true,
+                Some(RequestStatus::Done(service::ReportOutcome::Exported(x))) => {
+                    exported = Some(x);
+                }
+                Some(RequestStatus::Done(_)) => {
+                    let id = d.session_id;
+                    let delete = d.kind == ReportDialogKind::Delete;
+                    self.report_dialog = None;
+                    if delete && self.agent_session == Some(id) {
+                        self.agent_session = None;
+                        self.shown_shot = None;
+                    }
+                    return;
+                }
+                Some(RequestStatus::Failed(f)) => {
+                    let overwrite = matches!(
+                        d.kind,
+                        ReportDialogKind::Export {
+                            overwrite: true,
+                            ..
+                        }
+                    );
+                    if matches!(d.kind, ReportDialogKind::Export { .. })
+                        && f.code == Some(lightvm_proto::ErrorCode::StateConflict)
+                        && !overwrite
+                    {
+                        conflict = true;
+                        error = Some(
+                            "A file with this name already exists there. Replace it, or Cancel and export again with another name."
+                                .into(),
+                        );
+                    } else {
+                        error = Some(f.message);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let header = state.reports.headers.get(&d.session_id);
+        let current = header.map_or_else(String::new, |h| {
+            format!(
+                " (now {}, {})",
+                reports::outcome_text(h.outcome).to_lowercase(),
+                reports::source_short(h.outcome_source)
+            )
+        });
+        let stored = header.map_or(0, |h| h.screenshots_retained);
+        let who = format!(
+            "\u{201c}{}\u{201d}, started {}",
+            d.client,
+            baselines::format_time(d.started)
+        );
+        let spec = match &d.kind {
+            ReportDialogKind::Verdict(_) => dialogs::ConfirmSpec {
+                title: "Set your verdict".into(),
+                body: format!(
+                    "Session of {who}. Your verdict becomes the outcome{current}, recorded as decided by \u{201c}local user\u{201d} with the time. Earlier verdicts stay in the report's history; the agent's declaration is not changed."
+                ),
+                confirm: "Record verdict".into(),
+                destructive: false,
+            },
+            ReportDialogKind::Verify(_) => dialogs::ConfirmSpec {
+                title: "Run the automatic check".into(),
+                body: format!(
+                    "Session of {who}. LightVM checks the agent's last screenshot for the LightVM test fixture screen (reference blocks and marker). It is meant for test VMs that show the fixture; on any other screen the result is failed or inconclusive. The result replaces the outcome{current} and is attributed to the verifier."
+                ),
+                confirm: "Run check".into(),
+                destructive: false,
+            },
+            ReportDialogKind::Export { .. } if exported.is_some() => dialogs::ConfirmSpec {
+                title: "Report exported".into(),
+                body: exported
+                    .as_ref()
+                    .map(reports::export_text)
+                    .unwrap_or_default(),
+                confirm: "Done".into(),
+                destructive: false,
+            },
+            ReportDialogKind::Export { .. } => dialogs::ConfirmSpec {
+                title: "Export the session report".into(),
+                body: format!(
+                    "Session of {who}. The report is written to a file you choose: objective, limits, every recorded action, screenshot hashes and the outcome. Typed text is never in it, only its length and SHA-256."
+                ),
+                confirm: if conflict {
+                    "Replace the file".into()
+                } else {
+                    "Choose where to save\u{2026}".into()
+                },
+                destructive: conflict,
+            },
+            ReportDialogKind::Delete => dialogs::ConfirmSpec {
+                title: "Delete the report?".into(),
+                body: format!(
+                    "Session of {who}. The report and its {stored} stored screenshot{} are removed from this computer. Copies you exported are not touched. This cannot be undone.",
+                    if stored == 1 { "" } else { "s" }
+                ),
+                confirm: "Delete report".into(),
+                destructive: true,
+            },
+        };
+        let focus = std::mem::replace(&mut d.focus, false);
+        let done = exported.is_some();
+        let kind = &mut d.kind;
+        let choice = dialogs::confirm_custom(
+            ui,
+            "lightvm_report_dialog",
+            &spec,
+            pending,
+            error.as_deref(),
+            focus,
+            |ui, enabled| match kind {
+                ReportDialogKind::Verdict(o) => {
+                    ui.add_space(10.0);
+                    ui.add_enabled_ui(enabled, |ui| {
+                        for (v, text) in reports::VERDICTS {
+                            ui.radio_value(o, Some(v), text);
+                        }
+                    });
+                    o.is_some()
+                }
+                ReportDialogKind::Verify(m) => {
+                    ui.add_space(10.0);
+                    ui.add_enabled_ui(enabled, |ui| {
+                        ui.radio_value(
+                            m,
+                            Some(FixtureMarker::Present),
+                            "The marker should be on screen",
+                        );
+                        ui.radio_value(
+                            m,
+                            Some(FixtureMarker::Absent),
+                            "The marker should not be on screen",
+                        );
+                    });
+                    m.is_some()
+                }
+                ReportDialogKind::Export {
+                    format,
+                    screenshots,
+                    ..
+                } if !done => {
+                    ui.add_space(10.0);
+                    ui.add_enabled_ui(enabled && !conflict, |ui| {
+                        ui.radio_value(format, ReportFormat::Markdown, "Markdown, to read");
+                        ui.radio_value(
+                            format,
+                            ReportFormat::Json,
+                            "JSON, the canonical report for tools",
+                        );
+                        ui.add_space(6.0);
+                        let text = format!(
+                            "Also save the {stored} stored screenshot{} in a folder next to it",
+                            if stored == 1 { "" } else { "s" }
+                        );
+                        ui.add_enabled(stored > 0, egui::Checkbox::new(screenshots, text));
+                    });
+                    if *screenshots {
+                        theme::notice(
+                            ui,
+                            "Screenshots can show anything that was on the guest screen, passwords included.",
+                            theme::Tone::Warning,
+                        );
+                    }
+                    true
+                }
+                _ => true,
+            },
+        );
+        match choice {
+            Some(dialogs::Choice::Cancel) => self.report_dialog = None,
+            Some(dialogs::Choice::Confirm) if done => self.report_dialog = None,
+            Some(dialogs::Choice::Confirm) => {
+                let id = d.session_id;
+                let (client, started) = (d.client.clone(), d.started);
+                let command = match &mut d.kind {
+                    ReportDialogKind::Verdict(Some(o)) => Some(ServiceCommand::SetSessionVerdict {
+                        session_id: id,
+                        outcome: *o,
+                        rationale: reports::USER_VERDICT_RATIONALE.into(),
+                    }),
+                    ReportDialogKind::Verify(Some(m)) => Some(ServiceCommand::VerifySession {
+                        session_id: id,
+                        verifier: lightvm_proto::report::SessionVerifier::FixtureMarker {
+                            expected: *m,
+                        },
+                    }),
+                    ReportDialogKind::Export {
+                        format,
+                        screenshots,
+                        path: Some(path),
+                        overwrite,
+                    } if conflict => {
+                        *overwrite = true;
+                        Some(ServiceCommand::ExportSessionReport {
+                            session_id: id,
+                            format: *format,
+                            destination: path.clone(),
+                            overwrite: true,
+                            include_screenshots: *screenshots,
+                        })
+                    }
+                    ReportDialogKind::Export {
+                        format,
+                        screenshots,
+                        path,
+                        overwrite,
+                    } => {
+                        let name = report_file_name(&client, started, *format);
+                        match self.report_picker.as_mut() {
+                            None => {
+                                d.note = Some("Save dialog not available on this platform.".into());
+                                None
+                            }
+                            Some(pick) => pick(&name, *format).map(|chosen| {
+                                *path = Some(chosen.clone());
+                                *overwrite = false;
+                                ServiceCommand::ExportSessionReport {
+                                    session_id: id,
+                                    format: *format,
+                                    destination: chosen,
+                                    overwrite: false,
+                                    include_screenshots: *screenshots,
+                                }
+                            }),
+                        }
+                    }
+                    ReportDialogKind::Delete => Some(ServiceCommand::DeleteSessionReport(id)),
+                    _ => None,
+                };
+                if let Some(c) = command {
+                    d.sent = true;
+                    d.note = None;
+                    self.send(c);
+                }
+            }
+            None => {}
         }
     }
 
