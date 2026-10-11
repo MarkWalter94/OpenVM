@@ -123,3 +123,11 @@ Example configurations: `examples/mcp/README.md`, `examples/mcp/claude-code/mcp.
 3. Reports "correct also for failure, timeout and inconclusive": verified with the fake backend (`f5_reports.rs`); with real QEMU only the `passed`/`cancelled` path of the scripted run.
 4. Sessions UI (other agent) driving approval, verdict and export by a real user: not executed here.
 5. Linux: not executed.
+
+## Addendum 2026-10-11: `help` tool (agent guide)
+
+At the owner's request, so that an agent can use a VM without any other documentation, the adapter adds a read-only tool `help`, listed **first** in `tools/list` and needing no session or capability (no supervisor call). Without `topic` it returns a quick start (steps from `session_request` to `session_end`) plus the current session state and next step; topics `workflow` (see-act-check loop, terminal, typing files with a heredoc, long operations, checkpoints), `tools` (every tool: parameters, capability, when to use, result), `keys` (generated from the `vm_keyboard_press` allowlist and aliases, typeable characters), `errors` (every `ErrorCode` with what to do), `limits` (no network/file transfer/clipboard, one VM, capabilities, input ownership, US layout, quotas, pause, session end), or any tool name. The content block is Markdown; the structured result (`topic`, `guide`, `session_state`, `next_step`, `topics`) is validated against its output schema like every other tool. The server `instructions` now tell the client to call `help` first, and every tool error carries a `help` hint pointing to topic `errors`. This is an addition to catalogue v0.2 (ROADMAP 9), not a capability: it exposes no VM data.
+
+Tests: `help::tests` (every catalogue tool has a section and vice versa, `help` listed first; every topic renders; unknown topic refused; every allowed key and alias documented; every error code documented), `tests::help_works_without_a_session`, `stdio::handshake_tools_list_and_protocol_errors` (instructions mention `help`, `help` is first, `topic: tools` over stdio). Not yet exercised by a real LLM client.
+
+`examples/mcp/claude-code/*.json` fixed: they were not valid JSON (unescaped backslashes) and pointed to `C:\Program Files\LightVM` instead of the installer's per-user folder.

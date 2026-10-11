@@ -19,6 +19,7 @@
 //!   creation/deletion, no media tools. Every check that matters is done
 //!   again by the supervisor and the core.
 
+pub mod help;
 pub mod ipc;
 pub mod keys;
 pub mod pairing;
@@ -51,11 +52,12 @@ use lightvm_proto::{
 
 use crate::ipc::{CallError, Ipc};
 use crate::tools::{
-    BaselinesOut, Button, DeclareOut, DeclareParams, EndOut, InputOut, LogsOut, LogsParams,
-    MouseClickParams, MouseMoveParams, NoParams, OperationOut, OperationParams, Phase, PressParams,
-    ReportOut, ReportParams, RestoreOut, RestoreParams, Scale, ScreenshotOut, ScreenshotParams,
-    SessionOut, SessionRequestParams, SessionStatusParams, SnapshotOut, SnapshotParams, ToolDef,
-    TypeOut, TypeParams, VmListOut, VmOut, VmParams, VmStopParams,
+    BaselinesOut, Button, DeclareOut, DeclareParams, EndOut, HelpOut, HelpParams, InputOut,
+    LogsOut, LogsParams, MouseClickParams, MouseMoveParams, NoParams, OperationOut,
+    OperationParams, Phase, PressParams, ReportOut, ReportParams, RestoreOut, RestoreParams, Scale,
+    ScreenshotOut, ScreenshotParams, SessionOut, SessionRequestParams, SessionStatusParams,
+    SnapshotOut, SnapshotParams, ToolDef, TypeOut, TypeParams, VmListOut, VmOut, VmParams,
+    VmStopParams,
 };
 
 /// Only accepted MCP revision (ROADMAP 9; ADR-0021).
@@ -67,7 +69,8 @@ pub const SERVER_NAME: &str = "lightvm";
 pub const MAX_IMAGE_BYTES: usize = 4 * 1024 * 1024;
 
 const INSTRUCTIONS: &str = "LightVM controls one virtual machine on this computer within a \
-session the user approves in the LightVM app. Start with session_request (give the objective), \
+session the user approves in the LightVM app. Call the help tool first: it is the complete guide \
+(workflow, every tool, keys, errors, limits). In short: start with session_request (give the objective), \
 show the verification code to the user, then poll session_status until it is active. Use \
 vm_list/vm_status, vm_screenshot to see the screen, vm_mouse_* and vm_keyboard_* to act \
 (the user must hand input control to the session), and session_declare to state the result \
@@ -130,6 +133,7 @@ impl ToolError {
         if let Some(d) = &self.details {
             e["details"] = json!(d);
         }
+        e["help"] = json!("call the help tool with topic \"errors\" for what to do");
         CallToolResult::error(vec![ContentBlock::text(json!({ "error": e }).to_string())])
     }
 }
@@ -168,7 +172,15 @@ impl From<CallError> for ToolError {
 /// Successful tool output.
 enum Output {
     Json(Value),
-    Image { png: Vec<u8>, meta: Value },
+    /// Text for the model (Markdown) with its structured result.
+    Text {
+        text: String,
+        meta: Value,
+    },
+    Image {
+        png: Vec<u8>,
+        meta: Value,
+    },
 }
 
 /// State of the session as seen by the adapter.
@@ -416,6 +428,38 @@ impl Adapter {
                 )
                 .await;
         }
+    }
+
+    /// `help`: static guide plus the session state; no supervisor call.
+    fn help(&self, p: &HelpParams) -> Result<Output, ToolError> {
+        let topic = p.topic.as_deref().unwrap_or("").trim().to_ascii_lowercase();
+        let guide = help::guide(&topic).map_err(ToolError::invalid)?;
+        let phase = self.session_out().state;
+        let next = help::next_step(phase);
+        let state = serde_json::to_value(phase)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .unwrap_or_default();
+        let text = format!("{guide}\n---\nSession state: {state}. Next step: {next}\n");
+        let topics = help::TOPICS
+            .iter()
+            .copied()
+            .chain(help::tool_names())
+            .map(str::to_owned)
+            .collect();
+        let meta = serde_json::to_value(HelpOut {
+            topic: if topic.is_empty() {
+                "start".into()
+            } else {
+                topic
+            },
+            guide,
+            session_state: phase,
+            next_step: next.to_owned(),
+            topics,
+        })
+        .unwrap_or_default();
+        Ok(Output::Text { text, meta })
     }
 
     fn session_out(&self) -> SessionOut {
@@ -1317,6 +1361,7 @@ impl Adapter {
 
     async fn dispatch(&self, name: &str, args: Value) -> Result<Output, ToolError> {
         match name {
+            "help" => self.help(&parse(args)?),
             "session_request" => self.session_request(parse(args)?).await,
             "session_status" => self.session_status(parse(args)?).await,
             "session_end" => {
@@ -1406,6 +1451,22 @@ impl Adapter {
                         .result()
                 }
             },
+            Ok(Output::Text { text, meta }) => {
+                match schema::validate(&meta, &def.output, &def.output) {
+                    Ok(()) => {
+                        let mut r = CallToolResult::structured(meta);
+                        r.content = vec![ContentBlock::text(text)];
+                        r
+                    }
+                    Err(why) => {
+                        diag(&format!(
+                            "tool {name}: result not valid against its schema: {why}"
+                        ));
+                        ToolError::new("internal_error", "result did not match the output schema")
+                            .result()
+                    }
+                }
+            }
             Ok(Output::Image { png, meta }) => {
                 match schema::validate(&meta, &def.output, &def.output) {
                     Ok(()) => {
@@ -1500,11 +1561,48 @@ mod tests {
         assert_eq!(a.get_info().protocol_version.as_str(), "2025-11-25");
     }
 
+    #[tokio::test]
+    async fn help_works_without_a_session() {
+        let a = Adapter::new(AdapterConfig::default());
+        let r = a
+            .call("help", None)
+            .await
+            .expect("help is in the catalogue");
+        assert_ne!(r.is_error, Some(true));
+        let s = r.structured_content.expect("structured result");
+        assert_eq!(s["topic"], json!("start"));
+        assert_eq!(s["session_state"], json!("none"));
+        assert!(s["next_step"].as_str().unwrap().contains("session_request"));
+        let text = serde_json::to_string(&r.content).unwrap();
+        assert!(text.contains("quick start"), "{text}");
+
+        let mut args = serde_json::Map::new();
+        args.insert("topic".into(), json!("vm_mouse_click"));
+        let r = a.call("help", Some(args)).await.unwrap();
+        assert!(
+            r.structured_content.unwrap()["guide"]
+                .as_str()
+                .unwrap()
+                .starts_with("## vm_mouse_click")
+        );
+
+        let mut args = serde_json::Map::new();
+        args.insert("topic".into(), json!("nope"));
+        let r = a.call("help", Some(args)).await.unwrap();
+        assert_eq!(r.is_error, Some(true));
+        let text = serde_json::to_string(&r.content).unwrap();
+        assert!(
+            text.contains("invalid_argument") && text.contains("help"),
+            "{text}"
+        );
+    }
+
     #[test]
     fn catalogue_names_and_schemas() {
         let a = Adapter::new(AdapterConfig::default());
         let names: Vec<&str> = a.tool_defs().iter().map(|d| d.tool.name.as_ref()).collect();
         for n in [
+            "help",
             "vm_list",
             "vm_status",
             "vm_start",
