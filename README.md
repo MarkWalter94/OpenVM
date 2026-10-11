@@ -8,18 +8,15 @@ First supported host: Windows 11 x86_64 with Ubuntu LTS guests. No cloud service
 
 ## Status
 
-**Phase F1 (foundations and QEMU control) is in progress; F0 (feasibility) is under review, with two items left (P-4, Windows part of P-5).**
+**All MVP features are implemented (phases F1–F6 as far as they can be done on one host); no phase exit criterion is formally closed yet.** The roadmap phases are sequential and F0 (feasibility) still has two owner items open (P-4 physical keyboard, Windows part of P-5); each later phase also has manual or external items listed in `docs/STATUS.md`.
 
-Feasibility work on the first host (Windows 11 with WHPX, Ubuntu 26.04.1 LTS guest) demonstrated accelerated boot, a native RFB console, input, control channels on private sockets, baseline restore and process supervision, with published deviations (for example CPU model `qemu64` instead of `host`). The F0 outcome "verified on Windows only" was confirmed on 2026-10-10 (ADR-0016).
+What works today on the first host (Windows 11 + WHPX, Ubuntu 26.04.1 LTS guest), each with evidence under `docs/verification/`:
 
-F1 streams delivered so far, each with its evidence file under `docs/verification/`:
-
-- Shared types and JSON Schemas (`lightvm-proto`), VM state machine, resource validation, sessions and audit (`vm-core`).
-- SQLite catalog with versioned migrations, journal of intents, approved-media registry and disk guards (`vm-storage`).
-- Supervisor service with authenticated local IPC, real composition root and a headless end-to-end run against real QEMU (`lightvm-service`).
-- MCP server spike on the official Rust SDK pinned to protocol revision 2025-11-25 (`lightvm-mcp`), licence inventory, CI workflow validated locally.
-
-Since then the QEMU backend passed 20 real start/stop cycles without orphan processes (`F1-03`), and the desktop UI now launches the supervisor as a child process and talks to it over IPC, including a UI-crash test with a real VM (`F1-09`). These results do not count towards the F1 exit criterion until F0 is closed. The same 20 cycles also pass through the supervisor (IPC to core to QEMU), the live ISO reaches the desktop with the `Skylake-Client-v4` CPU model, and the desktop UI evidence is recorded (`F1-05`). The desktop UI has a Settings page (supervisor folders chosen with a folder picker, behaviour on abnormal UI exit, preferred renderer) and per-VM settings for vCPU, RAM, disk and execution limits (CPU cap, memory margin, storage budget) enforced by the supervisor through the Windows Job Object (`F1-10`); `lightvm-desktop --open-vm NAME [--create] [--cpu-max N] ...` opens a VM from the command line. Still open in F1: cold-start and RDP measurements, CI on GitHub, Linux process containment (R2a). F2 (manual alpha) work is in progress: wizard, ISO import, console through the supervisor with a per-run display ticket, VM deletion, experimental installer and user guide (`docs/STATUS.md`, `F2-01`…`F2-03`). To close F0: the physical keyboard test (P-4, script ready in `apps/desktop/scripts/keyboard-test-u4.ps1`) and the Windows part of the second-user test (P-5).
+- **Manual alpha (F2):** wizard with ISO import, dashboard, console in the app through the supervisor with a per-run display ticket, IT/US keyboard, full screen, graceful/forced stop, reset, deletion, persistent UEFI state; Ubuntu installed, booted from disk and found again after reopening (through the service).
+- **Baselines (F3):** baseline with the VM off, restore by overlay, crash recovery; 30/30 modify-restore cycles with unchanged base hashes.
+- **Agent sessions (F4):** pairing, approval with a verification code, one VM, capabilities, quotas, lease, input ownership, pause/revoke, Emergency Stop and a local emergency command; revoke closes a flooding agent in under 1 ms.
+- **MCP and reports (F5):** `lightvm-mcp` stdio adapter (MCP 2025-11-25), session reports in JSON/Markdown with evidence-backed outcomes; 10/10 deterministic fixture runs on real QEMU with a scripted client. **Real LLM clients not run yet.**
+- **Stabilization (F6, partial):** experimental per-user installer, SBOM, licence check, migration safety, disk-full handling, host-resume handling, regression script. Code signing and independent review are not available (ADR-0020): public distribution is blocked.
 
 ## Repository layout
 

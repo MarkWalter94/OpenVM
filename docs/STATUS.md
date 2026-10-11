@@ -1,6 +1,6 @@
 # Project status
 
-Last updated: 2026-10-10
+Last updated: 2026-10-11
 
 Operational document required by section 17 of `docs/ROADMAP.md`: current phase, impediments and progress. **This file does not change the Definition of Done (section 11), the scope or the exit criteria.** A status reported here does not count as verification: the evidence is in `docs/verification/`.
 
@@ -100,6 +100,25 @@ Started on 2026-10-11 at the owner's request; like F1 and F2, **not usable for t
 Deviations recorded in `F4-01` (D-1…D-6): service-side gate in addition to the core checks; **credential-less local emergency endpoint** (only verb Emergency Stop, same-user ACL; see ADR-0009); revocation keeps the pairing credential; lease expiry, client loss and UI loss stop the session's VM; screenshots in 32 KiB chunks; input ownership defaults to the user, one live session.
 
 Open: the service does not report the last run id of a stopped VM (`VmSummary.run_id` is `None`), unlike its doc comment; the UI relies on disk usage for the install-media hint.
+
+## F5 and F6 work started in parallel
+
+Started on 2026-10-11 at the owner's request; not usable for the exit criteria until the previous phases are closed (section 10).
+
+| Item | Evidence | Declared outcome |
+| --- | --- | --- |
+| F5: MCP stdio adapter `lightvm-mcp` (pairing file, verification code, tool catalogue v0.2 with `_` names, image content, schema-validated results) | `F5-01` | verified with a real service and a scripted client; **0 real LLM clients run** (Claude Code CLI logged out on this host; pi has no MCP support) |
+| F5: session reports (JSON canonical, Markdown export by the user, outcome states with their source, typed text never stored) and AI Workspace / history / verdict / export UI | `F5-01`, `F5-02` | verified headless and with real QEMU |
+| F5: deterministic fixture ten times with restore | `F5-03` | 10/10 runs completed and restored, 0 infrastructure errors (scripted client); failed, inconclusive, cancelled, timed_out and infrastructure_error produced on real QEMU |
+| F6: migrations (backup, downgrade refusal, refusal with open runs), re-probe after QEMU/firmware change, disk-full handling, host resume, SBOM, licence check, release artefact scan, regression script | `F6-01` | verified in simulation/test (injected faults, injected clock jump, fake distribution); real full volume, real suspend and a second QEMU build not executed |
+
+**Exit criteria still open (owner or external):**
+- F0: P-4 (physical keyboard), Windows part of P-5 (second user).
+- F2: a user installs Ubuntu following `docs/USER_GUIDE.md`; IT/US keyboard and coordinates after resize by hand; screen reader, DPI, multi-monitor; installer on a clean machine (Windows Sandbox procedure ready).
+- F3: a human driving the baseline screen on an installed system.
+- F4: a human driving the sessions UI; host sleep/resume for real.
+- F5: two real LLM clients with a successful path each (Claude Code: `claude auth login`, then the F5 real-client test; a second client with native MCP stdio support to be chosen).
+- F6: code signing and independent review (ADR-0020, not available), tests on at least two physical hosts (Intel/AMD if both declared), Linux (R2a).
 
 ## Linux lab outcome
 

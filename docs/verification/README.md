@@ -55,6 +55,11 @@ Examples: `F0-01-toolchain-eframe.md`, `F0-02-qemu-whpx-qmp.md`, `F1-04-start-st
 | `F3-01-baseline-restore.md` | F3 (baseline with the VM off, restore by overlay, crash recovery, fixture) | partial: 30/30 cycles on real QEMU (second run), base hashes unchanged, crash tests at every critical point including a real service kill; Linux, installed-Ubuntu path and a human user not executed | complete |
 | `F3-02-baseline-ui.md` | F3 (baseline screen) | partial: verified headless and through the UI with real QEMU and qemu-img (empty disk); installed system, screen reader not executed | complete |
 | `F4-01-sessions-bridge.md` | F4 (sessions, capabilities, quotas, input ownership, pause/revoke, Emergency Stop, emergency endpoint) | partial: verified on real QEMU (agent-driven fixture, stop latencies with a flooding client, stuck supervisor with full queue); Linux, real MCP client, host sleep/resume not executed | complete |
+| `F4-02-sessions-ui.md` | F4 (Agents page, approval with code, session bar, input ownership in the console) | partial: verified headless and with real QEMU and a scripted agent; human user not executed | complete |
+| `F5-01-mcp-reports.md` | F5 (MCP stdio adapter, agent calls, session reports) | partial: real adapter and real QEMU with a scripted client; real LLM clients not executed | complete |
+| `F5-02-reports-ui.md` | F5 (AI Workspace, history, report page, verdict, export) | partial: verified headless; real agent through the UI not executed | complete |
+| `F5-03-fixture-runs.md` | F5 (fixture ten times with restore; every outcome state) | verified with a scripted client on real QEMU (10/10, 0 infrastructure errors); LLM clients not executed | complete |
+| `F6-01-stabilization.md` | F6 (migrations, re-probe, disk full, host resume, SBOM, licences, artefact scan, regression) | partial: verified in simulation/test; signing, independent review, second host, real suspend/full volume not executed | complete |
 | `F1-05-desktop-egui.md` | F1 (backlog F1-13, F1-16, F1-18, F1-19) | partial: clipboard without text in the UI (headless) but read in egui-winit not blocking; rendering fallback verified; UI + supervisor measurements (wgpu above the memory target); RDP, cold start and manual test not executed | complete |
 
 ## Template
