@@ -114,6 +114,12 @@ pub enum StorageError {
         /// Detail (expected and observed value).
         detail: String,
     },
+    /// Simulated crash at a fault-injection point (tests only, see
+    /// [`crate::FaultPoint`]): the operation stops where it is, without
+    /// rollback, as if the process had died.
+    #[doc(hidden)]
+    #[error("injected crash at {0:?}")]
+    InjectedCrash(crate::FaultPoint),
 }
 
 impl StorageError {

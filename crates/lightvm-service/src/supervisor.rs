@@ -18,10 +18,17 @@
 //!   mutation queued before an Emergency Stop is discarded (media imports
 //!   included, also when their copy ends after the revocation or the
 //!   Emergency Stop: the copy is then discarded and the import audited as
-//!   failed).
+//!   failed);
+//! - **baselines (F3)**: creation and restore run on a worker thread like
+//!   the media import ([`SupervisorThread::start_storage_job`]); their work
+//!   polls a cancellation check (Emergency Stop generation, revocation or
+//!   closing of the connection, service shutdown) and stops `qemu-img`;
+//!   the result is then discarded and audited as failed. The service
+//!   shutdown waits (bounded) for the jobs still running, so nothing is
+//!   left half published (the catalog journal covers a crash anyway).
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -31,16 +38,22 @@ use lightvm_proto::ipc::{
     ServiceState, StopReason,
 };
 use lightvm_proto::{
-    Actor, Caller, MediaKind, PublicError, ReplyError, RunId, TerminationCause, VmConfig, VmId,
-    VmRequest,
+    Actor, BaselineId, Caller, Label, MediaKind, PublicError, ReplyError, RunId, TerminationCause,
+    VmConfig, VmId, VmRequest,
 };
 use tokio::sync::{OwnedSemaphorePermit, broadcast, oneshot, watch};
 
 use crate::display::DisplayRegistry;
-use crate::engine::{ImportCopied, VmEngine};
+use crate::engine::{
+    BaselineOutcome, BaselineRequest, CancelCheck, ImportCopied, StorageDone, VmEngine,
+};
 
 /// Media imports copying at the same time (each holds a worker thread).
 pub const MAX_CONCURRENT_IMPORTS: usize = 2;
+
+/// Longest wait of the service shutdown for baseline jobs still running
+/// (they are cancelled first: `qemu-img` is terminated within 100 ms).
+pub const STORAGE_SHUTDOWN_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Service host: processes, agent sessions and priority path.
 ///
@@ -111,6 +124,20 @@ pub(crate) enum SupervisorRequest {
         expected_revision: u64,
     },
     OpenConsole(VmId),
+    ListBaselines(VmId),
+    CreateBaseline {
+        vm_id: VmId,
+        label: Label,
+        allow_unclean: bool,
+    },
+    RestoreBaseline {
+        vm_id: VmId,
+        baseline_id: BaselineId,
+    },
+    DeleteBaseline {
+        vm_id: VmId,
+        baseline_id: BaselineId,
+    },
 }
 
 impl SupervisorRequest {
@@ -125,7 +152,30 @@ impl SupervisorRequest {
                 | Self::ImportMedia { .. }
                 | Self::DeleteVm { .. }
                 | Self::OpenConsole(_)
+                | Self::CreateBaseline { .. }
+                | Self::RestoreBaseline { .. }
+                | Self::DeleteBaseline { .. }
         )
+    }
+
+    /// Baseline request served as a long storage operation (F3).
+    fn baseline_job(&self) -> Option<BaselineRequest> {
+        match self {
+            Self::CreateBaseline {
+                vm_id,
+                label,
+                allow_unclean,
+            } => Some(BaselineRequest::Create {
+                vm_id: *vm_id,
+                label: label.clone(),
+                allow_unclean: *allow_unclean,
+            }),
+            Self::RestoreBaseline { vm_id, baseline_id } => Some(BaselineRequest::Restore {
+                vm_id: *vm_id,
+                baseline_id: *baseline_id,
+            }),
+            _ => None,
+        }
     }
 }
 
@@ -167,6 +217,15 @@ pub(crate) enum Command {
         /// Emergency Stop generation when the import was queued.
         epoch: u64,
     },
+    /// Work of a baseline job finished on its worker thread (F3).
+    FinishStorage {
+        done: StorageDone,
+        reply: Reply,
+        /// Revocation of the connection that asked for the operation.
+        revoked: watch::Receiver<bool>,
+        /// Emergency Stop generation when the operation was queued.
+        epoch: u64,
+    },
     /// Console tickets revoked outside the supervisor thread (UI connection
     /// revoked or closed, Emergency Stop): audit and, for a lost console,
     /// release of the keys and buttons still pressed on these runs.
@@ -186,6 +245,7 @@ impl std::fmt::Debug for Command {
             Self::ParentLost { policy, .. } => write!(f, "ParentLost({policy:?})"),
             Self::Shutdown { .. } => write!(f, "Shutdown"),
             Self::FinishImport { .. } => write!(f, "FinishImport"),
+            Self::FinishStorage { done, .. } => write!(f, "FinishStorage({done:?})"),
             Self::ConsolesRevoked { runs, cause, .. } => {
                 write!(f, "ConsolesRevoked({}, {cause:?})", runs.len())
             }
@@ -219,6 +279,10 @@ pub(crate) struct SupervisorThread {
     pub(crate) self_tx: mpsc::Sender<Command>,
     /// Media imports whose copy is in progress.
     pub(crate) imports: usize,
+    /// Baseline jobs whose work is in progress (F3).
+    pub(crate) storage_jobs: usize,
+    /// Raised at the service shutdown: cancels the baseline jobs.
+    pub(crate) storage_cancel: Arc<AtomicBool>,
 }
 
 /// Maximum interval between two observations of the process exits (shutdown
@@ -320,6 +384,12 @@ impl SupervisorThread {
                     Err(ReplyError::Operational(PublicError::state_conflict(
                         "request discarded by the Emergency Stop",
                     )))
+                } else if let Some(job) = req.baseline_job() {
+                    // The reply is sent when the work ends.
+                    if let Some(reply) = slot.take() {
+                        self.start_storage_job(caller, job, (reply, revoked, epoch));
+                    }
+                    return Served::Continue;
                 } else if let SupervisorRequest::ImportMedia {
                     source_path,
                     media_kind,
@@ -375,6 +445,45 @@ impl SupervisorThread {
                     let _ = reply.send(res);
                 }
             }
+            Command::FinishStorage {
+                done,
+                reply,
+                revoked,
+                epoch,
+            } => {
+                *slot = Some(reply);
+                self.storage_jobs = self.storage_jobs.saturating_sub(1);
+                let vm_id = done.vm_id();
+                let res = if is_revoked(&revoked) {
+                    Err(self.engine.abort_baseline_job(
+                        done,
+                        PublicError::unauthenticated("connection revoked: operation cancelled"),
+                    ))
+                } else if epoch != self.emergency_epoch.load(Ordering::SeqCst) {
+                    Err(self.engine.abort_baseline_job(
+                        done,
+                        PublicError::state_conflict("operation cancelled by the Emergency Stop"),
+                    ))
+                } else if self.storage_cancel.load(Ordering::SeqCst) {
+                    Err(self.engine.abort_baseline_job(
+                        done,
+                        PublicError::state_conflict("service shutting down"),
+                    ))
+                } else {
+                    self.engine.finish_baseline_job(done).map(|o| match o {
+                        BaselineOutcome::Created(baseline) => {
+                            ResponseBody::BaselineCreated { baseline }
+                        }
+                        BaselineOutcome::Restored { vm_id, baseline_id } => {
+                            ResponseBody::BaselineRestored { vm_id, baseline_id }
+                        }
+                    })
+                };
+                let _ = self.events.send(ServiceEvent::BaselinesChanged { vm_id });
+                if let Some(reply) = slot.take() {
+                    let _ = reply.send(res.map_err(ReplyError::Operational));
+                }
+            }
             Command::ConsolesRevoked {
                 runs,
                 actor,
@@ -410,8 +519,35 @@ impl SupervisorThread {
         let _ = self.events.send(ServiceEvent::ServiceState {
             state: ServiceState::Stopping,
         });
+        // Baseline jobs still running are cancelled (`qemu-img` stopped).
+        self.storage_cancel.store(true, Ordering::SeqCst);
         // Requests still in the queue are not executed.
         while let Ok(pending) = rx.try_recv() {
+            self.refuse_at_shutdown(pending);
+        }
+        // Bounded wait for the cancelled baseline jobs: their result is
+        // discarded (the journal would roll it back anyway).
+        let deadline = Instant::now() + STORAGE_SHUTDOWN_WAIT;
+        while self.storage_jobs > 0 {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match rx.recv_timeout(left) {
+                Ok(cmd) => self.refuse_at_shutdown(cmd),
+                Err(_) => break,
+            }
+        }
+        let runs = self.display.revoke_all();
+        self.engine
+            .console_revoked(Actor::System, &runs, TerminationCause::Completed);
+        self.backend.stop_agent_sessions(StopReason::Shutdown);
+        self.backend.prepare_shutdown();
+        self.engine.stop_all();
+        self.publish_state_changes();
+        self.backend.shutdown();
+    }
+
+    /// A command received during the service shutdown: nothing is executed.
+    fn refuse_at_shutdown(&mut self, pending: Command) {
+        {
             match pending {
                 Command::Request { reply, .. } => {
                     let _ = reply.send(Err(ReplyError::Operational(PublicError::state_conflict(
@@ -438,19 +574,19 @@ impl SupervisorThread {
                     );
                     let _ = reply.send(Err(ReplyError::Operational(e)));
                 }
+                Command::FinishStorage { done, reply, .. } => {
+                    self.storage_jobs = self.storage_jobs.saturating_sub(1);
+                    let e = self.engine.abort_baseline_job(
+                        done,
+                        PublicError::state_conflict("service shutting down"),
+                    );
+                    let _ = reply.send(Err(ReplyError::Operational(e)));
+                }
                 Command::ConsolesRevoked {
                     runs, actor, cause, ..
                 } => self.engine.console_revoked(actor, &runs, cause),
             }
         }
-        let runs = self.display.revoke_all();
-        self.engine
-            .console_revoked(Actor::System, &runs, TerminationCause::Completed);
-        self.backend.stop_agent_sessions(StopReason::Shutdown);
-        self.backend.prepare_shutdown();
-        self.engine.stop_all();
-        self.publish_state_changes();
-        self.backend.shutdown();
     }
 
     pub(crate) fn publish_state_changes(&mut self) {
@@ -531,6 +667,82 @@ impl SupervisorThread {
         match spawned {
             Ok(_) => self.imports += 1,
             Err(e) => crate::diag!("lightvm-service: media import thread not started: {e}"),
+        }
+    }
+
+    /// First step of a baseline creation or restore on this thread (core
+    /// and catalog checks, journal intents, guards), work on a worker thread
+    /// (`qemu-img`, hashes; cancellable), last step back here with
+    /// [`Command::FinishStorage`]: the supervisor keeps serving the other VMs.
+    fn start_storage_job(
+        &mut self,
+        caller: Option<Caller>,
+        req: BaselineRequest,
+        (reply, revoked, epoch): (Reply, watch::Receiver<bool>, u64),
+    ) {
+        let Some(caller) = caller else {
+            let _ = reply.send(Err(ReplyError::Operational(
+                PublicError::permission_denied("no VM permissions for this role"),
+            )));
+            return;
+        };
+        let vm_id = req.vm_id();
+        let cancel: CancelCheck = {
+            let current = self.emergency_epoch.clone();
+            let shutdown = self.storage_cancel.clone();
+            let rv = revoked.clone();
+            Arc::new(move || {
+                shutdown.load(Ordering::SeqCst)
+                    || current.load(Ordering::SeqCst) != epoch
+                    || is_revoked(&rv)
+            })
+        };
+        let job = match self.engine.begin_baseline_job(&caller, req, cancel) {
+            Ok(job) => job,
+            Err(e) => {
+                let _ = reply.send(Err(ReplyError::Operational(e)));
+                return;
+            }
+        };
+        let _ = self.events.send(ServiceEvent::BaselinesChanged { vm_id });
+        let tx = self.self_tx.clone();
+        // The worker owns the job: if the thread cannot start, the work
+        // runs here (blocking) so that the operation still ends.
+        let (job_tx, job_rx) = mpsc::channel::<crate::engine::StorageJob>();
+        let spawned = std::thread::Builder::new()
+            .name("lightvm-baseline".into())
+            .spawn(move || {
+                let Ok(job) = job_rx.recv() else { return };
+                let done = job.run();
+                // If the supervisor is gone the result stays unpublished and
+                // the catalog rolls it back at the next open.
+                let _ = tx.send(Command::FinishStorage {
+                    done,
+                    reply,
+                    revoked,
+                    epoch,
+                });
+            });
+        match spawned {
+            Ok(_) => {
+                self.storage_jobs += 1;
+                if let Err(mpsc::SendError(job)) = job_tx.send(job) {
+                    crate::diag!("lightvm-service: baseline worker gone: running inline");
+                    let done = job.run();
+                    let _ = self
+                        .engine
+                        .abort_baseline_job(done, PublicError::infrastructure("worker lost"));
+                    self.storage_jobs = self.storage_jobs.saturating_sub(1);
+                }
+            }
+            Err(e) => {
+                crate::diag!("lightvm-service: baseline thread not started: {e}");
+                let done = job.run();
+                let _ = self.engine.abort_baseline_job(
+                    done,
+                    PublicError::infrastructure("worker thread not available"),
+                );
+            }
         }
     }
 
@@ -659,6 +871,22 @@ impl SupervisorThread {
             SupervisorRequest::ImportMedia { .. } => {
                 Err(PublicError::infrastructure("media import not dispatched"))
             }
+            SupervisorRequest::ListBaselines(vm_id) => self
+                .engine
+                .list_baselines(who()?, vm_id)
+                .map(|baselines| ResponseBody::Baselines { vm_id, baselines }),
+            SupervisorRequest::DeleteBaseline { vm_id, baseline_id } => {
+                let r = self.engine.delete_baseline(who()?, vm_id, baseline_id);
+                if r.is_ok() {
+                    let _ = self.events.send(ServiceEvent::BaselinesChanged { vm_id });
+                }
+                r.map(|()| ResponseBody::BaselineDeleted { vm_id, baseline_id })
+            }
+            // Served by `start_storage_job` (reply after the work).
+            SupervisorRequest::CreateBaseline { .. }
+            | SupervisorRequest::RestoreBaseline { .. } => Err(PublicError::infrastructure(
+                "baseline operation not dispatched",
+            )),
         };
         r.map_err(ReplyError::Operational)
     }

@@ -1,0 +1,16 @@
+[package]
+name = "lightvm-fixture"
+description = "LightVM: deterministic test fixture (ADR-0019): reproducible data ISO and pixel verifier"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# No dependencies: a minimal ISO 9660 writer (no external tool such as
+# oscdimg or xorriso is available on the reference host) and an exact-colour
+# verifier on RGB framebuffers.
+[dependencies]
+
+[lints]
+workspace = true

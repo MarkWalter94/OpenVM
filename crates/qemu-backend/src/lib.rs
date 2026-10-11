@@ -52,6 +52,7 @@
 
 pub mod cmdline;
 pub mod error;
+pub mod image;
 pub mod input;
 pub mod paths;
 pub mod prepare;

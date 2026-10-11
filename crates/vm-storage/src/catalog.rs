@@ -47,6 +47,8 @@ pub struct Catalog {
     pub(crate) layout: CatalogLayout,
     pub(crate) started_at: UtcMillis,
     report: Option<OpenReport>,
+    /// Fault injection for crash tests (`None` in the product).
+    pub(crate) fault: Option<(crate::FaultPoint, crate::FaultAction)>,
     _lock: CatalogLock,
 }
 
@@ -125,6 +127,7 @@ impl Catalog {
             layout,
             started_at,
             report: None,
+            fault: None,
             _lock: lock,
         };
         let recovery = cat.recover()?;
@@ -236,6 +239,18 @@ impl Catalog {
                         layout.ensure_dir(&ManagedPath::parse(parent)?)?;
                     }
                 }
+                IntentKind::DiscardFile => {
+                    let (Some(fp), Some(rel)) = (&final_path, &spec.final_path) else {
+                        return Err(StorageError::StateConflict("discard without source".into()));
+                    };
+                    if !exists_no_follow(fp)? {
+                        return Err(StorageError::NotFound {
+                            kind: "file",
+                            id: rel.to_string(),
+                        });
+                    }
+                    discard_precheck(tx, spec.target_kind, spec.target_id.as_deref())?;
+                }
                 IntentKind::DeleteFile => {
                     let (Some(fp), Some(rel)) = (&final_path, &spec.final_path) else {
                         return Err(StorageError::StateConflict(
@@ -340,7 +355,7 @@ impl Catalog {
                     fsx::ensure_readonly(dest)?;
                 }
             }
-            IntentKind::DeleteFile => {
+            IntentKind::DeleteFile | IntentKind::DiscardFile => {
                 let src = intent
                     .final_path
                     .as_ref()
@@ -388,7 +403,9 @@ impl Catalog {
                 let present = target_exists(tx, i.target_kind, i.target_id.as_deref())?;
                 let ok = match i.kind {
                     k if k.is_create() => present,
-                    IntentKind::DeleteFile => !present || i.target_kind == TargetKind::None,
+                    IntentKind::DeleteFile | IntentKind::DiscardFile => {
+                        !present || i.target_kind == TargetKind::None
+                    }
                     _ => true,
                 };
                 if !ok {
@@ -401,9 +418,12 @@ impl Catalog {
             }
             Ok(())
         })?;
+        self.fault_at(crate::FaultPoint::AfterCommit)?;
         for i in intents {
-            if matches!(i.kind, IntentKind::DeleteFile | IntentKind::Export)
-                && remove_temp(&self.layout, &i.temp_rel).is_ok()
+            if matches!(
+                i.kind,
+                IntentKind::DeleteFile | IntentKind::DiscardFile | IntentKind::Export
+            ) && remove_temp(&self.layout, &i.temp_rel).is_ok()
             {
                 self.set_resolution(i.id, "temp_removed")?;
             }
@@ -617,7 +637,7 @@ impl Catalog {
                 }
                 Ok(parts.join("+"))
             }
-            IntentKind::DeleteFile => {
+            IntentKind::DeleteFile | IntentKind::DiscardFile => {
                 let res = if temp_exists && !final_exists {
                     let (Some(src), Some(rel)) = (&i.final_path, &i.final_rel) else {
                         return Err(StorageError::StateConflict("missing source".into()));
@@ -869,6 +889,31 @@ pub(crate) fn target_exists(tx: &Tx<'_>, kind: TargetKind, id: Option<&str>) -> 
     tx.exists(sql, id)
 }
 
+/// A file of the VM's previous current state can be discarded only if no
+/// open run uses it (the restore requires a stopped VM).
+fn discard_precheck(tx: &Tx<'_>, kind: TargetKind, id: Option<&str>) -> Result<()> {
+    let Some(id) = id else { return Ok(()) };
+    let sql = match kind {
+        TargetKind::Disk => {
+            "SELECT EXISTS (SELECT 1 FROM runs WHERE overlay_disk_id = ?1 AND ended_at IS NULL)"
+        }
+        TargetKind::Firmware => {
+            "SELECT EXISTS (SELECT 1 FROM runs WHERE vars_fw_id = ?1 AND ended_at IS NULL)"
+        }
+        TargetKind::None => return Ok(()),
+        _ => {
+            return Err(StorageError::StateConflict(
+                "discard of an unsupported target".into(),
+            ));
+        }
+    };
+    let used: bool = tx.conn().query_row(sql, params![id], |r| r.get(0)).db()?;
+    if used {
+        return Err(StorageError::Referenced("disk_referenced"));
+    }
+    Ok(())
+}
+
 fn deletion_precheck(tx: &Tx<'_>, kind: TargetKind, id: Option<&str>) -> Result<()> {
     let Some(id) = id else { return Ok(()) };
     let referenced = |sql: &str| -> Result<bool> {
@@ -970,6 +1015,19 @@ pub(crate) fn remove_managed_file(layout: &CatalogLayout, rel: &ManagedPath) -> 
         Ok(m) => force_remove_file(&p, m),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(StorageError::io(&p, e)),
+    }
+}
+
+/// Removes the parent directory of a managed file if it is empty (best
+/// effort: an empty directory left behind is harmless).
+pub(crate) fn remove_empty_parent(layout: &CatalogLayout, rel: &ManagedPath) {
+    if let Some((dir, _)) = rel.as_str().rsplit_once('/')
+        && let Ok(dir_rel) = ManagedPath::parse(dir)
+        && let Ok(p) = layout.resolve(&dir_rel)
+        && let Ok(mut it) = std::fs::read_dir(&p)
+        && it.next().is_none()
+    {
+        let _ = std::fs::remove_dir(&p);
     }
 }
 

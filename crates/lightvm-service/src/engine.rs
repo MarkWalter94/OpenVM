@@ -13,6 +13,17 @@
 //! display ticket, display geometry refreshed from the backend for console
 //! input ([`BackendPort::refresh_geometry`]).
 //!
+//! F3: baselines with the VM off. Creation and restore are long storage
+//! operations in three steps like the media import
+//! ([`VmEngine::begin_baseline_job`] on the supervisor thread: core checks,
+//! journal intents and guards on the catalog; [`StorageJob::run`] on a worker:
+//! `qemu-img` through the backend's [`ImageTool`], hashes; then
+//! [`VmEngine::finish_baseline_job`] or [`VmEngine::abort_baseline_job`]); the
+//! VM is busy in between. A start of a VM whose current state is an overlay
+//! receives the verified, guarded files from the catalog
+//! ([`BaselinePort::start_disks`] → [`BackendPort::set_start_disks`]); a
+//! refusal there leaves the VM `stopped` ([`vm_core::Core::refuse_start`]).
+//!
 //! The Emergency Stop does not go through here: the priority path terminates
 //! the processes with the backend handler ([`crate::supervisor::EmergencyStop`]);
 //! afterwards, [`VmEngine::after_emergency_stop`] records the stop in the core
@@ -21,13 +32,14 @@
 use std::any::Any;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use lightvm_proto::ipc::VmSummary;
+use lightvm_proto::ipc::{BaselineSummary, StorageOperation, VmBaselines, VmSummary};
 use lightvm_proto::{
-    Actor, Admission, BackendObservation, Caller, DisplayGeometry, ErrorCode, HostCapacity,
-    InputEvent, Label, MediaEntry, MediaKind, MediaRecord, OperationId, OperationRecord,
-    PolicyLayer, PublicError, ResourceLimits, RunId, TerminationCause, VmAction, VmConfig, VmId,
-    VmRecord, VmRequest, VmState,
+    Actor, Admission, BackendObservation, BaselineId, Caller, DisplayGeometry, ErrorCode,
+    HostCapacity, InputEvent, Label, MediaEntry, MediaKind, MediaRecord, OperationId,
+    OperationKind, OperationRecord, PolicyLayer, PublicError, ResourceLimits, RunId,
+    TerminationCause, VmAction, VmConfig, VmId, VmRecord, VmRequest, VmState,
 };
 use vm_core::ports::{AuditSink, CatalogStore, IdGenerator, MediaInspector, VmBackend};
 use vm_core::{Core, CoreConfig, DispatchOutcome, VmStatus};
@@ -126,6 +138,258 @@ pub trait VmEngine: Send + 'static {
     fn release_input(&mut self, vm_id: VmId, run_id: RunId);
     /// Host capacity used by the core.
     fn host_capacity(&self) -> Option<HostCapacity>;
+    /// Baselines of a VM (F3).
+    fn list_baselines(
+        &mut self,
+        _caller: &Caller,
+        _vm_id: VmId,
+    ) -> Result<Vec<BaselineSummary>, PublicError> {
+        Err(PublicError::unsupported("baselines not available"))
+    }
+    /// First step of a baseline creation or restore (F3): core and catalog
+    /// checks, journal intents and guards; returns the work to run outside
+    /// the supervisor thread. `cancel` is polled by the work (Emergency
+    /// Stop, revocation, shutdown).
+    fn begin_baseline_job(
+        &mut self,
+        _caller: &Caller,
+        _req: BaselineRequest,
+        _cancel: CancelCheck,
+    ) -> Result<StorageJob, PublicError> {
+        Err(PublicError::unsupported("baselines not available"))
+    }
+    /// Last step: publication on the catalog, audit, VM free again.
+    fn finish_baseline_job(&mut self, _done: StorageDone) -> Result<BaselineOutcome, PublicError> {
+        Err(PublicError::unsupported("baselines not available"))
+    }
+    /// Discards a finished job (cancellation): nothing is published, the
+    /// operation is audited as failed with `reason`, which is returned.
+    fn abort_baseline_job(&mut self, _done: StorageDone, reason: PublicError) -> PublicError {
+        reason
+    }
+    /// Deletion of a baseline (F3).
+    fn delete_baseline(
+        &mut self,
+        _caller: &Caller,
+        _vm_id: VmId,
+        _baseline_id: BaselineId,
+    ) -> Result<(), PublicError> {
+        Err(PublicError::unsupported("baselines not available"))
+    }
+}
+
+/// Cancellation check of a long storage operation, polled by its work.
+pub type CancelCheck = Arc<dyn Fn() -> bool + Send + Sync>;
+
+/// Disk image operations for baselines (in the product `qemu-img`, run by
+/// the backend in its own Job Object, cancellable). Paths are absolute
+/// catalog paths decided by the storage.
+pub trait ImageTool: Send + Sync + std::fmt::Debug + 'static {
+    /// Standalone copy of `src` (backing chain flattened) into the new file
+    /// `dst`.
+    fn convert(&self, src: &Path, dst: &Path, cancel: &dyn Fn() -> bool)
+    -> Result<(), PublicError>;
+    /// `true` if the guest-visible contents are identical.
+    fn compare(&self, a: &Path, b: &Path, cancel: &dyn Fn() -> bool) -> Result<bool, PublicError>;
+    /// Consistency check of an image (no errors, no leaks).
+    fn check(&self, p: &Path, cancel: &dyn Fn() -> bool) -> Result<(), PublicError>;
+    /// Virtual size of an image.
+    fn virtual_size(&self, p: &Path) -> Result<u64, PublicError>;
+    /// New overlay `dst` of `size` bytes whose backing reference is
+    /// `backing_ref` (relative to the overlay's final directory), format
+    /// `qcow2`, backing not opened.
+    fn create_overlay(&self, backing_ref: &str, size: u64, dst: &Path) -> Result<(), PublicError>;
+    /// Template of the UEFI variables of the approved firmware: a baseline
+    /// of a VM that never started gets its variables from it (a baseline
+    /// always carries its firmware state, ROADMAP 8).
+    fn firmware_vars_template(&self) -> Option<PathBuf> {
+        None
+    }
+}
+
+/// Verified and guarded files of a VM's current state for a start (F3).
+pub struct StartDisks {
+    /// Overlay of the current state.
+    pub overlay: PathBuf,
+    /// UEFI variables of the current state.
+    pub vars: Option<PathBuf>,
+    /// Base disk of the baseline (explicit read-only backing node).
+    pub base: PathBuf,
+    /// UEFI variables of the baseline (protected read-only during the run).
+    pub base_vars: Option<PathBuf>,
+    /// Catalog guard (baseline read-only, overlay not deletable): kept by
+    /// the backend until the run is released.
+    pub guard: Box<dyn Any + Send>,
+}
+
+impl std::fmt::Debug for StartDisks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StartDisks")
+            .field("overlay", &self.overlay)
+            .field("base", &self.base)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Baseline request served as a long storage operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BaselineRequest {
+    /// `create_baseline`.
+    Create {
+        /// VM.
+        vm_id: VmId,
+        /// Label.
+        label: Label,
+        /// Accept an unverified baseline after an unclean stop.
+        allow_unclean: bool,
+    },
+    /// `restore_baseline`.
+    Restore {
+        /// VM.
+        vm_id: VmId,
+        /// Baseline.
+        baseline_id: BaselineId,
+    },
+}
+
+impl BaselineRequest {
+    /// VM of the request.
+    pub fn vm_id(&self) -> VmId {
+        match self {
+            Self::Create { vm_id, .. } | Self::Restore { vm_id, .. } => *vm_id,
+        }
+    }
+
+    /// Kind of the core operation.
+    pub fn kind(&self) -> OperationKind {
+        match self {
+            Self::Create { .. } => OperationKind::Snapshot,
+            Self::Restore { .. } => OperationKind::Restore,
+        }
+    }
+}
+
+/// Work of a catalog storage operation, opaque to the engine.
+pub type StorageWork = Box<dyn FnOnce() -> Box<dyn Any + Send> + Send>;
+
+/// Long storage operation to run on a worker thread.
+pub struct StorageJob {
+    vm_id: VmId,
+    operation_id: OperationId,
+    work: StorageWork,
+}
+
+impl StorageJob {
+    /// VM.
+    pub fn vm_id(&self) -> VmId {
+        self.vm_id
+    }
+
+    /// Runs the work (blocking).
+    pub fn run(self) -> StorageDone {
+        StorageDone {
+            vm_id: self.vm_id,
+            operation_id: self.operation_id,
+            result: (self.work)(),
+        }
+    }
+}
+
+impl std::fmt::Debug for StorageJob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "StorageJob({}, {})", self.vm_id, self.operation_id)
+    }
+}
+
+/// Result of a [`StorageJob`], back to the supervisor thread.
+pub struct StorageDone {
+    vm_id: VmId,
+    operation_id: OperationId,
+    result: Box<dyn Any + Send>,
+}
+
+impl StorageDone {
+    /// VM.
+    pub fn vm_id(&self) -> VmId {
+        self.vm_id
+    }
+}
+
+impl std::fmt::Debug for StorageDone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "StorageDone({}, {})", self.vm_id, self.operation_id)
+    }
+}
+
+/// Successful outcome of a baseline job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BaselineOutcome {
+    /// New baseline.
+    Created(BaselineSummary),
+    /// Baseline restored.
+    Restored {
+        /// VM.
+        vm_id: VmId,
+        /// Baseline.
+        baseline_id: BaselineId,
+    },
+}
+
+/// Baselines on a catalog (F3). The defaults describe a catalog without
+/// baselines: listings empty, operations `unsupported`.
+pub trait BaselinePort {
+    /// Baselines of a VM, oldest first.
+    fn list_baselines(&self, _vm: VmId) -> Result<Vec<BaselineSummary>, PublicError> {
+        Ok(Vec::new())
+    }
+    /// Baseline facts of a VM for [`VmSummary`] (operation excluded).
+    fn baseline_facts(&self, _vm: VmId) -> VmBaselines {
+        VmBaselines::default()
+    }
+    /// First step of a baseline creation: checks (clean stop, budget, free
+    /// space), guards and intents; returns the work for the worker thread.
+    fn begin_create_baseline(
+        &mut self,
+        _vm: &VmRecord,
+        _label: &Label,
+        _allow_unclean: bool,
+        _tool: Arc<dyn ImageTool>,
+        _cancel: CancelCheck,
+    ) -> Result<StorageWork, PublicError> {
+        Err(PublicError::unsupported("baselines not available"))
+    }
+    /// First step of a restore.
+    fn begin_restore_baseline(
+        &mut self,
+        _vm: &VmRecord,
+        _baseline: BaselineId,
+        _tool: Arc<dyn ImageTool>,
+        _cancel: CancelCheck,
+    ) -> Result<StorageWork, PublicError> {
+        Err(PublicError::unsupported("baselines not available"))
+    }
+    /// Publishes the result of a work.
+    fn finish_storage_job(
+        &mut self,
+        _done: Box<dyn Any + Send>,
+    ) -> Result<BaselineOutcome, PublicError> {
+        Err(PublicError::unsupported("baselines not available"))
+    }
+    /// Discards the result of a work.
+    fn abort_storage_job(&mut self, _done: Box<dyn Any + Send>) -> Result<(), PublicError> {
+        Ok(())
+    }
+    /// Deletes a baseline with its files.
+    fn delete_baseline(&mut self, _vm: VmId, _baseline: BaselineId) -> Result<(), PublicError> {
+        Err(PublicError::unsupported("baselines not available"))
+    }
+    /// Verified, guarded files of the VM's current state for run `run`,
+    /// `None` if the VM runs on its standalone disk.
+    fn start_disks(&self, _vm: VmId, _run: RunId) -> Result<Option<StartDisks>, PublicError> {
+        Ok(None)
+    }
+    /// Records whether a run ended with an observed clean guest shutdown.
+    fn record_exit(&self, _run: RunId, _clean: bool) {}
 }
 
 /// Copy of a media import, to run on a worker thread; its result goes back
@@ -202,6 +466,20 @@ pub trait BackendPort: VmBackend + Send + 'static {
     }
     /// Releases the keys and buttons still pressed on the run.
     fn release_input(&mut self, _vm_id: VmId, _run_id: RunId) {}
+    /// Disk image tool for baselines (F3), if the backend has one.
+    fn image_tool(&self) -> Option<Arc<dyn ImageTool>> {
+        None
+    }
+    /// Files of the current state for the start of `run_id` that follows
+    /// (F3): the backend uses them instead of the standalone disk and keeps
+    /// the guard until the run is released. A backend without support
+    /// ignores them (and starts the standalone disk).
+    fn set_start_disks(&mut self, _vm_id: VmId, _run_id: RunId, _disks: StartDisks) {}
+    /// Runs ended since the last call, with `true` for an observed clean
+    /// guest shutdown (F3: a baseline is "verified" only after one).
+    fn take_exits(&mut self) -> Vec<(VmId, RunId, bool)> {
+        Vec::new()
+    }
     /// Starts a graceful stop without waiting for it: ACPI powerdown, then
     /// the escalation (wait, `quit`, termination) runs in the background and
     /// its outcome is reported by [`Self::finished_shutdowns`]. `None` if the
@@ -233,7 +511,12 @@ pub fn core_config(host: HostCapacity) -> CoreConfig {
     }
 }
 
-fn summary(s: VmStatus, disk_used_bytes: Option<u64>) -> VmSummary {
+fn summary(s: VmStatus, disk_used_bytes: Option<u64>, mut baselines: VmBaselines) -> VmSummary {
+    baselines.operation = match s.storage_operation {
+        Some(OperationKind::Snapshot) => Some(StorageOperation::CreateBaseline),
+        Some(OperationKind::Restore) => Some(StorageOperation::RestoreBaseline),
+        _ => None,
+    };
     VmSummary {
         vm_id: s.vm_id,
         name: s.name,
@@ -242,6 +525,7 @@ fn summary(s: VmStatus, disk_used_bytes: Option<u64>) -> VmSummary {
         config: s.config,
         config_revision: s.config_revision,
         disk_used_bytes,
+        baselines,
     }
 }
 
@@ -279,7 +563,7 @@ where
 
 impl<S, A, B, M> CoreEngine<S, A, B, M>
 where
-    S: CatalogStore + MediaImportPort + Send + 'static,
+    S: CatalogStore + MediaImportPort + BaselinePort + Send + 'static,
     A: AuditSink + Send + 'static,
     B: BackendPort,
     M: MediaInspector + Send + 'static,
@@ -323,6 +607,7 @@ where
     }
 
     fn apply_observations(&mut self) {
+        self.record_exits();
         for (vm_id, run_id, result) in self.backend.finished_shutdowns() {
             if self.pending_stops.get(&vm_id).map(|(_, r)| *r) == Some(run_id)
                 && let Some((op, _)) = self.pending_stops.remove(&vm_id)
@@ -335,7 +620,15 @@ where
         for (vm_id, obs) in self.backend.drain_observations() {
             let _ = self.core.observe(vm_id, obs);
         }
+        self.record_exits();
         self.settle_pending_stops();
+    }
+
+    /// Clean or unclean ends of the runs, recorded in the catalog (F3).
+    fn record_exits(&mut self) {
+        for (_, run, clean) in self.backend.take_exits() {
+            self.core.store().record_exit(run, clean);
+        }
     }
 
     /// Graceful stops whose run ended otherwise (forced stop, Emergency Stop,
@@ -370,7 +663,8 @@ where
 
     fn with_usage(&self, s: VmStatus) -> VmSummary {
         let used = self.core.store().vm_disk_usage(s.vm_id);
-        summary(s, used)
+        let baselines = self.core.store().baseline_facts(s.vm_id);
+        summary(s, used, baselines)
     }
 
     /// Input with pointer coordinates on a geometry different from the one
@@ -428,6 +722,19 @@ where
     /// once by the core and wins.
     fn run_queue(&mut self, vm_id: VmId) -> Result<(), PublicError> {
         while let Some(d) = self.core.begin_dispatch(vm_id)? {
+            if d.action == VmAction::Start {
+                // F3: the current state may be an overlay of a baseline:
+                // verified and guarded files from the catalog, or a refusal
+                // before any process (the VM stays stopped).
+                match self.core.store().start_disks(vm_id, d.run_id) {
+                    Ok(Some(disks)) => self.backend.set_start_disks(vm_id, d.run_id, disks),
+                    Ok(None) => {}
+                    Err(e) => {
+                        self.core.refuse_start(vm_id, d.operation_id, e)?;
+                        continue;
+                    }
+                }
+            }
             if d.action == VmAction::Stop {
                 match self.backend.begin_shutdown(vm_id, d.run_id) {
                     Some(Ok(())) => {
@@ -451,7 +758,7 @@ where
 
 impl<S, A, B, M> VmEngine for CoreEngine<S, A, B, M>
 where
-    S: CatalogStore + MediaImportPort + Send + 'static,
+    S: CatalogStore + MediaImportPort + BaselinePort + Send + 'static,
     A: AuditSink + Send + 'static,
     B: BackendPort,
     M: MediaInspector + Send + 'static,
@@ -684,5 +991,95 @@ where
 
     fn host_capacity(&self) -> Option<HostCapacity> {
         Some(self.core.config().host)
+    }
+
+    fn list_baselines(
+        &mut self,
+        caller: &Caller,
+        vm_id: VmId,
+    ) -> Result<Vec<BaselineSummary>, PublicError> {
+        self.apply_observations();
+        self.core
+            .with_visible_vm(caller, vm_id, |store| store.list_baselines(vm_id))
+    }
+
+    fn begin_baseline_job(
+        &mut self,
+        caller: &Caller,
+        req: BaselineRequest,
+        cancel: CancelCheck,
+    ) -> Result<StorageJob, PublicError> {
+        self.apply_observations();
+        let tool = self.backend.image_tool();
+        let vm_id = req.vm_id();
+        let kind = req.kind();
+        let (operation_id, work) =
+            self.core
+                .begin_storage_operation(caller, vm_id, kind, |store, vm, _op| {
+                    let tool = tool.ok_or_else(|| {
+                        PublicError::unsupported("baselines not available on this backend")
+                    })?;
+                    match &req {
+                        BaselineRequest::Create {
+                            label,
+                            allow_unclean,
+                            ..
+                        } => store.begin_create_baseline(vm, label, *allow_unclean, tool, cancel),
+                        BaselineRequest::Restore { baseline_id, .. } => {
+                            store.begin_restore_baseline(vm, *baseline_id, tool, cancel)
+                        }
+                    }
+                })?;
+        Ok(StorageJob {
+            vm_id,
+            operation_id,
+            work,
+        })
+    }
+
+    fn finish_baseline_job(&mut self, done: StorageDone) -> Result<BaselineOutcome, PublicError> {
+        let StorageDone {
+            vm_id,
+            operation_id,
+            result,
+        } = done;
+        self.core
+            .finish_storage_operation(vm_id, operation_id, |store| {
+                store.finish_storage_job(result)
+            })
+    }
+
+    fn abort_baseline_job(&mut self, done: StorageDone, reason: PublicError) -> PublicError {
+        let StorageDone {
+            vm_id,
+            operation_id,
+            result,
+        } = done;
+        let r = self
+            .core
+            .finish_storage_operation(vm_id, operation_id, |store| {
+                if let Err(e) = store.abort_storage_job(result) {
+                    crate::diag!(
+                        "lightvm-service: cancelled baseline operation not rolled back: {e}"
+                    );
+                }
+                Err::<BaselineOutcome, _>(reason)
+            });
+        match r {
+            Err(e) => e,
+            Ok(_) => PublicError::infrastructure("operation cancelled"),
+        }
+    }
+
+    fn delete_baseline(
+        &mut self,
+        caller: &Caller,
+        vm_id: VmId,
+        baseline_id: BaselineId,
+    ) -> Result<(), PublicError> {
+        self.apply_observations();
+        self.core.delete_baseline_with(caller, vm_id, |store| {
+            store.delete_baseline(vm_id, baseline_id)
+        })
     }
 }

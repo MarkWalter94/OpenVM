@@ -435,6 +435,8 @@ pub async fn start(
         display: display.clone(),
         self_tx: cmd_tx.clone(),
         imports: 0,
+        storage_jobs: 0,
+        storage_cancel: Arc::default(),
     };
     // Published before any possible subscription: no client receives it late,
     // after later events (race with `subscribe`).
@@ -848,7 +850,12 @@ async fn handle_connection(shared: Arc<Shared>, stream: BoxedStream, peer: PeerI
                             bucket.retry_after().as_millis()
                         ));
                         if send(&mut wr, &m, max).await.is_err() { Flow::Close(None) } else { Flow::Continue }
-                    } else if matches!(body, Request::ImportMedia { .. }) {
+                    } else if matches!(
+                        body,
+                        Request::ImportMedia { .. }
+                            | Request::CreateBaseline { .. }
+                            | Request::RestoreBaseline { .. }
+                    ) {
                         spawn_detached(&shared, role, connection_id, &revoke_rx, &late_tx, request_id, body);
                         Flow::Continue
                     } else {
@@ -1019,6 +1026,22 @@ async fn dispatch(
             expected_revision,
         },
         Request::OpenConsole { vm_id } => SupervisorRequest::OpenConsole(vm_id),
+        Request::ListBaselines { vm_id } => SupervisorRequest::ListBaselines(vm_id),
+        Request::CreateBaseline {
+            vm_id,
+            label,
+            allow_unclean,
+        } => SupervisorRequest::CreateBaseline {
+            vm_id,
+            label,
+            allow_unclean,
+        },
+        Request::RestoreBaseline { vm_id, baseline_id } => {
+            SupervisorRequest::RestoreBaseline { vm_id, baseline_id }
+        }
+        Request::DeleteBaseline { vm_id, baseline_id } => {
+            SupervisorRequest::DeleteBaseline { vm_id, baseline_id }
+        }
         Request::Subscribe => {
             if events.is_none() {
                 *events = Some(shared.events.subscribe());

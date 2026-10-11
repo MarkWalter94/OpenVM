@@ -54,6 +54,13 @@ pub enum AuditAction {
     /// closed or revoked, Emergency Stop, new ticket, shutdown); the cause is
     /// in `termination`.
     ConsoleRevoke,
+    /// Creation of a baseline with the VM off (F3).
+    BaselineCreate,
+    /// Restore of a baseline: the previous current state (disk or overlay
+    /// and UEFI variables) is discarded (F3).
+    BaselineRestore,
+    /// Deletion of a baseline (F3).
+    BaselineDelete,
 }
 
 /// Recorded outcome.

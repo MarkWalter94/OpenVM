@@ -77,6 +77,12 @@
     }
   ],
   "$defs": {
+    "BaselineId": {
+      "description": "BaselineId: version 7 UUID, lowercase with hyphens.",
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
     "DisplayGeometry": {
       "description": "Guest display geometry in pixels.",
       "type": "object",
@@ -221,6 +227,12 @@
         "qcode",
         "down"
       ]
+    },
+    "Label": {
+      "description": "Text declared by the user, without control characters; never interpreted.",
+      "type": "string",
+      "maxLength": 256,
+      "minLength": 1
     },
     "MediaId": {
       "description": "MediaId: version 7 UUID, lowercase with hyphens.",
@@ -698,6 +710,98 @@
           "required": [
             "op",
             "vm_id"
+          ]
+        },
+        {
+          "description": "Baselines of a VM (UI only, F3).",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "list_baselines"
+            },
+            "vm_id": {
+              "description": "VM.",
+              "$ref": "#/$defs/VmId"
+            }
+          },
+          "required": [
+            "op",
+            "vm_id"
+          ]
+        },
+        {
+          "description": "Creation of a baseline with the VM off (UI only, F3; ROADMAP 8,\nADR-0005): the VM's current disk and UEFI variables are materialized\ninto a standalone, read-only, hashed baseline. Long operation (a\n`qemu-img convert` of the whole disk): it runs outside the supervisor\nthread, the VM is busy meanwhile (`vm_busy` for other mutations,\n[`VmBaselines::operation`] set) and the reply arrives when it ends.\nCancelled by the Emergency Stop, by the revocation or closing of the\nconnection and by the service shutdown (nothing is published).",
+          "type": "object",
+          "properties": {
+            "allow_unclean": {
+              "description": "The last run did not end with an observed clean guest shutdown\n(forced stop, Emergency Stop, crash, supervisor restart since):\nwithout this flag the creation is refused (`state_conflict`,\ndetail `reason` = `unclean_shutdown`); with it the baseline is\nrecorded as **not verified** (`clean_shutdown: false`) and is\nnever promoted to verified later.",
+              "type": "boolean",
+              "default": false
+            },
+            "label": {
+              "description": "Label shown to the user.",
+              "$ref": "#/$defs/Label"
+            },
+            "op": {
+              "type": "string",
+              "const": "create_baseline"
+            },
+            "vm_id": {
+              "description": "VM (must be `stopped`).",
+              "$ref": "#/$defs/VmId"
+            }
+          },
+          "required": [
+            "op",
+            "vm_id",
+            "label"
+          ]
+        },
+        {
+          "description": "Restore of a baseline with the VM off (UI only, F3): the VM's current\nstate (standalone disk or previous overlay, and UEFI variables) is\n**discarded** and replaced by a new QCOW2 overlay backed by the\nbaseline plus a fresh copy of the baseline's UEFI variables. The\nbaseline's hash is verified first. The guest restarts with a normal\nboot at the next start. The reply arrives when done, as for\n`create_baseline` (same cancellation rules).",
+          "type": "object",
+          "properties": {
+            "baseline_id": {
+              "description": "Baseline of the same VM.",
+              "$ref": "#/$defs/BaselineId"
+            },
+            "op": {
+              "type": "string",
+              "const": "restore_baseline"
+            },
+            "vm_id": {
+              "description": "VM (must be `stopped`).",
+              "$ref": "#/$defs/VmId"
+            }
+          },
+          "required": [
+            "op",
+            "vm_id",
+            "baseline_id"
+          ]
+        },
+        {
+          "description": "Deletion of a baseline (UI only, F3; the UI asks for confirmation).\nRefused if the baseline is in use (the VM's current state is an\noverlay of it) or protected.",
+          "type": "object",
+          "properties": {
+            "baseline_id": {
+              "description": "Baseline of the same VM.",
+              "$ref": "#/$defs/BaselineId"
+            },
+            "op": {
+              "type": "string",
+              "const": "delete_baseline"
+            },
+            "vm_id": {
+              "description": "VM (must be `stopped`).",
+              "$ref": "#/$defs/VmId"
+            }
+          },
+          "required": [
+            "op",
+            "vm_id",
+            "baseline_id"
           ]
         }
       ]

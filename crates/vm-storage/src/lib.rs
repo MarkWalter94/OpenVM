@@ -29,6 +29,7 @@
 //! here; [`DiskId`], [`FirmwareId`] and [`ArtifactId`] belong to storage.
 //! The crate contains no `unsafe` code.
 
+mod baseline;
 mod budget;
 mod catalog;
 mod enums;
@@ -47,6 +48,11 @@ mod recover;
 mod time;
 mod vm_delete;
 
+pub use baseline::{
+    BaselineInfo, BaselineJob, BaselineJobDone, BaselineOverview, CreateBaseline,
+    CurrentStateFiles, FaultAction, FaultPoint, ProducedImage, RestoreBaseline, RestoreJob,
+    RestoreJobDone, StartFiles, qcow2_backing,
+};
 pub use budget::{
     BUDGET_MANIFEST_FILE, BaselineUsage, BudgetCheck, BudgetConfig, BudgetManifest, Enforcement,
     RunBudgetRequest, RunUsage, StorageUsage, VmBudget,
@@ -75,8 +81,9 @@ pub use media::{
 pub use ops::PromoteBaseline;
 pub use paths::ManagedPath;
 pub use records::{
-    ArtifactRecord, AuditEvent, AuditRecord, BaselineRecord, DiskRecord, FirmwareRecord,
-    GrantRecord, MediaRecord, NewVm, OperationRecord, RunRecord, SessionRecord, Tx, VmRecord,
+    ArtifactRecord, AuditEvent, AuditRecord, BaselineRecord, CurrentStateRecord, DiskRecord,
+    FirmwareRecord, GrantRecord, MediaRecord, NewVm, OperationRecord, RunRecord, SessionRecord, Tx,
+    VmRecord,
 };
 pub use recover::{IntegrityIssue, IntentRecovery, RecoveryOutcome, RecoveryReport};
 pub use time::{UtcMillis, now_rfc3339};

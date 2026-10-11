@@ -19,7 +19,8 @@ use vm_core::media::{ObservedMediaFacts, VerifiedMedia};
 use vm_core::ports::{AuditSink, CatalogStore, MediaInspector, VmBackend};
 
 use crate::engine::{
-    BackendPort, CoreEngine, ImportCopied, ImportJob, MediaImportPort, VmEngine, core_config,
+    BackendPort, BaselinePort, CoreEngine, ImageTool, ImportCopied, ImportJob, MediaImportPort,
+    StartDisks, VmEngine, core_config,
 };
 use crate::supervisor::{Backend, EmergencyOutcome, EmergencyStop, ParentLossPolicy};
 
@@ -181,6 +182,104 @@ impl CatalogStore for MemoryStore {
     }
 }
 
+/// No baselines in memory: listings empty, operations `unsupported` (the
+/// baseline tests use the SQLite catalog with [`FakeImageTool`]).
+impl BaselinePort for MemoryStore {}
+
+/// Image tool without `qemu-img` for the baseline tests (F3): files with a
+/// minimal QCOW2 v3 header (4 KiB) followed by the "guest data". `convert`
+/// writes the guest-visible content of the source (an overlay without data
+/// shows its base's) as a standalone image; `compare` compares contents;
+/// `create_overlay` writes a header with the backing reference. Optional
+/// delay per `convert` (cancellation tests) and failure injection.
+#[derive(Debug, Default)]
+pub struct FakeImageTool {
+    /// Delay of `convert`, polled for cancellation every 10 ms.
+    pub convert_delay: std::time::Duration,
+    /// Calls received.
+    pub calls: Calls,
+}
+
+/// Minimal QCOW2 v3 header with an optional backing reference (format
+/// `qcow2`), followed by `payload`.
+pub fn fake_qcow2(backing: Option<&str>, payload: &[u8]) -> Vec<u8> {
+    let mut h = vec![0u8; 4096];
+    h[0..4].copy_from_slice(&[0x51, 0x46, 0x49, 0xfb]);
+    h[4..8].copy_from_slice(&3u32.to_be_bytes());
+    h[100..104].copy_from_slice(&104u32.to_be_bytes());
+    if let Some(name) = backing {
+        let fmt = b"qcow2";
+        h[104..108].copy_from_slice(&0xe279_2acau32.to_be_bytes());
+        h[108..112].copy_from_slice(&5u32.to_be_bytes());
+        h[112..117].copy_from_slice(fmt);
+        let off = 128usize;
+        h[8..16].copy_from_slice(&(off as u64).to_be_bytes());
+        let len = u32::try_from(name.len()).unwrap_or(0);
+        h[16..20].copy_from_slice(&len.to_be_bytes());
+        h[off..off + name.len()].copy_from_slice(name.as_bytes());
+    }
+    h.extend_from_slice(payload);
+    h
+}
+
+/// Guest-visible content of a fake image (see [`FakeImageTool`]).
+pub fn fake_content(p: &Path) -> Result<Vec<u8>, PublicError> {
+    let bytes = std::fs::read(p).map_err(|_| PublicError::infrastructure("fake image read"))?;
+    let payload = bytes.get(4096..).unwrap_or_default().to_vec();
+    if !payload.is_empty() {
+        return Ok(payload);
+    }
+    match vm_storage::qcow2_backing(p) {
+        Ok(Some((r, _))) => {
+            let base = r
+                .split('/')
+                .fold(p.parent().unwrap_or(p).to_path_buf(), |b, c| b.join(c));
+            fake_content(&base)
+        }
+        _ => Ok(payload),
+    }
+}
+
+impl ImageTool for FakeImageTool {
+    fn convert(
+        &self,
+        src: &Path,
+        dst: &Path,
+        cancel: &dyn Fn() -> bool,
+    ) -> Result<(), PublicError> {
+        push(&self.calls, "convert");
+        let t0 = std::time::Instant::now();
+        while t0.elapsed() < self.convert_delay {
+            if cancel() {
+                return Err(PublicError::state_conflict("operation cancelled"));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        if cancel() {
+            return Err(PublicError::state_conflict("operation cancelled"));
+        }
+        let content = fake_content(src)?;
+        std::fs::write(dst, fake_qcow2(None, &content))
+            .map_err(|_| PublicError::infrastructure("fake convert"))
+    }
+    fn compare(&self, a: &Path, b: &Path, _cancel: &dyn Fn() -> bool) -> Result<bool, PublicError> {
+        push(&self.calls, "compare");
+        Ok(fake_content(a)? == fake_content(b)?)
+    }
+    fn check(&self, _p: &Path, _cancel: &dyn Fn() -> bool) -> Result<(), PublicError> {
+        push(&self.calls, "check");
+        Ok(())
+    }
+    fn virtual_size(&self, _p: &Path) -> Result<u64, PublicError> {
+        Ok(32 << 30)
+    }
+    fn create_overlay(&self, backing_ref: &str, _size: u64, dst: &Path) -> Result<(), PublicError> {
+        push(&self.calls, "create_overlay");
+        std::fs::write(dst, fake_qcow2(Some(backing_ref), b""))
+            .map_err(|_| PublicError::infrastructure("fake overlay"))
+    }
+}
+
 /// Import without a managed copy: hash and size of the source computed on
 /// the worker thread, registry row in memory.
 impl MediaImportPort for MemoryStore {
@@ -301,6 +400,14 @@ pub struct FakeVmBackend {
     /// (Emergency Stop): as with QEMU, their stop outcome and exit are not
     /// reported, they are left to `after_emergency_stop` (`force_stop`).
     pub emergency_killed: Arc<Mutex<std::collections::BTreeSet<VmId>>>,
+    /// Image tool for baselines (F3); `None` = baselines unsupported.
+    pub image_tool: Option<Arc<FakeImageTool>>,
+    /// Ends of runs to report (`true` = clean guest shutdown): a graceful
+    /// stop is clean, a forced stop is not.
+    pub exits: Vec<(VmId, RunId, bool)>,
+    /// Current-state files received for the next start, with their guard,
+    /// kept like the real backend until the next stop.
+    pub start_disks: BTreeMap<VmId, (RunId, StartDisks)>,
 }
 
 /// Outcomes of background graceful stops injected by a test.
@@ -310,21 +417,34 @@ impl VmBackend for FakeVmBackend {
     fn start(
         &mut self,
         vm: &VmRecord,
-        _run_id: RunId,
+        run_id: RunId,
         media: &[VerifiedMedia],
     ) -> Result<(), PublicError> {
+        let overlay = self
+            .start_disks
+            .get(&vm.id)
+            .is_some_and(|(r, _)| *r == run_id);
         push(
             &self.calls,
-            format!("vm_start:{}:media={}", vm.config.name, media.len()),
+            format!(
+                "vm_start:{}:media={}{}",
+                vm.config.name,
+                media.len(),
+                if overlay { ":overlay" } else { "" }
+            ),
         );
         Ok(())
     }
-    fn shutdown(&mut self, _vm_id: VmId, _run_id: RunId) -> Result<(), PublicError> {
+    fn shutdown(&mut self, vm_id: VmId, run_id: RunId) -> Result<(), PublicError> {
         push(&self.calls, "vm_shutdown");
+        self.start_disks.remove(&vm_id);
+        self.exits.push((vm_id, run_id, true));
         Ok(())
     }
-    fn force_stop(&mut self, vm_id: VmId, _run_id: RunId) -> Result<(), PublicError> {
+    fn force_stop(&mut self, vm_id: VmId, run_id: RunId) -> Result<(), PublicError> {
         push(&self.calls, "vm_force_stop");
+        self.start_disks.remove(&vm_id);
+        self.exits.push((vm_id, run_id, false));
         self.stopping.remove(&vm_id);
         lock(&self.emergency_killed).remove(&vm_id);
         Ok(())
@@ -371,6 +491,16 @@ impl VmBackend for FakeVmBackend {
 }
 
 impl BackendPort for FakeVmBackend {
+    fn image_tool(&self) -> Option<Arc<dyn ImageTool>> {
+        self.image_tool.clone().map(|t| t as Arc<dyn ImageTool>)
+    }
+    fn set_start_disks(&mut self, vm_id: VmId, run_id: RunId, disks: StartDisks) {
+        push(&self.calls, "vm_start_disks");
+        self.start_disks.insert(vm_id, (run_id, disks));
+    }
+    fn take_exits(&mut self) -> Vec<(VmId, RunId, bool)> {
+        std::mem::take(&mut self.exits)
+    }
     fn drain_observations(&mut self) -> Vec<(VmId, BackendObservation)> {
         if let Some(g) = &self.gate {
             g.wait();

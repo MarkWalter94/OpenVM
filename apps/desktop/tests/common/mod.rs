@@ -144,6 +144,7 @@ pub(crate) fn vm(n: u8, name: &str, state: VmState) -> VmSummary {
         },
         config_revision: 3,
         disk_used_bytes: Some(5_637_144_576),
+        baselines: Default::default(),
     }
 }
 

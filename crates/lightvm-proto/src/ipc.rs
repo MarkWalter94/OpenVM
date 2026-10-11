@@ -29,8 +29,9 @@ use schemars::{JsonSchema, Schema, generate::SchemaSettings};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Admission, DisplayGeometry, HostCapacity, MediaKind, MediaRecord, OperationRecord,
-    PROTOCOL_VERSION, ReplyError, RunId, VmConfig, VmId, VmName, VmRecord, VmRequest, VmState,
+    Admission, BaselineId, DisplayGeometry, HostCapacity, Label, MediaKind, MediaRecord,
+    OperationRecord, PROTOCOL_VERSION, ReplyError, RunId, Sha256Digest, UtcTimestamp, VmConfig,
+    VmId, VmName, VmRecord, VmRequest, VmState,
 };
 
 /// IPC protocol versions supported by the service, in order of preference.
@@ -176,6 +177,55 @@ pub enum Request {
         /// VM.
         vm_id: VmId,
     },
+    /// Baselines of a VM (UI only, F3).
+    ListBaselines {
+        /// VM.
+        vm_id: VmId,
+    },
+    /// Creation of a baseline with the VM off (UI only, F3; ROADMAP 8,
+    /// ADR-0005): the VM's current disk and UEFI variables are materialized
+    /// into a standalone, read-only, hashed baseline. Long operation (a
+    /// `qemu-img convert` of the whole disk): it runs outside the supervisor
+    /// thread, the VM is busy meanwhile (`vm_busy` for other mutations,
+    /// [`VmBaselines::operation`] set) and the reply arrives when it ends.
+    /// Cancelled by the Emergency Stop, by the revocation or closing of the
+    /// connection and by the service shutdown (nothing is published).
+    CreateBaseline {
+        /// VM (must be `stopped`).
+        vm_id: VmId,
+        /// Label shown to the user.
+        label: Label,
+        /// The last run did not end with an observed clean guest shutdown
+        /// (forced stop, Emergency Stop, crash, supervisor restart since):
+        /// without this flag the creation is refused (`state_conflict`,
+        /// detail `reason` = `unclean_shutdown`); with it the baseline is
+        /// recorded as **not verified** (`clean_shutdown: false`) and is
+        /// never promoted to verified later.
+        #[serde(default)]
+        allow_unclean: bool,
+    },
+    /// Restore of a baseline with the VM off (UI only, F3): the VM's current
+    /// state (standalone disk or previous overlay, and UEFI variables) is
+    /// **discarded** and replaced by a new QCOW2 overlay backed by the
+    /// baseline plus a fresh copy of the baseline's UEFI variables. The
+    /// baseline's hash is verified first. The guest restarts with a normal
+    /// boot at the next start. The reply arrives when done, as for
+    /// `create_baseline` (same cancellation rules).
+    RestoreBaseline {
+        /// VM (must be `stopped`).
+        vm_id: VmId,
+        /// Baseline of the same VM.
+        baseline_id: BaselineId,
+    },
+    /// Deletion of a baseline (UI only, F3; the UI asks for confirmation).
+    /// Refused if the baseline is in use (the VM's current state is an
+    /// overlay of it) or protected.
+    DeleteBaseline {
+        /// VM (must be `stopped`).
+        vm_id: VmId,
+        /// Baseline of the same VM.
+        baseline_id: BaselineId,
+    },
 }
 
 impl Request {
@@ -201,6 +251,10 @@ impl Request {
             Self::ImportMedia { .. } => "import_media",
             Self::DeleteVm { .. } => "delete_vm",
             Self::OpenConsole { .. } => "open_console",
+            Self::ListBaselines { .. } => "list_baselines",
+            Self::CreateBaseline { .. } => "create_baseline",
+            Self::RestoreBaseline { .. } => "restore_baseline",
+            Self::DeleteBaseline { .. } => "delete_baseline",
         }
     }
 }
@@ -225,6 +279,86 @@ pub struct VmSummary {
     /// if measurable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_used_bytes: Option<u64>,
+    /// Baselines and current state of the VM (F3).
+    #[serde(default)]
+    pub baselines: VmBaselines,
+}
+
+/// Baseline facts of a VM, in [`VmSummary`] (F3).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct VmBaselines {
+    /// Baseline the VM's current state is an overlay of (set by
+    /// `restore_baseline`); `None` = the VM runs on its standalone disk
+    /// (never restored).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<BaselineId>,
+    /// Number of baselines of the VM.
+    #[serde(default)]
+    pub count: u32,
+    /// Bytes used on the host by the baselines (disk images and UEFI
+    /// variables).
+    #[serde(default)]
+    pub bytes: u64,
+    /// Bytes used on the host by the current overlay and its UEFI variables
+    /// (0 on the standalone disk).
+    #[serde(default)]
+    pub overlay_bytes: u64,
+    /// Storage operation in progress on the VM: the VM is busy until it ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<StorageOperation>,
+}
+
+/// Long storage operation in progress on a VM.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageOperation {
+    /// `create_baseline`.
+    CreateBaseline,
+    /// `restore_baseline`.
+    RestoreBaseline,
+}
+
+/// Baseline of a VM, for `list_baselines` and `create_baseline` (F3).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct BaselineSummary {
+    /// Baseline.
+    pub baseline_id: BaselineId,
+    /// Owning VM.
+    pub vm_id: VmId,
+    /// Label given at creation.
+    pub label: Label,
+    /// Creation instant.
+    pub created_at: UtcTimestamp,
+    /// `true` if created after an observed clean guest shutdown (or before
+    /// any run); `false` = **not verified**: created after a forced or
+    /// unobserved stop with explicit consent (`allow_unclean`).
+    pub clean_shutdown: bool,
+    /// Protected baseline (initial baseline of an agent session, F4):
+    /// cannot be deleted.
+    pub protected: bool,
+    /// Baseline the source state derived from (the VM was running on an
+    /// overlay of it when this baseline was created); `None` = created from
+    /// the standalone disk. Informational only: every baseline is a
+    /// standalone image (no backing chain).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derived_from: Option<BaselineId>,
+    /// VM configuration revision at creation.
+    pub config_revision: u64,
+    /// Virtual size of the disk.
+    pub virtual_size_bytes: u64,
+    /// Bytes on the host (disk image and UEFI variables).
+    pub size_bytes: u64,
+    /// SHA-256 of the disk image, verified before every restore and start.
+    pub disk_sha256: Sha256Digest,
+    /// SHA-256 of the UEFI variables, if the baseline has them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub firmware_sha256: Option<Sha256Digest>,
+    /// The VM's current state is an overlay of this baseline.
+    pub current: bool,
+    /// In use (current overlay or an open run): `delete_baseline` is refused.
+    pub in_use: bool,
 }
 
 /// Per-run display ticket for the console (ADR-0013, ROADMAP 6.4).
@@ -433,6 +567,33 @@ pub enum ResponseBody {
         /// Display ticket.
         ticket: ConsoleTicket,
     },
+    /// Response to `list_baselines`, oldest first.
+    Baselines {
+        /// VM.
+        vm_id: VmId,
+        /// Baselines of the VM.
+        baselines: Vec<BaselineSummary>,
+    },
+    /// Response to `create_baseline`.
+    BaselineCreated {
+        /// New baseline.
+        baseline: BaselineSummary,
+    },
+    /// Response to `restore_baseline`: the VM's current state is now a new
+    /// overlay of the baseline.
+    BaselineRestored {
+        /// VM.
+        vm_id: VmId,
+        /// Restored baseline.
+        baseline_id: BaselineId,
+    },
+    /// Response to `delete_baseline`.
+    BaselineDeleted {
+        /// VM.
+        vm_id: VmId,
+        /// Deleted baseline.
+        baseline_id: BaselineId,
+    },
 }
 
 /// State of the service.
@@ -486,6 +647,13 @@ pub enum ServiceEvent {
     AgentSessionsStopped {
         /// Reason.
         reason: StopReason,
+    },
+    /// The baselines or the storage operation of a VM changed (operation
+    /// started or ended, baseline created, restored or deleted): re-read
+    /// `vm_status` and `list_baselines` (F3).
+    BaselinesChanged {
+        /// VM.
+        vm_id: VmId,
     },
     /// Events lost because the client was too slow.
     EventsLost {

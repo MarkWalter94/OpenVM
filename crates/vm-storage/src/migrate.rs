@@ -54,6 +54,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "0005_journal_vm_target.sql",
         sql: include_str!("../migrations/0005_journal_vm_target.sql"),
     },
+    Migration {
+        version: 6,
+        name: "0006_baseline_state.sql",
+        sql: include_str!("../migrations/0006_baseline_state.sql"),
+    },
 ];
 
 /// Latest schema version known to this binary.

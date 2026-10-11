@@ -9,8 +9,9 @@
 //!   vms/<vm_id>/manifest.json  VM manifest
 //!   vms/<vm_id>/primary.qcow2  working disk
 //!   vms/<vm_id>/base/<baseline_id>/{disk.qcow2,vars.fd,manifest.json}
-//!   vms/<vm_id>/overlays/<run_id>.qcow2
-//!   vms/<vm_id>/firmware/{primary.vars.fd,<run_id>.vars.fd}
+//!   vms/<vm_id>/overlays/<run_id>.qcow2      per-run overlay (prepare_run_from_baseline)
+//!   vms/<vm_id>/overlays/<disk_id>.qcow2     overlay of the current state (F3 restore)
+//!   vms/<vm_id>/firmware/{primary.vars.fd,<run_id>.vars.fd,<fw_id>.vars.fd}
 //!   runs/<run_id>/{artifacts,logs}/
 //!   tmp/                       journal temporary files
 //! ```
@@ -19,7 +20,7 @@ use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 
 use crate::error::{PathRejection, Result, StorageError};
-use crate::ids::{BaselineId, MediaId, RunId, VmId};
+use crate::ids::{BaselineId, DiskId, FirmwareId, MediaId, RunId, VmId};
 use crate::paths::{ManagedPath, is_link, resolve_checked};
 use crate::time::UtcMillis;
 
@@ -187,6 +188,23 @@ impl CatalogLayout {
     /// `vms/<vm_id>/firmware/primary.vars.fd`.
     pub fn primary_vars(vm: &VmId) -> ManagedPath {
         mp(format!("vms/{vm}/firmware/primary.vars.fd"))
+    }
+    /// `vms/<vm_id>/overlays/<disk_id>.qcow2`: overlay of the VM's current
+    /// state after a restore (F3).
+    pub fn state_overlay(vm: &VmId, disk: &DiskId) -> ManagedPath {
+        mp(format!("vms/{vm}/overlays/{disk}.qcow2"))
+    }
+    /// `vms/<vm_id>/firmware/<fw_id>.vars.fd`: UEFI variables of the VM's
+    /// current state after a restore (F3).
+    pub fn state_vars(vm: &VmId, fw: &FirmwareId) -> ManagedPath {
+        mp(format!("vms/{vm}/firmware/{fw}.vars.fd"))
+    }
+    /// Backing reference written in the header of a current-state overlay
+    /// ([`Self::state_overlay`]): the base disk of the baseline, relative to
+    /// the overlay's directory (`../base/<baseline_id>/disk.qcow2`). The only
+    /// backing reference LightVM ever writes: one level, fixed shape.
+    pub fn overlay_backing_ref(b: &BaselineId) -> String {
+        format!("../base/{b}/disk.qcow2")
     }
     /// `runs/<run_id>/artifacts`.
     pub fn run_artifacts(run: &RunId) -> ManagedPath {
