@@ -452,6 +452,8 @@ pub(crate) struct SupervisorThread {
     pub(crate) start_jobs: usize,
     /// Agent sessions on the service side (gate, connections), F4.
     pub(crate) agents: Arc<AgentRegistry>,
+    /// Host suspend/resume detection (F6, ROADMAP 7.3).
+    pub(crate) resume: crate::resume::ResumeDetector,
     /// Session reports (F5).
     pub(crate) reports: ReportStore,
 }
@@ -485,7 +487,12 @@ impl SupervisorThread {
         let mut next_observe = Instant::now() + OBSERVE_INTERVAL;
         loop {
             let wait = next_observe.saturating_duration_since(Instant::now());
-            match rx.recv_timeout(wait) {
+            self.resume.mark();
+            let received = rx.recv_timeout(wait);
+            // Before serving anything and before the expiry check: a host
+            // resume ends the agent sessions first (ROADMAP 7.3).
+            self.check_resume();
+            match received {
                 Ok(cmd) => {
                     let what = format!("{cmd:?}");
                     let exiting = matches!(cmd, Command::Shutdown { .. });
@@ -549,6 +556,33 @@ impl SupervisorThread {
                     panic_text(p.as_ref())
                 );
             }
+        }
+    }
+
+    /// F6 / ROADMAP 7.3: after a host suspend/resume (or a forward jump of
+    /// the wall clock) the agent sessions do not continue: they end with
+    /// `host_resumed`, their VMs are stopped on the emergency path and
+    /// their gates and connections close before any queued request is
+    /// served. Resuming the agent needs a new approval.
+    fn check_resume(&mut self) {
+        let Some(gap) = self.resume.check() else {
+            return;
+        };
+        let r = catch_unwind(AssertUnwindSafe(|| {
+            crate::diag!(
+                "lightvm-service: host resume detected (supervisor idle for {:.1} s): agent sessions terminated, their VMs stopped",
+                gap.as_secs_f64()
+            );
+            self.engine
+                .end_all_sessions(TerminationCause::HostResumed, true);
+            self.publish_state_changes();
+            self.reports.flush();
+        }));
+        if let Err(p) = r {
+            crate::diag!(
+                "lightvm-service: supervisor: panic while handling a host resume: {}",
+                panic_text(p.as_ref())
+            );
         }
     }
 

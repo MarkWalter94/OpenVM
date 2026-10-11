@@ -973,6 +973,42 @@ where
         self.settle_pending_stops();
     }
 
+    /// F6, recovery after a crash: a VM left `failed` by its run (QEMU
+    /// crashed or killed from outside, start failed) has no process any more
+    /// (the backend observed the exit). Once that state was published (the
+    /// UI and the reports saw `failed`), the next observation brings it back
+    /// to `stopped` through `recovering`, as a restarted supervisor does; the
+    /// catalog keeps the run's end cause (`crash`, `start_failed`) and the
+    /// audit the state changes. Without this a crashed VM stayed `failed`
+    /// (no start, restore or deletion) until the service restarted.
+    fn recover_failed(&mut self) {
+        let failed: Vec<VmId> = self
+            .last
+            .iter()
+            .filter(|(_, (s, _))| *s == VmState::Failed)
+            .map(|(id, _)| *id)
+            .collect();
+        for vm_id in failed {
+            let still_failed = self
+                .core
+                .vm_status(&Caller::User, vm_id)
+                .is_ok_and(|st| st.state == VmState::Failed);
+            if !still_failed {
+                continue;
+            }
+            let r = self
+                .core
+                .begin_recovery(vm_id)
+                .and_then(|()| self.core.finish_recovery(vm_id));
+            if let Err(e) = r {
+                crate::diag!(
+                    "lightvm-service: failed VM not brought back to stopped: {}",
+                    e.message
+                );
+            }
+        }
+    }
+
     /// Clean or unclean ends of the runs, recorded in the catalog (F3).
     fn record_exits(&mut self) {
         for (_, run, clean) in self.backend.take_exits() {
@@ -1495,6 +1531,7 @@ where
 
     fn observe(&mut self) {
         self.apply_observations();
+        self.recover_failed();
     }
 
     fn vms_with_process(&self) -> usize {

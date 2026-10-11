@@ -47,6 +47,8 @@ struct Opts {
     input_delay: Option<Duration>,
     queue_capacity: usize,
     keep_vms: bool,
+    /// Forward jump (ms) of the wall clock seen by the host-resume detector.
+    clock_jump_ms: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Default for Opts {
@@ -56,6 +58,7 @@ impl Default for Opts {
             input_delay: None,
             queue_capacity: 64,
             keep_vms: false,
+            clock_jump_ms: Arc::default(),
         }
     }
 }
@@ -83,6 +86,11 @@ async fn start_svc_in(dir: &Path, o: &Opts) -> Result<Svc, StartError> {
     let mut cfg = ServiceConfig::new(dir);
     cfg.runtime_dir = Some(dir.join("run"));
     cfg.queue_capacity = o.queue_capacity;
+    let jump = o.clock_jump_ms.clone();
+    cfg.wall_clock = lightvm_service::resume::WallClock::new(move || {
+        std::time::SystemTime::now()
+            + Duration::from_millis(jump.load(std::sync::atomic::Ordering::SeqCst))
+    });
     if o.keep_vms {
         cfg.parent_loss_policy = lightvm_proto::ipc::ParentLossPolicy::KeepVms;
     }
@@ -1096,6 +1104,128 @@ async fn client_loss_terminates_the_session_and_stops_the_vm() {
         }
         r => panic!("{r:?}"),
     }
+    svc.handle.shutdown().await;
+}
+
+/// F6 / ROADMAP 7.3, host suspend/resume with an injected forward jump of
+/// the wall clock seen by the supervisor (a 10-minute sleep): the agent
+/// session ends with `host_resumed` before any further agent request is
+/// served (no input forwarded after the resume), its VM is stopped on the
+/// emergency path, the report says `cancelled`, the old token is refused;
+/// continuing needs a new approval, which works. Small jumps (within the
+/// detector's gap) change nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn host_resume_terminates_the_sessions_and_stops_their_vms() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let o = Opts::default();
+    let jump = o.clock_jump_ms.clone();
+    let svc = start_svc("f6-resume", o).await;
+    let mut u = ui(&svc).await;
+    set_access(&mut u, true).await;
+    let vm = sample_vm(&mut u).await;
+    let run = ui_start(&mut u, vm).await;
+    let mut a = agent_client(&svc, &mut u).await;
+    let mut ap = approval(vm);
+    ap.give_input = true;
+    let (auth, info) = session(&mut u, &mut a, ap).await;
+    call_ok(
+        &mut a,
+        &auth,
+        AgentCall::Submit {
+            request: input_req(vm, run, 2),
+        },
+    )
+    .await;
+    // A 2 s jump is within the gap: nothing happens.
+    jump.store(2_000, SeqCst);
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    call_ok(&mut a, &auth, AgentCall::RenewLease).await;
+    let inputs_before = count_calls(&svc, "vm_input");
+    assert!(inputs_before >= 1);
+    // The host sleeps for 10 minutes (wall clock + 600 s), then the agent
+    // sends input right away.
+    jump.store(602_000, SeqCst);
+    let r = tokio::time::timeout(
+        T,
+        a.request(Request::Agent {
+            session: auth.clone(),
+            call: AgentCall::Submit {
+                request: input_req(vm, run, 2),
+            },
+        }),
+    )
+    .await
+    .expect("timeout");
+    match r {
+        Ok(ServerMessage::Error {
+            error: ReplyError::Operational(e),
+            ..
+        }) => assert!(
+            matches!(
+                e.code,
+                ErrorCode::Unauthenticated
+                    | ErrorCode::PermissionDenied
+                    | ErrorCode::SessionExpired
+            ),
+            "{e:?}"
+        ),
+        // The termination closed the agent connection first.
+        Ok(ServerMessage::Closing { .. }) | Err(_) => {}
+        Ok(other) => panic!("agent request served after the resume: {other:?}"),
+    }
+    wait_state(&mut u, vm, VmState::Stopped).await;
+    assert_eq!(
+        count_calls(&svc, "vm_input"),
+        inputs_before,
+        "input forwarded after the resume"
+    );
+    match ok(&mut u, Request::ListSessions).await {
+        ResponseBody::Sessions { sessions } => {
+            let s = sessions
+                .iter()
+                .find(|s| s.session_id == info.session_id)
+                .unwrap();
+            assert_eq!(s.state, SessionState::Terminated);
+            assert_eq!(s.termination, Some(TerminationCause::HostResumed));
+        }
+        r => panic!("{r:?}"),
+    }
+    match ok(
+        &mut u,
+        Request::GetSessionReport {
+            session_id: info.session_id,
+        },
+    )
+    .await
+    {
+        ResponseBody::SessionReport { report } => {
+            assert_eq!(report.termination, Some(TerminationCause::HostResumed));
+            assert_eq!(report.outcome, lightvm_proto::TestOutcome::Cancelled);
+        }
+        r => panic!("{r:?}"),
+    }
+    assert!(
+        audit(&svc)
+            .iter()
+            .any(|e| e.action == AuditAction::SessionTerminate
+                && e.termination == Some(TerminationCause::HostResumed)),
+        "termination audited with its cause"
+    );
+    // The old token is refused; a new approval gives a working session.
+    let mut a2 = agent_client(&svc, &mut u).await;
+    let run2 = ui_start(&mut u, vm).await;
+    let mut ap = approval(vm);
+    ap.give_input = true;
+    let (auth2, _) = session(&mut u, &mut a2, ap).await;
+    call_ok(
+        &mut a2,
+        &auth2,
+        AgentCall::Submit {
+            request: input_req(vm, run2, 2),
+        },
+    )
+    .await;
+    assert_eq!(count_calls(&svc, "vm_input"), inputs_before + 1);
     svc.handle.shutdown().await;
 }
 

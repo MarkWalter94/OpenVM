@@ -82,6 +82,13 @@ pub struct ServiceConfig {
     /// paths: 107 bytes, the proxy adds 21 characters). Default:
     /// `<runtime_dir or catalog/p>/d`.
     pub display_dir: Option<PathBuf>,
+    /// Wall-clock source of the host-resume detector (F6, ROADMAP 7.3);
+    /// the system clock outside tests.
+    pub wall_clock: crate::resume::WallClock,
+    /// Gap of the supervisor loop that counts as a host resume (or forward
+    /// clock jump): the agent sessions end with `host_resumed` and their
+    /// VMs are stopped.
+    pub resume_gap: Duration,
 }
 
 impl ServiceConfig {
@@ -104,6 +111,8 @@ impl ServiceConfig {
             shutdown_timeout: Duration::from_secs(30),
             parent_loss_policy: ParentLossPolicy::default(),
             display_dir: None,
+            wall_clock: crate::resume::WallClock::default(),
+            resume_gap: crate::resume::DEFAULT_RESUME_GAP,
         }
     }
 }
@@ -574,6 +583,7 @@ pub async fn start(
         storage_cancel: Arc::default(),
         start_jobs: 0,
         agents: agents.clone(),
+        resume: crate::resume::ResumeDetector::new(cfg.wall_clock.clone(), cfg.resume_gap),
         reports: crate::reports::ReportStore::new(Some(
             cfg.catalog_dir.join(crate::reports::SESSIONS_DIR),
         )),

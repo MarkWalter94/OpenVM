@@ -255,18 +255,32 @@ fn host_capacity(caps: &HostCapabilities, free_storage_gib: u64) -> HostCapacity
     }
 }
 
-/// Probe of the approved binaries and of the accelerator; returns the host,
-/// the VM backend and the host capacity for the core.
-///
-/// Must be called outside a tokio runtime (it uses `block_on` on the backend's
-/// own runtime).
-pub fn probe(setup: QemuSetup) -> Result<(QemuHost, QemuVmBackend, HostCapacity), PublicError> {
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
-        .thread_name("lightvm-qemu")
-        .enable_all()
-        .build()
-        .map_err(|e| io_public("runtime", &e))?;
+/// Free space the catalog volume must have for a VM to start (F6): the
+/// overlay grows while the guest writes, and the reports, audit and
+/// manifests need their reserve (ROADMAP 8). Below it the start is refused
+/// with a clear `resource_limit` instead of the guest stopping on a full
+/// disk shortly after.
+pub const START_FREE_MIN: u64 = 2 << 30;
+
+/// Start-time free-space check; an unmeasurable volume is not refused.
+fn check_start_space(free_bytes: Option<u64>) -> Result<(), PublicError> {
+    match free_bytes {
+        Some(free) if free < START_FREE_MIN => Err(PublicError::resource_limit(
+            "not enough free space in the catalog to start the VM: free some space first",
+        )
+        .with_detail("free_mib", (free >> 20).to_string())
+        .with_detail("required_mib", (START_FREE_MIN >> 20).to_string())),
+        _ => Ok(()),
+    }
+}
+
+/// Static probe of the approved binaries (hashes checked before running
+/// them) and real accelerator probe with the machine and CPU model that the
+/// VMs will use.
+fn probe_caps(
+    setup: &QemuSetup,
+    rt: &tokio::runtime::Runtime,
+) -> Result<(HostCapabilities, MachineType, CpuModel), PublicError> {
     let qemu_system =
         ManagedPath::verify(setup.qemu_dir.join(QEMU_SYSTEM)).map_err(|e| public(&e))?;
     let qemu_img = ManagedPath::verify(setup.qemu_dir.join(QEMU_IMG)).map_err(|e| public(&e))?;
@@ -293,6 +307,22 @@ pub fn probe(setup: QemuSetup) -> Result<(QemuHost, QemuVmBackend, HostCapacity)
             caps.accelerator.public_message()
         );
     }
+    Ok((caps, machine, cpu))
+}
+
+/// Probe of the approved binaries and of the accelerator; returns the host,
+/// the VM backend and the host capacity for the core.
+///
+/// Must be called outside a tokio runtime (it uses `block_on` on the backend's
+/// own runtime).
+pub fn probe(setup: QemuSetup) -> Result<(QemuHost, QemuVmBackend, HostCapacity), PublicError> {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .thread_name("lightvm-qemu")
+        .enable_all()
+        .build()
+        .map_err(|e| io_public("runtime", &e))?;
+    let (caps, machine, cpu) = probe_caps(&setup, &rt)?;
     let free_storage_gib = ManagedPath::verify(setup.catalog_root.clone())
         .and_then(|root| prepare::host_resources(&root))
         .map(|r| r.free_disk_bytes >> 30)
@@ -604,6 +634,44 @@ impl std::fmt::Debug for QemuVmBackend {
 }
 
 impl QemuVmBackend {
+    /// F6: before every start the files the probe depends on (QEMU binaries,
+    /// firmware) are hashed again; if they changed since the probe (QEMU
+    /// updated or replaced, firmware changed while the service runs) the
+    /// probe is repeated and the capabilities refreshed, or the start is
+    /// refused with the probe's reason (for example an unapproved binary).
+    fn ensure_current_probe(&mut self) -> Result<(), PublicError> {
+        let recorded = self.caps.fingerprint();
+        let now = qemu_backend::probe::current_fingerprint(&self.caps).map_err(|e| public(&e))?;
+        let (setup, rt) = (&self.setup, &self.rt);
+        let fresh =
+            qemu_backend::probe::reprobe_if_changed(&recorded, &now, || Ok(probe_caps(setup, rt)))
+                .map_err(|e| public(&e))?;
+        let Some((probed, changed)) = fresh else {
+            return Ok(());
+        };
+        crate::diag!(
+            "lightvm-service: {} changed since the probe: probing again",
+            changed.join(", ")
+        );
+        let (caps, machine, cpu) = probed.map_err(|e| {
+            PublicError::unsupported(format!(
+                "QEMU or its firmware changed since LightVM checked them ({}), and the new files did not pass the check: {}",
+                changed.join(", "),
+                e.message
+            ))
+        })?;
+        let available = caps.accelerator.is_available();
+        self.caps = caps;
+        self.machine = machine;
+        self.cpu = cpu;
+        if !available {
+            return Err(PublicError::unsupported(
+                "QEMU or its firmware changed and the accelerator probe failed with the new files",
+            ));
+        }
+        Ok(())
+    }
+
     fn run(&self, vm_id: VmId, run_id: RunId) -> Result<&Arc<QemuRun>, PublicError> {
         match self.runs.get(&vm_id) {
             Some(r) if r.run_id() == run_id => Ok(r),
@@ -843,6 +911,13 @@ impl VmBackend for QemuVmBackend {
         if self.runs.contains_key(&vm.id) {
             return Err(PublicError::state_conflict("run already active for the VM"));
         }
+        self.ensure_current_probe()?;
+        check_start_space(
+            ManagedPath::verify(self.setup.catalog_root.clone())
+                .and_then(|r| prepare::host_resources(&r))
+                .ok()
+                .map(|r| r.free_disk_bytes),
+        )?;
         if let Some(budget) = vm.config.limits.storage_budget_gib {
             let vm_dir = managed_abs(
                 &self.setup.catalog_root,
@@ -1426,6 +1501,20 @@ mod tests {
     use super::*;
     use crate::fakes::sample_config;
     use lightvm_proto::VmLimits;
+
+    /// F6: a start on an almost full catalog volume is refused with a
+    /// clear `resource_limit` (injected free-space readings).
+    #[test]
+    fn start_needs_free_space_on_the_catalog_volume() {
+        assert!(check_start_space(Some(START_FREE_MIN)).is_ok());
+        assert!(check_start_space(Some(64 << 30)).is_ok());
+        assert!(check_start_space(None).is_ok(), "unmeasurable: not refused");
+        let e = check_start_space(Some(300 << 20)).unwrap_err();
+        assert_eq!(e.code, lightvm_proto::ErrorCode::ResourceLimit);
+        assert!(e.message.contains("free space"), "{}", e.message);
+        let d = e.details.unwrap();
+        assert_eq!(d.get("free_mib").map(String::as_str), Some("300"));
+    }
 
     #[test]
     fn job_limits_from_vm_limits() {

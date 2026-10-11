@@ -86,6 +86,10 @@ fn supervisor(engine: Box<dyn VmEngine>) -> (SupervisorThread, mpsc::Receiver<Co
         storage_cancel: Arc::default(),
         start_jobs: 0,
         agents: Arc::default(),
+        resume: crate::resume::ResumeDetector::new(
+            crate::resume::WallClock::default(),
+            crate::resume::DEFAULT_RESUME_GAP,
+        ),
         reports: ReportStore::default(),
     };
     (sup, rx)

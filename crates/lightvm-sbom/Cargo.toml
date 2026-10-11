@@ -1,0 +1,20 @@
+[package]
+name = "lightvm-sbom"
+description = "LightVM: offline CycloneDX 1.5 SBOM and third-party licence notices of the shipped binaries, from cargo metadata and Cargo.lock (F6, ADR-0023)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Release tool, not a product artifact: it is never installed. It reads
+# `cargo metadata` (run with `--locked --offline`) and `Cargo.lock`, and the
+# licence files of the crates already in the local cargo registry: no
+# network, no new dependency (both crates below are already in the lockfile
+# for the product).
+[dependencies]
+serde_json = "=1.0.151"
+sha2 = "=0.11.0"
+
+[lints]
+workspace = true

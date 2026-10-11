@@ -716,6 +716,94 @@ pub fn find_firmware(qemu_system: &Path) -> Result<Option<FirmwareInfo>> {
     }))
 }
 
+/// Hashes of the files a probe result depends on: the two binaries and the
+/// UEFI firmware next to them (F6: "ripetizione dei probe dopo cambi
+/// QEMU/firmware").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProbeFingerprint {
+    /// SHA-256 of `qemu-system-x86_64`.
+    pub qemu_system_sha256: String,
+    /// SHA-256 of `qemu-img`.
+    pub qemu_img_sha256: String,
+    /// SHA-256 of the firmware code and variables template, if present.
+    pub firmware: Option<(String, String)>,
+}
+
+impl ProbeFingerprint {
+    /// Names of the parts that differ from `other` (empty: same files).
+    pub fn changes(&self, other: &Self) -> Vec<&'static str> {
+        let mut v = Vec::new();
+        if !self
+            .qemu_system_sha256
+            .eq_ignore_ascii_case(&other.qemu_system_sha256)
+        {
+            v.push("qemu-system-x86_64");
+        }
+        if !self
+            .qemu_img_sha256
+            .eq_ignore_ascii_case(&other.qemu_img_sha256)
+        {
+            v.push("qemu-img");
+        }
+        match (&self.firmware, &other.firmware) {
+            (Some((c1, v1)), Some((c2, v2))) => {
+                if c1 != c2 {
+                    v.push("firmware code");
+                }
+                if v1 != v2 {
+                    v.push("firmware variables template");
+                }
+            }
+            (None, None) => {}
+            _ => v.push("firmware presence"),
+        }
+        v
+    }
+}
+
+impl HostCapabilities {
+    /// Fingerprint recorded by the probe that produced these capabilities.
+    pub fn fingerprint(&self) -> ProbeFingerprint {
+        ProbeFingerprint {
+            qemu_system_sha256: self.qemu_system_sha256.clone(),
+            qemu_img_sha256: self.qemu_img_sha256.clone(),
+            firmware: self
+                .firmware
+                .as_ref()
+                .map(|f| (f.code_sha256.clone(), f.vars_sha256.clone())),
+        }
+    }
+}
+
+/// Current fingerprint of the files at the paths `caps` was probed from
+/// (hashes computed now; the firmware is looked up again next to the
+/// binary).
+pub fn current_fingerprint(caps: &HostCapabilities) -> Result<ProbeFingerprint> {
+    Ok(ProbeFingerprint {
+        qemu_system_sha256: sha256_file(caps.qemu_system.as_path())?,
+        qemu_img_sha256: sha256_file(caps.qemu_img.as_path())?,
+        firmware: find_firmware(caps.qemu_system.as_path())?
+            .map(|f| (f.code_sha256, f.vars_sha256)),
+    })
+}
+
+/// Repeats the probe when the files it depends on changed since it ran
+/// (QEMU updated or replaced, firmware changed): `reprobe` runs only if
+/// `current` differs from `recorded` and its result (or its refusal, for
+/// example an unapproved binary) is returned with the changed parts.
+/// `Ok(None)`: nothing changed, the recorded capabilities stay valid.
+pub fn reprobe_if_changed<T>(
+    recorded: &ProbeFingerprint,
+    current: &ProbeFingerprint,
+    reprobe: impl FnOnce() -> Result<T>,
+) -> Result<Option<(T, Vec<&'static str>)>> {
+    let changed = recorded.changes(current);
+    if changed.is_empty() {
+        return Ok(None);
+    }
+    reprobe().map(|t| Some((t, changed)))
+}
+
 /// SHA-256 of the approved `qemu-system-x86_64.exe` 11.1.0 (ADR-0010, F0-02 §2).
 pub const APPROVED_QEMU_SYSTEM_SHA256: &str =
     "47d57a6072e0bb3bd98f87926eb129eb1736dfe818c67b3b81ef7ce4edd0b3cd";
@@ -1064,6 +1152,104 @@ mod tests {
             !m.contains("No accelerator found"),
             "no stderr in the public message"
         );
+    }
+
+    /// Fake QEMU distribution (two "binaries" and the firmware files) and
+    /// the capabilities a probe of it would have recorded.
+    fn fake_distribution(dir: &Path) -> HostCapabilities {
+        std::fs::create_dir_all(dir.join("share")).unwrap();
+        let sys = dir.join("qemu-system-x86_64.exe");
+        let img = dir.join("qemu-img.exe");
+        std::fs::write(&sys, b"system v1").unwrap();
+        std::fs::write(&img, b"img v1").unwrap();
+        std::fs::write(dir.join("share").join("edk2-x86_64-code.fd"), b"code v1").unwrap();
+        std::fs::write(dir.join("share").join("edk2-i386-vars.fd"), b"vars v1").unwrap();
+        let v = QemuVersion {
+            major: 11,
+            minor: 1,
+            micro: 0,
+            package: None,
+        };
+        HostCapabilities {
+            qemu_system_sha256: sha256_file(&sys).unwrap(),
+            qemu_img_sha256: sha256_file(&img).unwrap(),
+            qemu_system: ManagedPath::verify(sys).unwrap(),
+            qemu_img: ManagedPath::verify(img).unwrap(),
+            version: v.clone(),
+            qemu_img_version: v,
+            accelerators: vec!["whpx".into()],
+            machines: Vec::new(),
+            q35_machines: Vec::new(),
+            devices: BTreeSet::new(),
+            missing_devices: Vec::new(),
+            cpu_models: BTreeSet::new(),
+            image_formats: BTreeSet::new(),
+            remote_protocols_present: Vec::new(),
+            firmware: find_firmware(&dir.join("qemu-system-x86_64.exe")).unwrap(),
+            accelerator: AcceleratorStatus::NotProbed,
+        }
+    }
+
+    /// F6: the probe is repeated when QEMU or the firmware change after it
+    /// ran; nothing is re-run while the files are the same.
+    #[test]
+    fn probe_is_repeated_after_a_qemu_or_firmware_change() {
+        let dir = std::env::temp_dir().join(format!(
+            "lightvm-qemu-backend-reprobe-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let caps = fake_distribution(&dir);
+        let recorded = caps.fingerprint();
+        assert!(recorded.firmware.is_some());
+        let mut probes = 0;
+        // Same files: the recorded capabilities stay, no probe.
+        let now = current_fingerprint(&caps).unwrap();
+        let r = reprobe_if_changed(&recorded, &now, || {
+            probes += 1;
+            Ok("caps v2")
+        })
+        .unwrap();
+        assert!(r.is_none());
+        assert_eq!(probes, 0);
+
+        // Firmware replaced: re-probe, the change is named.
+        std::fs::write(dir.join("share").join("edk2-x86_64-code.fd"), b"code v2").unwrap();
+        let now = current_fingerprint(&caps).unwrap();
+        let (fresh, changed) = reprobe_if_changed(&recorded, &now, || {
+            probes += 1;
+            Ok("caps v2")
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!((fresh, probes), ("caps v2", 1));
+        assert_eq!(changed, ["firmware code"]);
+
+        // QEMU binary replaced by an unapproved one: the probe's refusal is
+        // returned (the caller refuses the start).
+        std::fs::write(dir.join("qemu-system-x86_64.exe"), b"system v2").unwrap();
+        let now = current_fingerprint(&caps).unwrap();
+        assert_eq!(
+            recorded.changes(&now),
+            ["qemu-system-x86_64", "firmware code"]
+        );
+        let sys = caps.qemu_system.clone();
+        let e = reprobe_if_changed(&recorded, &now, || {
+            verify_approved_binary(
+                "qemu-system-x86_64",
+                &sys,
+                std::slice::from_ref(&recorded.qemu_system_sha256),
+            )
+        })
+        .unwrap_err();
+        assert!(matches!(e, BackendError::UnapprovedBinary { .. }), "{e}");
+
+        // Firmware removed: also a change.
+        std::fs::remove_file(dir.join("share").join("edk2-i386-vars.fd")).unwrap();
+        let now = current_fingerprint(&caps).unwrap();
+        assert!(now.firmware.is_none());
+        assert!(recorded.changes(&now).contains(&"firmware presence"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

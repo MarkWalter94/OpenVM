@@ -86,6 +86,16 @@ struct Live {
     shot_bytes: u64,
 }
 
+/// Reserve kept on the catalog volume for the reports (ROADMAP 8: "una
+/// riserva per manifest ed esito minimo"): released when a report cannot be
+/// written because the volume is full, so the termination and the outcome
+/// still reach the disk; re-created later when space is back.
+const RESERVE_FILE: &str = ".reserve";
+/// Size of the reserve: a full report at the event limit is a few MiB.
+pub(crate) const RESERVE_BYTES: u64 = 8 << 20;
+/// Minimum interval between two attempts to re-create a released reserve.
+const RESERVE_RETRY: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Reports of the catalog.
 #[derive(Debug, Default)]
 pub(crate) struct ReportStore {
@@ -93,6 +103,16 @@ pub(crate) struct ReportStore {
     dir: Option<PathBuf>,
     /// Reports of live sessions (and of terminated ones not yet written).
     live: BTreeMap<SessionId, Live>,
+    /// Size of the reserve file ([`RESERVE_BYTES`]; smaller in tests).
+    reserve_bytes: u64,
+    /// Last attempt to re-create the reserve after a release.
+    reserve_attempt: std::cell::Cell<Option<std::time::Instant>>,
+    /// Interval between attempts ([`RESERVE_RETRY`]; zero in tests).
+    reserve_retry: std::time::Duration,
+    /// Simulated volume (tests only): writes beyond its free bytes fail
+    /// with the "disk full" OS error.
+    #[cfg(test)]
+    volume: Option<std::sync::Arc<tests::Volume>>,
 }
 
 fn sha256(bytes: &[u8]) -> Sha256Digest {
@@ -166,10 +186,78 @@ impl ReportStore {
         let mut s = Self {
             dir,
             live: BTreeMap::new(),
+            reserve_bytes: RESERVE_BYTES,
+            reserve_attempt: std::cell::Cell::new(None),
+            reserve_retry: RESERVE_RETRY,
+            #[cfg(test)]
+            volume: None,
         };
         s.recover();
         s.prune();
         s
+    }
+
+    /// Writes `bytes` to `path` (atomic replace). In tests the simulated
+    /// volume may refuse it as full.
+    fn write_file(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        #[cfg(test)]
+        if let Some(v) = &self.volume {
+            v.take(bytes.len() as u64)?;
+        }
+        write_atomic(path, bytes)
+    }
+
+    fn reserve_path(&self) -> Option<PathBuf> {
+        self.dir.as_ref().map(|d| d.join(RESERVE_FILE))
+    }
+
+    /// Creates the reserve file if missing (best effort; a failure is
+    /// retried after [`RESERVE_RETRY`]). Returns whether it exists.
+    fn ensure_reserve(&self) -> bool {
+        let Some(p) = self.reserve_path() else {
+            return false;
+        };
+        if std::fs::metadata(&p).is_ok_and(|m| m.len() >= self.reserve_bytes) {
+            return true;
+        }
+        let now = std::time::Instant::now();
+        if self
+            .reserve_attempt
+            .get()
+            .is_some_and(|t| now.duration_since(t) < self.reserve_retry)
+        {
+            return false;
+        }
+        self.reserve_attempt.set(Some(now));
+        let zeros = vec![0u8; usize::try_from(self.reserve_bytes).unwrap_or(0)];
+        match self.write_file(&p, &zeros) {
+            Ok(()) => {
+                self.reserve_attempt.set(None);
+                true
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(p.with_extension("tmp"));
+                crate::diag!("lightvm-service: reports: storage reserve not created: {e}");
+                false
+            }
+        }
+    }
+
+    /// Releases the reserve (volume full): `true` if there was one.
+    fn release_reserve(&self) -> bool {
+        let Some(p) = self.reserve_path() else {
+            return false;
+        };
+        if std::fs::remove_file(&p).is_err() {
+            return false;
+        }
+        #[cfg(test)]
+        if let Some(v) = &self.volume {
+            v.give_back(self.reserve_bytes);
+        }
+        // Released now: the next re-creation waits for the retry interval.
+        self.reserve_attempt.set(Some(std::time::Instant::now()));
+        true
     }
 
     fn session_dir(&self, id: SessionId) -> Option<PathBuf> {
@@ -235,19 +323,64 @@ impl ReportStore {
             .map_err(|_| PublicError::infrastructure("stored session report not readable"))
     }
 
-    fn save(&self, r: &SessionReport) -> Result<(), PublicError> {
+    fn save_full(&self, r: &SessionReport) -> Result<(), PublicError> {
         let Some(d) = self.session_dir(r.session_id) else {
             return Ok(());
         };
         std::fs::create_dir_all(&d).map_err(|e| io_error("directory", &e))?;
         let (bytes, _) = canonical(r);
-        write_atomic(&d.join(REPORT_FILE), &bytes).map_err(|e| io_error("write", &e))?;
+        let report = d.join(REPORT_FILE);
+        self.write_file(&report, &bytes).map_err(|e| {
+            let _ = std::fs::remove_file(report.with_extension("tmp"));
+            io_error("write", &e)
+        })?;
         let summary = serde_json::to_vec(&r.summary()).unwrap_or_default();
-        write_atomic(&d.join(SUMMARY_FILE), &summary).map_err(|e| io_error("write", &e))
+        let path = d.join(SUMMARY_FILE);
+        self.write_file(&path, &summary).map_err(|e| {
+            let _ = std::fs::remove_file(path.with_extension("tmp"));
+            io_error("write", &e)
+        })
+    }
+
+    /// Writes a report. F6, full volume: if the write fails the storage
+    /// reserve is released and the write repeated; if it still fails, a
+    /// minimal report (header, termination, outcome and verdicts, without
+    /// the event list, counted as dropped) is written, so the termination
+    /// and the outcome stay traceable (ROADMAP 8). The previous file is
+    /// never left half-written (atomic replace).
+    fn save(&self, r: &SessionReport) -> Result<(), PublicError> {
+        let first = match self.save_full(r) {
+            Ok(()) => {
+                self.ensure_reserve();
+                return Ok(());
+            }
+            Err(e) => e,
+        };
+        if self.release_reserve() {
+            crate::diag!(
+                "lightvm-service: reports: volume full, storage reserve released for the reports"
+            );
+            if self.save_full(r).is_ok() {
+                return Ok(());
+            }
+        }
+        let mut minimal = r.clone();
+        minimal.events_dropped = minimal
+            .events_dropped
+            .saturating_add(u32::try_from(minimal.events.len()).unwrap_or(u32::MAX));
+        minimal.events.clear();
+        self.save_full(&minimal).map_err(|_| first)?;
+        crate::diag!(
+            "lightvm-service: reports: volume full, minimal report written (events dropped)"
+        );
+        Ok(())
     }
 
     /// Opens the report of a new session.
     pub(crate) fn open(&mut self, o: OpenReport) {
+        // The storage reserve is created with the first report (catalogs
+        // without agent sessions do not pay for it).
+        self.ensure_reserve();
         // A new report may push an old one out of the retention limit.
         self.prune();
         let now = UtcTimestamp::now();
@@ -365,25 +498,36 @@ impl ReportStore {
     /// A screenshot of the agent: hash always, file within the limits.
     pub(crate) fn screenshot(&mut self, id: SessionId, meta: &Screenshot, png: &[u8]) {
         let dir = self.session_dir(id);
-        let Some(l) = self.live_mut(id) else {
+        let Some(l) = self
+            .live
+            .get(&id)
+            .filter(|l| l.report.state != SessionState::Terminated)
+        else {
             return;
         };
-        let r = &mut l.report;
-        let shot = r.screenshots_retained + r.screenshots_dropped;
+        let shot = l.report.screenshots_retained + l.report.screenshots_dropped;
         let bytes = png.len() as u64;
-        let mut retained = r.screenshots_retained < MAX_REPORT_SCREENSHOTS
+        let mut retained = l.report.screenshots_retained < MAX_REPORT_SCREENSHOTS
             && l.shot_bytes.saturating_add(bytes) <= MAX_REPORT_SCREENSHOT_BYTES
             && sha256(png) == meta.sha256;
         if retained && let Some(d) = dir {
             let shots = d.join(SHOTS_DIR);
-            let ok = std::fs::create_dir_all(&shots)
-                .and_then(|()| write_atomic(&shots.join(format!("{shot:04}.png")), png));
+            let path = shots.join(format!("{shot:04}.png"));
+            let ok = std::fs::create_dir_all(&shots).and_then(|()| self.write_file(&path, png));
             if let Err(e) = ok {
-                // Storage unavailable: the hash stays in the report.
+                // Storage unavailable (volume full...): the hash stays in the
+                // report, no partial file is left; screenshots are not
+                // promised when the storage is unavailable (ROADMAP 8) and
+                // the reserve is kept for the report itself.
+                let _ = std::fs::remove_file(path.with_extension("tmp"));
                 crate::diag!("lightvm-service: reports: screenshot not stored: {e}");
                 retained = false;
             }
         }
+        let Some(l) = self.live_mut(id) else {
+            return;
+        };
+        let r = &mut l.report;
         if retained {
             r.screenshots_retained += 1;
             l.shot_bytes += bytes;
@@ -489,7 +633,10 @@ impl ReportStore {
             l.dirty = true;
             self.flush();
             // Written: the terminated report is read from disk from now on.
-            if self.dir.is_some() {
+            // Not written (storage unavailable even after the reserve): it
+            // stays in memory, still dirty, and the next flush retries.
+            let written = self.live.get(&id).is_some_and(|l| !l.dirty);
+            if self.dir.is_some() && written {
                 self.live.remove(&id);
             }
             return true;
@@ -610,18 +757,28 @@ impl ReportStore {
             .filter(|(_, l)| l.dirty)
             .map(|(id, _)| *id)
             .collect();
+        let mut written = Vec::new();
         for id in dirty {
-            if let Some(l) = self.live.get(&id)
-                && let Err(e) = self.save(&l.report)
-            {
-                crate::diag!(
-                    "lightvm-service: reports: report not written: {}",
+            match self.live.get(&id).map(|l| self.save(&l.report)) {
+                Some(Ok(())) => written.push(id),
+                Some(Err(e)) => crate::diag!(
+                    "lightvm-service: reports: report not written (retried at the next flush): {}",
                     e.message
-                );
+                ),
+                None => {}
             }
+        }
+        // A report that could not be written stays dirty: retried later.
+        for id in written {
             if let Some(l) = self.live.get_mut(&id) {
                 l.dirty = false;
             }
+        }
+        // Terminated reports kept in memory because they were not written:
+        // once written they are read from disk like the others.
+        if self.dir.is_some() {
+            self.live
+                .retain(|_, l| l.dirty || l.report.state != SessionState::Terminated);
         }
     }
 
@@ -1294,6 +1451,199 @@ pub(crate) fn strip_paths(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Simulated volume for the disk-full tests: every write takes its size
+    /// from `free`; a write larger than what is left fails with the OS
+    /// "disk full" error (`ERROR_DISK_FULL` on Windows, `ENOSPC` elsewhere),
+    /// as the real file system would, before anything is renamed.
+    #[derive(Debug)]
+    pub(super) struct Volume {
+        free: std::sync::Mutex<u64>,
+    }
+
+    impl Volume {
+        pub(super) fn new(free: u64) -> std::sync::Arc<Self> {
+            std::sync::Arc::new(Self {
+                free: std::sync::Mutex::new(free),
+            })
+        }
+
+        pub(super) fn take(&self, n: u64) -> std::io::Result<()> {
+            let mut f = self.free.lock().unwrap();
+            if n > *f {
+                return Err(disk_full());
+            }
+            *f -= n;
+            Ok(())
+        }
+
+        pub(super) fn give_back(&self, n: u64) {
+            *self.free.lock().unwrap() += n;
+        }
+
+        fn set(&self, n: u64) {
+            *self.free.lock().unwrap() = n;
+        }
+    }
+
+    fn disk_full() -> std::io::Error {
+        if cfg!(windows) {
+            // ERROR_DISK_FULL
+            std::io::Error::from_raw_os_error(112)
+        } else {
+            std::io::Error::from_raw_os_error(28)
+        }
+    }
+
+    fn store_on_volume(name: &str, free: u64, reserve: u64) -> (ReportStore, PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "lightvm-reports-{name}-{}-{}",
+            std::process::id(),
+            SessionId::new_v7()
+        ));
+        let mut s = ReportStore {
+            dir: Some(dir.clone()),
+            reserve_bytes: reserve,
+            volume: Some(Volume::new(free)),
+            ..ReportStore::default()
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(s.ensure_reserve(), "reserve created");
+        s.reserve_retry = std::time::Duration::ZERO;
+        (s, dir)
+    }
+
+    fn on_disk(dir: &Path, id: SessionId) -> SessionReport {
+        let b = std::fs::read(dir.join(id.to_string()).join(REPORT_FILE)).unwrap();
+        serde_json::from_slice(&b).unwrap()
+    }
+
+    /// F6, disk full (injected): the OS error is the one the file system
+    /// returns for a full volume, and std maps it to `StorageFull`.
+    #[test]
+    fn injected_error_is_the_disk_full_error() {
+        assert_eq!(disk_full().kind(), std::io::ErrorKind::StorageFull);
+    }
+
+    /// F6, disk full while a session ends: the reserve is released and the
+    /// terminated report (termination cause and outcome) reaches the disk;
+    /// the reserve comes back once there is space again.
+    #[test]
+    fn full_volume_at_termination_uses_the_reserve() {
+        let (mut s, dir) = store_on_volume("reserve", 1 << 20, 64 << 10);
+        let id = open_report(&mut s);
+        s.flush();
+        // The volume fills up (another program, a growing overlay).
+        s.volume.as_ref().unwrap().set(0);
+        assert!(s.session_changed(
+            id,
+            SessionState::Terminated,
+            Some(TerminationCause::Revoked)
+        ));
+        assert!(!dir.join(RESERVE_FILE).exists(), "reserve released");
+        let r = on_disk(&dir, id);
+        assert_eq!(r.state, SessionState::Terminated);
+        assert_eq!(r.termination, Some(TerminationCause::Revoked));
+        assert_eq!(r.outcome, TestOutcome::Cancelled);
+        assert!(!r.events.is_empty(), "full report written with the reserve");
+        assert!(!s.live.contains_key(&id), "written: read from disk");
+        // Space is back: the next successful write re-creates the reserve.
+        s.volume.as_ref().unwrap().set(1 << 20);
+        let id2 = open_report(&mut s);
+        s.flush();
+        assert!(s.full(id2).is_ok());
+        assert!(dir.join(RESERVE_FILE).exists(), "reserve re-created");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// F6: when even the reserve is not enough for the full report, a
+    /// minimal report (header, termination, outcome, verdicts; events
+    /// counted as dropped) is written; the previous file is never left
+    /// half-written.
+    #[test]
+    fn full_volume_beyond_the_reserve_writes_a_minimal_report() {
+        let (mut s, dir) = store_on_volume("minimal", 4 << 20, 16 << 10);
+        let id = open_report(&mut s);
+        for i in 0..1000 {
+            s.tool_note(
+                id,
+                "vm_status",
+                true,
+                None,
+                serde_json::json!({"note": format!("note {i} with some padding text")}),
+            );
+        }
+        s.flush();
+        let before = on_disk(&dir, id);
+        assert!(before.events.len() > 1000);
+        s.volume.as_ref().unwrap().set(0);
+        s.session_changed(
+            id,
+            SessionState::Terminated,
+            Some(TerminationCause::GrantExpired),
+        );
+        let r = on_disk(&dir, id);
+        assert_eq!(r.termination, Some(TerminationCause::GrantExpired));
+        assert_eq!(r.outcome, TestOutcome::TimedOut);
+        assert!(r.events.is_empty(), "minimal report");
+        assert!(r.events_dropped >= u32::try_from(before.events.len()).unwrap());
+        assert!(!r.verdicts.is_empty());
+        // No temporary left next to the report.
+        assert!(!dir.join(id.to_string()).join("report.tmp").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// F6: with no space at all (reserve already used, nothing writable)
+    /// the terminated report stays in memory and is written by a later
+    /// flush once space is back; screenshots are dropped to their hash.
+    #[test]
+    fn report_not_written_is_kept_and_retried() {
+        let (mut s, dir) = store_on_volume("retry", 1 << 20, 4 << 10);
+        let id = open_report(&mut s);
+        s.flush();
+        let png = vec![7u8; 10_000];
+        let meta = Screenshot {
+            vm_id: VmId::new_v7(),
+            run_id: RunId::new_v7(),
+            geometry: lightvm_proto::DisplayGeometry::new(1280, 800).unwrap(),
+            format: lightvm_proto::ImageFormat::Png,
+            sha256: sha256(&png),
+            byte_len: png.len() as u64,
+            captured_at: UtcTimestamp::now(),
+        };
+        std::fs::remove_file(dir.join(RESERVE_FILE)).unwrap();
+        s.volume.as_ref().unwrap().set(0);
+        s.screenshot(id, &meta, &png);
+        assert!(
+            !dir.join(id.to_string())
+                .join(SHOTS_DIR)
+                .join("0000.png")
+                .exists()
+        );
+        assert!(
+            !dir.join(id.to_string())
+                .join(SHOTS_DIR)
+                .join("0000.tmp")
+                .exists()
+        );
+        s.session_changed(
+            id,
+            SessionState::Terminated,
+            Some(TerminationCause::Revoked),
+        );
+        // Not on disk yet (still `active` there), kept in memory.
+        assert_eq!(on_disk(&dir, id).state, SessionState::Active);
+        assert!(s.live.contains_key(&id));
+        assert_eq!(s.full(id).unwrap().outcome, TestOutcome::Cancelled);
+        // Space is back.
+        s.volume.as_ref().unwrap().set(1 << 20);
+        s.flush();
+        let r = on_disk(&dir, id);
+        assert_eq!(r.state, SessionState::Terminated);
+        assert_eq!((r.screenshots_retained, r.screenshots_dropped), (0, 1));
+        assert!(!s.live.contains_key(&id));
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     fn open_report(store: &mut ReportStore) -> SessionId {
         let id = SessionId::new_v7();

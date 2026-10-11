@@ -92,7 +92,7 @@ fn unexpected_exit_while_running_fails_and_discards_the_queue() {
     let mut h = Harness::new();
     let vm = h.create_vm("a");
     let run = h.start(vm);
-    let (_sid, agent) = h.session(&[vm], &ALL_CAPS, 1);
+    let (sid, agent) = h.session(&[vm], &ALL_CAPS, 1);
     let r = h.req(vm, Some(run), VmAction::Screenshot);
     let queued = r.operation_id;
     h.core.submit(&agent, r).unwrap();
@@ -118,11 +118,58 @@ fn unexpected_exit_while_running_fails_and_discards_the_queue() {
         (OperationStatus::Discarded, Some(ErrorCode::StateConflict))
     );
     assert_eq!(h.backend.count(|c| matches!(c, Call::Screenshot(..))), 0);
-    // The session stays valid: the agent sees the `failed` state but cannot restart.
-    assert_eq!(h.core.vm_status(&agent, vm).unwrap().state, VmState::Failed);
+    // F6: the run the session controlled is gone without anyone asking:
+    // the session ends with `vm_terminated` (report: infrastructure error)
+    // and the agent can do nothing more.
+    let s = h.core.sessions().get(sid).unwrap();
+    assert_eq!(s.state, SessionState::Terminated);
+    assert_eq!(s.termination, Some(TerminationCause::VmTerminated));
+    assert!(h.core.vm_status(&agent, vm).is_err());
     let r = h.req(vm, None, VmAction::Start);
-    let e = h.core.submit(&agent, r).unwrap_err();
+    assert!(h.core.submit(&agent, r).is_err());
+    // The user sees `failed`; the VM cannot start until the supervisor
+    // reconciles it (`failed → recovering → stopped`).
+    let r = h.req(vm, None, VmAction::Start);
+    let e = h.core.submit(&Caller::User, r).unwrap_err();
     assert_eq!(e.code, ErrorCode::StateConflict);
+    h.core.begin_recovery(vm).unwrap();
+    h.core.finish_recovery(vm).unwrap();
+    assert_eq!(
+        h.core.vm_status(&Caller::User, vm).unwrap().state,
+        VmState::Stopped
+    );
+    assert_eq!(
+        run_of(&h, run).end_reason,
+        Some(RunEndReason::UnexpectedExit),
+        "the crash stays recorded on the run"
+    );
+}
+
+/// A stop asked by the user ends the run cleanly: the agent session on the
+/// VM stays (it may start the VM again), unlike a crash.
+#[test]
+fn orderly_exit_keeps_the_agent_session() {
+    let mut h = Harness::new();
+    let vm = h.create_vm("a");
+    let run = h.start(vm);
+    let (sid, _agent) = h.session(&[vm], &ALL_CAPS, 1);
+    h.core
+        .observe(
+            vm,
+            BackendObservation::ProcessExited {
+                run_id: run,
+                expected: true,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        h.core.vm_status(&Caller::User, vm).unwrap().state,
+        VmState::Stopped
+    );
+    assert_eq!(
+        h.core.sessions().get(sid).unwrap().state,
+        SessionState::Active
+    );
 }
 
 #[test]
@@ -285,7 +332,7 @@ fn load_catalog_never_trusts_a_persisted_process_state() {
     let mut h = Harness::with_store(config(), store);
     h.core.load_catalog().unwrap();
     for (id, persisted) in ids {
-        let expected = if persisted.has_process() {
+        let expected = if persisted.has_process() || persisted == VmState::Failed {
             VmState::Recovering
         } else {
             persisted
@@ -516,7 +563,10 @@ fn reconcile_after_restart_returns_recovering_vms_to_stopped() {
     h.core.load_catalog().unwrap();
     let done = h.core.reconcile_after_restart().unwrap();
     for (id, persisted) in ids {
-        let expected = if persisted.has_process() || persisted == VmState::Recovering {
+        let expected = if persisted.has_process()
+            || persisted == VmState::Recovering
+            || persisted == VmState::Failed
+        {
             VmState::Stopped
         } else {
             persisted

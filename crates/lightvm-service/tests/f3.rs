@@ -34,6 +34,8 @@ struct Svc {
     handle: ServiceHandle,
     ui: Credential,
     calls: Calls,
+    /// F6: `qemu-img convert` fails as on a full volume while set.
+    disk_full: Arc<std::sync::atomic::AtomicBool>,
     dir: PathBuf,
 }
 
@@ -57,11 +59,13 @@ async fn start_svc(name: &str, convert_delay: Duration) -> Svc {
     let store = SqliteStore::open(&dir).unwrap();
     let audit = FileAuditSink::open(&audit_path(&dir)).unwrap();
     let calls = Calls::default();
+    let disk_full = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let backend = FakeVmBackend {
         calls: calls.clone(),
         image_tool: Some(Arc::new(FakeImageTool {
             convert_delay,
             calls: calls.clone(),
+            disk_full: disk_full.clone(),
         })),
         ..FakeVmBackend::default()
     };
@@ -87,6 +91,7 @@ async fn start_svc(name: &str, convert_delay: Duration) -> Svc {
         handle,
         ui,
         calls,
+        disk_full,
         dir,
     }
 }
@@ -656,4 +661,58 @@ async fn baseline_requests_are_refused_for_the_pairing_role() {
     svc.handle.shutdown().await;
     remove_catalog(&svc.dir);
     let _ = RunId::new_v7();
+}
+
+/// F6, disk full while taking a baseline (injected: `qemu-img convert`
+/// writes part of its output and fails as on a full volume): clear
+/// `resource_limit` naming the free space, no baseline recorded, no file
+/// left behind (catalog `tmp` empty, nothing under `base`), the VM's disk
+/// untouched and the VM still usable; with space back the same request
+/// succeeds.
+#[tokio::test(flavor = "multi_thread")]
+async fn baseline_on_a_full_volume_fails_cleanly() {
+    let svc = start_svc("f6-full", Duration::ZERO).await;
+    let mut c = connect(&svc, &svc.ui).await;
+    let vm = vm_with_disk(&mut c, &svc, "f6-full", b"installed system").await;
+    let vm_dir = svc.dir.join("vms").join(vm.to_string());
+    svc.disk_full
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let m = create_baseline(&mut c, vm, "on a full volume", false).await;
+    assert_eq!(code(&m), Some(ErrorCode::ResourceLimit), "{m:?}");
+    match &m {
+        ServerMessage::Error {
+            error: ReplyError::Operational(e),
+            ..
+        } => assert!(e.message.contains("free space"), "{}", e.message),
+        other => panic!("{other:?}"),
+    }
+    assert!(list(&mut c, vm).await.is_empty(), "no baseline recorded");
+    assert!(tmp_empty(&svc.dir), "temporary output removed");
+    let base_files = std::fs::read_dir(vm_dir.join("base"))
+        .map(|r| r.flatten().count())
+        .unwrap_or(0);
+    assert_eq!(base_files, 0, "nothing published under base/");
+    assert_eq!(
+        fake_content(&vm_dir.join("primary.qcow2")).unwrap(),
+        b"installed system"
+    );
+    let st = status(&mut c, vm).await;
+    assert_eq!(st.state, VmState::Stopped);
+    assert_eq!(st.baselines.operation, None);
+    assert_eq!(
+        count(
+            &read_audit(&svc.dir),
+            AuditAction::BaselineCreate,
+            AuditOutcome::Failed
+        ),
+        1
+    );
+    // Space is back: the same request works.
+    svc.disk_full
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let b = created(&create_baseline(&mut c, vm, "space back", false).await);
+    assert_eq!(list(&mut c, vm).await.len(), 1);
+    assert!(b.size_bytes > 0);
+    svc.handle.shutdown().await;
+    remove_catalog(&svc.dir);
 }

@@ -131,6 +131,151 @@ fn newer_schema_is_refused_without_changes() {
     assert_eq!(backups, 0, "no backup or migration on a newer schema");
 }
 
+fn file_sha256(p: &std::path::Path) -> String {
+    use sha2::Digest as _;
+    let d = sha2::Sha256::digest(std::fs::read(p).unwrap());
+    d.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn backups_in(dir: &std::path::Path) -> usize {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .filter(|e| {
+            e.as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains("backup")
+        })
+        .count()
+}
+
+/// F6: a catalog written by a newer binary is refused without any write:
+/// the database file is byte-for-byte unchanged and no backup appears.
+#[test]
+fn newer_schema_refusal_writes_nothing() {
+    let dir = common::tempdir();
+    {
+        let mut cat = Catalog::open(dir.path()).unwrap();
+        common::new_vm(&mut cat, "kept");
+    }
+    let db = dir.path().join(DB_FILE);
+    {
+        let conn = migrate::open_connection(&db).unwrap();
+        conn.execute(
+            "INSERT INTO schema_version(version, name, sql_sha256, applied_at) VALUES (?1, 'future', 'x', 'x')",
+            params![LATEST_VERSION + 1],
+        )
+        .unwrap();
+    }
+    let before = file_sha256(&db);
+    for _ in 0..3 {
+        let e = Catalog::open(dir.path()).unwrap_err();
+        assert!(
+            matches!(e, StorageError::SchemaTooNew { .. }),
+            "downgrade accepted: {e:?}"
+        );
+        // The message tells the user what happened.
+        assert!(e.to_string().contains("downgrade not allowed"), "{e}");
+    }
+    assert_eq!(file_sha256(&db), before, "database modified by the refusal");
+    assert_eq!(backups_in(dir.path()), 0);
+    // `last_start` was not written either (the open stopped before it).
+    let conn = migrate::open_connection(&db).unwrap();
+    let vms: i64 = conn
+        .query_row("SELECT count(*) FROM vms", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(vms, 1);
+}
+
+/// F6: update only with the VMs stopped. A catalog of a previous version
+/// with a run that never ended (a VM of that version may still be running)
+/// is not migrated: clear refusal, no backup, no write. Once the run is
+/// closed (the previous version reconciled it), the migration runs with its
+/// backup.
+#[test]
+fn upgrade_is_refused_while_runs_of_the_previous_version_are_open() {
+    let dir = common::tempdir();
+    let db = dir.path().join(DB_FILE);
+    {
+        let mut conn = migrate::open_connection(&db).unwrap();
+        migrate::migrate_to(&mut conn, &db, 1).unwrap();
+        conn.execute(
+            "INSERT INTO vms(vm_id, name, guest_os, config_version, config_json, created_at, updated_at)
+             VALUES ('0190f7a4-0000-7000-8000-000000000001', 'running', 'ubuntu', 1, '{}', 'x', 'x')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO runs(run_id, vm_id, state, started_at)
+             VALUES ('0190f7a4-0000-7000-8000-0000000000a1', '0190f7a4-0000-7000-8000-000000000001', 'running', 'x')",
+            [],
+        )
+        .unwrap();
+    }
+    let before = file_sha256(&db);
+    let e = Catalog::open(dir.path()).unwrap_err();
+    match &e {
+        StorageError::UpgradeWithOpenRuns {
+            from,
+            to,
+            open_runs,
+        } => assert_eq!((*from, *to, *open_runs), (1, LATEST_VERSION, 1)),
+        other => panic!("migration with an open run: {other:?}"),
+    }
+    let text = e.to_string();
+    assert!(text.contains("stop every VM"), "{text}");
+    assert!(text.contains("nothing was changed"), "{text}");
+    assert_eq!(file_sha256(&db), before, "database modified by the refusal");
+    assert_eq!(backups_in(dir.path()), 0);
+    {
+        let conn = migrate::open_connection(&db).unwrap();
+        assert_eq!(migrate::current_version(&conn).unwrap(), 1);
+        conn.execute(
+            "UPDATE runs SET state = 'stopped', ended_at = 'y', termination_cause = 'shutdown'",
+            [],
+        )
+        .unwrap();
+    }
+    let cat = Catalog::open(dir.path()).unwrap();
+    let rep = cat.open_report().unwrap();
+    assert_eq!(
+        (rep.migration.from_version, rep.migration.to_version),
+        (1, LATEST_VERSION)
+    );
+    assert!(
+        rep.migration.backup.is_some(),
+        "backup before the migration"
+    );
+}
+
+/// An up-to-date catalog with an open run (service crash) opens normally:
+/// the refusal concerns migrations only, the reconciliation is the
+/// service's job.
+#[test]
+fn open_runs_do_not_block_a_catalog_without_migration() {
+    let dir = common::tempdir();
+    drop(Catalog::open(dir.path()).unwrap());
+    let db = dir.path().join(DB_FILE);
+    {
+        let conn = migrate::open_connection(&db).unwrap();
+        conn.execute(
+            "INSERT INTO vms(vm_id, name, guest_os, config_version, config_json, created_at, updated_at)
+             VALUES ('0190f7a4-0000-7000-8000-000000000001', 'running', 'ubuntu', 1, '{}', 'x', 'x')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO runs(run_id, vm_id, state, started_at)
+             VALUES ('0190f7a4-0000-7000-8000-0000000000a1', '0190f7a4-0000-7000-8000-000000000001', 'running', 'x')",
+            [],
+        )
+        .unwrap();
+    }
+    let cat = Catalog::open(dir.path()).unwrap();
+    assert!(cat.open_report().unwrap().migration.backup.is_none());
+}
+
 #[test]
 fn tampered_migration_is_detected() {
     let dir = common::tempdir();

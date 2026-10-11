@@ -133,7 +133,28 @@ impl ImageCommand<'_> {
     }
 }
 
+/// `true` if a `qemu-img` (or QEMU) error text reports a full volume:
+/// `strerror(ENOSPC)` of the C runtime or the Win32 message of
+/// `ERROR_DISK_FULL`/`ERROR_HANDLE_DISK_FULL`.
+pub fn reports_no_space(stderr: &str) -> bool {
+    let s = stderr.to_ascii_lowercase();
+    [
+        "no space left on device",
+        "not enough space on the disk",
+        "disk is full",
+    ]
+    .iter()
+    .any(|p| s.contains(p))
+}
+
 fn failed(what: &str, o: &ImageOutput) -> BackendError {
+    // F6: a full catalog volume is a clear `resource_limit`, not an opaque
+    // I/O error (the partial output file is removed by the caller's job).
+    if reports_no_space(&o.stderr) {
+        return BackendError::ResourceLimit(format!(
+            "not enough free space on the catalog volume (qemu-img {what})"
+        ));
+    }
     BackendError::Io(std::io::Error::other(format!(
         "qemu-img {what} exited with {:?}: {}",
         o.code,
@@ -305,6 +326,33 @@ pub fn virtual_size(cmd: &ImageCommand<'_>, p: &ManagedPath) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// F6: `qemu-img` failing on a full volume becomes `resource_limit`
+    /// with a clear message (injected outputs, the texts QEMU prints).
+    #[test]
+    fn full_volume_is_a_resource_limit() {
+        for stderr in [
+            "qemu-img: error while writing at byte 1048576: No space left on device",
+            "qemu-img: Could not write: There is not enough space on the disk.",
+        ] {
+            let o = ImageOutput {
+                code: Some(1),
+                stdout: String::new(),
+                stderr: stderr.into(),
+            };
+            let e = failed("convert", &o);
+            assert!(matches!(e, BackendError::ResourceLimit(_)), "{e}");
+            let p = e.to_public();
+            assert_eq!(p.code.as_str(), "resource_limit");
+            assert!(p.message.contains("free space"), "{}", p.message);
+        }
+        let o = ImageOutput {
+            code: Some(1),
+            stdout: String::new(),
+            stderr: "qemu-img: Image is corrupt".into(),
+        };
+        assert!(matches!(failed("check", &o), BackendError::Io(_)));
+    }
 
     #[test]
     fn fixed_backing_reference_shape() {
