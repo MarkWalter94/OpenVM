@@ -65,6 +65,21 @@ pub enum StorageError {
         /// Highest version known to this binary.
         supported: u32,
     },
+    /// A migration is needed but the catalog records runs that never ended:
+    /// VMs of the previous version may still be running (F6: update only
+    /// with the VMs stopped). Nothing is written.
+    #[error(
+        "catalog schema v{from} needs the update to v{to}, but {open_runs} VM runs of the previous version never ended: \
+         start the previous version of LightVM, stop every VM and close it, then start this version (nothing was changed)"
+    )]
+    UpgradeWithOpenRuns {
+        /// Version found in the database.
+        from: u32,
+        /// Version the binary would migrate to.
+        to: u32,
+        /// Runs without an end.
+        open_runs: u32,
+    },
     /// An already applied migration does not match the embedded one.
     #[error("migration v{version} applied with content different from the embedded one")]
     MigrationMismatch {

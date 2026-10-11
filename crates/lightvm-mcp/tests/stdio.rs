@@ -77,6 +77,7 @@ async fn start_svc(name: &str) -> Svc {
         image_tool: Some(Arc::new(FakeImageTool {
             convert_delay: Duration::ZERO,
             calls: calls.clone(),
+            ..FakeImageTool::default()
         })),
         screenshot_png: real_png(),
         ..FakeVmBackend::default()

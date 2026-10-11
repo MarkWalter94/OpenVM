@@ -209,6 +209,9 @@ pub struct FakeImageTool {
     pub convert_delay: std::time::Duration,
     /// Calls received.
     pub calls: Calls,
+    /// F6 disk-full injection: while set, `convert` writes part of the
+    /// output and fails as `qemu-img` does on a full volume (ENOSPC).
+    pub disk_full: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Minimal QCOW2 v3 header with an optional backing reference (format
@@ -270,6 +273,15 @@ impl ImageTool for FakeImageTool {
             return Err(PublicError::state_conflict("operation cancelled"));
         }
         let content = fake_content(src)?;
+        if self.disk_full.load(std::sync::atomic::Ordering::SeqCst) {
+            // Partial output, then the error of the real tool for
+            // "No space left on device".
+            let _ = std::fs::write(dst, &fake_qcow2(None, &content)[..2048]);
+            return Err(qemu_backend::BackendError::ResourceLimit(
+                "not enough free space on the catalog volume (qemu-img convert)".into(),
+            )
+            .to_public());
+        }
         std::fs::write(dst, fake_qcow2(None, &content))
             .map_err(|_| PublicError::infrastructure("fake convert"))
     }

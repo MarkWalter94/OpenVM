@@ -1471,6 +1471,28 @@ impl vm_core::ports::MediaInspector for ManagedMediaInspector {
 mod tests {
     use super::*;
 
+    /// F6: the OS "disk full" error during a media copy or a baseline file
+    /// operation reaches the user as `resource_limit` with a clear message,
+    /// not as an opaque infrastructure error (injected OS error).
+    #[test]
+    fn disk_full_is_a_clear_resource_limit() {
+        let full = || st::StorageError::Io {
+            path: PathBuf::from("media/tmp/copy"),
+            source: if cfg!(windows) {
+                std::io::Error::from_raw_os_error(112) // ERROR_DISK_FULL
+            } else {
+                std::io::Error::from_raw_os_error(28) // ENOSPC
+            },
+        };
+        let e = import_error(&full());
+        assert_eq!(e.code, ErrorCode::ResourceLimit);
+        assert!(e.message.contains("free space"), "{}", e.message);
+        assert!(!e.message.contains("media/tmp"), "no path in the message");
+        let e = baseline_error(&full());
+        assert_eq!(e.code, ErrorCode::ResourceLimit);
+        assert!(e.message.contains("free space"), "{}", e.message);
+    }
+
     #[test]
     fn iso_9660_or_udf_signature() {
         let d = std::env::temp_dir().join(format!(

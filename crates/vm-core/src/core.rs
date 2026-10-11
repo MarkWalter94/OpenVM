@@ -663,10 +663,14 @@ where
 
     /// Loads the catalog at startup. A persisted state with a process
     /// (`starting`/`running`/`stopping`) is confirmed by neither process nor QMP
-    /// after a supervisor restart: the VM enters `recovering`.
+    /// after a supervisor restart: the VM enters `recovering`. So does a VM
+    /// persisted as `failed` (F6): its run ended with a crash or a failed
+    /// start and nothing else would ever bring it back to `stopped`.
     pub fn load_catalog(&mut self) -> Result<(), PublicError> {
         for record in self.store.list_vms()? {
-            let state = if record.persisted_state.has_process() {
+            let state = if record.persisted_state.has_process()
+                || record.persisted_state == VmState::Failed
+            {
                 VmState::Recovering
             } else {
                 record.persisted_state
@@ -2230,6 +2234,15 @@ where
                     self.end_run(vm_id, VmState::Stopped, RunEndReason::Stopped);
                 } else {
                     self.end_run(vm_id, VmState::Failed, RunEndReason::UnexpectedExit);
+                    // F6: the run the sessions were controlling is gone
+                    // without anyone asking for it (QEMU crashed or was
+                    // killed from outside): the sessions of the VM end with
+                    // `vm_terminated`, whose report outcome is
+                    // `infrastructure_error`. A stop asked by the user or an
+                    // agent, or the Emergency Stop, keeps its own cause.
+                    for s in self.sessions.live_for_vm(vm_id) {
+                        self.revoke_inner(s, TerminationCause::VmTerminated);
+                    }
                 }
             }
         }

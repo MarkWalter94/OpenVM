@@ -6,6 +6,9 @@
 //! - A database with a newer version is rejected (downgrade, section 10 F6).
 //! - Backup before migrating a non-empty database: `VACUUM INTO` a file with
 //!   a UTC-dated name in the same directory (section 10 F6).
+//! - Update only with the VMs stopped: a migration is refused, before the
+//!   backup and any write, while the catalog records runs without an end
+//!   ([`StorageError::UpgradeWithOpenRuns`], section 10 F6).
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -177,6 +180,25 @@ pub fn migrate_to(conn: &mut Connection, db_path: &Path, target: u32) -> Result<
             to_version: from,
             backup: None,
         });
+    }
+    // Update only with the VMs stopped (ROADMAP 10 F6): a run without an end
+    // means a VM of the previous version may still be running (or crashed
+    // without reconciliation). Refused before the backup and any write.
+    if from > 0 {
+        let open_runs: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM runs WHERE ended_at IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .db()?;
+        if open_runs > 0 {
+            return Err(StorageError::UpgradeWithOpenRuns {
+                from,
+                to: target,
+                open_runs: u32::try_from(open_runs).unwrap_or(u32::MAX),
+            });
+        }
     }
     let backup = if from > 0 {
         Some(backup_database(conn, db_path, from)?)
