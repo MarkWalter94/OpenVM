@@ -77,11 +77,217 @@
     }
   ],
   "$defs": {
+    "AgentCall": {
+      "description": "Call of an agent session.",
+      "oneOf": [
+        {
+          "description": "VMs of the grant (`vm.list`).",
+          "type": "object",
+          "properties": {
+            "call": {
+              "type": "string",
+              "const": "list_vms"
+            }
+          },
+          "required": [
+            "call"
+          ]
+        },
+        {
+          "description": "Status of a VM of the grant (`vm.status`).",
+          "type": "object",
+          "properties": {
+            "call": {
+              "type": "string",
+              "const": "vm_status"
+            },
+            "vm_id": {
+              "description": "VM.",
+              "$ref": "#/$defs/VmId"
+            }
+          },
+          "required": [
+            "call",
+            "vm_id"
+          ]
+        },
+        {
+          "description": "Action on a VM through the core's queue: `start`, `stop`,\n`force_stop`, `reset`, `input` (screenshots use\n[`AgentCall::Screenshot`]).",
+          "type": "object",
+          "properties": {
+            "call": {
+              "type": "string",
+              "const": "submit"
+            },
+            "request": {
+              "description": "Request with idempotency key.",
+              "$ref": "#/$defs/VmRequest"
+            }
+          },
+          "required": [
+            "call",
+            "request"
+          ]
+        },
+        {
+          "description": "Screenshot (`vm.screenshot`): metadata in the reply, image bytes\nfetched with [`AgentCall::ScreenshotChunk`].",
+          "type": "object",
+          "properties": {
+            "call": {
+              "type": "string",
+              "const": "screenshot"
+            },
+            "expected_run_id": {
+              "description": "Current run of the VM.",
+              "$ref": "#/$defs/RunId"
+            },
+            "operation_id": {
+              "description": "Idempotency key.",
+              "$ref": "#/$defs/OperationId"
+            },
+            "vm_id": {
+              "description": "VM.",
+              "$ref": "#/$defs/VmId"
+            }
+          },
+          "required": [
+            "call",
+            "operation_id",
+            "vm_id",
+            "expected_run_id"
+          ]
+        },
+        {
+          "description": "Chunk `index` of the last screenshot of the session.",
+          "type": "object",
+          "properties": {
+            "call": {
+              "type": "string",
+              "const": "screenshot_chunk"
+            },
+            "index": {
+              "description": "Chunk index, from 0.",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "operation_id": {
+              "description": "Screenshot operation.",
+              "$ref": "#/$defs/OperationId"
+            }
+          },
+          "required": [
+            "call",
+            "operation_id",
+            "index"
+          ]
+        },
+        {
+          "description": "An operation of this session (`vm.status`).",
+          "type": "object",
+          "properties": {
+            "call": {
+              "type": "string",
+              "const": "operation"
+            },
+            "operation_id": {
+              "description": "Operation.",
+              "$ref": "#/$defs/OperationId"
+            }
+          },
+          "required": [
+            "call",
+            "operation_id"
+          ]
+        },
+        {
+          "description": "Lease renewal: due before the lease expires (at most 10 s).",
+          "type": "object",
+          "properties": {
+            "call": {
+              "type": "string",
+              "const": "renew_lease"
+            }
+          },
+          "required": [
+            "call"
+          ]
+        },
+        {
+          "description": "Ordinary end of the session by the agent (the VM is not stopped).",
+          "type": "object",
+          "properties": {
+            "call": {
+              "type": "string",
+              "const": "end_session"
+            }
+          },
+          "required": [
+            "call"
+          ]
+        }
+      ]
+    },
     "BaselineId": {
       "description": "BaselineId: version 7 UUID, lowercase with hyphens.",
       "type": "string",
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "Capability": {
+      "description": "Authorizable action on a VM. Serialized names follow the MCP catalog\n(ROADMAP 9); `vm.input` covers mouse and keyboard.",
+      "oneOf": [
+        {
+          "description": "List filtered by the grant.",
+          "type": "string",
+          "const": "vm.list"
+        },
+        {
+          "description": "Status.",
+          "type": "string",
+          "const": "vm.status"
+        },
+        {
+          "description": "Start.",
+          "type": "string",
+          "const": "vm.start"
+        },
+        {
+          "description": "Stop (ordinary or forced).",
+          "type": "string",
+          "const": "vm.stop"
+        },
+        {
+          "description": "Reset: requires an explicit capability.",
+          "type": "string",
+          "const": "vm.reset"
+        },
+        {
+          "description": "Screenshot.",
+          "type": "string",
+          "const": "vm.screenshot"
+        },
+        {
+          "description": "Mouse and keyboard.",
+          "type": "string",
+          "const": "vm.input"
+        },
+        {
+          "description": "Checkpoint with the VM off: requires an explicit capability.",
+          "type": "string",
+          "const": "vm.snapshot"
+        },
+        {
+          "description": "Restore with the VM off.",
+          "type": "string",
+          "const": "vm.restore"
+        },
+        {
+          "description": "Authorized LightVM events and QEMU logs.",
+          "type": "string",
+          "const": "vm.logs"
+        }
+      ]
     },
     "DisplayGeometry": {
       "description": "Guest display geometry in pixels.",
@@ -206,6 +412,42 @@
           "$ref": "#/$defs/PointerButton",
           "required": [
             "type"
+          ]
+        }
+      ]
+    },
+    "InputOwner": {
+      "description": "Owner of the input of a VM: the user or one agent session, never both.",
+      "oneOf": [
+        {
+          "description": "The local user (default).",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "user"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "An agent session.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "agent"
+            },
+            "session_id": {
+              "description": "Session.",
+              "$ref": "#/$defs/SessionId"
+            }
+          },
+          "required": [
+            "kind",
+            "session_id"
           ]
         }
       ]
@@ -398,6 +640,49 @@
       "description": "QEMU QKeyCode.",
       "type": "string",
       "pattern": "^[a-z0-9_]{1,32}$"
+    },
+    "Quotas": {
+      "description": "Quotas of a session or of a policy layer. Each field is an inclusive\nmaximum; the intersection takes the minimum.",
+      "type": "object",
+      "properties": {
+        "max_input_events": {
+          "description": "Total input events allowed in the session.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_operations": {
+          "description": "Total operations allowed in the session.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_queued_operations": {
+          "description": "Operations queued per VM and not yet forwarded.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_screenshot_bytes": {
+          "description": "Maximum size of a single screenshot in bytes.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_screenshots": {
+          "description": "Total screenshots allowed in the session.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "max_operations",
+        "max_input_events",
+        "max_screenshots",
+        "max_screenshot_bytes",
+        "max_queued_operations"
+      ]
     },
     "Request": {
       "description": "Typed operations.",
@@ -803,6 +1088,268 @@
             "vm_id",
             "baseline_id"
           ]
+        },
+        {
+          "description": "Session request of an agent (`pairing` role only, F4): refused while\nthe agent access switch is off. The reply carries the verification\ncode the user compares in the app; the decision is awaited with\n[`Request::AwaitSession`].",
+          "type": "object",
+          "properties": {
+            "client_name": {
+              "description": "Client name declared by the agent (free text, at most\n[`MAX_CLIENT_NAME_CHARS`] characters kept, never interpreted).",
+              "type": "string"
+            },
+            "op": {
+              "type": "string",
+              "const": "request_session"
+            },
+            "purpose": {
+              "description": "Purpose declared by the agent (free text, at most\n[`MAX_PURPOSE_CHARS`] characters kept, never interpreted).",
+              "type": "string"
+            },
+            "requested_capabilities": {
+              "description": "Capabilities the agent would like (a hint for the user).",
+              "type": "array",
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/Capability"
+              },
+              "uniqueItems": true
+            },
+            "requested_vms": {
+              "description": "VMs the agent would like (a hint for the user).",
+              "type": "array",
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/VmId"
+              }
+            }
+          },
+          "required": [
+            "op",
+            "client_name",
+            "purpose"
+          ]
+        },
+        {
+          "description": "Waits for the user's decision on a session request of this\nconnection (`pairing` role only). Long: the reply arrives when the\nuser approves or denies, or when the request expires.",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "await_session"
+            },
+            "request_id": {
+              "description": "Request.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "op",
+            "request_id"
+          ]
+        },
+        {
+          "description": "Call of an agent session bound to this connection (`pairing` role\nonly). Checked by the core on receipt and right before forwarding.",
+          "type": "object",
+          "properties": {
+            "call": {
+              "description": "Call.",
+              "$ref": "#/$defs/AgentCall"
+            },
+            "op": {
+              "type": "string",
+              "const": "agent"
+            },
+            "session": {
+              "description": "Session credential.",
+              "$ref": "#/$defs/SessionAuth"
+            }
+          },
+          "required": [
+            "op",
+            "session",
+            "call"
+          ]
+        },
+        {
+          "description": "State of the agent access switch (UI only).",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "get_agent_access"
+            }
+          },
+          "required": [
+            "op"
+          ]
+        },
+        {
+          "description": "Agent access switch (UI only): off at every service start. Turning it\noff denies the pending requests and revokes the live sessions.",
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "description": "New state.",
+              "type": "boolean"
+            },
+            "op": {
+              "type": "string",
+              "const": "set_agent_access"
+            }
+          },
+          "required": [
+            "op",
+            "enabled"
+          ]
+        },
+        {
+          "description": "Pending session requests (UI only).",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "list_session_requests"
+            }
+          },
+          "required": [
+            "op"
+          ]
+        },
+        {
+          "description": "Approval of a session request (UI only).",
+          "type": "object",
+          "properties": {
+            "approval": {
+              "description": "What the user grants.",
+              "$ref": "#/$defs/SessionApproval"
+            },
+            "op": {
+              "type": "string",
+              "const": "approve_session"
+            },
+            "request_id": {
+              "description": "Request.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "op",
+            "request_id",
+            "approval"
+          ]
+        },
+        {
+          "description": "Denial of a session request (UI only).",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "deny_session"
+            },
+            "request_id": {
+              "description": "Request.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "op",
+            "request_id"
+          ]
+        },
+        {
+          "description": "Agent sessions, live first (UI only).",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "list_sessions"
+            }
+          },
+          "required": [
+            "op"
+          ]
+        },
+        {
+          "description": "Agent pause (UI only): agent mutations refused, the VM keeps running.",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "pause_session"
+            },
+            "session_id": {
+              "description": "Session.",
+              "$ref": "#/$defs/SessionId"
+            }
+          },
+          "required": [
+            "op",
+            "session_id"
+          ]
+        },
+        {
+          "description": "Resume after a pause (UI only).",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "resume_session"
+            },
+            "session_id": {
+              "description": "Session.",
+              "$ref": "#/$defs/SessionId"
+            }
+          },
+          "required": [
+            "op",
+            "session_id"
+          ]
+        },
+        {
+          "description": "Revocation (UI only): the session ends, its queue is discarded, the\nagent connection is closed; the VM is not stopped.",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "revoke_session"
+            },
+            "session_id": {
+              "description": "Session.",
+              "$ref": "#/$defs/SessionId"
+            }
+          },
+          "required": [
+            "op",
+            "session_id"
+          ]
+        },
+        {
+          "description": "Input ownership of a VM (UI only): take control back or hand it to an\nagent session. Pressed keys and buttons are released on every change.",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "set_input_owner"
+            },
+            "owner": {
+              "description": "New owner.",
+              "$ref": "#/$defs/InputOwner"
+            },
+            "vm_id": {
+              "description": "VM.",
+              "$ref": "#/$defs/VmId"
+            }
+          },
+          "required": [
+            "op",
+            "vm_id",
+            "owner"
+          ]
         }
       ]
     },
@@ -811,6 +1358,92 @@
       "type": "string",
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "SessionApproval": {
+      "description": "What the user grants when approving a session request.",
+      "type": "object",
+      "properties": {
+        "capabilities": {
+          "description": "Granted capabilities (not empty).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Capability"
+          },
+          "uniqueItems": true
+        },
+        "duration_s": {
+          "description": "Duration of the grant in seconds\n([`MIN_SESSION_DURATION_S`]..=[`MAX_SESSION_DURATION_S`]).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "give_input": {
+          "description": "Hand input control of the VM to the agent at once.",
+          "type": "boolean",
+          "default": false
+        },
+        "lease_ms": {
+          "description": "Lease in milliseconds ([`MIN_LEASE_MS`]..=10000); `None` = 10000.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "quotas": {
+          "description": "Quotas; `None` = [`AGENT_DEFAULT_QUOTAS`].",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Quotas"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "vm_id": {
+          "description": "The single VM of the session (MVP).",
+          "$ref": "#/$defs/VmId"
+        }
+      },
+      "required": [
+        "vm_id",
+        "capabilities",
+        "duration_s"
+      ]
+    },
+    "SessionAuth": {
+      "description": "Credential of an agent session, carried by every [`Request::Agent`].\n`Debug` redacts the token.",
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "description": "Session.",
+          "$ref": "#/$defs/SessionId"
+        },
+        "token": {
+          "description": "Session secret received in [`ResponseBody::SessionGranted`].",
+          "$ref": "#/$defs/SessionToken"
+        }
+      },
+      "required": [
+        "session_id",
+        "token"
+      ]
+    },
+    "SessionId": {
+      "description": "SessionId: version 7 UUID, lowercase with hyphens.",
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "SessionToken": {
+      "description": "Session secret, only on authenticated IPC; never in logs or reports.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "writeOnly": true
     },
     "VmAction": {
       "description": "Action requested on an existing VM.",

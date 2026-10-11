@@ -268,6 +268,51 @@
           "description": "Deletion of a baseline (F3).",
           "type": "string",
           "const": "baseline_delete"
+        },
+        {
+          "description": "Session request of an agent (F4): received, or refused (agent access\noff, limits). Never the declared texts.",
+          "type": "string",
+          "const": "session_request"
+        },
+        {
+          "description": "Session request denied by the user, expired or withdrawn (F4).",
+          "type": "string",
+          "const": "session_deny"
+        },
+        {
+          "description": "Lease renewal of an agent session (F4).",
+          "type": "string",
+          "const": "session_lease"
+        },
+        {
+          "description": "Change of the input owner of a VM (F4).",
+          "type": "string",
+          "const": "input_control"
+        },
+        {
+          "description": "Agent access switch turned on (F4).",
+          "type": "string",
+          "const": "agent_access_enable"
+        },
+        {
+          "description": "Agent access switch turned off (F4): pending requests denied, live\nsessions revoked.",
+          "type": "string",
+          "const": "agent_access_disable"
+        },
+        {
+          "description": "VM list read by an agent session (F4).",
+          "type": "string",
+          "const": "vm_list"
+        },
+        {
+          "description": "VM status read by an agent session (F4).",
+          "type": "string",
+          "const": "vm_status"
+        },
+        {
+          "description": "Screenshot bytes read by an agent session (F4, never the bytes).",
+          "type": "string",
+          "const": "screenshot_read"
         }
       ]
     },

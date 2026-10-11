@@ -1,5 +1,16 @@
 //! Service: IPC endpoint, handshake, connection registry with revocation,
 //! request dispatcher, controlled shutdown.
+//!
+//! F4: agent sessions. A `pairing` connection asks for a session
+//! (`request_session`), the user approves it in the UI (`approve_session`),
+//! the session is bound to that connection and its calls (`agent`) are
+//! checked on receipt by the gate of [`crate::agents::AgentRegistry`], then
+//! by the supervisor thread and twice by the core. Pause, revocation and
+//! Emergency Stop flip the gate here, before the supervisor queue (priority
+//! point). A second endpoint accepts only the emergency verb
+//! ([`EmergencyCommand`]) for `lightvm-service --emergency-stop`, usable when
+//! the UI is frozen; it bypasses the supervisor thread like the UI's
+//! Emergency Stop.
 
 use std::collections::HashMap;
 use std::io;
@@ -12,18 +23,22 @@ use tokio::io::{AsyncWrite, ReadHalf, WriteHalf};
 use tokio::sync::{Semaphore, broadcast, oneshot, watch};
 
 use lightvm_proto::ipc::{
-    ClientMessage, CloseReason, ConnectionInfo, EmergencyStopReport, Request, RequestId,
-    ResponseBody, Role, SUPPORTED_PROTOCOL_VERSIONS, ServerMessage, ServiceEvent, ServiceState,
-    StopReason,
+    AGENT_DEFAULT_QUOTAS, AGENT_MAX_SCREENSHOT_BYTES, AgentCall, ClientMessage, CloseReason,
+    ConnectionInfo, EMERGENCY_ENDPOINT_FILE, EmergencyCommand, EmergencyStopReport,
+    MAX_SESSION_DURATION_S, MIN_LEASE_MS, MIN_SESSION_DURATION_S, Request, RequestId, ResponseBody,
+    Role, SUPPORTED_PROTOCOL_VERSIONS, ServerMessage, ServiceEvent, ServiceState, SessionApproval,
+    SessionAuth, SessionInfo, SessionRequestId, SessionRequestOutcome, SessionUsage, StopReason,
 };
 use lightvm_proto::{
-    Actor, Caller, ErrorCode, ProtocolError, ProtocolErrorCode, PublicError, ReplyError,
-    TerminationCause,
+    Actor, AuditAction, AuditOutcome, Caller, Capability, ErrorCode, LEASE_MAX_MILLIS,
+    ProtocolError, ProtocolErrorCode, PublicError, ReplyError, SessionId, SessionState,
+    SessionToken, TerminationCause, UtcTimestamp,
 };
 
+use crate::agents::{AgentRegistry, AwaitDecision, Closed};
 use crate::credential::{Credential, CredentialId, CredentialStore};
 use crate::display::DisplayRegistry;
-use crate::engine::VmEngine;
+use crate::engine::{NewSession, VmEngine};
 use crate::frame::{self, FrameError};
 use crate::lock::{InstanceLock, LockError};
 use crate::ratelimit::{RateLimit, TokenBucket};
@@ -44,6 +59,11 @@ pub struct ServiceConfig {
     pub max_frame: u32,
     /// Per-connection rate limit.
     pub rate_limit: RateLimit,
+    /// Rate limit of an agent (`pairing`) connection, i.e. per agent
+    /// session (ROADMAP 9: per identity/session).
+    pub agent_rate_limit: RateLimit,
+    /// Lifetime of a pending session request (F4).
+    pub session_request_ttl: Duration,
     /// Slots in the queue towards the supervisor (shared between connections).
     pub queue_capacity: usize,
     /// Maximum simultaneous connections (including those in handshake).
@@ -71,6 +91,11 @@ impl ServiceConfig {
             runtime_dir: None,
             max_frame: frame::DEFAULT_MAX_FRAME,
             rate_limit: RateLimit::default(),
+            agent_rate_limit: RateLimit {
+                burst: 20,
+                per_second: 50.0,
+            },
+            session_request_ttl: Duration::from_secs(lightvm_proto::ipc::SESSION_REQUEST_TTL_S),
             queue_capacity: 64,
             max_connections: 16,
             handshake_timeout: Duration::from_secs(5),
@@ -135,6 +160,10 @@ struct Shared {
     vms_with_process: Arc<AtomicUsize>,
     /// Console tickets (revoked here on connection loss and Emergency Stop).
     display: Arc<DisplayRegistry>,
+    /// Agent sessions: switch, requests, gate (F4).
+    agents: Arc<AgentRegistry>,
+    /// File publishing the emergency endpoint, removed at shutdown.
+    emergency_file: Option<PathBuf>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -215,6 +244,78 @@ impl Shared {
         }
     }
 
+    /// Audit of a session lifecycle step decided here (no reply awaited).
+    fn audit(
+        &self,
+        actor: Actor,
+        action: AuditAction,
+        outcome: AuditOutcome,
+        session_id: Option<SessionId>,
+        error: Option<ErrorCode>,
+    ) {
+        self.send_cmd(Command::Record {
+            actor,
+            action,
+            outcome,
+            session_id,
+            error,
+        });
+    }
+
+    /// Requests closed without a user decision (expired, withdrawn) or
+    /// denied: event and audit.
+    fn report_closed(&self, closed: Closed) {
+        for (request_id, outcome) in closed {
+            let error = match outcome {
+                SessionRequestOutcome::Expired => Some(ErrorCode::SessionExpired),
+                SessionRequestOutcome::Denied => Some(ErrorCode::PermissionDenied),
+                _ => None,
+            };
+            let actor = if outcome == SessionRequestOutcome::Denied {
+                Actor::User
+            } else {
+                Actor::System
+            };
+            self.audit(
+                actor,
+                AuditAction::SessionDeny,
+                AuditOutcome::Succeeded,
+                None,
+                error,
+            );
+            let _ = self.events.send(ServiceEvent::SessionRequestClosed {
+                request_id,
+                outcome,
+            });
+        }
+    }
+
+    /// Priority path of the Emergency Stop, of the UI loss and of the agent
+    /// access switch turned off: every session gate closes (their
+    /// connections close) and every pending request is denied. The core
+    /// terminates the sessions afterwards on the supervisor thread.
+    /// Closes an agent connection whose session was terminated here: its
+    /// request in progress and its queued requests are abandoned at once
+    /// (the pairing credential is kept: a new session needs a new approval).
+    fn close_agent_connection(&self, connection_id: u64) {
+        if let Some(e) = lock(&self.conns).get(&connection_id) {
+            let _ = e.revoke.send(true);
+        }
+    }
+
+    fn close_all_agent_sessions(&self, reason: &str, cause: TerminationCause, stop: bool) {
+        for conn in self.agents.terminate_all(cause, stop) {
+            self.close_agent_connection(conn);
+        }
+        let mut closed = Vec::new();
+        for id in self.agents.pending_ids() {
+            if self.agents.deny(id, reason) {
+                closed.push((id, SessionRequestOutcome::Denied));
+            }
+        }
+        self.report_closed(closed);
+    }
+
     fn connections(&self) -> Vec<ConnectionInfo> {
         let mut v: Vec<ConnectionInfo> = lock(&self.conns)
             .iter()
@@ -238,9 +339,12 @@ impl Shared {
     }
 
     async fn emergency_stop(&self, actor: Actor) -> EmergencyStopReport {
-        // Revoke first: after this point no new agent mutation is accepted.
-        // Then termination through the backend handler, outside the queue and
-        // outside the supervisor thread.
+        // Revoke first: after this point no new agent mutation is accepted
+        // (session gates closed, pending requests denied, non-UI connections
+        // and credentials revoked). Then termination through the backend
+        // handler, outside the queue and outside the supervisor thread.
+        // The Emergency Stop kills every VM itself: no stop per session.
+        self.close_all_agent_sessions("emergency_stop", TerminationCause::EmergencyStop, false);
         let revoked = self.revoke_non_ui();
         // Console tickets: no new display connection, live ones closed.
         let consoles = self.display.revoke_all();
@@ -276,6 +380,8 @@ impl Shared {
             return;
         }
         let policy = *lock(&self.parent_loss_policy);
+        // ROADMAP 7.3: UI lost → revocation and stop of the sessions' VMs.
+        self.close_all_agent_sessions("ui_lost", TerminationCause::UiClosed, true);
         self.revoke_non_ui();
         let (done_tx, done_rx) = oneshot::channel();
         if self.send_cmd(Command::ParentLost {
@@ -322,6 +428,7 @@ impl Shared {
 pub struct ServiceHandle {
     shared: Arc<Shared>,
     endpoint: String,
+    emergency_endpoint: String,
     stopped: watch::Receiver<bool>,
 }
 
@@ -337,6 +444,16 @@ impl ServiceHandle {
     /// IPC endpoint (not secret).
     pub fn endpoint(&self) -> &str {
         &self.endpoint
+    }
+
+    /// Emergency endpoint (not secret): accepts only the emergency verb.
+    pub fn emergency_endpoint(&self) -> &str {
+        &self.emergency_endpoint
+    }
+
+    /// Agent access switch (F4), for diagnostics and tests.
+    pub fn agent_access(&self) -> bool {
+        self.shared.agents.enabled()
     }
 
     /// Issues a pairing credential (no VM permissions).
@@ -401,6 +518,23 @@ pub async fn start(
     })
     .map_err(StartError::Endpoint)?;
     let endpoint = listener.endpoint().to_owned();
+    // Emergency endpoint (F4): same per-user ACL, one verb only, published
+    // in the catalog for `lightvm-service --emergency-stop`.
+    let emergency_listener = Listener::bind(&EndpointOptions {
+        runtime_dir: cfg.runtime_dir.clone(),
+        catalog_dir: cfg.catalog_dir.clone(),
+    })
+    .map_err(StartError::Endpoint)?;
+    let emergency_endpoint = emergency_listener.endpoint().to_owned();
+    let emergency_file = cfg.catalog_dir.join(EMERGENCY_ENDPOINT_FILE);
+    let emergency_file = match std::fs::write(&emergency_file, &emergency_endpoint) {
+        Ok(()) => Some(emergency_file),
+        Err(e) => {
+            crate::diag!("lightvm-service: emergency endpoint not published: {e}");
+            None
+        }
+    };
+    let agents = Arc::new(AgentRegistry::new(cfg.session_request_ttl));
 
     let mut creds = CredentialStore::new();
     let (_, ui_credential) = creds.issue(Role::Ui, None).map_err(StartError::Io)?;
@@ -438,6 +572,7 @@ pub async fn start(
         storage_jobs: 0,
         storage_cancel: Arc::default(),
         start_jobs: 0,
+        agents: agents.clone(),
     };
     // Published before any possible subscription: no client receives it late,
     // after later events (race with `subscribe`).
@@ -470,6 +605,8 @@ pub async fn start(
         parent_loss_policy,
         vms_with_process,
         display,
+        agents,
+        emergency_file,
     });
 
     // Accept loop.
@@ -507,6 +644,37 @@ pub async fn start(
         // `listener` is dropped here: on Unix the socket is removed.
     });
 
+    // Emergency accept loop: one verb, no credential (fail-safe effect),
+    // bounded concurrency, short timeout.
+    let em_shared = shared.clone();
+    let mut em_closing = shared.closing.subscribe();
+    let em_slots = Arc::new(Semaphore::new(4));
+    let emergency_task = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = flag_set(&mut em_closing) => break,
+                r = emergency_listener.accept() => match r {
+                    Ok(Accepted::Ok(stream, _peer)) => {
+                        if let Ok(permit) = em_slots.clone().try_acquire_owned() {
+                            let sh = em_shared.clone();
+                            tokio::spawn(async move {
+                                handle_emergency(sh, stream).await;
+                                drop(permit);
+                            });
+                        }
+                    }
+                    Ok(Accepted::Rejected(reason)) => {
+                        crate::diag!("lightvm-service: emergency peer rejected: {reason}");
+                    }
+                    Err(e) => {
+                        crate::diag!("lightvm-service: emergency accept error: {e}");
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                },
+            }
+        }
+    });
+
     // Shutdown driver.
     let drv = shared.clone();
     tokio::spawn(async move {
@@ -515,6 +683,10 @@ pub async fn start(
         // 1. No new connections; the connections receive `closing`.
         let _ = drv.closing.send(true);
         let _ = accept_task.await;
+        let _ = emergency_task.await;
+        if let Some(f) = &drv.emergency_file {
+            let _ = std::fs::remove_file(f);
+        }
         // 2. The supervisor finishes the current operation, rejects the queue and
         //    stops the backend.
         let (done_tx, done_rx) = oneshot::channel();
@@ -555,10 +727,41 @@ pub async fn start(
         ServiceHandle {
             shared,
             endpoint,
+            emergency_endpoint,
             stopped: stopped_rx,
         },
         ui_credential,
     ))
+}
+
+/// Emergency endpoint: reads one [`EmergencyCommand`] (small frame, short
+/// timeout) and runs the priority path; anything else closes the
+/// connection with a protocol error.
+async fn handle_emergency(shared: Arc<Shared>, stream: BoxedStream) {
+    let (mut rd, mut wr) = tokio::io::split(stream);
+    let max = shared.cfg.max_frame;
+    let first = tokio::time::timeout(
+        shared.cfg.handshake_timeout,
+        frame::read_frame::<_, EmergencyCommand>(&mut rd, 256),
+    )
+    .await;
+    let m = match first {
+        Ok(Ok(EmergencyCommand::EmergencyStop)) => {
+            crate::diag!("lightvm-service: Emergency Stop from the local emergency command");
+            let report = shared.emergency_stop(Actor::User).await;
+            ServerMessage::Response {
+                request_id: 0,
+                result: ResponseBody::EmergencyStop(report),
+            }
+        }
+        Ok(Err(e)) => frame_error_message(&e).unwrap_or(ServerMessage::Error {
+            request_id: None,
+            error: protocol_error(ProtocolErrorCode::MalformedMessage, "invalid message"),
+        }),
+        Err(_) => return,
+    };
+    let _ = send(&mut wr, &m, max).await;
+    let _ = tokio::io::AsyncWriteExt::shutdown(&mut wr).await;
 }
 
 async fn reject_busy(stream: BoxedStream, max: u32) {
@@ -801,7 +1004,14 @@ async fn handle_connection(shared: Arc<Shared>, stream: BoxedStream, peer: PeerI
         mut revoke_rx,
     } = auth;
     let mut closing_rx = shared.closing.subscribe();
-    let mut bucket = TokenBucket::new(shared.cfg.rate_limit);
+    // Agent connections: raised when the bound session is terminated.
+    let mut session_end =
+        (role == Role::Pairing).then(|| shared.agents.register_conn(connection_id));
+    let mut bucket = TokenBucket::new(if role == Role::Pairing {
+        shared.cfg.agent_rate_limit
+    } else {
+        shared.cfg.rate_limit
+    });
     let mut events: Option<broadcast::Receiver<ServiceEvent>> = None;
     // Replies of long requests served without blocking the connection (media
     // import: the reply arrives after the copy, events keep flowing).
@@ -811,6 +1021,7 @@ async fn handle_connection(shared: Arc<Shared>, stream: BoxedStream, peer: PeerI
         let flow = tokio::select! {
             biased;
             _ = flag_set(&mut revoke_rx) => Flow::Close(Some(CloseReason::Revoked)),
+            _ = session_ended(&mut session_end) => Flow::Close(Some(CloseReason::Revoked)),
             _ = flag_set(&mut closing_rx) => Flow::Close(Some(CloseReason::ServiceStopping)),
             Some(m) = late_rx.recv() => {
                 if send(&mut wr, &m, max).await.is_err() { Flow::Close(None) } else { Flow::Continue }
@@ -856,16 +1067,17 @@ async fn handle_connection(shared: Arc<Shared>, stream: BoxedStream, peer: PeerI
                         Request::ImportMedia { .. }
                             | Request::CreateBaseline { .. }
                             | Request::RestoreBaseline { .. }
+                            | Request::AwaitSession { .. }
                     ) {
-                        spawn_detached(&shared, role, connection_id, &revoke_rx, &late_tx, request_id, body);
+                        spawn_detached(&shared, role, connection_id, peer.pid, &revoke_rx, &late_tx, request_id, body);
                         Flow::Continue
-                    } else if let Some(request) = start_request(&body) {
-                        match submit_start_deferred(&shared, role, connection_id, &revoke_rx, &late_tx, request_id, request) {
+                    } else if let Some((request, caller, agent)) = start_request(&shared, role, connection_id, &body) {
+                        match submit_start_deferred(&shared, caller, agent, connection_id, &revoke_rx, &late_tx, request_id, request) {
                             Some(m) => if send(&mut wr, &m, max).await.is_err() { Flow::Close(None) } else { Flow::Continue },
                             None => Flow::Continue,
                         }
                     } else {
-                        let ctx = ReqCtx { shared: &shared, role, connection_id, revoke_rx: &mut revoke_rx };
+                        let ctx = ReqCtx { shared: &shared, role, connection_id, peer_pid: peer.pid, revoke_rx: &mut revoke_rx };
                         match dispatch(ctx, &mut events, body).await {
                             Dispatch::Reply(res) => {
                                 let m = match res {
@@ -913,7 +1125,31 @@ async fn handle_connection(shared: Arc<Shared>, stream: BoxedStream, peer: PeerI
     }
     // The console tickets do not outlive the connection that obtained them.
     shared.revoke_consoles_of(connection_id, Actor::System, TerminationCause::UiClosed);
+    // Agent connection lost: its pending request is withdrawn, its live
+    // session ends and its VM is stopped (ROADMAP 7.3, client loss).
+    if role == Role::Pairing {
+        let (withdrawn, live) = shared.agents.connection_closed(connection_id);
+        if let Some(id) = withdrawn {
+            shared.report_closed(vec![(id, SessionRequestOutcome::Withdrawn)]);
+        }
+        if let Some(session_id) = live {
+            shared.send_cmd(Command::EndSessions {
+                ids: vec![session_id],
+                cause: TerminationCause::ClientLost,
+                stop: true,
+            });
+        }
+    }
     let _ = tokio::io::AsyncWriteExt::shutdown(&mut wr).await;
+}
+
+/// Waits for the end of the session bound to an agent connection (never for
+/// other connections).
+async fn session_ended(rx: &mut Option<watch::Receiver<bool>>) {
+    match rx {
+        Some(rx) => flag_set(rx).await,
+        None => std::future::pending().await,
+    }
 }
 
 async fn recv_event(
@@ -929,14 +1165,17 @@ struct ReqCtx<'a> {
     shared: &'a Arc<Shared>,
     role: Role,
     connection_id: u64,
+    peer_pid: Option<u32>,
     revoke_rx: &'a mut watch::Receiver<bool>,
 }
 
 /// Serves a request in its own task; the reply goes through `late`.
+#[allow(clippy::too_many_arguments)]
 fn spawn_detached(
     shared: &Arc<Shared>,
     role: Role,
     connection_id: u64,
+    peer_pid: Option<u32>,
     revoke_rx: &watch::Receiver<bool>,
     late: &tokio::sync::mpsc::Sender<ServerMessage>,
     request_id: RequestId,
@@ -951,6 +1190,7 @@ fn spawn_detached(
             shared: &shared,
             role,
             connection_id,
+            peer_pid,
             revoke_rx: &mut revoke_rx,
         };
         let m = match dispatch(ctx, &mut no_events, body).await {
@@ -973,7 +1213,22 @@ enum Dispatch {
 }
 
 fn requires_ui(req: &Request) -> bool {
-    !matches!(req, Request::Ping | Request::GetCapabilities)
+    !matches!(
+        req,
+        Request::Ping
+            | Request::GetCapabilities
+            | Request::RequestSession { .. }
+            | Request::AwaitSession { .. }
+            | Request::Agent { .. }
+    )
+}
+
+/// Requests of agents only (`pairing` role).
+fn requires_pairing(req: &Request) -> bool {
+    matches!(
+        req,
+        Request::RequestSession { .. } | Request::AwaitSession { .. } | Request::Agent { .. }
+    )
 }
 
 /// Caller towards the core: the UI is the local user; pairing has no VM
@@ -992,12 +1247,16 @@ async fn dispatch(
 ) -> Dispatch {
     let shared = ctx.shared;
     // First check: on receipt.
-    if requires_ui(&req) && ctx.role != Role::Ui {
+    if (requires_ui(&req) && ctx.role != Role::Ui)
+        || (requires_pairing(&req) && ctx.role != Role::Pairing)
+    {
         return Dispatch::Reply(Err(op_error(
             ErrorCode::PermissionDenied,
             format!("operation {} not allowed for the role", req.name()),
         )));
     }
+    let mut caller = caller_for(ctx.role);
+    let mut agent_gate = None;
     let sup_req = match req {
         Request::Ping => SupervisorRequest::Ping,
         Request::GetCapabilities => SupervisorRequest::GetCapabilities,
@@ -1096,8 +1355,138 @@ async fn dispatch(
             });
         }
         Request::Shutdown => return Dispatch::ReplyThenShutdown(ResponseBody::ShuttingDown),
+        Request::Agent { session, call } => {
+            let SessionAuth { session_id, token } = session;
+            let mutation = call.is_mutation();
+            // Gate on receipt: bound to this connection, live, not paused
+            // for a mutation.
+            if let Err(e) = shared.agents.check(ctx.connection_id, session_id, mutation) {
+                return Dispatch::Reply(Err(ReplyError::Operational(e)));
+            }
+            caller = Some(Caller::Agent {
+                session_id,
+                token: Some(token),
+            });
+            agent_gate = Some((session_id, mutation));
+            SupervisorRequest::Agent(Box::new(call))
+        }
+        Request::RequestSession {
+            client_name,
+            purpose,
+            requested_vms,
+            requested_capabilities,
+        } => {
+            return Dispatch::Reply(request_session(
+                shared,
+                ctx.connection_id,
+                ctx.peer_pid,
+                &client_name,
+                &purpose,
+                requested_vms,
+                requested_capabilities,
+            ));
+        }
+        Request::AwaitSession { request_id } => {
+            return Dispatch::Reply(await_session(shared, ctx.connection_id, request_id).await);
+        }
+        Request::GetAgentAccess => {
+            return Dispatch::Reply(Ok(ResponseBody::AgentAccess {
+                enabled: shared.agents.enabled(),
+            }));
+        }
+        Request::SetAgentAccess { enabled } => {
+            return Dispatch::Reply(set_agent_access(shared, ctx.connection_id, enabled).await);
+        }
+        Request::ListSessionRequests => {
+            let (requests, closed) = shared.agents.list();
+            shared.report_closed(closed);
+            return Dispatch::Reply(Ok(ResponseBody::SessionRequests { requests }));
+        }
+        Request::ApproveSession {
+            request_id,
+            approval,
+        } => {
+            return Dispatch::Reply(
+                approve_session(shared, ctx.connection_id, request_id, approval).await,
+            );
+        }
+        Request::DenySession { request_id } => {
+            return Dispatch::Reply(if shared.agents.deny(request_id, "denied") {
+                shared.report_closed(vec![(request_id, SessionRequestOutcome::Denied)]);
+                Ok(ResponseBody::SessionDenied { request_id })
+            } else {
+                Err(op_error(ErrorCode::NotFound, "session request not found"))
+            });
+        }
+        Request::ListSessions => SupervisorRequest::ListSessions,
+        Request::PauseSession { session_id } => {
+            // Gate first (priority): agent mutations refused from now on;
+            // the core follows (sync before its next admission).
+            if !shared.agents.pause(session_id) {
+                return Dispatch::Reply(Err(op_error(
+                    ErrorCode::StateConflict,
+                    "session not active",
+                )));
+            }
+            return Dispatch::Reply(
+                supervisor_call(
+                    shared,
+                    ctx.connection_id,
+                    SupervisorRequest::PauseSession(session_id),
+                )
+                .await,
+            );
+        }
+        Request::ResumeSession { session_id } => {
+            let r = supervisor_call(
+                shared,
+                ctx.connection_id,
+                SupervisorRequest::ResumeSession(session_id),
+            )
+            .await;
+            if r.is_ok() {
+                shared.agents.resume(session_id);
+            }
+            return Dispatch::Reply(r);
+        }
+        Request::RevokeSession { session_id } => {
+            // Point of revocation: the gate closes and the agent connection
+            // closes before the core records the revocation.
+            if let Some(conn) = shared.agents.revoke(session_id) {
+                shared.close_agent_connection(conn);
+            }
+            return Dispatch::Reply(
+                supervisor_call(
+                    shared,
+                    ctx.connection_id,
+                    SupervisorRequest::EndSession {
+                        session_id,
+                        cause: TerminationCause::Revoked,
+                        stop: false,
+                    },
+                )
+                .await,
+            );
+        }
+        Request::SetInputOwner { vm_id, owner } => {
+            return Dispatch::Reply(
+                supervisor_call(
+                    shared,
+                    ctx.connection_id,
+                    SupervisorRequest::SetInputOwner { vm_id, owner },
+                )
+                .await,
+            );
+        }
     };
-    let reply_rx = match enqueue(shared, ctx.role, ctx.connection_id, ctx.revoke_rx, sup_req) {
+    let reply_rx = match enqueue(
+        shared,
+        caller,
+        agent_gate,
+        ctx.connection_id,
+        ctx.revoke_rx,
+        sup_req,
+    ) {
         Ok(rx) => rx,
         Err(e) => return Dispatch::Reply(Err(e)),
     };
@@ -1113,14 +1502,311 @@ async fn dispatch(
 
 type ReplyRx = oneshot::Receiver<Result<ResponseBody, ReplyError>>;
 
-/// The VM request of a `submit_vm(start)`.
-fn start_request(body: &Request) -> Option<lightvm_proto::VmRequest> {
+/// Agent session of a request and whether it mutates a VM (gate check).
+type AgentGate = Option<(SessionId, bool)>;
+
+/// Caller, agent gate and VM request of a start (`submit_vm(start)` of the
+/// UI, or `agent { submit(start) }` of an agent session whose gate is
+/// open), served with a deferred reply.
+fn start_request(
+    shared: &Arc<Shared>,
+    role: Role,
+    connection_id: u64,
+    body: &Request,
+) -> Option<(lightvm_proto::VmRequest, Option<Caller>, AgentGate)> {
     match body {
         Request::SubmitVm { request } if request.action == lightvm_proto::VmAction::Start => {
-            Some(request.clone())
+            Some((request.clone(), caller_for(role), None))
+        }
+        Request::Agent {
+            session,
+            call: AgentCall::Submit { request },
+        } if request.action == lightvm_proto::VmAction::Start
+            && role == Role::Pairing
+            && shared
+                .agents
+                .check(connection_id, session.session_id, true)
+                .is_ok() =>
+        {
+            Some((
+                request.clone(),
+                Some(Caller::Agent {
+                    session_id: session.session_id,
+                    token: Some(session.token.clone()),
+                }),
+                Some((session.session_id, true)),
+            ))
         }
         _ => None,
     }
+}
+
+/// Session control of the UI (approval, pause, resume, revocation, input
+/// owner, agent access off) sent to the supervisor **without a queue slot**:
+/// a full queue (agents flooding) never prevents the user from pausing,
+/// revoking or taking the input back. The supervisor serves commands in
+/// order; each agent connection has at most one request ahead of it.
+async fn supervisor_call(
+    shared: &Arc<Shared>,
+    _connection_id: u64,
+    req: SupervisorRequest,
+) -> Result<ResponseBody, ReplyError> {
+    let (reply, rx) = oneshot::channel();
+    let sent = shared.send_cmd(Command::Control {
+        req,
+        epoch: shared.emergency_epoch.load(Ordering::SeqCst),
+        reply,
+    });
+    if !sent {
+        return Err(op_error(ErrorCode::StateConflict, "service shutting down"));
+    }
+    rx.await
+        .unwrap_or_else(|_| Err(op_error(ErrorCode::StateConflict, "service shutting down")))
+}
+
+/// `request_session` (agent): new pending request with its verification code.
+fn request_session(
+    shared: &Arc<Shared>,
+    connection_id: u64,
+    peer_pid: Option<u32>,
+    client_name: &str,
+    purpose: &str,
+    requested_vms: Vec<lightvm_proto::VmId>,
+    requested_capabilities: lightvm_proto::CapabilitySet,
+) -> Result<ResponseBody, ReplyError> {
+    match shared.agents.open_request(
+        connection_id,
+        peer_pid,
+        client_name,
+        purpose,
+        requested_vms,
+        requested_capabilities,
+    ) {
+        Ok((info, closed)) => {
+            shared.report_closed(closed);
+            shared.audit(
+                Actor::System,
+                AuditAction::SessionRequest,
+                AuditOutcome::Accepted,
+                None,
+                None,
+            );
+            let reply = ResponseBody::SessionRequested {
+                request_id: info.request_id,
+                verification_code: info.verification_code.clone(),
+                expires_in_s: shared.cfg.session_request_ttl.as_secs(),
+            };
+            let _ = shared
+                .events
+                .send(ServiceEvent::SessionRequest { request: info });
+            Ok(reply)
+        }
+        Err(e) => {
+            shared.audit(
+                Actor::System,
+                AuditAction::SessionRequest,
+                AuditOutcome::Denied,
+                None,
+                Some(e.code),
+            );
+            Err(ReplyError::Operational(e))
+        }
+    }
+}
+
+/// `await_session` (agent): the user's decision, or the expiry.
+async fn await_session(
+    shared: &Arc<Shared>,
+    connection_id: u64,
+    request_id: SessionRequestId,
+) -> Result<ResponseBody, ReplyError> {
+    match shared
+        .agents
+        .await_decision(connection_id, request_id)
+        .map_err(ReplyError::Operational)?
+    {
+        AwaitDecision::Ready(d) => *d,
+        AwaitDecision::Wait(rx, left) => match tokio::time::timeout(left, rx).await {
+            Ok(Ok(d)) => d,
+            Ok(Err(_)) => Err(op_error(ErrorCode::StateConflict, "service shutting down")),
+            Err(_) => {
+                // Expired: purged (event and audit) by the listing.
+                let (_, closed) = shared.agents.list();
+                shared.report_closed(closed);
+                Err(crate::agents::expired())
+            }
+        },
+    }
+}
+
+/// Validation of an approval (ROADMAP 7.3: the user authorizes a bounded set
+/// of operations for a defined duration).
+fn validate_approval(a: &SessionApproval) -> Result<(lightvm_proto::Quotas, i64), PublicError> {
+    if !(MIN_SESSION_DURATION_S..=MAX_SESSION_DURATION_S).contains(&a.duration_s) {
+        return Err(PublicError::invalid_argument(format!(
+            "duration_s outside {MIN_SESSION_DURATION_S}..={MAX_SESSION_DURATION_S}"
+        )));
+    }
+    if a.capabilities.is_empty() {
+        return Err(PublicError::invalid_argument("no capability granted"));
+    }
+    let lease = a.lease_ms.map_or(LEASE_MAX_MILLIS, i64::from);
+    if !(i64::from(MIN_LEASE_MS)..=LEASE_MAX_MILLIS).contains(&lease) {
+        return Err(PublicError::invalid_argument(format!(
+            "lease_ms outside {MIN_LEASE_MS}..={LEASE_MAX_MILLIS}"
+        )));
+    }
+    let mut quotas = a.quotas.unwrap_or(AGENT_DEFAULT_QUOTAS);
+    quotas.max_screenshot_bytes = quotas.max_screenshot_bytes.min(AGENT_MAX_SCREENSHOT_BYTES);
+    Ok((quotas, lease))
+}
+
+/// `approve_session` (UI): the core creates the session, the service binds it
+/// to the agent connection and delivers the grant to the waiting agent.
+async fn approve_session(
+    shared: &Arc<Shared>,
+    connection_id: u64,
+    request_id: SessionRequestId,
+    approval: SessionApproval,
+) -> Result<ResponseBody, ReplyError> {
+    let (quotas, lease_ms) = validate_approval(&approval).map_err(ReplyError::Operational)?;
+    let (info, closed) = shared
+        .agents
+        .begin_approval(request_id)
+        .map_err(ReplyError::Operational)?;
+    shared.report_closed(closed);
+    let mut b = [0u8; 32];
+    if getrandom::fill(&mut b).is_err() {
+        shared.agents.abort_approval(request_id);
+        return Err(op_error(
+            ErrorCode::ResourceLimit,
+            "random generator not available",
+        ));
+    }
+    let now = UtcTimestamp::now();
+    let Some(expires_at) = now.checked_add_millis(i64::from(approval.duration_s) * 1000) else {
+        shared.agents.abort_approval(request_id);
+        return Err(op_error(ErrorCode::InvalidArgument, "expiry out of range"));
+    };
+    let new = NewSession {
+        vm_id: approval.vm_id,
+        capabilities: approval.capabilities.clone(),
+        quotas,
+        expires_at,
+        lease_ms,
+        give_input: approval.give_input,
+        token: SessionToken::from_bytes(b),
+        connection_id: info.connection_id,
+        client_name: info.client_name.clone(),
+        purpose: info.purpose.clone(),
+    };
+    b.fill(0);
+    let r = supervisor_call(
+        shared,
+        connection_id,
+        SupervisorRequest::CreateSession(Box::new(new)),
+    )
+    .await;
+    let granted = match r {
+        Ok(g @ ResponseBody::SessionGranted { .. }) => g,
+        Ok(_) => {
+            shared.agents.abort_approval(request_id);
+            return Err(op_error(ErrorCode::InfrastructureError, "unexpected reply"));
+        }
+        Err(e) => {
+            shared.agents.abort_approval(request_id);
+            return Err(e);
+        }
+    };
+    let ResponseBody::SessionGranted {
+        session_id,
+        ref grant,
+        ref lease,
+        ..
+    } = granted
+    else {
+        return Err(op_error(ErrorCode::InfrastructureError, "unexpected reply"));
+    };
+    let session = SessionInfo {
+        session_id,
+        vm_id: approval.vm_id,
+        connection_id: Some(info.connection_id),
+        client_name: info.client_name.clone(),
+        purpose: info.purpose.clone(),
+        state: SessionState::Active,
+        termination: None,
+        capabilities: grant.capabilities.clone(),
+        quotas: grant.quotas,
+        usage: SessionUsage::default(),
+        created_at: lease.renewed_at,
+        expires_at: grant.expires_at,
+        lease_expires_at: lease.expires_at,
+        input_owner: approval.give_input && grant.capabilities.contains(&Capability::VmInput),
+    };
+    if !shared
+        .agents
+        .complete_approval(request_id, session_id, granted.clone())
+    {
+        // The agent connection is gone: the session it never received ends.
+        shared.send_cmd(Command::EndSessions {
+            ids: vec![session_id],
+            cause: TerminationCause::ClientLost,
+            stop: false,
+        });
+        return Err(op_error(
+            ErrorCode::StateConflict,
+            "the agent connection closed before the approval",
+        ));
+    }
+    shared.audit(
+        Actor::User,
+        AuditAction::SessionRequest,
+        AuditOutcome::Succeeded,
+        Some(session_id),
+        None,
+    );
+    let _ = shared.events.send(ServiceEvent::SessionRequestClosed {
+        request_id,
+        outcome: SessionRequestOutcome::Approved,
+    });
+    Ok(ResponseBody::Session { session })
+}
+
+/// `set_agent_access` (UI). Turning it off denies the pending requests and
+/// revokes every live session (their connections close; VMs keep running).
+async fn set_agent_access(
+    shared: &Arc<Shared>,
+    connection_id: u64,
+    enabled: bool,
+) -> Result<ResponseBody, ReplyError> {
+    let was = shared.agents.set_enabled(enabled);
+    if was != enabled {
+        shared.audit(
+            Actor::User,
+            if enabled {
+                AuditAction::AgentAccessEnable
+            } else {
+                AuditAction::AgentAccessDisable
+            },
+            AuditOutcome::Succeeded,
+            None,
+            None,
+        );
+        let _ = shared.events.send(ServiceEvent::AgentAccess { enabled });
+    }
+    if !enabled {
+        shared.close_all_agent_sessions("agent_access_disabled", TerminationCause::Revoked, false);
+        supervisor_call(
+            shared,
+            connection_id,
+            SupervisorRequest::EndAllSessions {
+                cause: TerminationCause::Revoked,
+                stop: false,
+            },
+        )
+        .await?;
+    }
+    Ok(ResponseBody::AgentAccess { enabled })
 }
 
 /// Queues a request for the supervisor thread (queue slot, revocation and
@@ -1128,7 +1814,8 @@ fn start_request(body: &Request) -> Option<lightvm_proto::VmRequest> {
 /// connection reach the supervisor in the order they were received.
 fn enqueue(
     shared: &Arc<Shared>,
-    role: Role,
+    caller: Option<Caller>,
+    agent: Option<(SessionId, bool)>,
     connection_id: u64,
     revoke_rx: &watch::Receiver<bool>,
     req: SupervisorRequest,
@@ -1139,10 +1826,11 @@ fn enqueue(
     let (reply_tx, reply_rx) = oneshot::channel();
     let sent = shared.send_cmd(Command::Request {
         req,
-        caller: caller_for(role),
+        caller,
         connection_id,
         revoked: revoke_rx.clone(),
         epoch: shared.emergency_epoch.load(Ordering::SeqCst),
+        agent,
         reply: reply_tx,
         _permit: permit,
     });
@@ -1157,16 +1845,18 @@ fn enqueue(
 /// start's file checks (a minute for a large ISO) and the connection must
 /// keep serving the other requests and the events meanwhile. Returns the
 /// message to send at once if the request was not queued.
+#[allow(clippy::too_many_arguments)]
 fn submit_start_deferred(
     shared: &Arc<Shared>,
-    role: Role,
+    caller: Option<Caller>,
+    agent: Option<(SessionId, bool)>,
     connection_id: u64,
     revoke_rx: &watch::Receiver<bool>,
     late: &tokio::sync::mpsc::Sender<ServerMessage>,
     request_id: RequestId,
     request: lightvm_proto::VmRequest,
 ) -> Option<ServerMessage> {
-    if role != Role::Ui {
+    let Some(caller) = caller else {
         return Some(ServerMessage::Error {
             request_id: Some(request_id),
             error: op_error(
@@ -1174,14 +1864,13 @@ fn submit_start_deferred(
                 "operation submit_vm not allowed for the role",
             ),
         });
-    }
-    let rx = match enqueue(
-        shared,
-        role,
-        connection_id,
-        revoke_rx,
-        SupervisorRequest::SubmitVm(Box::new(request)),
-    ) {
+    };
+    let req = if agent.is_some() {
+        SupervisorRequest::Agent(Box::new(AgentCall::Submit { request }))
+    } else {
+        SupervisorRequest::SubmitVm(Box::new(request))
+    };
+    let rx = match enqueue(shared, Some(caller), agent, connection_id, revoke_rx, req) {
         Ok(rx) => rx,
         Err(error) => {
             return Some(ServerMessage::Error {

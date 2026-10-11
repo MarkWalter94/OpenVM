@@ -488,6 +488,21 @@ impl Harness {
             .core
             .create_session(spec, SessionToken::from_bytes([token; 32]))
             .unwrap();
+        // Explicit handover of the input (F4): a session with `vm.input`
+        // receives the control of its VMs, as the user would give it.
+        if caps.contains(&Capability::VmInput) {
+            for vm in vms {
+                self.core
+                    .set_input_owner(
+                        Actor::User,
+                        *vm,
+                        ipc::InputOwner::Agent {
+                            session_id: grant.session_id,
+                        },
+                    )
+                    .unwrap();
+            }
+        }
         (
             grant.session_id,
             Caller::Agent {

@@ -28,18 +28,32 @@
 //! the processes with the backend handler ([`crate::supervisor::EmergencyStop`]);
 //! afterwards, [`VmEngine::after_emergency_stop`] records the stop in the core
 //! (session revocation, queue discarded, audit, observed process end).
+//!
+//! F4: agent sessions. [`VmEngine::create_session`] issues the grant approved
+//! in the app; [`VmEngine::agent_call`] serves the calls of a session through
+//! the core (two checks, quotas, audit); screenshots of a session keep their
+//! PNG here and are read back in chunks; the input owner of each VM lives in
+//! the core and every change releases the pressed keys
+//! ([`BackendPort::release_input`]); [`VmEngine::tick_sessions`] terminates
+//! expired sessions and Emergency-Stops their VMs with OS primitives
+//! ([`VmBackend::force_stop`]).
 
 use std::any::Any;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use lightvm_proto::ipc::{BaselineSummary, StorageOperation, VmBaselines, VmSummary};
+use lightvm_proto::ipc::{
+    AgentCall, AgentVmView, BaselineSummary, InputOwner, ResponseBody, SCREENSHOT_CHUNK_BYTES,
+    SessionInfo, StorageOperation, VmBaselines, VmSummary,
+};
 use lightvm_proto::{
-    Actor, Admission, BackendObservation, BaselineId, Caller, DisplayGeometry, ErrorCode,
-    HostCapacity, InputEvent, Label, MediaEntry, MediaKind, MediaRecord, OperationId,
-    OperationKind, OperationRecord, PolicyLayer, PublicError, ResourceLimits, RunId,
-    TerminationCause, VmAction, VmConfig, VmId, VmRecord, VmRequest, VmState,
+    Actor, Admission, AuditAction, AuditOutcome, BackendObservation, BaselineId, Caller,
+    DisplayGeometry, ErrorCode, Grant, HostCapacity, InputEvent, Label, Lease, MediaEntry,
+    MediaKind, MediaRecord, OperationId, OperationKind, OperationRecord, OperationStatus,
+    PolicyLayer, PublicError, ResourceLimits, RevocationReport, RunId, Screenshot, SessionId,
+    SessionState, SessionToken, TerminationCause, VmAction, VmConfig, VmId, VmRecord, VmRequest,
+    VmState,
 };
 use vm_core::ports::{AuditSink, CatalogStore, IdGenerator, VmBackend};
 use vm_core::{Core, CoreConfig, DispatchOutcome, VmStatus};
@@ -200,6 +214,134 @@ pub trait VmEngine: Send + 'static {
     ) -> Result<OperationRecord, PublicError> {
         Err(PublicError::unsupported("deferred start not available"))
     }
+
+    // ----- agent sessions (F4) ---------------------------------------------
+
+    /// Creates the session approved by the user (core grant and lease) and,
+    /// with `give_input`, hands it the input of its VM.
+    fn create_session(&mut self, _new: NewSession) -> Result<CreatedSession, PublicError> {
+        Err(PublicError::unsupported("agent sessions not available"))
+    }
+    /// Sessions for the UI: live first, then the most recent terminated.
+    fn list_sessions(&mut self) -> Vec<SessionInfo> {
+        Vec::new()
+    }
+    /// Gate changes made outside the supervisor thread (F4): applied to the
+    /// core before every admission and forwarding.
+    fn attach_gate(&mut self, _gate: Arc<dyn SessionGate>) {}
+    /// Agent pause (core): mutations refused, observation allowed.
+    fn pause_session(&mut self, _id: SessionId) -> Result<SessionInfo, PublicError> {
+        Err(PublicError::unsupported("agent sessions not available"))
+    }
+    /// Resume after a pause.
+    fn resume_session(&mut self, _id: SessionId) -> Result<SessionInfo, PublicError> {
+        Err(PublicError::unsupported("agent sessions not available"))
+    }
+    /// Terminates a session with `cause`; with `stop` its running VM is
+    /// Emergency-Stopped (expiry, client loss, UI loss: ROADMAP 7.3).
+    fn end_session(
+        &mut self,
+        _id: SessionId,
+        _cause: TerminationCause,
+        _stop: bool,
+    ) -> Result<RevocationReport, PublicError> {
+        Err(PublicError::unsupported("agent sessions not available"))
+    }
+    /// Terminates every live session.
+    fn end_all_sessions(&mut self, _cause: TerminationCause, _stop: bool) {}
+    /// Grant and lease expiries: expired sessions end and their VMs are
+    /// Emergency-Stopped.
+    fn tick_sessions(&mut self) {}
+    /// Input owner of a VM (decided by the user).
+    fn set_input_owner(&mut self, _vm_id: VmId, _owner: InputOwner) -> Result<(), PublicError> {
+        Err(PublicError::unsupported("agent sessions not available"))
+    }
+    /// Call of an agent session (the caller carries session and token).
+    fn agent_call(
+        &mut self,
+        _caller: &Caller,
+        _call: AgentCall,
+    ) -> Result<ResponseBody, PublicError> {
+        Err(PublicError::unsupported("agent sessions not available"))
+    }
+    /// Session state changes since the last call (`session_changed` events
+    /// and the service gate).
+    fn session_changes(&mut self) -> Vec<(SessionId, SessionState, Option<TerminationCause>)> {
+        Vec::new()
+    }
+    /// Input owner changes since the last call (`input_owner` events).
+    fn input_owner_changes(&mut self) -> Vec<(VmId, InputOwner)> {
+        Vec::new()
+    }
+    /// Audit of a session lifecycle step decided by the service.
+    fn record_event(
+        &mut self,
+        _actor: Actor,
+        _action: AuditAction,
+        _outcome: AuditOutcome,
+        _session_id: Option<SessionId>,
+        _error: Option<ErrorCode>,
+    ) {
+    }
+}
+
+/// Change of an agent session decided by the service on its priority path
+/// (pause, revocation, Emergency Stop, client or UI loss), for the core.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateChange {
+    /// Agent pause.
+    Pause,
+    /// Termination with the cause; `stop` = Emergency Stop of its VM.
+    Terminate {
+        /// Cause.
+        cause: TerminationCause,
+        /// Stop the running VM of the session.
+        stop: bool,
+    },
+}
+
+/// Source of the gate changes made outside the supervisor thread: the
+/// engine applies them to the core before every admission and every
+/// forwarding ([`VmEngine::attach_gate`]).
+pub trait SessionGate: Send + Sync + 'static {
+    /// Changes since the last call, in order.
+    fn take_changes(&self) -> Vec<(SessionId, GateChange)>;
+}
+
+/// Session approved in the app, for [`VmEngine::create_session`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewSession {
+    /// The single VM of the grant.
+    pub vm_id: VmId,
+    /// Granted capabilities.
+    pub capabilities: lightvm_proto::CapabilitySet,
+    /// Granted quotas.
+    pub quotas: lightvm_proto::Quotas,
+    /// Absolute expiry of the grant.
+    pub expires_at: lightvm_proto::UtcTimestamp,
+    /// Lease duration in ms.
+    pub lease_ms: i64,
+    /// Hand the input of the VM to the session at once.
+    pub give_input: bool,
+    /// Session secret generated by the service (never logged).
+    pub token: SessionToken,
+    /// Agent connection.
+    pub connection_id: u64,
+    /// Client name declared by the agent.
+    pub client_name: String,
+    /// Purpose declared by the agent.
+    pub purpose: String,
+}
+
+/// Outcome of [`VmEngine::create_session`].
+#[derive(Debug, Clone)]
+pub struct CreatedSession {
+    /// Session for the UI.
+    pub info: SessionInfo,
+    /// Grant for the agent.
+    pub grant: Grant,
+    /// First lease.
+    pub lease: Lease,
 }
 
 /// Cancellation check of a long storage operation, polled by its work.
@@ -495,6 +637,11 @@ pub trait BackendPort: VmBackend + Send + 'static {
     }
     /// Releases the keys and buttons still pressed on the run.
     fn release_input(&mut self, _vm_id: VmId, _run_id: RunId) {}
+    /// Image bytes of the last screenshot of the run (F4: agent screenshots),
+    /// with its metadata; taken once.
+    fn take_screenshot(&mut self, _vm_id: VmId, _run_id: RunId) -> Option<(Screenshot, Vec<u8>)> {
+        None
+    }
     /// Disk image tool for baselines (F3), if the backend has one.
     fn image_tool(&self) -> Option<Arc<dyn ImageTool>> {
         None
@@ -596,7 +743,47 @@ where
     pending_starts: BTreeMap<VmId, PendingStart>,
     /// Start checks begun and not yet taken by the supervisor.
     start_jobs: Vec<StartJob>,
+    /// Service-side data of the agent sessions (F4).
+    session_meta: BTreeMap<SessionId, SessionMeta>,
+    /// Last screenshot of each agent session, read back in chunks.
+    shots: BTreeMap<SessionId, StoredShot>,
+    /// Session states at the last [`VmEngine::session_changes`].
+    last_sessions: BTreeMap<SessionId, (SessionState, Option<TerminationCause>)>,
+    /// Input owners at the last [`VmEngine::input_owner_changes`].
+    last_owners: BTreeMap<VmId, InputOwner>,
+    /// Gate of the service (pause and revocation decided outside).
+    gate: Option<Arc<dyn SessionGate>>,
+    /// Reports of sessions terminated through the gate, for the reply of
+    /// the core revocation that follows.
+    gate_reports: BTreeMap<SessionId, RevocationReport>,
 }
+
+/// Service-side data of an agent session.
+#[derive(Debug, Clone)]
+struct SessionMeta {
+    vm_id: VmId,
+    connection_id: u64,
+    client_name: String,
+    purpose: String,
+    lease_ms: i64,
+}
+
+/// Screenshot of an agent session kept for its chunked read.
+#[derive(Debug)]
+struct StoredShot {
+    operation: OperationRecord,
+    meta: Screenshot,
+    png: Vec<u8>,
+}
+
+/// SHA-256 of a byte buffer.
+fn sha256(bytes: &[u8]) -> lightvm_proto::Sha256Digest {
+    use sha2::Digest as _;
+    lightvm_proto::Sha256Digest::from_bytes(sha2::Sha256::digest(bytes).into())
+}
+
+/// Terminated sessions listed for the UI after the live ones.
+const TERMINATED_SESSIONS_LISTED: usize = 16;
 
 /// Start forwarded by the core whose file checks are running.
 struct PendingStart {
@@ -655,6 +842,12 @@ where
             offload: false,
             pending_starts: BTreeMap::new(),
             start_jobs: Vec::new(),
+            session_meta: BTreeMap::new(),
+            shots: BTreeMap::new(),
+            last_sessions: BTreeMap::new(),
+            last_owners: BTreeMap::new(),
+            gate: None,
+            gate_reports: BTreeMap::new(),
         };
         let _ = e.state_changes();
         Ok(e)
@@ -665,7 +858,41 @@ where
         &self.core
     }
 
+    /// Applies to the core the pauses and terminations decided by the
+    /// service gate since the last call (priority path, ROADMAP 7.3): from
+    /// here on the core's own checks refuse the session.
+    fn sync_gates(&mut self) {
+        let Some(gate) = self.gate.clone() else {
+            return;
+        };
+        let changes = gate.take_changes();
+        if changes.is_empty() {
+            return;
+        }
+        let mut ended = Vec::new();
+        for (id, change) in changes {
+            match change {
+                GateChange::Pause => {
+                    let _ = self.core.pause_session(id);
+                }
+                GateChange::Terminate { cause, stop } => {
+                    let r = if stop {
+                        self.core.terminate_session_with_stop(id, cause)
+                    } else {
+                        self.core.revoke_session(id, cause)
+                    };
+                    if let Ok(t) = r {
+                        self.gate_reports.insert(id, t.report.clone());
+                        ended.push(t);
+                    }
+                }
+            }
+        }
+        self.execute_stops(&ended);
+    }
+
     fn apply_observations(&mut self) {
+        self.sync_gates();
         self.record_exits();
         for (vm_id, run_id, result) in self.backend.finished_shutdowns() {
             if self.pending_stops.get(&vm_id).map(|(_, r)| *r) == Some(run_id)
@@ -911,12 +1138,162 @@ where
         }
     }
 
+    /// Releases the pressed keys of the runs whose input owner changed
+    /// (core decision, ROADMAP 6.4).
+    fn flush_input_releases(&mut self) {
+        for (vm_id, run_id) in self.core.take_input_releases() {
+            self.backend.release_input(vm_id, run_id);
+        }
+    }
+
+    /// Kills the runs planned by the core for terminated sessions (expiry,
+    /// client loss, UI loss) with OS primitives, outside the queue, and
+    /// records the observed end.
+    fn execute_stops(&mut self, terminations: &[vm_core::SessionTermination]) {
+        for t in terminations {
+            for plan in &t.emergency_stops {
+                self.cancel_pending_start(plan.vm_id);
+                if let Some(run) = plan.run_id {
+                    let killed = self.backend.force_stop(plan.vm_id, run);
+                    if let Err(e) = &killed {
+                        crate::diag!(
+                            "lightvm-service: stop of a terminated session's VM: {}",
+                            e.message
+                        );
+                    }
+                    let _ = self
+                        .core
+                        .finish_emergency_stop(Actor::System, plan.vm_id, run, killed);
+                }
+            }
+            self.shots.remove(&t.session_id);
+        }
+        if !terminations.is_empty() {
+            self.flush_input_releases();
+            self.apply_observations();
+        }
+    }
+
+    /// Session for the UI.
+    fn session_info(&self, id: SessionId) -> Option<SessionInfo> {
+        let s = self.core.sessions().get(id)?;
+        let meta = self.session_meta.get(&id);
+        let vm_id = meta
+            .map(|m| m.vm_id)
+            .or_else(|| s.grant.vm_allowlist.iter().next().copied())?;
+        let live = s.state != SessionState::Terminated;
+        Some(SessionInfo {
+            session_id: id,
+            vm_id,
+            connection_id: meta.filter(|_| live).map(|m| m.connection_id),
+            client_name: meta.map(|m| m.client_name.clone()).unwrap_or_default(),
+            purpose: meta.map(|m| m.purpose.clone()).unwrap_or_default(),
+            state: s.state,
+            termination: s.termination,
+            capabilities: s.grant.capabilities.clone(),
+            quotas: s.grant.quotas,
+            usage: lightvm_proto::ipc::SessionUsage {
+                operations: s.usage.operations,
+                input_events: s.usage.input_events,
+                screenshots: s.usage.screenshots,
+            },
+            created_at: s.created_at,
+            expires_at: s.grant.expires_at,
+            lease_expires_at: s.lease.expires_at,
+            input_owner: self.core.input_owner(vm_id) == InputOwner::Agent { session_id: id },
+        })
+    }
+
+    fn agent_view(&self, st: VmStatus, session: SessionId) -> AgentVmView {
+        AgentVmView {
+            vm_id: st.vm_id,
+            name: st.name,
+            state: st.state,
+            run_id: st.run_id,
+            geometry: st.geometry,
+            input_owner: self.core.input_owner(st.vm_id)
+                == InputOwner::Agent {
+                    session_id: session,
+                },
+        }
+    }
+
+    /// `true` if `caller` presents the right token of a live session.
+    fn session_token_ok(&self, session_id: SessionId, token: Option<&SessionToken>) -> bool {
+        self.core.sessions().get(session_id).is_some_and(|s| {
+            s.state != SessionState::Terminated && token.is_some_and(|t| s.token_matches(t))
+        })
+    }
+
+    /// Agent screenshot: through the core queue (two checks, quota, byte
+    /// limit of the grant), then the PNG from the backend, verified against
+    /// the metadata, kept for the chunked read.
+    fn agent_screenshot(
+        &mut self,
+        caller: &Caller,
+        session_id: SessionId,
+        operation_id: OperationId,
+        vm_id: VmId,
+        expected_run_id: RunId,
+    ) -> Result<ResponseBody, PublicError> {
+        if let Some(shot) = self.shots.get(&session_id)
+            && shot.operation.id == operation_id
+        {
+            // Idempotent repeat of the same screenshot request.
+            return Ok(shot_reply(shot));
+        }
+        let req = VmRequest {
+            operation_id,
+            vm_id,
+            expected_run_id: Some(expected_run_id),
+            action: VmAction::Screenshot,
+        };
+        let (_, record) = self.submit(caller, req)?;
+        let record =
+            record.ok_or_else(|| PublicError::infrastructure("screenshot operation not found"))?;
+        match record.status {
+            OperationStatus::Succeeded => {}
+            OperationStatus::Failed | OperationStatus::Discarded => {
+                let code = record.error.unwrap_or(ErrorCode::InfrastructureError);
+                return Err(PublicError::new(code, "screenshot not taken"));
+            }
+            _ => return Err(PublicError::vm_busy("screenshot not completed")),
+        }
+        let (meta, png) = self
+            .backend
+            .take_screenshot(vm_id, expected_run_id)
+            .ok_or_else(|| PublicError::infrastructure("screenshot bytes not available"))?;
+        if meta.vm_id != vm_id
+            || meta.run_id != expected_run_id
+            || meta.byte_len != png.len() as u64
+            || sha256(&png) != meta.sha256
+        {
+            return Err(PublicError::infrastructure(
+                "screenshot bytes inconsistent with the metadata",
+            ));
+        }
+        let shot = StoredShot {
+            operation: record,
+            meta,
+            png,
+        };
+        let reply = shot_reply(&shot);
+        self.shots.insert(session_id, shot);
+        Ok(reply)
+    }
+
     /// Forwards the queued operations of the VM. A graceful stop is started
     /// in the backend and left forwarded (the supervisor thread is not held
     /// for the ACPI wait); a forced stop queued meanwhile is forwarded at
     /// once by the core and wins.
     fn run_queue(&mut self, vm_id: VmId) -> Result<(), PublicError> {
-        while let Some(d) = self.core.begin_dispatch(vm_id)? {
+        loop {
+            // The gate may have changed while the previous operation was in
+            // the backend: the core sees it before the next forwarding.
+            self.sync_gates();
+            let Some(d) = self.core.begin_dispatch(vm_id)? else {
+                break;
+            };
             if d.action == VmAction::Start {
                 // Files to verify opened with their guards here; the hashes
                 // run on a worker (offload) or inline, then `complete_start`
@@ -962,6 +1339,19 @@ where
     }
 }
 
+fn chunk_count(len: usize) -> u32 {
+    u32::try_from(len.div_ceil(SCREENSHOT_CHUNK_BYTES as usize)).unwrap_or(u32::MAX)
+}
+
+fn shot_reply(shot: &StoredShot) -> ResponseBody {
+    ResponseBody::AgentScreenshot {
+        operation: shot.operation.clone(),
+        screenshot: shot.meta.clone(),
+        chunk_bytes: SCREENSHOT_CHUNK_BYTES,
+        chunks: chunk_count(shot.png.len()),
+    }
+}
+
 impl<S, A, B, M> VmEngine for CoreEngine<S, A, B, M>
 where
     S: CatalogStore + MediaImportPort + BaselinePort + Send + 'static,
@@ -1002,6 +1392,8 @@ where
         let vm_id = req.vm_id;
         let op = req.operation_id;
         self.refresh_geometry_for(caller, &req);
+        // The capture of the geometry may have taken a while.
+        self.sync_gates();
         let admission = self.core.submit(caller, req)?;
         // Execution is synchronous on the supervisor thread: a single owner of
         // the core and the backend (ARCHITECTURE 5).
@@ -1027,6 +1419,13 @@ where
                 .core
                 .emergency_stop_with(actor, vm.vm_id, &mut self.backend);
         }
+        // Sessions on VMs without a process end too: the Emergency Stop
+        // revokes every agent session (F4).
+        let _ = self
+            .core
+            .terminate_all_sessions(TerminationCause::EmergencyStop, false);
+        self.shots.clear();
+        self.flush_input_releases();
         self.apply_observations();
         self.settle_pending_stops();
     }
@@ -1072,6 +1471,7 @@ where
     }
 
     fn state_changes(&mut self) -> Vec<(VmId, VmState)> {
+        self.flush_input_releases();
         let Ok(vms) = self.core.list_vms(&Caller::User) else {
             return Vec::new();
         };
@@ -1297,6 +1697,10 @@ where
         self.offload = on;
     }
 
+    fn attach_gate(&mut self, gate: Arc<dyn SessionGate>) {
+        self.gate = Some(gate);
+    }
+
     fn take_start_jobs(&mut self) -> Vec<StartJob> {
         std::mem::take(&mut self.start_jobs)
     }
@@ -1308,5 +1712,284 @@ where
     ) -> Result<OperationRecord, PublicError> {
         self.apply_observations();
         self.complete_start(done, abort)
+    }
+
+    fn create_session(&mut self, new: NewSession) -> Result<CreatedSession, PublicError> {
+        self.apply_observations();
+        let spec = vm_core::session::SessionSpec {
+            vm_allowlist: [new.vm_id].into_iter().collect(),
+            capabilities: new.capabilities,
+            quotas: new.quotas,
+            expires_at: new.expires_at,
+            lease_millis: new.lease_ms,
+        };
+        let (grant, lease) = self.core.create_session(spec, new.token)?;
+        let id = grant.session_id;
+        self.session_meta.insert(
+            id,
+            SessionMeta {
+                vm_id: new.vm_id,
+                connection_id: new.connection_id,
+                client_name: new.client_name,
+                purpose: new.purpose,
+                lease_ms: new.lease_ms,
+            },
+        );
+        if new.give_input
+            && let Err(e) = self.core.set_input_owner(
+                Actor::User,
+                new.vm_id,
+                InputOwner::Agent { session_id: id },
+            )
+        {
+            // The grant has no `vm.input`: the session stays, without input.
+            crate::diag!("lightvm-service: input not handed over: {}", e.message);
+        }
+        self.flush_input_releases();
+        let info = self
+            .session_info(id)
+            .ok_or_else(|| PublicError::infrastructure("session not registered"))?;
+        Ok(CreatedSession { info, grant, lease })
+    }
+
+    fn list_sessions(&mut self) -> Vec<SessionInfo> {
+        let mut all: Vec<SessionInfo> = self
+            .core
+            .sessions()
+            .all()
+            .filter_map(|s| self.session_info(s.id))
+            .collect();
+        all.sort_by(|a, b| {
+            let live = |s: &SessionInfo| s.state != SessionState::Terminated;
+            live(b)
+                .cmp(&live(a))
+                .then_with(|| b.created_at.cmp(&a.created_at))
+        });
+        let live = all
+            .iter()
+            .filter(|s| s.state != SessionState::Terminated)
+            .count();
+        all.truncate(live + TERMINATED_SESSIONS_LISTED);
+        all
+    }
+
+    fn pause_session(&mut self, id: SessionId) -> Result<SessionInfo, PublicError> {
+        // A pause decided on the service gate is applied by the sync.
+        self.apply_observations();
+        let paused = self
+            .core
+            .sessions()
+            .get(id)
+            .is_some_and(|s| s.state == SessionState::Paused);
+        if !paused {
+            self.core.pause_session(id)?;
+        }
+        self.session_info(id)
+            .ok_or_else(|| PublicError::not_found("session does not exist"))
+    }
+
+    fn resume_session(&mut self, id: SessionId) -> Result<SessionInfo, PublicError> {
+        self.core.resume_session(id)?;
+        self.session_info(id)
+            .ok_or_else(|| PublicError::not_found("session does not exist"))
+    }
+
+    fn end_session(
+        &mut self,
+        id: SessionId,
+        cause: TerminationCause,
+        stop: bool,
+    ) -> Result<RevocationReport, PublicError> {
+        self.apply_observations();
+        // Already terminated through the gate: the report of that moment.
+        if let Some(report) = self.gate_reports.remove(&id) {
+            return Ok(report);
+        }
+        let t = if stop {
+            self.core.terminate_session_with_stop(id, cause)?
+        } else {
+            self.core.revoke_session(id, cause)?
+        };
+        let report = t.report.clone();
+        self.shots.remove(&id);
+        self.execute_stops(std::slice::from_ref(&t));
+        self.flush_input_releases();
+        Ok(report)
+    }
+
+    fn end_all_sessions(&mut self, cause: TerminationCause, stop: bool) {
+        self.apply_observations();
+        let t = self.core.terminate_all_sessions(cause, stop);
+        self.execute_stops(&t);
+        self.shots.clear();
+        self.flush_input_releases();
+    }
+
+    fn tick_sessions(&mut self) {
+        self.sync_gates();
+        match self.core.tick() {
+            Ok(t) => self.execute_stops(&t),
+            Err(e) => crate::diag!("lightvm-service: session expiry check: {}", e.message),
+        }
+    }
+
+    fn set_input_owner(&mut self, vm_id: VmId, owner: InputOwner) -> Result<(), PublicError> {
+        self.apply_observations();
+        let r = self.core.set_input_owner(Actor::User, vm_id, owner);
+        self.flush_input_releases();
+        r
+    }
+
+    fn agent_call(
+        &mut self,
+        caller: &Caller,
+        call: AgentCall,
+    ) -> Result<ResponseBody, PublicError> {
+        let Caller::Agent { session_id, token } = caller else {
+            return Err(PublicError::permission_denied(
+                "agent calls need an agent session",
+            ));
+        };
+        let session_id = *session_id;
+        self.sync_gates();
+        match call {
+            AgentCall::ListVms => {
+                self.apply_observations();
+                let vms = self.core.list_vms(caller)?;
+                Ok(ResponseBody::AgentVms {
+                    vms: vms
+                        .into_iter()
+                        .map(|s| self.agent_view(s, session_id))
+                        .collect(),
+                })
+            }
+            AgentCall::VmStatus { vm_id } => {
+                self.apply_observations();
+                let st = self.core.vm_status(caller, vm_id)?;
+                Ok(ResponseBody::AgentVm {
+                    vm: self.agent_view(st, session_id),
+                })
+            }
+            AgentCall::Submit { request } => {
+                if request.action == VmAction::Screenshot {
+                    return Err(PublicError::invalid_argument(
+                        "screenshots use the screenshot call",
+                    ));
+                }
+                let (admission, operation) = self.submit(caller, request)?;
+                Ok(ResponseBody::Operation {
+                    admission,
+                    operation,
+                })
+            }
+            AgentCall::Screenshot {
+                operation_id,
+                vm_id,
+                expected_run_id,
+            } => self.agent_screenshot(caller, session_id, operation_id, vm_id, expected_run_id),
+            AgentCall::ScreenshotChunk {
+                operation_id,
+                index,
+            } => {
+                let vm_id = self
+                    .shots
+                    .get(&session_id)
+                    .filter(|s| s.operation.id == operation_id)
+                    .map(|s| s.meta.vm_id);
+                // The core checks the session even when the shot is unknown
+                // (no data about other sessions or VMs).
+                let check_vm =
+                    vm_id.or_else(|| self.session_meta.get(&session_id).map(|m| m.vm_id));
+                let Some(check_vm) = check_vm else {
+                    return Err(crate::agents::unauthenticated());
+                };
+                self.core.read_screenshot(caller, check_vm, operation_id)?;
+                let shot = self
+                    .shots
+                    .get(&session_id)
+                    .filter(|s| s.operation.id == operation_id)
+                    .ok_or_else(|| PublicError::not_found("screenshot not available"))?;
+                let chunks = chunk_count(shot.png.len());
+                if index >= chunks.max(1) {
+                    return Err(PublicError::invalid_argument("chunk index out of range"));
+                }
+                let size = SCREENSHOT_CHUNK_BYTES as usize;
+                let start = index as usize * size;
+                let end = (start + size).min(shot.png.len());
+                Ok(ResponseBody::ScreenshotChunk {
+                    operation_id,
+                    index,
+                    chunks,
+                    data: lightvm_proto::ipc::base64_encode(&shot.png[start..end]),
+                })
+            }
+            AgentCall::Operation { operation_id } => {
+                let operation = self.core.operation(caller, operation_id)?;
+                Ok(ResponseBody::OperationStatus { operation })
+            }
+            AgentCall::RenewLease => {
+                let token = token.as_ref().ok_or_else(crate::agents::unauthenticated)?;
+                let ms = self
+                    .session_meta
+                    .get(&session_id)
+                    .map_or(lightvm_proto::LEASE_MAX_MILLIS, |m| m.lease_ms);
+                let lease = self.core.renew_lease(session_id, token, ms)?;
+                Ok(ResponseBody::Lease { lease })
+            }
+            AgentCall::EndSession => {
+                if !self.session_token_ok(session_id, token.as_ref()) {
+                    // Expired sessions are already terminated by the tick.
+                    return Err(crate::agents::unauthenticated());
+                }
+                let report = self.end_session(session_id, TerminationCause::Completed, false)?;
+                Ok(ResponseBody::SessionEnded { session_id, report })
+            }
+        }
+    }
+
+    fn session_changes(&mut self) -> Vec<(SessionId, SessionState, Option<TerminationCause>)> {
+        let mut out = Vec::new();
+        for s in self.core.sessions().all() {
+            let now = (s.state, s.termination);
+            if self.last_sessions.insert(s.id, now) != Some(now) {
+                out.push((s.id, s.state, s.termination));
+            }
+        }
+        for (id, state, _) in &out {
+            if *state == SessionState::Terminated {
+                self.shots.remove(id);
+            }
+        }
+        out
+    }
+
+    fn input_owner_changes(&mut self) -> Vec<(VmId, InputOwner)> {
+        let mut out = Vec::new();
+        let vms: Vec<VmId> = self.last.keys().copied().collect();
+        for vm in vms {
+            let owner = self.core.input_owner(vm);
+            let prev = self.last_owners.get(&vm).copied().unwrap_or_default();
+            if owner != prev {
+                out.push((vm, owner));
+            }
+            if owner == InputOwner::User {
+                self.last_owners.remove(&vm);
+            } else {
+                self.last_owners.insert(vm, owner);
+            }
+        }
+        out
+    }
+
+    fn record_event(
+        &mut self,
+        actor: Actor,
+        action: AuditAction,
+        outcome: AuditOutcome,
+        session_id: Option<SessionId>,
+        error: Option<ErrorCode>,
+    ) {
+        self.core
+            .record_event(actor, action, outcome, None, session_id, error);
     }
 }

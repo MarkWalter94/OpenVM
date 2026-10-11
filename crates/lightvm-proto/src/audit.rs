@@ -61,6 +61,26 @@ pub enum AuditAction {
     BaselineRestore,
     /// Deletion of a baseline (F3).
     BaselineDelete,
+    /// Session request of an agent (F4): received, or refused (agent access
+    /// off, limits). Never the declared texts.
+    SessionRequest,
+    /// Session request denied by the user, expired or withdrawn (F4).
+    SessionDeny,
+    /// Lease renewal of an agent session (F4).
+    SessionLease,
+    /// Change of the input owner of a VM (F4).
+    InputControl,
+    /// Agent access switch turned on (F4).
+    AgentAccessEnable,
+    /// Agent access switch turned off (F4): pending requests denied, live
+    /// sessions revoked.
+    AgentAccessDisable,
+    /// VM list read by an agent session (F4).
+    VmList,
+    /// VM status read by an agent session (F4).
+    VmStatus,
+    /// Screenshot bytes read by an agent session (F4, never the bytes).
+    ScreenshotRead,
 }
 
 /// Recorded outcome.

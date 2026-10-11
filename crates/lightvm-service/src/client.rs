@@ -9,7 +9,10 @@ use tokio::io::{ReadHalf, WriteHalf};
 use crate::credential::Credential;
 use crate::frame::{self, FrameError};
 use crate::transport::{self, BoxedStream};
-use lightvm_proto::ipc::{ClientMessage, Request, RequestId, ServerMessage, ServiceEvent};
+use lightvm_proto::ipc::{
+    ClientMessage, EMERGENCY_ENDPOINT_FILE, EmergencyCommand, EmergencyStopReport, Request,
+    RequestId, ResponseBody, ServerMessage, ServiceEvent,
+};
 
 /// Client connection.
 pub struct Client {
@@ -46,6 +49,11 @@ impl Client {
         let id = self.next_id;
         self.next_id += 1;
         id
+    }
+
+    /// The two halves of the connection (tests that pipeline requests).
+    pub fn into_parts(self) -> (ReadHalf<BoxedStream>, WriteHalf<BoxedStream>) {
+        (self.rd, self.wr)
     }
 
     /// Sends an arbitrary message.
@@ -119,5 +127,51 @@ impl Client {
             ServerMessage::Event { event } => Ok(Ok(event)),
             other => Ok(Err(other)),
         }
+    }
+}
+
+/// Emergency endpoint published by the running service of a catalog
+/// (`<catalog>/emergency.endpoint`, F4). Not a secret.
+pub fn read_emergency_endpoint(catalog_dir: &std::path::Path) -> io::Result<String> {
+    let p = catalog_dir.join(EMERGENCY_ENDPOINT_FILE);
+    let meta = std::fs::symlink_metadata(&p)?;
+    if !meta.is_file() || meta.len() > 512 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "emergency endpoint file not valid",
+        ));
+    }
+    let s = std::fs::read_to_string(&p)?;
+    let s = s.trim();
+    if s.is_empty() || s.chars().any(char::is_control) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "emergency endpoint file not valid",
+        ));
+    }
+    Ok(s.to_owned())
+}
+
+/// Local emergency command (F4, ROADMAP 7.3): sends the only verb of the
+/// emergency endpoint and returns the report of the service (completion only
+/// after the end of the processes was observed). It needs no credential and
+/// does not depend on the UI nor on the supervisor thread.
+pub async fn emergency_stop(endpoint: &str) -> io::Result<EmergencyStopReport> {
+    let s = transport::connect(endpoint).await?;
+    let (mut rd, mut wr) = tokio::io::split(s);
+    frame::write_frame(&mut wr, &EmergencyCommand::EmergencyStop, 256).await?;
+    let m: ServerMessage = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        frame::read_frame(&mut rd, frame::DEFAULT_MAX_FRAME),
+    )
+    .await
+    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "no reply from the service"))?
+    .map_err(|e| io::Error::other(e.to_string()))?;
+    match m {
+        ServerMessage::Response {
+            result: ResponseBody::EmergencyStop(r),
+            ..
+        } => Ok(r),
+        other => Err(io::Error::other(format!("unexpected reply: {other:?}"))),
     }
 }

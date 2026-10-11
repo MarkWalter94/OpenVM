@@ -625,6 +625,15 @@ fn quotas_are_enforced() {
         session_id: grant.session_id,
         token: Some(SessionToken::from_bytes([5; 32])),
     };
+    h.core
+        .set_input_owner(
+            Actor::User,
+            vm,
+            ipc::InputOwner::Agent {
+                session_id: grant.session_id,
+            },
+        )
+        .unwrap();
     let r = h.req(vm, Some(run), VmAction::Screenshot);
     h.core.submit(&agent, r).unwrap();
     let r = h.req(vm, Some(run), VmAction::Screenshot);

@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "EmergencyCommand",
+  "description": "Messages accepted by the emergency endpoint (`lightvm-service\n--emergency-stop`): one verb only.",
+  "oneOf": [
+    {
+      "description": "Emergency Stop of every VM and agent session.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "emergency_stop"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    }
+  ]
+}
