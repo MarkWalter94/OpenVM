@@ -431,7 +431,7 @@ async fn handshake_tools_list_and_protocol_errors() {
         r["result"]["instructions"]
             .as_str()
             .unwrap()
-            .contains("Call the help tool first"),
+            .contains("help tool is the reference"),
         "{r}"
     );
     let list = m.request("tools/list", json!({}));

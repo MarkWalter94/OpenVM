@@ -332,13 +332,13 @@ Then tick **The agent shows the code …** (after comparing it) and press **Appr
 - **Emergency Stop**: stops **all** VMs and ends every session immediately. It stays clickable even while a dialog is open.
 - **Details**: the session page with the stated objective, the state and its controls, the session report (see below) and the session events this app saw while it was open (request, start, pause, keyboard handover, end). Every action of the agent is also recorded in the audit log (section 12).
 
-**Giving an agent its task.** The adapter carries its own complete guide: the first tool it lists, `help`, explains to the agent the steps (request, verification code, approval), every tool with its parameters and when to use it, key names, error codes and the limits below, so the agent does not need any other documentation. With Claude Code, for example, register the adapter once:
+**Giving an agent its task.** The adapter carries its own reference documentation: its `help` tool describes how sessions work (request, verification code, approval), every tool with its parameters, key names, error codes and the limits below, so the agent does not need any other documentation. It only describes and never gives the agent instructions: what to do is decided by your prompt alone. With Claude Code, for example, register the adapter once:
 
 ```
 claude mcp add lightvm -- "%LOCALAPPDATA%\Programs\LightVM\lightvm-mcp.exe"
 ```
 
-(write the full path if your shell does not expand `%LOCALAPPDATA%`), pair the client (step 2) and give a prompt such as: *"Use the lightvm MCP server; call its help tool first and follow it. Task: … (the VM, what to do, how to check it, the guest login if needed)."* Before handing over a task, keep in mind that the VM has **no network, no shared folders and no clipboard**: the agent works only through the screen, the mouse and the keyboard, typing any code or file content into the guest. It types with the **US keyboard layout**, so the guest should use the US layout; and tick only the capabilities the task needs.
+(write the full path if your shell does not expand `%LOCALAPPDATA%`), pair the client (step 2) and give a prompt such as: *"Use the lightvm MCP server (its help tool documents how it works). Task: … (the VM, what to do, how to check it, the guest login if needed)."* Before handing over a task, keep in mind that the VM has **no network, no shared folders and no clipboard**: the agent works only through the screen, the mouse and the keyboard, typing any code or file content into the guest. It types with the **US keyboard layout**, so the guest should use the US layout; and tick only the capabilities the task needs.
 
 **6. The AI Workspace.** The Agents page is titled **AI Workspace**. From the top:
 

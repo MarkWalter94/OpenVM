@@ -648,7 +648,6 @@ fn scripted_client(
 }
 
 const PROMPT: &str = "You control a virtual machine only through the `lightvm` MCP tools. \
-Call the lightvm help tool first: it explains how the tools work. \
 Task (ADR-0019 fixture): 1) call session_request with purpose \"Run the LightVM fixture: open a terminal and run fx.sh scrivi\", tell me the verification code, then call session_status until the state is active (I approve it in the app). \
 2) vm_list to get the VM (it is already running the Ubuntu live desktop) and take a vm_screenshot with scale \"half\". \
 3) Press ctrl+alt+t to open a terminal, wait about 5 seconds and take a screenshot to check it opened. \
