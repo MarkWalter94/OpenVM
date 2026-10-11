@@ -29,9 +29,10 @@ use schemars::{JsonSchema, Schema, generate::SchemaSettings};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Admission, BaselineId, DisplayGeometry, HostCapacity, Label, MediaKind, MediaRecord,
-    OperationRecord, PROTOCOL_VERSION, ReplyError, RunId, Sha256Digest, UtcTimestamp, VmConfig,
-    VmId, VmName, VmRecord, VmRequest, VmState,
+    Admission, BaselineId, CapabilitySet, DisplayGeometry, Grant, HostCapacity, Label, Lease,
+    MediaKind, MediaRecord, OperationId, OperationRecord, PROTOCOL_VERSION, Quotas, ReplyError,
+    RevocationReport, RunId, Screenshot, SessionId, SessionState, SessionToken, Sha256Digest,
+    TerminationCause, UtcTimestamp, VmConfig, VmId, VmName, VmRecord, VmRequest, VmState,
 };
 
 /// IPC protocol versions supported by the service, in order of preference.
@@ -226,6 +227,87 @@ pub enum Request {
         /// Baseline of the same VM.
         baseline_id: BaselineId,
     },
+    /// Session request of an agent (`pairing` role only, F4): refused while
+    /// the agent access switch is off. The reply carries the verification
+    /// code the user compares in the app; the decision is awaited with
+    /// [`Request::AwaitSession`].
+    RequestSession {
+        /// Client name declared by the agent (free text, at most
+        /// [`MAX_CLIENT_NAME_CHARS`] characters kept, never interpreted).
+        client_name: String,
+        /// Purpose declared by the agent (free text, at most
+        /// [`MAX_PURPOSE_CHARS`] characters kept, never interpreted).
+        purpose: String,
+        /// VMs the agent would like (a hint for the user).
+        #[serde(default)]
+        requested_vms: Vec<VmId>,
+        /// Capabilities the agent would like (a hint for the user).
+        #[serde(default)]
+        requested_capabilities: CapabilitySet,
+    },
+    /// Waits for the user's decision on a session request of this
+    /// connection (`pairing` role only). Long: the reply arrives when the
+    /// user approves or denies, or when the request expires.
+    AwaitSession {
+        /// Request.
+        request_id: SessionRequestId,
+    },
+    /// Call of an agent session bound to this connection (`pairing` role
+    /// only). Checked by the core on receipt and right before forwarding.
+    Agent {
+        /// Session credential.
+        session: SessionAuth,
+        /// Call.
+        call: AgentCall,
+    },
+    /// State of the agent access switch (UI only).
+    GetAgentAccess,
+    /// Agent access switch (UI only): off at every service start. Turning it
+    /// off denies the pending requests and revokes the live sessions.
+    SetAgentAccess {
+        /// New state.
+        enabled: bool,
+    },
+    /// Pending session requests (UI only).
+    ListSessionRequests,
+    /// Approval of a session request (UI only).
+    ApproveSession {
+        /// Request.
+        request_id: SessionRequestId,
+        /// What the user grants.
+        approval: SessionApproval,
+    },
+    /// Denial of a session request (UI only).
+    DenySession {
+        /// Request.
+        request_id: SessionRequestId,
+    },
+    /// Agent sessions, live first (UI only).
+    ListSessions,
+    /// Agent pause (UI only): agent mutations refused, the VM keeps running.
+    PauseSession {
+        /// Session.
+        session_id: SessionId,
+    },
+    /// Resume after a pause (UI only).
+    ResumeSession {
+        /// Session.
+        session_id: SessionId,
+    },
+    /// Revocation (UI only): the session ends, its queue is discarded, the
+    /// agent connection is closed; the VM is not stopped.
+    RevokeSession {
+        /// Session.
+        session_id: SessionId,
+    },
+    /// Input ownership of a VM (UI only): take control back or hand it to an
+    /// agent session. Pressed keys and buttons are released on every change.
+    SetInputOwner {
+        /// VM.
+        vm_id: VmId,
+        /// New owner.
+        owner: InputOwner,
+    },
 }
 
 impl Request {
@@ -255,9 +337,284 @@ impl Request {
             Self::CreateBaseline { .. } => "create_baseline",
             Self::RestoreBaseline { .. } => "restore_baseline",
             Self::DeleteBaseline { .. } => "delete_baseline",
+            Self::RequestSession { .. } => "request_session",
+            Self::AwaitSession { .. } => "await_session",
+            Self::Agent { .. } => "agent",
+            Self::GetAgentAccess => "get_agent_access",
+            Self::SetAgentAccess { .. } => "set_agent_access",
+            Self::ListSessionRequests => "list_session_requests",
+            Self::ApproveSession { .. } => "approve_session",
+            Self::DenySession { .. } => "deny_session",
+            Self::ListSessions => "list_sessions",
+            Self::PauseSession { .. } => "pause_session",
+            Self::ResumeSession { .. } => "resume_session",
+            Self::RevokeSession { .. } => "revoke_session",
+            Self::SetInputOwner { .. } => "set_input_owner",
         }
     }
 }
+
+/// Identifier of a session request, assigned by the service.
+pub type SessionRequestId = u64;
+
+/// Longest client name kept from [`Request::RequestSession`].
+pub const MAX_CLIENT_NAME_CHARS: usize = 64;
+/// Longest purpose kept from [`Request::RequestSession`].
+pub const MAX_PURPOSE_CHARS: usize = 512;
+/// Lifetime of a pending session request, in seconds.
+pub const SESSION_REQUEST_TTL_S: u64 = 300;
+/// Shortest session duration the user can approve, in seconds.
+pub const MIN_SESSION_DURATION_S: u32 = 60;
+/// Longest session duration the user can approve, in seconds.
+pub const MAX_SESSION_DURATION_S: u32 = 86_400;
+/// Shortest lease, in milliseconds.
+pub const MIN_LEASE_MS: u32 = 1_000;
+/// Hard cap of one agent screenshot (PNG bytes), whatever the quotas.
+pub const AGENT_MAX_SCREENSHOT_BYTES: u64 = 8 * 1024 * 1024;
+/// Raw bytes per screenshot chunk (base64 in the reply fits a 64 KiB frame).
+pub const SCREENSHOT_CHUNK_BYTES: u32 = 32 * 1024;
+
+/// Quotas of an approval that does not set them.
+pub const AGENT_DEFAULT_QUOTAS: Quotas = Quotas {
+    max_operations: 10_000,
+    max_input_events: 200_000,
+    max_screenshots: 2_000,
+    max_screenshot_bytes: 4 * 1024 * 1024,
+    max_queued_operations: 8,
+};
+
+/// Credential of an agent session, carried by every [`Request::Agent`].
+/// `Debug` redacts the token.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionAuth {
+    /// Session.
+    pub session_id: SessionId,
+    /// Session secret received in [`ResponseBody::SessionGranted`].
+    pub token: SessionToken,
+}
+
+/// Call of an agent session.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "call", rename_all = "snake_case")]
+pub enum AgentCall {
+    /// VMs of the grant (`vm.list`).
+    ListVms,
+    /// Status of a VM of the grant (`vm.status`).
+    VmStatus {
+        /// VM.
+        vm_id: VmId,
+    },
+    /// Action on a VM through the core's queue: `start`, `stop`,
+    /// `force_stop`, `reset`, `input` (screenshots use
+    /// [`AgentCall::Screenshot`]).
+    Submit {
+        /// Request with idempotency key.
+        request: VmRequest,
+    },
+    /// Screenshot (`vm.screenshot`): metadata in the reply, image bytes
+    /// fetched with [`AgentCall::ScreenshotChunk`].
+    Screenshot {
+        /// Idempotency key.
+        operation_id: OperationId,
+        /// VM.
+        vm_id: VmId,
+        /// Current run of the VM.
+        expected_run_id: RunId,
+    },
+    /// Chunk `index` of the last screenshot of the session.
+    ScreenshotChunk {
+        /// Screenshot operation.
+        operation_id: OperationId,
+        /// Chunk index, from 0.
+        index: u32,
+    },
+    /// An operation of this session (`vm.status`).
+    Operation {
+        /// Operation.
+        operation_id: OperationId,
+    },
+    /// Lease renewal: due before the lease expires (at most 10 s).
+    RenewLease,
+    /// Ordinary end of the session by the agent (the VM is not stopped).
+    EndSession,
+}
+
+impl AgentCall {
+    /// Stable name of the call, for diagnostics.
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::ListVms => "list_vms",
+            Self::VmStatus { .. } => "vm_status",
+            Self::Submit { .. } => "submit",
+            Self::Screenshot { .. } => "screenshot",
+            Self::ScreenshotChunk { .. } => "screenshot_chunk",
+            Self::Operation { .. } => "operation",
+            Self::RenewLease => "renew_lease",
+            Self::EndSession => "end_session",
+        }
+    }
+
+    /// `true` if the call mutates a VM (refused while the session is paused).
+    #[must_use]
+    pub const fn is_mutation(&self) -> bool {
+        matches!(self, Self::Submit { .. })
+    }
+}
+
+/// What the user grants when approving a session request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionApproval {
+    /// The single VM of the session (MVP).
+    pub vm_id: VmId,
+    /// Granted capabilities (not empty).
+    pub capabilities: CapabilitySet,
+    /// Duration of the grant in seconds
+    /// ([`MIN_SESSION_DURATION_S`]..=[`MAX_SESSION_DURATION_S`]).
+    pub duration_s: u32,
+    /// Quotas; `None` = [`AGENT_DEFAULT_QUOTAS`].
+    #[serde(default)]
+    pub quotas: Option<Quotas>,
+    /// Lease in milliseconds ([`MIN_LEASE_MS`]..=10000); `None` = 10000.
+    #[serde(default)]
+    pub lease_ms: Option<u32>,
+    /// Hand input control of the VM to the agent at once.
+    #[serde(default)]
+    pub give_input: bool,
+}
+
+/// Owner of the input of a VM: the user or one agent session, never both.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum InputOwner {
+    /// The local user (default).
+    #[default]
+    User,
+    /// An agent session.
+    Agent {
+        /// Session.
+        session_id: SessionId,
+    },
+}
+
+/// Pending session request, for the UI.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionRequestInfo {
+    /// Request.
+    pub request_id: SessionRequestId,
+    /// Agent connection.
+    pub connection_id: ConnectionId,
+    /// Client name declared by the agent (plain text).
+    pub client_name: String,
+    /// Peer PID reported by the operating system, diagnostic only.
+    pub peer_pid: Option<u32>,
+    /// Purpose declared by the agent (plain text).
+    pub purpose: String,
+    /// VMs requested (hint).
+    pub requested_vms: Vec<VmId>,
+    /// Capabilities requested (hint).
+    pub requested_capabilities: CapabilitySet,
+    /// Code shown to the agent and in the app.
+    pub verification_code: String,
+    /// Instant of the request.
+    pub requested_at: UtcTimestamp,
+    /// The request expires at this instant if not decided.
+    pub expires_at: UtcTimestamp,
+}
+
+/// Quota consumption of a session.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionUsage {
+    /// Accepted operations.
+    pub operations: u32,
+    /// Accepted input events.
+    pub input_events: u32,
+    /// Accepted screenshots.
+    pub screenshots: u32,
+}
+
+/// Agent session, for the UI.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionInfo {
+    /// Session.
+    pub session_id: SessionId,
+    /// VM of the grant.
+    pub vm_id: VmId,
+    /// Agent connection the session is bound to (absent once terminated).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<ConnectionId>,
+    /// Client name declared by the agent (plain text).
+    pub client_name: String,
+    /// Purpose declared by the agent (plain text).
+    pub purpose: String,
+    /// State.
+    pub state: SessionState,
+    /// Termination cause, if terminated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub termination: Option<TerminationCause>,
+    /// Granted capabilities.
+    pub capabilities: CapabilitySet,
+    /// Granted quotas.
+    pub quotas: Quotas,
+    /// Consumption.
+    pub usage: SessionUsage,
+    /// Creation instant.
+    pub created_at: UtcTimestamp,
+    /// Expiry of the grant.
+    pub expires_at: UtcTimestamp,
+    /// Expiry of the current lease.
+    pub lease_expires_at: UtcTimestamp,
+    /// `true` if the session owns the input of its VM.
+    pub input_owner: bool,
+}
+
+/// A VM as seen by an agent session (no host details).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AgentVmView {
+    /// VM.
+    pub vm_id: VmId,
+    /// Name.
+    pub name: VmName,
+    /// State.
+    pub state: VmState,
+    /// Current run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<RunId>,
+    /// Display geometry, if known (for pointer coordinates).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geometry: Option<DisplayGeometry>,
+    /// `true` if this session owns the input of the VM.
+    pub input_owner: bool,
+}
+
+/// Outcome of a session request, in [`ServiceEvent::SessionRequestClosed`].
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionRequestOutcome {
+    /// Approved: a session was created.
+    Approved,
+    /// Denied by the user (or by the agent access switch).
+    Denied,
+    /// Not decided in time.
+    Expired,
+    /// The agent connection closed.
+    Withdrawn,
+}
+
+/// Messages accepted by the emergency endpoint (`lightvm-service
+/// --emergency-stop`): one verb only.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum EmergencyCommand {
+    /// Emergency Stop of every VM and agent session.
+    EmergencyStop,
+}
+
+/// Name of the file, in the catalog directory, where the running service
+/// publishes its emergency endpoint (not a secret).
+pub const EMERGENCY_ENDPOINT_FILE: &str = "emergency.endpoint";
 
 /// Summary of a VM for list and status.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -628,6 +985,115 @@ pub enum ResponseBody {
         /// Deleted baseline.
         baseline_id: BaselineId,
     },
+    /// Response to `request_session`.
+    SessionRequested {
+        /// Request, for `await_session`.
+        request_id: SessionRequestId,
+        /// Code the user compares in the app.
+        verification_code: String,
+        /// Lifetime of the request.
+        expires_in_s: u64,
+    },
+    /// Response to `await_session`: session approved and bound to this
+    /// connection.
+    SessionGranted {
+        /// Session.
+        session_id: SessionId,
+        /// Session secret: never logged.
+        token: SessionToken,
+        /// Grant issued by the supervisor.
+        grant: Grant,
+        /// First lease.
+        lease: Lease,
+    },
+    /// Agent access switch.
+    AgentAccess {
+        /// State.
+        enabled: bool,
+    },
+    /// Response to `list_session_requests`.
+    SessionRequests {
+        /// Pending requests, oldest first.
+        requests: Vec<SessionRequestInfo>,
+    },
+    /// A session (approval, pause, resume).
+    Session {
+        /// Session.
+        session: SessionInfo,
+    },
+    /// Response to `deny_session`.
+    SessionDenied {
+        /// Request.
+        request_id: SessionRequestId,
+    },
+    /// Response to `list_sessions`.
+    Sessions {
+        /// Live sessions first, then the most recent terminated ones.
+        sessions: Vec<SessionInfo>,
+    },
+    /// Response to `revoke_session`.
+    SessionRevoked {
+        /// Session.
+        session_id: SessionId,
+        /// Discarded queue and requests already forwarded.
+        report: RevocationReport,
+    },
+    /// Response to `set_input_owner`.
+    InputOwner {
+        /// VM.
+        vm_id: VmId,
+        /// Owner now.
+        owner: InputOwner,
+    },
+    /// Response to the agent call `list_vms`.
+    AgentVms {
+        /// VMs of the grant.
+        vms: Vec<AgentVmView>,
+    },
+    /// Response to the agent call `vm_status`.
+    AgentVm {
+        /// VM.
+        vm: AgentVmView,
+    },
+    /// Response to the agent call `screenshot`.
+    AgentScreenshot {
+        /// Operation record.
+        operation: OperationRecord,
+        /// Metadata (VM, run, geometry, SHA-256, size).
+        screenshot: Screenshot,
+        /// Raw bytes per chunk.
+        chunk_bytes: u32,
+        /// Number of chunks to fetch.
+        chunks: u32,
+    },
+    /// Response to the agent call `screenshot_chunk`.
+    ScreenshotChunk {
+        /// Screenshot operation.
+        operation_id: OperationId,
+        /// Chunk index.
+        index: u32,
+        /// Number of chunks.
+        chunks: u32,
+        /// Bytes of the chunk, standard base64 with padding.
+        data: String,
+    },
+    /// Response to the agent call `operation`.
+    OperationStatus {
+        /// Operation record.
+        operation: OperationRecord,
+    },
+    /// Response to the agent call `renew_lease`.
+    Lease {
+        /// New lease.
+        lease: Lease,
+    },
+    /// Response to the agent call `end_session`.
+    SessionEnded {
+        /// Session.
+        session_id: SessionId,
+        /// Discarded queue and requests already forwarded.
+        report: RevocationReport,
+    },
 }
 
 /// State of the service.
@@ -694,6 +1160,40 @@ pub enum ServiceEvent {
         /// Number of lost events.
         count: u64,
     },
+    /// The agent access switch changed.
+    AgentAccess {
+        /// State.
+        enabled: bool,
+    },
+    /// New pending session request.
+    SessionRequest {
+        /// Request.
+        request: SessionRequestInfo,
+    },
+    /// A session request was decided, expired or withdrawn.
+    SessionRequestClosed {
+        /// Request.
+        request_id: SessionRequestId,
+        /// Outcome.
+        outcome: SessionRequestOutcome,
+    },
+    /// A session was created, paused, resumed or terminated.
+    SessionChanged {
+        /// Session.
+        session_id: SessionId,
+        /// State now.
+        state: SessionState,
+        /// Termination cause, if terminated.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        termination: Option<TerminationCause>,
+    },
+    /// The input owner of a VM changed.
+    InputOwner {
+        /// VM.
+        vm_id: VmId,
+        /// Owner now.
+        owner: InputOwner,
+    },
 }
 
 /// Reason the service closed the connection.
@@ -749,6 +1249,66 @@ pub enum ServerMessage {
     },
 }
 
+const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// Standard base64 with padding (screenshot chunks).
+#[must_use]
+pub fn base64_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for c in bytes.chunks(3) {
+        let n = (u32::from(c[0]) << 16)
+            | (u32::from(*c.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*c.get(2).unwrap_or(&0));
+        let idx = |shift: u32| B64[((n >> shift) & 63) as usize] as char;
+        out.push(idx(18));
+        out.push(idx(12));
+        out.push(if c.len() > 1 { idx(6) } else { '=' });
+        out.push(if c.len() > 2 { idx(0) } else { '=' });
+    }
+    out
+}
+
+/// Decodes standard base64 with padding; `None` if malformed.
+#[must_use]
+pub fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    let b = s.as_bytes();
+    if !b.len().is_multiple_of(4) {
+        return None;
+    }
+    let val = |c: u8| -> Option<u32> {
+        match c {
+            b'A'..=b'Z' => Some(u32::from(c - b'A')),
+            b'a'..=b'z' => Some(u32::from(c - b'a') + 26),
+            b'0'..=b'9' => Some(u32::from(c - b'0') + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    };
+    let mut out = Vec::with_capacity(b.len() / 4 * 3);
+    let quads = b.len() / 4;
+    for (i, q) in b.chunks(4).enumerate() {
+        let last = i + 1 == quads;
+        let pad = q.iter().rev().take_while(|c| **c == b'=').count();
+        if pad > 2 || (pad > 0 && !last) {
+            return None;
+        }
+        let mut n = 0u32;
+        for (j, c) in q.iter().enumerate() {
+            let v = if j >= 4 - pad { 0 } else { val(*c)? };
+            n = (n << 6) | v;
+        }
+        out.push((n >> 16) as u8);
+        if pad < 2 {
+            out.push((n >> 8) as u8);
+        }
+        if pad < 1 {
+            out.push(n as u8);
+        }
+    }
+    Some(out)
+}
+
 fn generate<T: JsonSchema>() -> Schema {
     SchemaSettings::draft2020_12()
         .into_generator()
@@ -763,6 +1323,7 @@ pub fn schemas() -> Vec<(&'static str, Schema)> {
         ("ipc_client_message", generate::<ClientMessage>()),
         ("ipc_server_message", generate::<ServerMessage>()),
         ("parent_loss_policy", generate::<ParentLossPolicy>()),
+        ("ipc_emergency_command", generate::<EmergencyCommand>()),
     ]
 }
 
@@ -871,6 +1432,74 @@ mod tests {
     fn credential_is_write_only_in_schema() {
         let s = serde_json::to_string(&generate::<ClientMessage>()).unwrap();
         assert!(s.contains("writeOnly"));
+    }
+
+    #[test]
+    fn base64_round_trip() {
+        for n in 0..70usize {
+            let v: Vec<u8> = (0..n).map(|i| (i * 37 + 11) as u8).collect();
+            let e = base64_encode(&v);
+            assert_eq!(base64_decode(&e).unwrap(), v, "{n}");
+        }
+        assert_eq!(base64_encode(b"Man"), "TWFu");
+        assert_eq!(base64_encode(b"Ma"), "TWE=");
+        assert_eq!(base64_encode(b"M"), "TQ==");
+        assert!(base64_decode("TQ=").is_none());
+        assert!(base64_decode("T===").is_none());
+        assert!(base64_decode("TQ==TWFu").is_none());
+        assert!(base64_decode("TW!u").is_none());
+    }
+
+    #[test]
+    fn session_auth_debug_redacts_the_token() {
+        let token = SessionToken::from_bytes([0xab; 32]);
+        let a = SessionAuth {
+            session_id: SessionId::from_unix_millis(1_760_000_000_000, [2; 10]),
+            token,
+        };
+        let d = format!("{a:?}");
+        assert!(!d.contains("abab"), "{d}");
+        let m = ClientMessage::Request {
+            request_id: 1,
+            body: Request::Agent {
+                session: a,
+                call: AgentCall::RenewLease,
+            },
+        };
+        let s = serde_json::to_string(&m).unwrap();
+        assert!(s.contains(r#""op":"agent""#), "{s}");
+        assert!(s.contains(r#""call":"renew_lease""#), "{s}");
+        assert_eq!(serde_json::from_str::<ClientMessage>(&s).unwrap(), m);
+        assert!(!format!("{m:?}").contains("abab"));
+    }
+
+    #[test]
+    fn f4_wire_shapes() {
+        assert_eq!(
+            serde_json::to_string(&InputOwner::User).unwrap(),
+            r#"{"kind":"user"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&EmergencyCommand::EmergencyStop).unwrap(),
+            r#"{"type":"emergency_stop"}"#
+        );
+        let a: SessionApproval = serde_json::from_str(
+            r#"{"vm_id":"0199d1a4-6000-7000-8000-000000000000","capabilities":["vm.input"],"duration_s":600}"#,
+        )
+        .unwrap();
+        assert_eq!(a.quotas, None);
+        assert!(!a.give_input);
+        let r: ClientMessage = serde_json::from_str(
+            r#"{"type":"request","request_id":1,"body":{"op":"request_session","client_name":"x","purpose":"y"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            r,
+            ClientMessage::Request {
+                body: Request::RequestSession { .. },
+                ..
+            }
+        ));
     }
 
     #[test]

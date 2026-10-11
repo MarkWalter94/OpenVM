@@ -155,6 +155,56 @@
         "duplicate"
       ]
     },
+    "AgentVmView": {
+      "description": "A VM as seen by an agent session (no host details).",
+      "type": "object",
+      "properties": {
+        "geometry": {
+          "description": "Display geometry, if known (for pointer coordinates).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DisplayGeometry"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "input_owner": {
+          "description": "`true` if this session owns the input of the VM.",
+          "type": "boolean"
+        },
+        "name": {
+          "description": "Name.",
+          "$ref": "#/$defs/VmName"
+        },
+        "run_id": {
+          "description": "Current run.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RunId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "description": "State.",
+          "$ref": "#/$defs/VmState"
+        },
+        "vm_id": {
+          "description": "VM.",
+          "$ref": "#/$defs/VmId"
+        }
+      },
+      "required": [
+        "vm_id",
+        "name",
+        "state",
+        "input_owner"
+      ]
+    },
     "BaselineId": {
       "description": "BaselineId: version 7 UUID, lowercase with hyphens.",
       "type": "string",
@@ -310,6 +360,61 @@
         "protocol_versions",
         "backend",
         "max_frame_bytes"
+      ]
+    },
+    "Capability": {
+      "description": "Authorizable action on a VM. Serialized names follow the MCP catalog\n(ROADMAP 9); `vm.input` covers mouse and keyboard.",
+      "oneOf": [
+        {
+          "description": "List filtered by the grant.",
+          "type": "string",
+          "const": "vm.list"
+        },
+        {
+          "description": "Status.",
+          "type": "string",
+          "const": "vm.status"
+        },
+        {
+          "description": "Start.",
+          "type": "string",
+          "const": "vm.start"
+        },
+        {
+          "description": "Stop (ordinary or forced).",
+          "type": "string",
+          "const": "vm.stop"
+        },
+        {
+          "description": "Reset: requires an explicit capability.",
+          "type": "string",
+          "const": "vm.reset"
+        },
+        {
+          "description": "Screenshot.",
+          "type": "string",
+          "const": "vm.screenshot"
+        },
+        {
+          "description": "Mouse and keyboard.",
+          "type": "string",
+          "const": "vm.input"
+        },
+        {
+          "description": "Checkpoint with the VM off: requires an explicit capability.",
+          "type": "string",
+          "const": "vm.snapshot"
+        },
+        {
+          "description": "Restore with the VM off.",
+          "type": "string",
+          "const": "vm.restore"
+        },
+        {
+          "description": "Authorized LightVM events and QEMU logs.",
+          "type": "string",
+          "const": "vm.logs"
+        }
       ]
     },
     "CloseReason": {
@@ -519,6 +624,63 @@
         }
       ]
     },
+    "Grant": {
+      "description": "Grant issued by the supervisor after the user's approval in the app (ROADMAP 9).",
+      "type": "object",
+      "properties": {
+        "capabilities": {
+          "description": "Granted capabilities.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Capability"
+          },
+          "uniqueItems": true
+        },
+        "expires_at": {
+          "description": "Absolute UTC expiry.",
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "id": {
+          "description": "Identifier.",
+          "$ref": "#/$defs/GrantId"
+        },
+        "policy_revision": {
+          "description": "Revision of the policy the grant was issued with.",
+          "$ref": "#/$defs/PolicyRevision"
+        },
+        "quotas": {
+          "description": "Granted quotas.",
+          "$ref": "#/$defs/Quotas"
+        },
+        "session_id": {
+          "description": "Session it is bound to.",
+          "$ref": "#/$defs/SessionId"
+        },
+        "vm_allowlist": {
+          "description": "Allowed VMs (explicit allowlist; empty = no VM).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/VmId"
+          },
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "id",
+        "session_id",
+        "vm_allowlist",
+        "capabilities",
+        "expires_at",
+        "quotas",
+        "policy_revision"
+      ]
+    },
+    "GrantId": {
+      "description": "GrantId: version 7 UUID, lowercase with hyphens.",
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
     "GuestOs": {
       "description": "Declared guest operating system. In the MVP the reference is Ubuntu LTS\nx86_64 with the version and checksum pinned in F0 (ROADMAP 4).",
       "oneOf": [
@@ -597,11 +759,80 @@
         "baseline_available"
       ]
     },
+    "ImageFormat": {
+      "description": "Image format of a screenshot.",
+      "oneOf": [
+        {
+          "description": "PNG.",
+          "type": "string",
+          "const": "png"
+        }
+      ]
+    },
+    "InputOwner": {
+      "description": "Owner of the input of a VM: the user or one agent session, never both.",
+      "oneOf": [
+        {
+          "description": "The local user (default).",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "user"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "An agent session.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "agent"
+            },
+            "session_id": {
+              "description": "Session.",
+              "$ref": "#/$defs/SessionId"
+            }
+          },
+          "required": [
+            "kind",
+            "session_id"
+          ]
+        }
+      ]
+    },
     "Label": {
       "description": "Text declared by the user, without control characters; never interpreted.",
       "type": "string",
       "maxLength": 256,
       "minLength": 1
+    },
+    "Lease": {
+      "description": "Lease of a session: it must be renewed before it expires, otherwise the\nsession is revoked through the emergency path (ROADMAP 7.3).",
+      "type": "object",
+      "properties": {
+        "expires_at": {
+          "description": "Expiry: `renewed_at + duration`, with duration in `1..=LEASE_MAX_MILLIS`.",
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "renewed_at": {
+          "description": "Last valid renewal.",
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "session_id": {
+          "description": "Session.",
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "required": [
+        "session_id",
+        "renewed_at",
+        "expires_at"
+      ]
     },
     "MediaId": {
       "description": "MediaId: version 7 UUID, lowercase with hyphens.",
@@ -887,6 +1118,12 @@
         }
       ]
     },
+    "PolicyRevision": {
+      "description": "Monotonic revision of the applied policy (recorded in reports, ROADMAP 9).",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
     "ProtocolError": {
       "description": "Protocol error: distinct from operational errors (ROADMAP 9).",
       "type": "object",
@@ -966,6 +1203,49 @@
         "code",
         "message",
         "retryable"
+      ]
+    },
+    "Quotas": {
+      "description": "Quotas of a session or of a policy layer. Each field is an inclusive\nmaximum; the intersection takes the minimum.",
+      "type": "object",
+      "properties": {
+        "max_input_events": {
+          "description": "Total input events allowed in the session.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_operations": {
+          "description": "Total operations allowed in the session.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_queued_operations": {
+          "description": "Operations queued per VM and not yet forwarded.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_screenshot_bytes": {
+          "description": "Maximum size of a single screenshot in bytes.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_screenshots": {
+          "description": "Total screenshots allowed in the session.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "max_operations",
+        "max_input_events",
+        "max_screenshots",
+        "max_screenshot_bytes",
+        "max_queued_operations"
       ]
     },
     "ReplyError": {
@@ -1424,7 +1704,412 @@
             "vm_id",
             "baseline_id"
           ]
+        },
+        {
+          "description": "Response to `request_session`.",
+          "type": "object",
+          "properties": {
+            "expires_in_s": {
+              "description": "Lifetime of the request.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "session_requested"
+            },
+            "request_id": {
+              "description": "Request, for `await_session`.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "verification_code": {
+              "description": "Code the user compares in the app.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "request_id",
+            "verification_code",
+            "expires_in_s"
+          ]
+        },
+        {
+          "description": "Response to `await_session`: session approved and bound to this\nconnection.",
+          "type": "object",
+          "properties": {
+            "grant": {
+              "description": "Grant issued by the supervisor.",
+              "$ref": "#/$defs/Grant"
+            },
+            "kind": {
+              "type": "string",
+              "const": "session_granted"
+            },
+            "lease": {
+              "description": "First lease.",
+              "$ref": "#/$defs/Lease"
+            },
+            "session_id": {
+              "description": "Session.",
+              "$ref": "#/$defs/SessionId"
+            },
+            "token": {
+              "description": "Session secret: never logged.",
+              "$ref": "#/$defs/SessionToken"
+            }
+          },
+          "required": [
+            "kind",
+            "session_id",
+            "token",
+            "grant",
+            "lease"
+          ]
+        },
+        {
+          "description": "Agent access switch.",
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "description": "State.",
+              "type": "boolean"
+            },
+            "kind": {
+              "type": "string",
+              "const": "agent_access"
+            }
+          },
+          "required": [
+            "kind",
+            "enabled"
+          ]
+        },
+        {
+          "description": "Response to `list_session_requests`.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "session_requests"
+            },
+            "requests": {
+              "description": "Pending requests, oldest first.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/SessionRequestInfo"
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "requests"
+          ]
+        },
+        {
+          "description": "A session (approval, pause, resume).",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "session"
+            },
+            "session": {
+              "description": "Session.",
+              "$ref": "#/$defs/SessionInfo"
+            }
+          },
+          "required": [
+            "kind",
+            "session"
+          ]
+        },
+        {
+          "description": "Response to `deny_session`.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "session_denied"
+            },
+            "request_id": {
+              "description": "Request.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "kind",
+            "request_id"
+          ]
+        },
+        {
+          "description": "Response to `list_sessions`.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "sessions"
+            },
+            "sessions": {
+              "description": "Live sessions first, then the most recent terminated ones.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/SessionInfo"
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "sessions"
+          ]
+        },
+        {
+          "description": "Response to `revoke_session`.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "session_revoked"
+            },
+            "report": {
+              "description": "Discarded queue and requests already forwarded.",
+              "$ref": "#/$defs/RevocationReport"
+            },
+            "session_id": {
+              "description": "Session.",
+              "$ref": "#/$defs/SessionId"
+            }
+          },
+          "required": [
+            "kind",
+            "session_id",
+            "report"
+          ]
+        },
+        {
+          "description": "Response to `set_input_owner`.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "input_owner"
+            },
+            "owner": {
+              "description": "Owner now.",
+              "$ref": "#/$defs/InputOwner"
+            },
+            "vm_id": {
+              "description": "VM.",
+              "$ref": "#/$defs/VmId"
+            }
+          },
+          "required": [
+            "kind",
+            "vm_id",
+            "owner"
+          ]
+        },
+        {
+          "description": "Response to the agent call `list_vms`.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "agent_vms"
+            },
+            "vms": {
+              "description": "VMs of the grant.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/AgentVmView"
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "vms"
+          ]
+        },
+        {
+          "description": "Response to the agent call `vm_status`.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "agent_vm"
+            },
+            "vm": {
+              "description": "VM.",
+              "$ref": "#/$defs/AgentVmView"
+            }
+          },
+          "required": [
+            "kind",
+            "vm"
+          ]
+        },
+        {
+          "description": "Response to the agent call `screenshot`.",
+          "type": "object",
+          "properties": {
+            "chunk_bytes": {
+              "description": "Raw bytes per chunk.",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "chunks": {
+              "description": "Number of chunks to fetch.",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "agent_screenshot"
+            },
+            "operation": {
+              "description": "Operation record.",
+              "$ref": "#/$defs/OperationRecord"
+            },
+            "screenshot": {
+              "description": "Metadata (VM, run, geometry, SHA-256, size).",
+              "$ref": "#/$defs/Screenshot"
+            }
+          },
+          "required": [
+            "kind",
+            "operation",
+            "screenshot",
+            "chunk_bytes",
+            "chunks"
+          ]
+        },
+        {
+          "description": "Response to the agent call `screenshot_chunk`.",
+          "type": "object",
+          "properties": {
+            "chunks": {
+              "description": "Number of chunks.",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "data": {
+              "description": "Bytes of the chunk, standard base64 with padding.",
+              "type": "string"
+            },
+            "index": {
+              "description": "Chunk index.",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "screenshot_chunk"
+            },
+            "operation_id": {
+              "description": "Screenshot operation.",
+              "$ref": "#/$defs/OperationId"
+            }
+          },
+          "required": [
+            "kind",
+            "operation_id",
+            "index",
+            "chunks",
+            "data"
+          ]
+        },
+        {
+          "description": "Response to the agent call `operation`.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "operation_status"
+            },
+            "operation": {
+              "description": "Operation record.",
+              "$ref": "#/$defs/OperationRecord"
+            }
+          },
+          "required": [
+            "kind",
+            "operation"
+          ]
+        },
+        {
+          "description": "Response to the agent call `renew_lease`.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "lease"
+            },
+            "lease": {
+              "description": "New lease.",
+              "$ref": "#/$defs/Lease"
+            }
+          },
+          "required": [
+            "kind",
+            "lease"
+          ]
+        },
+        {
+          "description": "Response to the agent call `end_session`.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "session_ended"
+            },
+            "report": {
+              "description": "Discarded queue and requests already forwarded.",
+              "$ref": "#/$defs/RevocationReport"
+            },
+            "session_id": {
+              "description": "Session.",
+              "$ref": "#/$defs/SessionId"
+            }
+          },
+          "required": [
+            "kind",
+            "session_id",
+            "report"
+          ]
         }
+      ]
+    },
+    "RevocationReport": {
+      "description": "Report of a revocation or an Emergency Stop: distinguishes the discarded queue\nfrom requests already forwarded (ROADMAP 7.3). It promises no cancellations.",
+      "type": "object",
+      "properties": {
+        "already_forwarded": {
+          "description": "Operations already forwarded to the backend: they may have produced effects.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OperationId"
+          }
+        },
+        "discarded": {
+          "description": "Queued operations discarded without forwarding (no effect).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OperationId"
+          }
+        }
+      },
+      "required": [
+        "discarded",
+        "already_forwarded"
       ]
     },
     "Role": {
@@ -1447,6 +2132,51 @@
       "type": "string",
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "Screenshot": {
+      "description": "Metadata of a screenshot produced by the backend (ROADMAP 6.4, 9). The image\nbytes travel separately (MCP image content or IPC block),\nnever as a host path.",
+      "type": "object",
+      "properties": {
+        "byte_len": {
+          "description": "Size in bytes of the image.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "captured_at": {
+          "description": "Capture instant.",
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "format": {
+          "description": "Format.",
+          "$ref": "#/$defs/ImageFormat"
+        },
+        "geometry": {
+          "description": "Display geometry at capture time.",
+          "$ref": "#/$defs/DisplayGeometry"
+        },
+        "run_id": {
+          "description": "Run in which it was captured.",
+          "$ref": "#/$defs/RunId"
+        },
+        "sha256": {
+          "description": "SHA-256 of the image bytes.",
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "vm_id": {
+          "description": "VM.",
+          "$ref": "#/$defs/VmId"
+        }
+      },
+      "required": [
+        "vm_id",
+        "run_id",
+        "geometry",
+        "format",
+        "sha256",
+        "byte_len",
+        "captured_at"
+      ]
     },
     "ServiceEvent": {
       "description": "Events published on the state channel.",
@@ -1567,6 +2297,124 @@
             "kind",
             "count"
           ]
+        },
+        {
+          "description": "The agent access switch changed.",
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "description": "State.",
+              "type": "boolean"
+            },
+            "kind": {
+              "type": "string",
+              "const": "agent_access"
+            }
+          },
+          "required": [
+            "kind",
+            "enabled"
+          ]
+        },
+        {
+          "description": "New pending session request.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "session_request"
+            },
+            "request": {
+              "description": "Request.",
+              "$ref": "#/$defs/SessionRequestInfo"
+            }
+          },
+          "required": [
+            "kind",
+            "request"
+          ]
+        },
+        {
+          "description": "A session request was decided, expired or withdrawn.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "session_request_closed"
+            },
+            "outcome": {
+              "description": "Outcome.",
+              "$ref": "#/$defs/SessionRequestOutcome"
+            },
+            "request_id": {
+              "description": "Request.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "kind",
+            "request_id",
+            "outcome"
+          ]
+        },
+        {
+          "description": "A session was created, paused, resumed or terminated.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "session_changed"
+            },
+            "session_id": {
+              "description": "Session.",
+              "$ref": "#/$defs/SessionId"
+            },
+            "state": {
+              "description": "State now.",
+              "$ref": "#/$defs/SessionState"
+            },
+            "termination": {
+              "description": "Termination cause, if terminated.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TerminationCause"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "session_id",
+            "state"
+          ]
+        },
+        {
+          "description": "The input owner of a VM changed.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "input_owner"
+            },
+            "owner": {
+              "description": "Owner now.",
+              "$ref": "#/$defs/InputOwner"
+            },
+            "vm_id": {
+              "description": "VM.",
+              "$ref": "#/$defs/VmId"
+            }
+          },
+          "required": [
+            "kind",
+            "vm_id",
+            "owner"
+          ]
         }
       ]
     },
@@ -1590,6 +2438,251 @@
       "type": "string",
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "SessionInfo": {
+      "description": "Agent session, for the UI.",
+      "type": "object",
+      "properties": {
+        "capabilities": {
+          "description": "Granted capabilities.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Capability"
+          },
+          "uniqueItems": true
+        },
+        "client_name": {
+          "description": "Client name declared by the agent (plain text).",
+          "type": "string"
+        },
+        "connection_id": {
+          "description": "Agent connection the session is bound to (absent once terminated).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "created_at": {
+          "description": "Creation instant.",
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "expires_at": {
+          "description": "Expiry of the grant.",
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "input_owner": {
+          "description": "`true` if the session owns the input of its VM.",
+          "type": "boolean"
+        },
+        "lease_expires_at": {
+          "description": "Expiry of the current lease.",
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "purpose": {
+          "description": "Purpose declared by the agent (plain text).",
+          "type": "string"
+        },
+        "quotas": {
+          "description": "Granted quotas.",
+          "$ref": "#/$defs/Quotas"
+        },
+        "session_id": {
+          "description": "Session.",
+          "$ref": "#/$defs/SessionId"
+        },
+        "state": {
+          "description": "State.",
+          "$ref": "#/$defs/SessionState"
+        },
+        "termination": {
+          "description": "Termination cause, if terminated.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TerminationCause"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "usage": {
+          "description": "Consumption.",
+          "$ref": "#/$defs/SessionUsage"
+        },
+        "vm_id": {
+          "description": "VM of the grant.",
+          "$ref": "#/$defs/VmId"
+        }
+      },
+      "required": [
+        "session_id",
+        "vm_id",
+        "client_name",
+        "purpose",
+        "state",
+        "capabilities",
+        "quotas",
+        "usage",
+        "created_at",
+        "expires_at",
+        "lease_expires_at",
+        "input_owner"
+      ]
+    },
+    "SessionRequestInfo": {
+      "description": "Pending session request, for the UI.",
+      "type": "object",
+      "properties": {
+        "client_name": {
+          "description": "Client name declared by the agent (plain text).",
+          "type": "string"
+        },
+        "connection_id": {
+          "description": "Agent connection.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "expires_at": {
+          "description": "The request expires at this instant if not decided.",
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "peer_pid": {
+          "description": "Peer PID reported by the operating system, diagnostic only.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "purpose": {
+          "description": "Purpose declared by the agent (plain text).",
+          "type": "string"
+        },
+        "request_id": {
+          "description": "Request.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "requested_at": {
+          "description": "Instant of the request.",
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "requested_capabilities": {
+          "description": "Capabilities requested (hint).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Capability"
+          },
+          "uniqueItems": true
+        },
+        "requested_vms": {
+          "description": "VMs requested (hint).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/VmId"
+          }
+        },
+        "verification_code": {
+          "description": "Code shown to the agent and in the app.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "request_id",
+        "connection_id",
+        "client_name",
+        "purpose",
+        "requested_vms",
+        "requested_capabilities",
+        "verification_code",
+        "requested_at",
+        "expires_at"
+      ]
+    },
+    "SessionRequestOutcome": {
+      "description": "Outcome of a session request, in [`ServiceEvent::SessionRequestClosed`].",
+      "oneOf": [
+        {
+          "description": "Approved: a session was created.",
+          "type": "string",
+          "const": "approved"
+        },
+        {
+          "description": "Denied by the user (or by the agent access switch).",
+          "type": "string",
+          "const": "denied"
+        },
+        {
+          "description": "Not decided in time.",
+          "type": "string",
+          "const": "expired"
+        },
+        {
+          "description": "The agent connection closed.",
+          "type": "string",
+          "const": "withdrawn"
+        }
+      ]
+    },
+    "SessionState": {
+      "description": "State of an agent session.",
+      "oneOf": [
+        {
+          "description": "Active.",
+          "type": "string",
+          "const": "active"
+        },
+        {
+          "description": "Agent pause: no new mutation forwarded; observation allowed.",
+          "type": "string",
+          "const": "paused"
+        },
+        {
+          "description": "Terminated (revocation, expiry, Emergency Stop, client loss...). Final.",
+          "type": "string",
+          "const": "terminated"
+        }
+      ]
+    },
+    "SessionToken": {
+      "description": "Session secret, only on authenticated IPC; never in logs or reports.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "writeOnly": true
+    },
+    "SessionUsage": {
+      "description": "Quota consumption of a session.",
+      "type": "object",
+      "properties": {
+        "input_events": {
+          "description": "Accepted input events.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "operations": {
+          "description": "Accepted operations.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "screenshots": {
+          "description": "Accepted screenshots.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "operations",
+        "input_events",
+        "screenshots"
+      ]
     },
     "Sha256Digest": {
       "description": "SHA-256 in lowercase hexadecimal.",
@@ -1675,6 +2768,66 @@
           "description": "`restore_baseline`.",
           "type": "string",
           "const": "restore_baseline"
+        }
+      ]
+    },
+    "TerminationCause": {
+      "description": "Termination cause of a session (recorded in the report, ROADMAP 9).",
+      "oneOf": [
+        {
+          "description": "Ordinary close from the app.",
+          "type": "string",
+          "const": "completed"
+        },
+        {
+          "description": "Revoked by the user.",
+          "type": "string",
+          "const": "revoked"
+        },
+        {
+          "description": "Emergency Stop.",
+          "type": "string",
+          "const": "emergency_stop"
+        },
+        {
+          "description": "Grant expired.",
+          "type": "string",
+          "const": "grant_expired"
+        },
+        {
+          "description": "Lease not renewed within the limit.",
+          "type": "string",
+          "const": "lease_expired"
+        },
+        {
+          "description": "Loss of the client or of the adapter.",
+          "type": "string",
+          "const": "client_lost"
+        },
+        {
+          "description": "UI closed or crashed.",
+          "type": "string",
+          "const": "ui_closed"
+        },
+        {
+          "description": "Supervisor lost or restarted.",
+          "type": "string",
+          "const": "supervisor_lost"
+        },
+        {
+          "description": "Host resumed from sleep.",
+          "type": "string",
+          "const": "host_resumed"
+        },
+        {
+          "description": "VM failed or terminated during the session.",
+          "type": "string",
+          "const": "vm_terminated"
+        },
+        {
+          "description": "Baseline restore: the control session closes (ROADMAP 8).",
+          "type": "string",
+          "const": "restored"
         }
       ]
     },

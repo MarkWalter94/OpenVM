@@ -359,6 +359,7 @@ pub fn probe(setup: QemuSetup) -> Result<(QemuHost, QemuVmBackend, HostCapacity)
         guards: BTreeMap::new(),
         exits: Vec::new(),
         image_tool,
+        last_shots: BTreeMap::new(),
     };
     Ok((host, backend, capacity))
 }
@@ -532,6 +533,9 @@ pub struct QemuVmBackend {
     exits: Vec<(VmId, RunId, bool)>,
     /// Image operations for baselines.
     image_tool: Arc<QemuImageTool>,
+    /// Last screenshot of each VM (PNG in memory, at most the byte limit of
+    /// the request), taken once by the engine for an agent session (F4).
+    last_shots: BTreeMap<VmId, qemu_backend::screenshot::CapturedScreenshot>,
 }
 
 /// Route of a graceful stop task that ended.
@@ -614,6 +618,7 @@ impl QemuVmBackend {
     /// private directory.
     fn release(&mut self, vm_id: VmId) {
         lock(&self.registry).remove(&vm_id);
+        self.last_shots.remove(&vm_id);
         lock(&self.priority_killed).retain(|(vm, _)| *vm != vm_id);
         // A graceful stop still running ends as soon as it sees the exit
         // (the process is gone when a run is released).
@@ -957,9 +962,10 @@ impl VmBackend for QemuVmBackend {
         self.rt.block_on(run.reset()).map_err(|e| public(&e))
     }
 
-    /// `screendump` in the private directory; only the metadata (geometry,
-    /// hash, size) leaves the backend: the image is not delivered over IPC
-    /// (the console uses RFB).
+    /// `screendump` in the private directory; the metadata (geometry, hash,
+    /// size) goes to the core, the PNG stays here until the engine takes it
+    /// for an agent session ([`BackendPort::take_screenshot`], F4; the
+    /// console uses RFB).
     fn screenshot(
         &mut self,
         vm_id: VmId,
@@ -967,10 +973,13 @@ impl VmBackend for QemuVmBackend {
         max_bytes: u64,
     ) -> Result<Screenshot, PublicError> {
         let run = self.run(vm_id, run_id)?;
-        self.rt
+        let shot = self
+            .rt
             .block_on(run.screenshot_limited(max_bytes))
-            .map(|c| c.metadata(vm_id))
-            .map_err(|e| public(&e))
+            .map_err(|e| public(&e))?;
+        let meta = shot.metadata(vm_id);
+        self.last_shots.insert(vm_id, shot);
+        Ok(meta)
     }
 
     /// `input-send-event`. A batch without pointer movements does not depend
@@ -1152,6 +1161,11 @@ impl BackendPort for QemuVmBackend {
                 None
             }
         }
+    }
+
+    fn take_screenshot(&mut self, vm_id: VmId, run_id: RunId) -> Option<(Screenshot, Vec<u8>)> {
+        let shot = self.last_shots.remove(&vm_id)?;
+        (shot.run_id == run_id).then(|| (shot.metadata(vm_id), shot.png))
     }
 
     fn release_input(&mut self, vm_id: VmId, run_id: RunId) {

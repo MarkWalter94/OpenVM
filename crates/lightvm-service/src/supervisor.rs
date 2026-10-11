@@ -33,7 +33,15 @@
 //!   with `VmSummary::start` showing the phase. The `submit_vm(start)` reply
 //!   is held until QEMU is launched (or the start fails). Forced stop,
 //!   Emergency Stop, revocation of the requesting connection and shutdown
-//!   cancel the checks; nothing is launched and the VM ends `stopped`.
+//!   cancel the checks; nothing is launched and the VM ends `stopped`;
+//! - **agent sessions (F4)**: a request of an agent session carries its
+//!   session; right before executing, the service gate
+//!   ([`crate::agents::AgentRegistry::check`]) is checked again (pause and
+//!   revocation flip it outside this thread), then the core checks the
+//!   session twice. Every [`OBSERVE_INTERVAL`] the grant and lease expiries
+//!   are checked ([`VmEngine::tick_sessions`]); sessions terminated by the
+//!   core for any cause close their gate and connection, and their changes
+//!   (and the input owner changes) are published as events.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -51,10 +59,14 @@ use lightvm_proto::{
 };
 use tokio::sync::{OwnedSemaphorePermit, broadcast, oneshot, watch};
 
+use lightvm_proto::ipc::{AgentCall, InputOwner};
+use lightvm_proto::{AuditAction, AuditOutcome, ErrorCode, SessionId, SessionState};
+
+use crate::agents::AgentRegistry;
 use crate::display::DisplayRegistry;
 use crate::engine::{
-    BaselineOutcome, BaselineRequest, CancelCheck, ImportCopied, StartDone, StartJob, StorageDone,
-    VmEngine,
+    BaselineOutcome, BaselineRequest, CancelCheck, ImportCopied, NewSession, StartDone, StartJob,
+    StorageDone, VmEngine,
 };
 
 /// Media imports copying at the same time (each holds a worker thread).
@@ -147,6 +159,26 @@ pub(crate) enum SupervisorRequest {
         vm_id: VmId,
         baseline_id: BaselineId,
     },
+    /// Session approved in the app (F4).
+    CreateSession(Box<NewSession>),
+    ListSessions,
+    PauseSession(SessionId),
+    ResumeSession(SessionId),
+    EndSession {
+        session_id: SessionId,
+        cause: TerminationCause,
+        stop: bool,
+    },
+    EndAllSessions {
+        cause: TerminationCause,
+        stop: bool,
+    },
+    SetInputOwner {
+        vm_id: VmId,
+        owner: InputOwner,
+    },
+    /// Call of an agent session (the caller carries the session).
+    Agent(Box<AgentCall>),
 }
 
 impl SupervisorRequest {
@@ -164,7 +196,9 @@ impl SupervisorRequest {
                 | Self::CreateBaseline { .. }
                 | Self::RestoreBaseline { .. }
                 | Self::DeleteBaseline { .. }
-        )
+                | Self::CreateSession(_)
+                | Self::SetInputOwner { .. }
+        ) || matches!(self, Self::Agent(call) if call.is_mutation())
     }
 
     /// Baseline request served as a long storage operation (F3).
@@ -210,9 +244,20 @@ pub(crate) enum Command {
         revoked: watch::Receiver<bool>,
         /// Emergency Stop generation at the time of queueing.
         epoch: u64,
+        /// Agent session of the request and whether it mutates a VM: the
+        /// service gate is checked again right before executing (F4).
+        agent: Option<(SessionId, bool)>,
         reply: Reply,
         /// Queue slot: released when the command is served.
         _permit: OwnedSemaphorePermit,
+    },
+    /// Session control of the UI (F4): served like a request of the user,
+    /// without a queue slot (see `server::supervisor_call`).
+    Control {
+        req: SupervisorRequest,
+        /// Emergency Stop generation at the time of sending.
+        epoch: u64,
+        reply: Reply,
     },
     /// The Emergency Stop has already terminated the processes: record it in the
     /// core with the actor who decided it.
@@ -261,12 +306,28 @@ pub(crate) enum Command {
         cause: TerminationCause,
         release_input: bool,
     },
+    /// Audit of a session lifecycle step decided by the service (F4).
+    Record {
+        actor: Actor,
+        action: AuditAction,
+        outcome: AuditOutcome,
+        session_id: Option<SessionId>,
+        error: Option<ErrorCode>,
+    },
+    /// Sessions to terminate without a reply (agent connection lost: cause
+    /// `client_lost`, VM stopped, ROADMAP 7.3).
+    EndSessions {
+        ids: Vec<SessionId>,
+        cause: TerminationCause,
+        stop: bool,
+    },
 }
 
 impl std::fmt::Debug for Command {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Request { req, .. } => write!(f, "Request({req:?})"),
+            Self::Control { req, .. } => write!(f, "Control({req:?})"),
             Self::EmergencyReconcile(a) => write!(f, "EmergencyReconcile({a:?})"),
             Self::ParentLost { policy, .. } => write!(f, "ParentLost({policy:?})"),
             Self::Shutdown { .. } => write!(f, "Shutdown"),
@@ -275,6 +336,12 @@ impl std::fmt::Debug for Command {
             Self::FinishStart { done, .. } => write!(f, "FinishStart({done:?})"),
             Self::ConsolesRevoked { runs, cause, .. } => {
                 write!(f, "ConsolesRevoked({}, {cause:?})", runs.len())
+            }
+            Self::Record {
+                action, outcome, ..
+            } => write!(f, "Record({action:?}, {outcome:?})"),
+            Self::EndSessions { ids, cause, .. } => {
+                write!(f, "EndSessions({}, {cause:?})", ids.len())
             }
         }
     }
@@ -313,6 +380,8 @@ pub(crate) struct SupervisorThread {
     pub(crate) storage_cancel: Arc<AtomicBool>,
     /// Start checks running on worker threads.
     pub(crate) start_jobs: usize,
+    /// Agent sessions on the service side (gate, connections), F4.
+    pub(crate) agents: Arc<AgentRegistry>,
 }
 
 /// Maximum interval between two observations of the process exits (shutdown
@@ -338,6 +407,9 @@ impl SupervisorThread {
         // The file checks of a start (hash of a multi-GiB ISO) run on worker
         // threads: this thread keeps serving the other requests.
         self.engine.offload_start_checks(true);
+        // Pauses and revocations decided on the service's priority path
+        // reach the core before its next admission or forwarding (F4).
+        self.engine.attach_gate(self.agents.clone());
         let mut next_observe = Instant::now() + OBSERVE_INTERVAL;
         loop {
             let wait = next_observe.saturating_duration_since(Instant::now());
@@ -390,6 +462,9 @@ impl SupervisorThread {
             let r = catch_unwind(AssertUnwindSafe(|| {
                 if observe {
                     self.engine.observe();
+                    // Grant and lease expiries (ROADMAP 7.3): expired
+                    // sessions end and their VMs are Emergency-Stopped.
+                    self.engine.tick_sessions();
                 }
                 self.publish_state_changes();
             }));
@@ -418,12 +493,19 @@ impl SupervisorThread {
                 connection_id,
                 revoked,
                 epoch,
+                agent,
                 reply,
                 _permit,
             } => {
                 *slot = Some(reply);
+                let gate = agent.map_or(Ok(()), |(sid, mutation)| {
+                    self.agents.check(connection_id, sid, mutation)
+                });
                 let res = if is_revoked(&revoked) {
                     Err(unauthenticated("connection revoked"))
+                } else if let Err(e) = gate {
+                    // Second check of the service gate, right before executing.
+                    Err(ReplyError::Operational(e))
                 } else if req.is_mutation() && epoch != self.emergency_epoch.load(Ordering::SeqCst)
                 {
                     Err(ReplyError::Operational(PublicError::state_conflict(
@@ -490,6 +572,20 @@ impl SupervisorThread {
             } => {
                 self.start_jobs = self.start_jobs.saturating_sub(1);
                 self.finish_start(done, holder, epoch, slot);
+            }
+            Command::Control { req, epoch, reply } => {
+                *slot = Some(reply);
+                let res =
+                    if req.is_mutation() && epoch != self.emergency_epoch.load(Ordering::SeqCst) {
+                        Err(ReplyError::Operational(PublicError::state_conflict(
+                            "request discarded by the Emergency Stop",
+                        )))
+                    } else {
+                        self.handle(req, Some(&Caller::User), 0)
+                    };
+                if let Some(reply) = slot.take() {
+                    let _ = reply.send(res);
+                }
             }
             Command::FinishImport {
                 caller,
@@ -575,7 +671,28 @@ impl SupervisorThread {
                 }
             }
             Command::EmergencyReconcile(actor) => self.engine.after_emergency_stop(actor),
+            Command::Record {
+                actor,
+                action,
+                outcome,
+                session_id,
+                error,
+            } => self
+                .engine
+                .record_event(actor, action, outcome, session_id, error),
+            Command::EndSessions { ids, cause, stop } => {
+                for id in ids {
+                    if let Err(e) = self.engine.end_session(id, cause, stop) {
+                        crate::diag!("lightvm-service: session not ended: {}", e.message);
+                    }
+                }
+            }
             Command::ParentLost { policy, done } => {
+                // ROADMAP 7.3: UI lost → the agent sessions end and their VMs
+                // are stopped through the emergency path.
+                self.engine
+                    .end_all_sessions(TerminationCause::UiClosed, true);
+                self.publish_state_changes();
                 self.backend.stop_agent_sessions(StopReason::ParentLost);
                 self.backend.on_parent_lost(policy);
                 let _ = self.events.send(ServiceEvent::AgentSessionsStopped {
@@ -615,6 +732,9 @@ impl SupervisorThread {
         let runs = self.display.revoke_all();
         self.engine
             .console_revoked(Actor::System, &runs, TerminationCause::Completed);
+        // No session survives the service (they live in memory only).
+        self.engine
+            .end_all_sessions(TerminationCause::UiClosed, false);
         self.backend.stop_agent_sessions(StopReason::Shutdown);
         self.backend.prepare_shutdown();
         self.engine.stop_all();
@@ -626,7 +746,7 @@ impl SupervisorThread {
     fn refuse_at_shutdown(&mut self, pending: Command) {
         {
             match pending {
-                Command::Request { reply, .. } => {
+                Command::Request { reply, .. } | Command::Control { reply, .. } => {
                     let _ = reply.send(Err(ReplyError::Operational(PublicError::state_conflict(
                         "service shutting down",
                     ))));
@@ -673,6 +793,20 @@ impl SupervisorThread {
                 Command::ConsolesRevoked {
                     runs, actor, cause, ..
                 } => self.engine.console_revoked(actor, &runs, cause),
+                Command::Record {
+                    actor,
+                    action,
+                    outcome,
+                    session_id,
+                    error,
+                } => self
+                    .engine
+                    .record_event(actor, action, outcome, session_id, error),
+                Command::EndSessions { ids, cause, stop } => {
+                    for id in ids {
+                        let _ = self.engine.end_session(id, cause, stop);
+                    }
+                }
             }
         }
     }
@@ -700,6 +834,21 @@ impl SupervisorThread {
         }
         for (vm_id, state) in changes {
             let _ = self.events.send(ServiceEvent::VmState { vm_id, state });
+        }
+        // F4: sessions terminated by the core for any cause close their gate
+        // and their connection; changes and input owners are published.
+        for (session_id, state, termination) in self.engine.session_changes() {
+            if state == SessionState::Terminated {
+                self.agents.terminated(session_id);
+            }
+            let _ = self.events.send(ServiceEvent::SessionChanged {
+                session_id,
+                state,
+                termination,
+            });
+        }
+        for (vm_id, owner) in self.engine.input_owner_changes() {
+            let _ = self.events.send(ServiceEvent::InputOwner { vm_id, owner });
         }
         self.vms_with_process
             .store(self.engine.vms_with_process(), Ordering::SeqCst);
@@ -1083,6 +1232,70 @@ impl SupervisorThread {
             | SupervisorRequest::RestoreBaseline { .. } => Err(PublicError::infrastructure(
                 "baseline operation not dispatched",
             )),
+            SupervisorRequest::CreateSession(new) => {
+                who()?;
+                // The token goes back to the service only to be delivered to
+                // the waiting agent (never logged: `Debug` redacts it).
+                let token = new.token.clone();
+                self.engine
+                    .create_session(*new)
+                    .map(|c| ResponseBody::SessionGranted {
+                        session_id: c.grant.session_id,
+                        token,
+                        grant: c.grant,
+                        lease: c.lease,
+                    })
+            }
+            SupervisorRequest::ListSessions => {
+                who()?;
+                Ok(ResponseBody::Sessions {
+                    sessions: self.engine.list_sessions(),
+                })
+            }
+            SupervisorRequest::PauseSession(id) => {
+                who()?;
+                self.engine
+                    .pause_session(id)
+                    .map(|session| ResponseBody::Session { session })
+            }
+            SupervisorRequest::ResumeSession(id) => {
+                who()?;
+                self.engine
+                    .resume_session(id)
+                    .map(|session| ResponseBody::Session { session })
+            }
+            SupervisorRequest::EndSession {
+                session_id,
+                cause,
+                stop,
+            } => self
+                .engine
+                .end_session(session_id, cause, stop)
+                .map(|report| ResponseBody::SessionRevoked { session_id, report }),
+            SupervisorRequest::EndAllSessions { cause, stop } => {
+                self.engine.end_all_sessions(cause, stop);
+                Ok(ResponseBody::Pong)
+            }
+            SupervisorRequest::SetInputOwner { vm_id, owner } => {
+                who()?;
+                self.engine
+                    .set_input_owner(vm_id, owner)
+                    .map(|()| ResponseBody::InputOwner { vm_id, owner })
+            }
+            SupervisorRequest::Agent(call) => {
+                let c = who()?;
+                let end = matches!(*call, AgentCall::EndSession);
+                let r = self.engine.agent_call(c, *call);
+                if end
+                    && r.is_ok()
+                    && let Caller::Agent { session_id, .. } = c
+                {
+                    // Ordinary end by the agent: the gate closes, the
+                    // connection stays (a new request is possible).
+                    let _ = self.agents.terminate(*session_id, true, None);
+                }
+                r
+            }
         };
         r.map_err(ReplyError::Operational)
     }

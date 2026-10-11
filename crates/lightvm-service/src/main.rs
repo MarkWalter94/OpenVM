@@ -22,6 +22,15 @@
 //!
 //! Exit codes: 0 regular shutdown, 2 wrong usage, 3 catalog already in use by
 //! another instance, 4 other startup errors.
+//!
+//! Local emergency command (F4, ROADMAP 7.3, ADR-0009):
+//! `lightvm-service --emergency-stop --catalog <dir>` connects to the
+//! emergency endpoint of the service running on that catalog (published in
+//! `<catalog>/emergency.endpoint`, same per-user ACL as the IPC endpoint),
+//! sends the only verb it accepts and prints the report. Usable when the UI
+//! is frozen: no credential, no UI, no supervisor thread involved. Exit
+//! codes: 0 completed (end of every process observed), 5 not completed,
+//! 6 no running service reachable for the catalog.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -41,7 +50,8 @@ use lightvm_service::{ServiceConfig, start};
 
 const USAGE: &str = "usage: lightvm-service --catalog <dir> [--qemu-dir <dir>] \
 [--audit-log <file>] [--runtime-dir <dir>] [--parent-watch stdin|none] \
-[--parent-loss-policy kill-vms|shutdown-vms|keep-vms] [--parent-loss-powerdown-s N]";
+[--parent-loss-policy kill-vms|shutdown-vms|keep-vms] [--parent-loss-powerdown-s N]
+       lightvm-service --emergency-stop --catalog <dir>";
 
 /// Message for a catalog already in use (same text as the service lock).
 const ALREADY_RUNNING: &str = "another instance of lightvm-service is already using this catalog";
@@ -54,6 +64,7 @@ struct Args {
     runtime_dir: Option<PathBuf>,
     parent_watch: bool,
     parent_loss_policy: ParentLossPolicy,
+    emergency_stop: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -65,6 +76,7 @@ fn parse_args() -> Result<Args, String> {
     let mut parent_watch = true;
     let mut parent_loss: Option<String> = None;
     let mut powerdown_s: u32 = 10;
+    let mut emergency_stop = false;
     while let Some(a) = it.next() {
         let a = a
             .into_string()
@@ -95,6 +107,7 @@ fn parse_args() -> Result<Args, String> {
                     .and_then(|v| v.parse().ok())
                     .ok_or("--parent-loss-powerdown-s: expected a number of seconds")?;
             }
+            "--emergency-stop" => emergency_stop = true,
             "--version" => {
                 println!("lightvm-service {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
@@ -124,7 +137,53 @@ fn parse_args() -> Result<Args, String> {
         runtime_dir,
         parent_watch,
         parent_loss_policy,
+        emergency_stop,
     })
+}
+
+/// `--emergency-stop`: local emergency command, never opens the catalog.
+fn emergency_command(catalog: &std::path::Path) -> ExitCode {
+    let endpoint = match lightvm_service::client::read_emergency_endpoint(catalog) {
+        Ok(e) => e,
+        Err(e) => {
+            lightvm_service::diag!(
+                "lightvm-service: no running service for this catalog (emergency endpoint: {e})"
+            );
+            return ExitCode::from(6);
+        }
+    };
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            lightvm_service::diag!("lightvm-service: runtime: {e}");
+            return ExitCode::from(4);
+        }
+    };
+    match rt.block_on(lightvm_service::client::emergency_stop(&endpoint)) {
+        Ok(r) => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "event": "emergency_stop",
+                    "revoked_connections": r.revoked_connections,
+                    "processes_terminated": r.processes_terminated,
+                    "completed": r.completed,
+                })
+            );
+            if r.completed {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(5)
+            }
+        }
+        Err(e) => {
+            lightvm_service::diag!("lightvm-service: emergency endpoint not reachable: {e}");
+            ExitCode::from(6)
+        }
+    }
 }
 
 /// Engine and host composed from the real adapters, and the root of the
@@ -236,6 +295,9 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if args.emergency_stop {
+        return emergency_command(&args.catalog);
+    }
     let (engine, host, display_dir) = match compose(&args) {
         Ok(x) => x,
         Err((code, msg)) => {

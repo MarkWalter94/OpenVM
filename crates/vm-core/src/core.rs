@@ -15,9 +15,16 @@
 //! The Emergency Stop ([`Core::emergency_stop`]) does not go through the queue: it revokes the
 //! sessions, discards the queue, identifies the requests already forwarded and asks for the
 //! termination of the run.
+//!
+//! Input ownership (F4, ROADMAP 6.4/7.3): every VM has one input owner, the
+//! user (default) or one agent session, never both. Input from anyone else
+//! is refused on receipt and discarded right before forwarding; every change
+//! of owner (and the end of the owning session) records the run whose
+//! pressed keys must be released ([`Core::take_input_releases`]).
 
 use std::collections::{BTreeMap, VecDeque};
 
+use lightvm_proto::ipc::InputOwner;
 use lightvm_proto::{
     Actor, Admission, AuditAction, AuditEvent, AuditOutcome, BackendObservation, Caller,
     Capability, DisplayGeometry, EffectivePolicy, ErrorCode, FileIdentity, Grant, HostCapacity,
@@ -326,6 +333,10 @@ pub struct Core<S, C, I, A> {
     op_index: BTreeMap<OperationId, VmId>,
     audit_seq: u64,
     audit_failures: u64,
+    /// Input owner per VM; absent = the user.
+    input_owners: BTreeMap<VmId, SessionId>,
+    /// Runs whose pressed keys and buttons must be released (owner change).
+    input_releases: Vec<(VmId, RunId)>,
 }
 
 impl<S, C, I, A> Core<S, C, I, A>
@@ -350,6 +361,8 @@ where
             op_index: BTreeMap::new(),
             audit_seq: 0,
             audit_failures: 0,
+            input_owners: BTreeMap::new(),
+            input_releases: Vec::new(),
         }
     }
 
@@ -442,6 +455,150 @@ where
         ev.error = Some(err.code);
         self.emit_after(actor, action, AuditOutcome::Denied, ev);
         err
+    }
+
+    /// Records an audit event decided outside the core (service-level steps
+    /// of the session lifecycle: requests, denials, agent access switch).
+    /// Only identifiers, outcome and code: never declared texts or secrets.
+    pub fn record_event(
+        &mut self,
+        actor: Actor,
+        action: AuditAction,
+        outcome: AuditOutcome,
+        vm_id: Option<VmId>,
+        session_id: Option<SessionId>,
+        error: Option<ErrorCode>,
+    ) {
+        self.emit_after(
+            actor,
+            action,
+            outcome,
+            Ev {
+                vm_id,
+                session_id,
+                error,
+                ..Ev::default()
+            },
+        );
+    }
+
+    // ----- input ownership (F4) -------------------------------------------
+
+    /// Input owner of a VM.
+    #[must_use]
+    pub fn input_owner(&self, vm_id: VmId) -> InputOwner {
+        self.input_owners
+            .get(&vm_id)
+            .map_or(InputOwner::User, |s| InputOwner::Agent { session_id: *s })
+    }
+
+    /// `Ok` if `caller` owns the input of the VM.
+    fn check_input_owner(&self, caller: &Caller, vm_id: VmId) -> Result<(), PublicError> {
+        match (caller, self.input_owners.get(&vm_id)) {
+            (Caller::User, None) => Ok(()),
+            (Caller::User, Some(_)) => Err(PublicError::permission_denied(
+                "input controlled by an agent session: take control first",
+            )
+            .with_detail("reason", "input_owned_by_agent")),
+            (Caller::Agent { session_id, .. }, Some(owner)) if owner == session_id => Ok(()),
+            (Caller::Agent { .. }, _) => Err(PublicError::permission_denied(
+                "the session does not control the input of the VM",
+            )
+            .with_detail("reason", "input_not_owned")),
+        }
+    }
+
+    /// Changes the input owner of a VM (decided by the user in the app). An
+    /// agent owner must be a live session whose grant covers the VM and
+    /// `vm.input`. Queued input of the previous owner is discarded and the
+    /// pressed keys of the current run are released
+    /// ([`Self::take_input_releases`]). Audited (`input_control`).
+    pub fn set_input_owner(
+        &mut self,
+        actor: Actor,
+        vm_id: VmId,
+        owner: InputOwner,
+    ) -> Result<(), PublicError> {
+        let ev = |session_id: Option<SessionId>| Ev {
+            vm_id: Some(vm_id),
+            session_id,
+            capability: Some(Capability::VmInput),
+            ..Ev::default()
+        };
+        let new_session = match owner {
+            InputOwner::User => None,
+            InputOwner::Agent { session_id } => Some(session_id),
+        };
+        let check = (|| {
+            if !self.vms.contains_key(&vm_id) {
+                return Err(PublicError::not_found("VM does not exist"));
+            }
+            if let Some(sid) = new_session {
+                let s = self
+                    .sessions
+                    .get(sid)
+                    .filter(|s| s.state != SessionState::Terminated)
+                    .ok_or_else(|| PublicError::not_found("session not live"))?;
+                if !s.grant.vm_allowlist.contains(&vm_id)
+                    || !s.grant.capabilities.contains(&Capability::VmInput)
+                {
+                    return Err(PublicError::permission_denied(
+                        "the session grant does not cover input on this VM",
+                    ));
+                }
+            }
+            Ok(())
+        })();
+        if let Err(err) = check {
+            return Err(self.deny(actor, AuditAction::InputControl, ev(new_session), err));
+        }
+        let previous = self.input_owners.get(&vm_id).copied();
+        if previous == new_session {
+            return Ok(());
+        }
+        match new_session {
+            Some(sid) => {
+                self.input_owners.insert(vm_id, sid);
+            }
+            None => {
+                self.input_owners.remove(&vm_id);
+            }
+        }
+        self.after_input_owner_change(vm_id, previous);
+        self.emit_after(
+            actor,
+            AuditAction::InputControl,
+            AuditOutcome::Succeeded,
+            ev(new_session.or(previous)),
+        );
+        Ok(())
+    }
+
+    /// Queued input of the previous owner discarded, release of the run's
+    /// pressed keys recorded.
+    fn after_input_owner_change(&mut self, vm_id: VmId, previous: Option<SessionId>) {
+        let Some(rt) = self.vms.get_mut(&vm_id) else {
+            return;
+        };
+        let (stale, rest): (VecDeque<Pending>, VecDeque<Pending>) = rt
+            .queue
+            .drain(..)
+            .partition(|p| p.record.kind == OperationKind::Input && p.session_id() == previous);
+        rt.queue = rest;
+        if let Some(run) = rt.run_id
+            && rt.state.has_process()
+        {
+            self.input_releases.push((vm_id, run));
+        }
+        for p in stale {
+            self.discard(vm_id, p, ErrorCode::PermissionDenied);
+        }
+    }
+
+    /// Runs whose pressed keys and buttons must be released since the last
+    /// call (input owner changed or owning session ended).
+    pub fn take_input_releases(&mut self) -> Vec<(VmId, RunId)> {
+        std::mem::take(&mut self.input_releases)
     }
 
     // ----- authorization ---------------------------------------------------
@@ -929,13 +1086,14 @@ where
     /// List of the VMs visible to the caller (filtered by the grant for agents).
     pub fn list_vms(&mut self, caller: &Caller) -> Result<Vec<VmStatus>, PublicError> {
         let now = self.clock.now();
+        let session_id = agent_session(caller);
         if let Err(err) = self.authorize(caller, None, Capability::VmList, now) {
-            return Err(self.deny(
-                caller.actor(),
-                AuditAction::VmStateObserved,
-                Ev::default(),
-                err,
-            ));
+            let ev = Ev {
+                session_id,
+                capability: Some(Capability::VmList),
+                ..Ev::default()
+            };
+            return Err(self.deny(caller.actor(), AuditAction::VmList, ev, err));
         }
         let allow = match caller {
             Caller::User => None,
@@ -944,30 +1102,59 @@ where
                 .get(*session_id)
                 .map(|s| s.grant.vm_allowlist.clone()),
         };
-        Ok(self
+        let out: Vec<VmStatus> = self
             .vms
             .values()
             .filter(|rt| allow.as_ref().is_none_or(|a| a.contains(&rt.record.id)))
             .map(Self::status_of)
-            .collect())
+            .collect();
+        // Every agent call is audited (F4); the user's reads are not.
+        if session_id.is_some() {
+            self.emit_after(
+                caller.actor(),
+                AuditAction::VmList,
+                AuditOutcome::Succeeded,
+                Ev {
+                    session_id,
+                    ..Ev::default()
+                },
+            );
+        }
+        Ok(out)
     }
 
     /// State of a VM, if the caller is authorized. For an agent a VM outside the
     /// allowlist gives `permission_denied` even if it does not exist (no data about other VMs).
     pub fn vm_status(&mut self, caller: &Caller, vm_id: VmId) -> Result<VmStatus, PublicError> {
         let now = self.clock.now();
+        let session_id = agent_session(caller);
         if let Err(err) = self.authorize(caller, Some(vm_id), Capability::VmStatus, now) {
             let ev = Ev {
                 vm_id: Some(vm_id),
+                session_id,
                 capability: Some(Capability::VmStatus),
                 ..Ev::default()
             };
-            return Err(self.deny(caller.actor(), AuditAction::VmStateObserved, ev, err));
+            return Err(self.deny(caller.actor(), AuditAction::VmStatus, ev, err));
         }
-        self.vms
+        let st = self
+            .vms
             .get(&vm_id)
             .map(Self::status_of)
-            .ok_or_else(|| PublicError::not_found("VM does not exist"))
+            .ok_or_else(|| PublicError::not_found("VM does not exist"))?;
+        if session_id.is_some() {
+            self.emit_after(
+                caller.actor(),
+                AuditAction::VmStatus,
+                AuditOutcome::Succeeded,
+                Ev {
+                    vm_id: Some(vm_id),
+                    session_id,
+                    ..Ev::default()
+                },
+            );
+        }
+        Ok(st)
     }
 
     /// Operation by id: the user sees everything, an agent only its own.
@@ -1072,6 +1259,12 @@ where
             Ok(e) => e,
             Err(err) => return Err(self.deny(actor, audit_action, ev(req.expected_run_id), err)),
         };
+        if kind == OperationKind::Input
+            && self.vms.contains_key(&req.vm_id)
+            && let Err(err) = self.check_input_owner(caller, req.vm_id)
+        {
+            return Err(self.deny(actor, audit_action, ev(req.expected_run_id), err));
+        }
         match self.admit(caller, &req, &effective) {
             Ok(Some(adm)) => Ok(adm),
             Ok(None) => {
@@ -1394,6 +1587,12 @@ where
                     continue;
                 }
             };
+            if kind == OperationKind::Input
+                && let Err(err) = self.check_input_owner(&p.caller, vm_id)
+            {
+                self.discard(vm_id, p, err.code);
+                continue;
+            }
             if p.record.run_id.is_some() && p.record.run_id != current_run {
                 self.discard(vm_id, p, ErrorCode::StateConflict);
                 continue;
@@ -2143,7 +2342,55 @@ where
         lease_millis: i64,
     ) -> Result<Lease, PublicError> {
         let now = self.clock.now();
-        self.sessions.renew(session_id, token, lease_millis, now)
+        let r = self.sessions.renew(session_id, token, lease_millis, now);
+        let ev = Ev {
+            session_id: Some(session_id),
+            ..Ev::default()
+        };
+        let actor = Actor::Agent { session_id };
+        match &r {
+            Ok(_) => self.emit_after(
+                actor,
+                AuditAction::SessionLease,
+                AuditOutcome::Succeeded,
+                ev,
+            ),
+            Err(e) => {
+                let _ = self.deny(actor, AuditAction::SessionLease, ev, e.clone());
+            }
+        }
+        r
+    }
+
+    /// Check of a read of screenshot bytes already captured for an agent
+    /// session (`vm.screenshot` on the VM, observation: allowed while
+    /// paused). Audited (`screenshot_read`), never the bytes.
+    pub fn read_screenshot(
+        &mut self,
+        caller: &Caller,
+        vm_id: VmId,
+        operation_id: OperationId,
+    ) -> Result<(), PublicError> {
+        let now = self.clock.now();
+        let ev = Ev {
+            vm_id: Some(vm_id),
+            operation_id: Some(operation_id),
+            session_id: agent_session(caller),
+            capability: Some(Capability::VmScreenshot),
+            ..Ev::default()
+        };
+        match self.authorize(caller, Some(vm_id), Capability::VmScreenshot, now) {
+            Ok(_) => {
+                self.emit_after(
+                    caller.actor(),
+                    AuditAction::ScreenshotRead,
+                    AuditOutcome::Succeeded,
+                    ev,
+                );
+                Ok(())
+            }
+            Err(err) => Err(self.deny(caller.actor(), AuditAction::ScreenshotRead, ev, err)),
+        }
     }
 
     /// Agent pause: blocks forwarding of new mutations (the VM keeps running).
@@ -2221,6 +2468,29 @@ where
                     .push(self.discard(vm_id, p, discard_code_for(cause)));
             }
         }
+        // The input of the session's VMs goes back to the user, keys released.
+        let owned: Vec<VmId> = self
+            .input_owners
+            .iter()
+            .filter(|(_, s)| **s == session_id)
+            .map(|(v, _)| *v)
+            .collect();
+        for vm_id in owned {
+            self.input_owners.remove(&vm_id);
+            self.after_input_owner_change(vm_id, Some(session_id));
+            self.emit_after(
+                Actor::System,
+                AuditAction::InputControl,
+                AuditOutcome::Succeeded,
+                Ev {
+                    vm_id: Some(vm_id),
+                    session_id: Some(session_id),
+                    capability: Some(Capability::VmInput),
+                    termination: Some(cause),
+                    ..Ev::default()
+                },
+            );
+        }
         self.emit_after(
             Actor::System,
             AuditAction::SessionTerminate,
@@ -2260,11 +2530,26 @@ where
         session_id: SessionId,
         cause: TerminationCause,
     ) -> Result<SessionTermination, PublicError> {
-        let allow = self
+        let (allow, live) = self
             .sessions
             .get(session_id)
-            .map(|s| s.grant.vm_allowlist.clone())
+            .map(|s| {
+                (
+                    s.grant.vm_allowlist.clone(),
+                    s.state != SessionState::Terminated,
+                )
+            })
             .ok_or_else(|| PublicError::not_found("session does not exist"))?;
+        // An already terminated session (revoked meanwhile, for example) does
+        // not stop its VMs a second time.
+        if !live {
+            return Ok(SessionTermination {
+                session_id,
+                cause,
+                report: RevocationReport::default(),
+                emergency_stops: Vec::new(),
+            });
+        }
         let report = self.revoke_inner(session_id, cause);
         let mut emergency_stops = Vec::new();
         for vm_id in allow {
@@ -2278,6 +2563,25 @@ where
             report,
             emergency_stops,
         })
+    }
+
+    /// Terminates every live session with `cause`; with `stop` their VMs
+    /// are Emergency-Stopped as for [`Self::terminate_session_with_stop`].
+    pub fn terminate_all_sessions(
+        &mut self,
+        cause: TerminationCause,
+        stop: bool,
+    ) -> Vec<SessionTermination> {
+        let live: Vec<SessionId> = self.sessions.live().map(|s| s.id).collect();
+        live.into_iter()
+            .filter_map(|id| {
+                if stop {
+                    self.terminate_session_with_stop(id, cause).ok()
+                } else {
+                    self.revoke_session(id, cause).ok()
+                }
+            })
+            .collect()
     }
 
     /// Periodic check of grant and lease expiries.
@@ -2370,6 +2674,20 @@ where
             return Ok((plan, Ok(())));
         };
         let killed = backend.force_stop(vm_id, run_id);
+        self.finish_emergency_stop(actor, vm_id, run_id, killed.clone())?;
+        Ok((plan, killed))
+    }
+
+    /// Records the outcome of the termination of a run planned by
+    /// [`Self::emergency_stop`]: `Ok` = end of the process observed (the VM
+    /// becomes `stopped`), `Err` = not confirmed (the VM becomes `failed`).
+    pub fn finish_emergency_stop(
+        &mut self,
+        actor: Actor,
+        vm_id: VmId,
+        run_id: RunId,
+        killed: Result<(), PublicError>,
+    ) -> Result<(), PublicError> {
         let outcome = match &killed {
             Ok(()) => {
                 self.observe(
@@ -2397,7 +2715,14 @@ where
                 ..Ev::default()
             },
         );
-        Ok((plan, killed))
+        Ok(())
+    }
+}
+
+fn agent_session(caller: &Caller) -> Option<SessionId> {
+    match caller {
+        Caller::Agent { session_id, .. } => Some(*session_id),
+        Caller::User => None,
     }
 }
 

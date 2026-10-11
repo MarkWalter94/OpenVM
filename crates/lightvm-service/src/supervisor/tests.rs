@@ -84,6 +84,7 @@ fn supervisor(engine: Box<dyn VmEngine>) -> (SupervisorThread, mpsc::Receiver<Co
         storage_jobs: 0,
         storage_cancel: Arc::default(),
         start_jobs: 0,
+        agents: Arc::default(),
     };
     (sup, rx)
 }
@@ -102,6 +103,7 @@ fn request(
             connection_id: 1,
             revoked,
             epoch,
+            agent: None,
             reply: tx,
             _permit: permit,
         },

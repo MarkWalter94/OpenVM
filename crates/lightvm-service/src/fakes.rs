@@ -54,6 +54,12 @@ impl Gate {
         self.cv.notify_all();
     }
 
+    /// Closes the gate again: the fake backend blocks at its next
+    /// observation (a stuck supervisor, F4 stop-latency tests).
+    pub fn close(&self) {
+        *lock(&self.open) = false;
+    }
+
     /// `true` once opened.
     pub fn is_open(&self) -> bool {
         *lock(&self.open)
@@ -490,6 +496,13 @@ pub struct FakeVmBackend {
     /// Media handles received for the next start, kept like the real
     /// backend until the next stop.
     pub start_media: BTreeMap<VmId, (RunId, Vec<Box<dyn GuardedMedia>>)>,
+    /// Bytes of every screenshot (a stand-in for the PNG; F4 chunked read).
+    pub screenshot_png: Vec<u8>,
+    /// Last screenshot per VM, taken once by the engine.
+    pub last_shots: BTreeMap<VmId, (Screenshot, Vec<u8>)>,
+    /// Delay of every input forwarding (stop-latency measurements: a slow
+    /// backend keeps the supervisor busy).
+    pub input_delay: Option<std::time::Duration>,
 }
 
 /// Outcomes of background graceful stops injected by a test.
@@ -541,18 +554,29 @@ impl VmBackend for FakeVmBackend {
         &mut self,
         vm_id: VmId,
         run_id: RunId,
-        _max_bytes: u64,
+        max_bytes: u64,
     ) -> Result<Screenshot, PublicError> {
         push(&self.calls, "vm_screenshot");
-        Ok(Screenshot {
+        let png = self.screenshot_png.clone();
+        if png.len() as u64 > max_bytes {
+            return Err(PublicError::resource_limit(
+                "screenshot over the byte limit",
+            ));
+        }
+        let shot = Screenshot {
             vm_id,
             run_id,
             geometry: FAKE_GEOMETRY,
             format: ImageFormat::Png,
-            sha256: Sha256Digest::from_bytes([0; 32]),
-            byte_len: 0,
+            sha256: {
+                use sha2::Digest as _;
+                Sha256Digest::from_bytes(sha2::Sha256::digest(&png).into())
+            },
+            byte_len: png.len() as u64,
             captured_at: UtcTimestamp::now(),
-        })
+        };
+        self.last_shots.insert(vm_id, (shot.clone(), png));
+        Ok(shot)
     }
     fn send_input(
         &mut self,
@@ -561,6 +585,9 @@ impl VmBackend for FakeVmBackend {
         geometry: DisplayGeometry,
         events: &[InputEvent],
     ) -> Result<(), PublicError> {
+        if let Some(d) = self.input_delay {
+            std::thread::sleep(d);
+        }
         push(
             &self.calls,
             format!(
@@ -608,6 +635,10 @@ impl BackendPort for FakeVmBackend {
     }
     fn release_input(&mut self, _vm_id: VmId, _run_id: RunId) {
         push(&self.calls, "vm_release_input");
+    }
+    fn take_screenshot(&mut self, vm_id: VmId, run_id: RunId) -> Option<(Screenshot, Vec<u8>)> {
+        let (meta, png) = self.last_shots.remove(&vm_id)?;
+        (meta.run_id == run_id).then_some((meta, png))
     }
     fn begin_shutdown(&mut self, vm_id: VmId, run_id: RunId) -> Option<Result<(), PublicError>> {
         if !self.async_stop {

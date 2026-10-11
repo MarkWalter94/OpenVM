@@ -253,12 +253,19 @@ fn user_input_is_accepted_while_stopping_agents_and_stopped_vms_are_refused() {
         code(h.core.submit(&Caller::User, r)),
         ErrorCode::StateConflict
     );
-    // Agent session with the input capability: refused while stopping.
-    let (_, agent) = h.session(&[vm], &[Capability::VmInput], 6);
+    // Agent session with the input capability and the input control:
+    // refused while stopping.
+    let (sid, agent) = h.session(&[vm], &[Capability::VmInput], 6);
+    h.core
+        .set_input_owner(Actor::User, vm, ipc::InputOwner::Agent { session_id: sid })
+        .unwrap();
     let input = h.input(vm, run, 1);
     let r = h.req(vm, Some(run), input);
     assert_eq!(code(h.core.submit(&agent, r)), ErrorCode::StateConflict);
-    // End of the stop: no process, input refused.
+    // End of the stop: no process, input refused (control back to the user).
+    h.core
+        .set_input_owner(Actor::User, vm, ipc::InputOwner::User)
+        .unwrap();
     h.core
         .finish_dispatch(vm, stop.operation_id, Ok(vm_core::DispatchOutcome::Done))
         .unwrap();

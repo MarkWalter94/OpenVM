@@ -98,6 +98,7 @@ fn fixture() -> Fx {
         storage_jobs: 0,
         storage_cancel: Arc::default(),
         start_jobs: 0,
+        agents: Arc::default(),
     };
     sup.engine.offload_start_checks(true);
     Fx {
@@ -125,6 +126,7 @@ fn request(
             connection_id: 1,
             revoked,
             epoch,
+            agent: None,
             reply: tx,
             _permit: permit,
         },
