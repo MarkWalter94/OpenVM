@@ -227,11 +227,11 @@ impl Default for UdfOpts {
 
 const PART_START: usize = 300;
 
-fn put16(b: &mut [u8], at: usize, v: u16) {
+pub fn put16(b: &mut [u8], at: usize, v: u16) {
     b[at..at + 2].copy_from_slice(&v.to_le_bytes());
 }
 
-fn put32(b: &mut [u8], at: usize, v: u32) {
+pub fn put32(b: &mut [u8], at: usize, v: u32) {
     b[at..at + 4].copy_from_slice(&v.to_le_bytes());
 }
 
@@ -239,7 +239,8 @@ fn put64(b: &mut [u8], at: usize, v: u64) {
     b[at..at + 8].copy_from_slice(&v.to_le_bytes());
 }
 
-fn finish_tag(b: &mut [u8], id: u16, loc: u32) {
+/// Writes descriptor tag `id` at `loc` with its checksum.
+pub fn finish_tag(b: &mut [u8], id: u16, loc: u32) {
     put16(b, 0, id);
     put16(b, 2, 2);
     put32(b, 12, loc);
@@ -519,6 +520,22 @@ pub fn build_udf(files: &[(&str, &[u8])], opts: UdfOpts) -> Vec<u8> {
     // Terminating descriptor.
     finish_tag(&mut img[259 * SECTOR..260 * SECTOR], 8, 259);
     u.img
+}
+
+/// Byte offset of block `lbn` of the physical partition of a
+/// [`build_udf`] image.
+pub fn udf_block_at(lbn: u32) -> usize {
+    (PART_START + lbn as usize) * SECTOR
+}
+
+/// Appends `n` blocks to the physical partition of a [`build_udf`] image
+/// (partition descriptor at sector 257); returns the first new block.
+pub fn udf_grow(img: &mut Vec<u8>, n: u32) -> u32 {
+    let pd = 257 * SECTOR;
+    let len = u32::from_le_bytes([img[pd + 192], img[pd + 193], img[pd + 194], img[pd + 195]]);
+    put32(&mut img[pd..], 192, len + n);
+    img.resize(udf_block_at(len + n) + SECTOR, 0);
+    len
 }
 
 // --------------------------------------------------------------------- WIM

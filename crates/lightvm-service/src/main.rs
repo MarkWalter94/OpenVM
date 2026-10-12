@@ -211,11 +211,7 @@ fn private_root(
     if fits(&candidate) {
         return Ok(candidate);
     }
-    let short = std::env::temp_dir().join(format!(
-        "{}{}",
-        lightvm_service::display::FALLBACK_ROOT_PREFIX,
-        std::process::id()
-    ));
+    let short = lightvm_service::display::fallback_root();
     if !fits(&short) {
         return Err((
             4,

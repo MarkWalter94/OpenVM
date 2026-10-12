@@ -109,6 +109,10 @@ fn harness(app: LightVmApp, size: egui::Vec2) -> Harness<'static, LightVmApp> {
 }
 
 #[test]
+#[cfg_attr(
+    not(windows),
+    ignore = "WARP fallback: the status bar label names WARP only on Windows"
+)]
 fn snapshot_status_bar_degraded() {
     let _serial = serial();
     let info = warp_fallback_info();
@@ -133,6 +137,10 @@ fn snapshot_status_bar_glow() {
 }
 
 #[test]
+#[cfg_attr(
+    not(windows),
+    ignore = "WARP fallback: the status bar label names WARP only on Windows"
+)]
 fn snapshot_console_synthetic_frame() {
     let _serial = serial();
     let (fake, _hs) = FakeSupervisor::new(connected(vec![vm(1, "ubuntu-dev", VmState::Running)]));

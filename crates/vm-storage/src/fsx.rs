@@ -84,7 +84,20 @@ pub(crate) fn open_regular(path: &Path, share: Share, label: &str) -> Result<Fil
     }
     #[cfg(not(windows))]
     let _ = share;
+    // Unix: a link on the last component is refused by the open itself
+    // (`ELOOP`), and a FIFO or device does not block the open; anything that
+    // is not a regular file is then refused below. `O_NONBLOCK` has no effect
+    // on reads of a regular file.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
     let f = o.open(path).map_err(|e| {
+        #[cfg(unix)]
+        if e.raw_os_error() == Some(libc::ELOOP) {
+            return StorageError::invalid_path(label, PathRejection::Link);
+        }
         if is_sharing_violation(&e) {
             StorageError::VmBusy(format!(
                 "`{label}` is open by another process in an incompatible mode (unexpected writer)"
