@@ -10,7 +10,9 @@
 //! binary must first be verified with [`crate::probe::verify_approved_binary`]
 //! ([`crate::probe::probe_host`] does it).
 
+#[cfg(windows)]
 use std::path::Path;
+#[cfg(windows)]
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -222,11 +224,13 @@ pub struct RunDirs {
     pub private_acl_entries: usize,
 }
 
+#[cfg(windows)]
 fn system32(exe: &str) -> std::path::PathBuf {
     let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
     Path::new(&root).join("System32").join(exe)
 }
 
+#[cfg(windows)]
 /// SID of the current user (`whoami /user`), form `S-1-...`.
 fn current_user_sid() -> Result<String> {
     let o = run_capture(
@@ -262,12 +266,34 @@ pub fn prepare_run_dirs(run_dir: &ManagedPath, private_dir: &ManagedPath) -> Res
 /// supervisor's per-run display sockets).
 pub fn restrict_to_current_user(private_dir: &ManagedPath) -> Result<RunDirs> {
     std::fs::create_dir_all(private_dir.as_path())?;
-    if !cfg!(windows) {
-        return Err(BackendError::Unsupported {
-            what: "private directory ACL on this system".into(),
-            hint: "on Linux use 0700 permissions (not yet implemented)".into(),
-        });
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        // Unix: mode 0700, owned by the effective user, not a link.
+        std::fs::set_permissions(
+            private_dir.as_path(),
+            std::fs::Permissions::from_mode(0o700),
+        )?;
+        let meta = std::fs::symlink_metadata(private_dir.as_path())?;
+        let uid = crate::sys::unix::euid();
+        if !meta.is_dir() || meta.uid() != uid || meta.mode() & 0o077 != 0 {
+            return Err(BackendError::StateConflict(
+                "private directory not owned by the current user or not 0700".into(),
+            ));
+        }
+        Ok(RunDirs {
+            owner_sid: format!("uid={uid}"),
+            private_acl_entries: 1,
+        })
     }
+    #[cfg(windows)]
+    {
+        restrict_windows(private_dir)
+    }
+}
+
+#[cfg(windows)]
+fn restrict_windows(private_dir: &ManagedPath) -> Result<RunDirs> {
     let sid = current_user_sid()?;
     let grant = format!("*{sid}:(OI)(CI)F");
     let st = Command::new(system32("icacls.exe"))
@@ -298,6 +324,7 @@ pub fn restrict_to_current_user(private_dir: &ManagedPath) -> Result<RunDirs> {
     })
 }
 
+#[cfg(windows)]
 /// Number of ACE entries reported by `icacls <dir>` (lines with `:(`).
 fn acl_entries(dir: &Path) -> Result<usize> {
     let dir_s = dir
@@ -318,6 +345,18 @@ pub struct HostResources {
     pub free_disk_bytes: u64,
 }
 
+/// Total physical memory of the host in bytes.
+pub fn total_memory_bytes() -> Result<u64> {
+    #[cfg(windows)]
+    {
+        Ok(crate::sys::windows::physical_memory()?.0)
+    }
+    #[cfg(unix)]
+    {
+        Ok(crate::sys::unix::physical_memory()?.0)
+    }
+}
+
 /// Measures physical memory and free space on the volume of `storage_dir`.
 pub fn host_resources(storage_dir: &ManagedPath) -> Result<HostResources> {
     #[cfg(windows)]
@@ -330,12 +369,14 @@ pub fn host_resources(storage_dir: &ManagedPath) -> Result<HostResources> {
             free_disk_bytes: free,
         })
     }
-    #[cfg(not(windows))]
+    #[cfg(unix)]
     {
-        let _ = storage_dir;
-        Err(BackendError::Unsupported {
-            what: "host resource measurement on this system".into(),
-            hint: "Linux implementation not yet available".into(),
+        let (total, avail) = crate::sys::unix::physical_memory()?;
+        let free = crate::sys::unix::free_disk_bytes(storage_dir.as_path())?;
+        Ok(HostResources {
+            total_memory_bytes: total,
+            available_memory_bytes: avail,
+            free_disk_bytes: free,
         })
     }
 }
@@ -405,13 +446,15 @@ pub fn file_location(file: &std::fs::File) -> Result<FileLocation> {
         };
         Ok(FileLocation { final_path, volume })
     }
-    #[cfg(not(windows))]
+    #[cfg(unix)]
     {
-        let _ = file;
-        Err(BackendError::Unsupported {
-            what: "final path of a handle on this system".into(),
-            hint: "Linux implementation not yet available".into(),
-        })
+        let final_path = crate::sys::unix::final_path(file)?;
+        let volume = if crate::sys::unix::is_remote(file)? {
+            VolumeKind::Remote
+        } else {
+            VolumeKind::Fixed
+        };
+        Ok(FileLocation { final_path, volume })
     }
 }
 

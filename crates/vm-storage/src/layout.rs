@@ -12,6 +12,7 @@
 //!   vms/<vm_id>/overlays/<run_id>.qcow2      per-run overlay (prepare_run_from_baseline)
 //!   vms/<vm_id>/overlays/<disk_id>.qcow2     overlay of the current state (F3 restore)
 //!   vms/<vm_id>/firmware/{primary.vars.fd,<run_id>.vars.fd,<fw_id>.vars.fd}
+//!   vms/<vm_id>/tpm/           swtpm state of a TPM guest (0700, ADR-0028)
 //!   runs/<run_id>/{artifacts,logs}/
 //!   tmp/                       journal temporary files
 //! ```
@@ -149,6 +150,30 @@ impl CatalogLayout {
         Ok(cur)
     }
 
+    /// [`Self::ensure_dir`], then on Unix restricts the last directory to
+    /// the owner (mode 0700) and checks owner and mode; on Windows the
+    /// directory keeps the catalog ACL.
+    pub fn ensure_private_dir(&self, rel: &ManagedPath) -> Result<PathBuf> {
+        let dir = self.ensure_dir(rel)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+                .map_err(|e| StorageError::io(&dir, e))?;
+            let meta = std::fs::symlink_metadata(&dir).map_err(|e| StorageError::io(&dir, e))?;
+            let own = std::fs::symlink_metadata(&self.root)
+                .map_err(|e| StorageError::io(&self.root, e))?
+                .uid();
+            if is_link(&meta) || meta.mode() & 0o077 != 0 || meta.uid() != own {
+                return Err(StorageError::StateConflict(format!(
+                    "{} is not a private directory of the catalog owner",
+                    rel.as_str()
+                )));
+            }
+        }
+        Ok(dir)
+    }
+
     /// `vms/<vm_id>`.
     pub fn vm_dir(vm: &VmId) -> ManagedPath {
         mp(format!("vms/{vm}"))
@@ -184,6 +209,14 @@ impl CatalogLayout {
     /// `vms/<vm_id>/firmware/<run_id>.vars.fd`.
     pub fn run_vars(vm: &VmId, run: &RunId) -> ManagedPath {
         mp(format!("vms/{vm}/firmware/{run}.vars.fd"))
+    }
+    /// `vms/<vm_id>/tpm`: swtpm state directory of a guest with a TPM 2.0
+    /// (Windows 11 ARM64, ADR-0028), created with mode 0700 by
+    /// [`Self::ensure_private_dir`]. Not yet part of baselines: baseline
+    /// create and restore are refused for these guests
+    /// ([`crate::Catalog::begin_create_baseline`]).
+    pub fn tpm_state_dir(vm: &VmId) -> ManagedPath {
+        mp(format!("vms/{vm}/tpm"))
     }
     /// `vms/<vm_id>/firmware/primary.vars.fd`.
     pub fn primary_vars(vm: &VmId) -> ManagedPath {

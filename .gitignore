@@ -17,3 +17,6 @@ Thumbs.db
 
 # Packaging output (packaging/windows/build-package.ps1)
 /dist/
+
+# Claude Code local state (agent worktrees)
+.claude/

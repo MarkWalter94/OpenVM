@@ -1,6 +1,6 @@
 # ADR-0028 — macOS Apple Silicon host and Windows 11 ARM64 guest
 
-- Status: Proposed (direction requested by the project owner on 2026-10-12; evidence partial)
+- Status: Accepted (2026-10-12, project owner; evidence partial)
 - Date: 2026-10-12
 - Owner: to be assigned
 
@@ -17,11 +17,11 @@ Facts:
 
 Decision of the project owner (2026-10-12): Windows ARM64 must run on the Mac; build the Secure Boot firmware in the project (option "B") rather than reuse a third-party binary.
 
-## Decision (proposed)
+## Decision
 
 **Scope.** Host: macOS on Apple Silicon, accelerator HVF. Guest: Windows 11 ARM64 from the user's installation medium, **offline only**. This ADR amends ADR-0027 only for this host and architecture: Windows 11 x86_64 and Windows 8 stay excluded; the x86 profiles of ADR-0027 are not offered on this host. Linux ARM64 guests (the roadmap's R2b target) get their profile in a later revision of this ADR or in a separate one. No cell of `docs/COMPATIBILITY.md` is promoted until the evidence below exists.
 
-**Hardware profile (normative once accepted).** `X.Y` is the versioned machine of the QEMU build used on macOS.
+**Hardware profile (normative).** `X.Y` is the versioned machine of the QEMU build used on macOS.
 
 | Item | Value |
 | --- | --- |

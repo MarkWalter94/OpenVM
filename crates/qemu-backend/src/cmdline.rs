@@ -9,20 +9,28 @@
 //!   see [`crate::run`]);
 //! - explicit accelerator, never TCG (the [`Accelerator`] type has no
 //!   TCG variant: ADR-0007);
-//! - **versioned** machine (`pc-q35-X.Y` or `pc-i440fx-X.Y`) chosen by the
-//!   probe, of the family required by the [`DeviceProfile`];
-//! - nominal CPU model (`host` and `max` rejected, F0-02 9.1);
+//! - **versioned** machine (`pc-q35-X.Y`, `pc-i440fx-X.Y` or `virt-X.Y` with
+//!   `gic-version=3`) chosen by the probe, of the family required by the
+//!   [`DeviceProfile`];
+//! - nominal CPU model (`host` and `max` rejected, F0-02 9.1), except the
+//!   AArch64 profile under HVF, which runs only with `-cpu host` (ADR-0028);
 //! - firmware per profile: UEFI as pflash (read-only code, per-run
-//!   variables) or SeaBIOS with `-bios` (verified image, no variables);
+//!   variables; x86 OVMF or the project's AArch64 Secure Boot build) or
+//!   SeaBIOS with `-bios` (verified image, no variables);
+//! - TPM 2.0 for the profiles that need it (ADR-0028): `tpm-tis-device` with
+//!   `ppi=off` on an `emulator` backend whose control socket is in the
+//!   private directory; the swtpm process is described by [`TpmCommand`]
+//!   and started by [`crate::run`] in the run's container before QEMU;
 //! - disks with structured `-blockdev` (`driver`, `node-name`,
 //!   `file.driver=file`, `file.filename`), explicit format and only the `file`
 //!   protocol;
-//! - installation ISO and data medium read-only on `ide-cd`;
+//! - installation ISO and data medium read-only on `ide-cd`, or on `scsi-cd`
+//!   behind one `usb-bot` per medium (AArch64 profile);
 //! - VNC display on a Unix socket and QMP on a Unix socket in the private directory;
 //! - devices only from the closed set of the hardware profiles (ADR-0027):
-//!   `virtio-blk-pci` or `ide-hd`, `virtio-vga` or `VGA`, virtio
-//!   tablet/keyboard or a USB controller (`qemu-xhci`, `piix3-usb-uhci`)
-//!   with `usb-tablet`.
+//!   `virtio-blk-pci`, `ide-hd` or `nvme`, `virtio-vga`, `VGA` or `ramfb`,
+//!   virtio tablet/keyboard or a USB controller (`qemu-xhci`,
+//!   `piix3-usb-uhci`) with `usb-tablet` (and `usb-kbd` on AArch64).
 
 use std::ffi::OsString;
 
@@ -72,17 +80,24 @@ pub enum MachineFamily {
     /// i440FX + PIIX (`pc-i440fx-X.Y`): PIIX IDE, buses `ide.0`/`ide.1` with
     /// two units each.
     I440fx,
+    /// AArch64 `virt-X.Y` with GICv3 (ADR-0028): no IDE, PCIe root.
+    Virt,
 }
 
 impl MachineFamily {
-    /// Both families, in display order.
-    pub const ALL: [MachineFamily; 2] = [MachineFamily::Q35, MachineFamily::I440fx];
+    /// Every family, in display order.
+    pub const ALL: [MachineFamily; 3] = [
+        MachineFamily::Q35,
+        MachineFamily::I440fx,
+        MachineFamily::Virt,
+    ];
 
     /// Prefix of the versioned names of the family.
     pub fn prefix(self) -> &'static str {
         match self {
             Self::Q35 => "pc-q35-",
             Self::I440fx => "pc-i440fx-",
+            Self::Virt => "virt-",
         }
     }
 
@@ -91,11 +106,26 @@ impl MachineFamily {
         match self {
             Self::Q35 => "q35",
             Self::I440fx => "i440fx",
+            Self::Virt => "virt",
+        }
+    }
+
+    /// `true` for the AArch64 family (run by `qemu-system-aarch64`).
+    pub fn is_aarch64(self) -> bool {
+        matches!(self, Self::Virt)
+    }
+
+    /// Fixed machine properties of the family, appended to `type=`
+    /// (`virt` needs GICv3 under HVF, ADR-0028).
+    fn fixed_properties(self) -> &'static str {
+        match self {
+            Self::Q35 | Self::I440fx => "",
+            Self::Virt => ",gic-version=3",
         }
     }
 }
 
-/// Versioned machine type (`pc-q35-X.Y` or `pc-i440fx-X.Y`).
+/// Versioned machine type (`pc-q35-X.Y`, `pc-i440fx-X.Y` or `virt-X.Y`).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct MachineType {
     name: String,
@@ -104,17 +134,17 @@ pub struct MachineType {
 }
 
 impl MachineType {
-    /// Accepts only `pc-q35-<major>.<minor>` and `pc-i440fx-<major>.<minor>`
-    /// names; the `q35` and `pc` aliases are rejected because their meaning
-    /// changes with the QEMU version.
+    /// Accepts only `pc-q35-<major>.<minor>`, `pc-i440fx-<major>.<minor>`
+    /// and `virt-<major>.<minor>` names; the `q35`, `pc` and `virt` aliases
+    /// are rejected because their meaning changes with the QEMU version.
     pub fn versioned(name: &str) -> Result<Self> {
         check_token("machine", name)?;
         let (family, major, minor) = parse_versioned_machine(name).ok_or_else(|| {
             BackendError::invalid(
                 "machine",
                 format!(
-                    "`{name}` is not a versioned machine type (expected pc-q35-X.Y or \
-                     pc-i440fx-X.Y)"
+                    "`{name}` is not a versioned machine type (expected pc-q35-X.Y, \
+                     pc-i440fx-X.Y or virt-X.Y)"
                 ),
             )
         })?;
@@ -166,8 +196,9 @@ impl MachineType {
     }
 }
 
-/// Extracts the family and `(major, minor)` from `pc-q35-X.Y` or
-/// `pc-i440fx-X.Y` (decimal digits only, nothing after the minor).
+/// Extracts the family and `(major, minor)` from `pc-q35-X.Y`,
+/// `pc-i440fx-X.Y` or `virt-X.Y` (decimal digits only, nothing after the
+/// minor).
 pub(crate) fn parse_versioned_machine(name: &str) -> Option<(MachineFamily, u32, u32)> {
     let (family, v) = MachineFamily::ALL
         .iter()
@@ -190,6 +221,10 @@ pub enum FirmwareKind {
     /// SeaBIOS (`share/bios-256k.bin` of the verified build) passed with
     /// `-bios`: no pflash, no variables.
     SeaBios,
+    /// Project build of edk2 `ArmVirtQemu` with Secure Boot and TPM 2.0
+    /// (ADR-0028) as pflash: read-only code plus per-VM variables created
+    /// from the guest's template.
+    UefiAarch64,
 }
 
 impl FirmwareKind {
@@ -203,7 +238,7 @@ impl FirmwareKind {
 
     /// Whether the firmware needs per-VM variables (`pflash1`).
     pub fn has_vars(self) -> bool {
-        matches!(self, Self::Uefi)
+        matches!(self, Self::Uefi | Self::UefiAarch64)
     }
 
     /// Short name for messages.
@@ -211,6 +246,7 @@ impl FirmwareKind {
         match self {
             Self::Uefi => "UEFI",
             Self::SeaBios => "SeaBIOS",
+            Self::UefiAarch64 => "UEFI AArch64 Secure Boot",
         }
     }
 }
@@ -224,6 +260,27 @@ pub enum DiskBus {
     Ahci,
     /// `ide-hd` on `ide.0`, unit 0, of the i440fx PIIX IDE controller.
     PiixIde,
+    /// `nvme` with a fixed serial (inbox driver of Windows on ARM, ADR-0028).
+    Nvme,
+}
+
+/// Bus of the installation and data CDs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CdromBus {
+    /// `ide-cd` on the board's IDE/AHCI controller.
+    Ide,
+    /// `scsi-cd` behind one `usb-bot` per medium on the xHCI controller
+    /// (a plain `usb-storage` is seen as a RAW disk by Windows setup, R2b-01).
+    UsbBot,
+}
+
+/// CPU model policy of a profile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CpuPolicy {
+    /// A nominal model (`host`/`max` refused, F0-02 9.1).
+    Nominal,
+    /// `host`: the only model HVF accelerates (AArch64 profile, ADR-0028).
+    Host,
 }
 
 /// Display adapter.
@@ -233,6 +290,8 @@ pub enum DisplayDevice {
     VirtioVga,
     /// `VGA` (standard VGA with Bochs VBE).
     StdVga,
+    /// `ramfb` (Windows on ARM has no inbox virtio-gpu driver, ADR-0028).
+    Ramfb,
 }
 
 impl DisplayDevice {
@@ -241,6 +300,7 @@ impl DisplayDevice {
         match self {
             Self::VirtioVga => "virtio-vga",
             Self::StdVga => "VGA",
+            Self::Ramfb => "ramfb",
         }
     }
 }
@@ -256,6 +316,20 @@ pub enum PointerDevice {
     UsbXhciTablet,
     /// `piix3-usb-uhci` controller + `usb-tablet` on its bus.
     UsbUhciTablet,
+    /// `qemu-xhci` controller + `usb-kbd` + `usb-tablet` on its bus (no
+    /// i8042 on `virt`, ADR-0028).
+    UsbXhciKeyboardTablet,
+}
+
+impl PointerDevice {
+    /// USB controller of the USB pointer devices.
+    fn usb_controller(self) -> Option<&'static str> {
+        match self {
+            Self::Virtio => None,
+            Self::UsbXhciTablet | Self::UsbXhciKeyboardTablet => Some("qemu-xhci"),
+            Self::UsbUhciTablet => Some("piix3-usb-uhci"),
+        }
+    }
 }
 
 /// Id of the USB controller of the USB pointer profiles.
@@ -271,6 +345,9 @@ pub struct DeviceProfile {
     disk_bus: DiskBus,
     display: DisplayDevice,
     pointer: PointerDevice,
+    cdrom: CdromBus,
+    tpm: bool,
+    cpu: CpuPolicy,
 }
 
 impl DeviceProfile {
@@ -281,6 +358,9 @@ impl DeviceProfile {
         disk_bus: DiskBus::Virtio,
         display: DisplayDevice::VirtioVga,
         pointer: PointerDevice::Virtio,
+        cdrom: CdromBus::Ide,
+        tpm: false,
+        cpu: CpuPolicy::Nominal,
     };
     /// Windows 8.1 / 10 with UEFI: q35, AHCI, VGA, xHCI tablet.
     pub const WINDOWS_UEFI: Self = Self {
@@ -289,6 +369,9 @@ impl DeviceProfile {
         disk_bus: DiskBus::Ahci,
         display: DisplayDevice::StdVga,
         pointer: PointerDevice::UsbXhciTablet,
+        cdrom: CdromBus::Ide,
+        tpm: false,
+        cpu: CpuPolicy::Nominal,
     };
     /// Windows 8.1 / 10 with legacy BIOS: q35, SeaBIOS, AHCI, VGA, xHCI tablet.
     pub const WINDOWS_BIOS: Self = Self {
@@ -297,6 +380,9 @@ impl DeviceProfile {
         disk_bus: DiskBus::Ahci,
         display: DisplayDevice::StdVga,
         pointer: PointerDevice::UsbXhciTablet,
+        cdrom: CdromBus::Ide,
+        tpm: false,
+        cpu: CpuPolicy::Nominal,
     };
     /// Windows Vista / 7: q35, SeaBIOS, AHCI, VGA, UHCI tablet.
     pub const WINDOWS_VISTA_7: Self = Self {
@@ -305,6 +391,9 @@ impl DeviceProfile {
         disk_bus: DiskBus::Ahci,
         display: DisplayDevice::StdVga,
         pointer: PointerDevice::UsbUhciTablet,
+        cdrom: CdromBus::Ide,
+        tpm: false,
+        cpu: CpuPolicy::Nominal,
     };
     /// Windows XP: i440fx, SeaBIOS, PIIX IDE, VGA, UHCI tablet.
     pub const WINDOWS_XP: Self = Self {
@@ -313,16 +402,45 @@ impl DeviceProfile {
         disk_bus: DiskBus::PiixIde,
         display: DisplayDevice::StdVga,
         pointer: PointerDevice::UsbUhciTablet,
+        cdrom: CdromBus::Ide,
+        tpm: false,
+        cpu: CpuPolicy::Nominal,
+    };
+
+    /// Windows 11 ARM64 (ADR-0028): `virt` + GICv3, project edk2 with Secure
+    /// Boot, NVMe disk, CDs on `usb-bot`, `ramfb`, xHCI keyboard and tablet,
+    /// TPM 2.0 (`tpm-tis-device`, swtpm), `-cpu host` under HVF.
+    pub const WINDOWS11_ARM64: Self = Self {
+        machine_family: MachineFamily::Virt,
+        firmware: FirmwareKind::UefiAarch64,
+        disk_bus: DiskBus::Nvme,
+        display: DisplayDevice::Ramfb,
+        pointer: PointerDevice::UsbXhciKeyboardTablet,
+        cdrom: CdromBus::UsbBot,
+        tpm: true,
+        cpu: CpuPolicy::Host,
     };
 
     /// Every profile, in the order of the contract table.
-    pub const ALL: [DeviceProfile; 5] = [
+    pub const ALL: [DeviceProfile; 6] = [
         Self::LINUX,
         Self::WINDOWS_UEFI,
         Self::WINDOWS_BIOS,
         Self::WINDOWS_VISTA_7,
         Self::WINDOWS_XP,
+        Self::WINDOWS11_ARM64,
     ];
+
+    /// Reference profile of this host: probed at service start (ADR-0007).
+    /// Apple Silicon macOS runs only the AArch64 profile, every other host
+    /// the x86 Linux one.
+    pub const fn host_reference() -> Self {
+        if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            Self::WINDOWS11_ARM64
+        } else {
+            Self::LINUX
+        }
+    }
 
     /// Profile for a guest and its firmware (contract table, ADR-0027).
     /// Combinations outside [`GuestOs::allowed_firmware`] are rejected.
@@ -339,7 +457,35 @@ impl DeviceProfile {
             (GuestOs::Windows81 | GuestOs::Windows10, Firmware::Bios) => Self::WINDOWS_BIOS,
             (GuestOs::WindowsVista | GuestOs::Windows7, _) => Self::WINDOWS_VISTA_7,
             (GuestOs::WindowsXp, _) => Self::WINDOWS_XP,
+            (GuestOs::Windows11Arm64, _) => Self::WINDOWS11_ARM64,
         })
+    }
+
+    /// `true` for the AArch64 profiles (`qemu-system-aarch64`).
+    pub fn is_aarch64(&self) -> bool {
+        self.machine_family.is_aarch64()
+    }
+
+    /// Whether this host can run the profile accelerated (ADR-0007,
+    /// ADR-0028): Apple Silicon macOS only the AArch64 profiles, every other
+    /// host only the x86 ones.
+    pub fn runs_on_this_host(&self) -> bool {
+        self.is_aarch64() == cfg!(all(target_os = "macos", target_arch = "aarch64"))
+    }
+
+    /// Bus of the CDs.
+    pub fn cdrom_bus(&self) -> CdromBus {
+        self.cdrom
+    }
+
+    /// Whether the profile has a TPM 2.0 (swtpm per VM, ADR-0028).
+    pub fn needs_tpm(&self) -> bool {
+        self.tpm
+    }
+
+    /// CPU model policy.
+    pub fn cpu_policy(&self) -> CpuPolicy {
+        self.cpu
     }
 
     /// Chipset family the machine type must belong to.
@@ -384,12 +530,22 @@ impl DeviceProfile {
             PointerDevice::Virtio => v.extend(["virtio-tablet-pci", "virtio-keyboard-pci"]),
             PointerDevice::UsbXhciTablet => v.extend(["qemu-xhci", "usb-tablet"]),
             PointerDevice::UsbUhciTablet => v.extend(["piix3-usb-uhci", "usb-tablet"]),
+            PointerDevice::UsbXhciKeyboardTablet => {
+                v.extend(["qemu-xhci", "usb-kbd", "usb-tablet"]);
+            }
         }
         v.push(match self.disk_bus {
             DiskBus::Virtio => "virtio-blk-pci",
             DiskBus::Ahci | DiskBus::PiixIde => "ide-hd",
+            DiskBus::Nvme => "nvme",
         });
-        v.push("ide-cd");
+        match self.cdrom {
+            CdromBus::Ide => v.push("ide-cd"),
+            CdromBus::UsbBot => v.extend(["usb-bot", "scsi-cd"]),
+        }
+        if self.tpm {
+            v.push("tpm-tis-device");
+        }
         v
     }
 
@@ -401,14 +557,16 @@ impl DeviceProfile {
             DiskBus::PiixIde => {
                 format!("ide-hd,drive=disk0,bus=ide.0,unit=0,bootindex={bootindex}")
             }
+            DiskBus::Nvme => format!("nvme,drive=disk0,serial=lv0,bootindex={bootindex}"),
         }
     }
 
-    /// Bus (and unit) of the installation (`slot` 0) or data (`slot` 1) CD.
+    /// Bus (and unit) of the installation (`slot` 0) or data (`slot` 1)
+    /// IDE CD.
     fn cdrom_location(&self, slot: u8) -> String {
         match self.machine_family {
-            MachineFamily::Q35 => format!("bus=ide.{slot}"),
             MachineFamily::I440fx => format!("bus=ide.1,unit={slot}"),
+            MachineFamily::Q35 | MachineFamily::Virt => format!("bus=ide.{slot}"),
         }
     }
 }
@@ -423,11 +581,28 @@ pub struct ProbeTarget {
 }
 
 impl ProbeTarget {
-    /// q35 + UEFI: the reference (Linux) configuration probed at service start.
+    /// q35 + UEFI: the reference (Linux) configuration of the x86 hosts.
     pub const REFERENCE: Self = Self {
         family: MachineFamily::Q35,
         firmware: FirmwareKind::Uefi,
     };
+
+    /// `virt` + AArch64 UEFI: the reference configuration of Apple Silicon
+    /// macOS (ADR-0028).
+    pub const REFERENCE_AARCH64: Self = Self {
+        family: MachineFamily::Virt,
+        firmware: FirmwareKind::UefiAarch64,
+    };
+
+    /// Reference configuration of this host, probed at service start:
+    /// the probe target of [`DeviceProfile::host_reference`].
+    pub const fn host_reference() -> Self {
+        if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            Self::REFERENCE_AARCH64
+        } else {
+            Self::REFERENCE
+        }
+    }
 }
 
 /// Firmware image passed to the accelerator probe.
@@ -438,6 +613,8 @@ pub enum ProbeFirmware {
     Uefi(ManagedPath),
     /// SeaBIOS image passed with `-bios`.
     SeaBios(ManagedPath),
+    /// AArch64 edk2 code (ADR-0028), attached read-only as `pflash0`.
+    UefiAarch64(ManagedPath),
 }
 
 impl ProbeFirmware {
@@ -446,6 +623,7 @@ impl ProbeFirmware {
         match self {
             Self::Uefi(_) => FirmwareKind::Uefi,
             Self::SeaBios(_) => FirmwareKind::SeaBios,
+            Self::UefiAarch64(_) => FirmwareKind::UefiAarch64,
         }
     }
 }
@@ -457,6 +635,26 @@ pub struct CpuModel(String);
 impl CpuModel {
     /// Model verified up to the live desktop on this host (F0-02 9.2).
     pub const VERIFIED_DEFAULT: &'static str = "qemu64";
+
+    /// `host`, allowed only for a profile whose [`CpuPolicy`] is
+    /// [`CpuPolicy::Host`] under HVF (ADR-0028: the only CPU model HVF
+    /// accelerates; the exclusion of F0-02 9.1 concerns OVMF under WHPX).
+    pub fn host_for(profile: &DeviceProfile, accelerator: Accelerator) -> Result<Self> {
+        if profile.cpu_policy() != CpuPolicy::Host || accelerator != Accelerator::Hvf {
+            return Err(BackendError::Unsupported {
+                what: "CPU model `host`".into(),
+                hint: "`-cpu host` is allowed only for the AArch64 profile under HVF \
+                       (ADR-0028)"
+                    .into(),
+            });
+        }
+        Ok(Self("host".to_owned()))
+    }
+
+    /// `true` for `host` (see [`Self::host_for`]).
+    pub fn is_host(&self) -> bool {
+        self.0 == "host"
+    }
 
     /// Accepts a nominal model; `host` and `max` are rejected (with OVMF
     /// under WHPX they do not boot the firmware, F0-02 9.1). The presence of the model
@@ -567,6 +765,27 @@ pub struct QemuCommand {
     pub private_dir: ManagedPath,
     /// Limits of the process container.
     pub limits: crate::process::JobLimits,
+    /// swtpm to start in the run's container before QEMU (TPM profiles).
+    pub tpm: Option<TpmCommand>,
+}
+
+/// swtpm process of a run (ADR-0028): TPM 2.0 with a per-VM state directory
+/// and its control socket in the private directory; `--terminate` ends it
+/// when QEMU closes the connection.
+#[derive(Clone, Debug)]
+pub struct TpmCommand {
+    /// Approved swtpm executable.
+    pub program: ManagedPath,
+    /// Structured arguments.
+    pub args: Vec<OsString>,
+    /// Control socket QEMU connects to.
+    pub socket: ManagedPath,
+    /// swtpm log (`--log file=`).
+    pub log: ManagedPath,
+    /// stdout file.
+    pub stdout: ManagedPath,
+    /// stderr file.
+    pub stderr: ManagedPath,
 }
 
 struct Args(Vec<OsString>);
@@ -616,6 +835,20 @@ impl VmLaunchSpec {
                 ),
             ));
         }
+        // `host` only where the profile requires it, under HVF; a profile
+        // that requires it runs with nothing else (ADR-0028).
+        let wants_host = self.profile.cpu_policy() == CpuPolicy::Host;
+        let host_ok = wants_host && self.accelerator == Accelerator::Hvf;
+        if self.cpu.is_host() != wants_host || (self.cpu.is_host() && !host_ok) {
+            return Err(BackendError::invalid(
+                "cpu",
+                format!(
+                    "CPU model `{}` not allowed for the hardware profile with {}",
+                    self.cpu.as_str(),
+                    self.accelerator.qemu_name()
+                ),
+            ));
+        }
         Ok(())
     }
 
@@ -634,7 +867,7 @@ impl VmLaunchSpec {
         // Firmware: pflash code + per-run variables (UEFI) or `-bios` image
         // (SeaBIOS, no variables).
         let firmware = match profile.firmware() {
-            FirmwareKind::Uefi => {
+            FirmwareKind::Uefi | FirmwareKind::UefiAarch64 => {
                 let code = paths.firmware_code()?;
                 let vars = paths.firmware_vars(run)?.ok_or_else(|| {
                     BackendError::invalid(
@@ -661,15 +894,16 @@ impl VmLaunchSpec {
         a.opt("-name", format!("guest=lightvm-{run}"));
         a.flag("-no-user-config");
         a.flag("-nodefaults");
+        let fixed = self.machine.family().fixed_properties();
         match &firmware {
             (_, Some(_)) => a.opt(
                 "-machine",
                 format!(
-                    "type={},pflash0=fw-code,pflash1=fw-vars",
+                    "type={}{fixed},pflash0=fw-code,pflash1=fw-vars",
                     self.machine.as_str()
                 ),
             ),
-            (_, None) => a.opt("-machine", format!("type={}", self.machine.as_str())),
+            (_, None) => a.opt("-machine", format!("type={}{fixed}", self.machine.as_str())),
         }
         a.opt("-accel", self.accelerator.qemu_name());
         a.opt("-cpu", self.cpu.as_str());
@@ -693,6 +927,11 @@ impl VmLaunchSpec {
                 );
             }
             (bios, None) => a.opt("-bios", bios.qemu_value()),
+        }
+        // CDs on `usb-bot` need the USB controller before them.
+        let usb_first = profile.cdrom_bus() == CdromBus::UsbBot;
+        if usb_first {
+            push_input(&mut a, profile);
         }
         let mut next_boot = 0u32;
         if let Some(media) = &self.install_media {
@@ -759,21 +998,48 @@ impl VmLaunchSpec {
         }
         a.opt("-nic", "none");
         a.opt("-device", profile.display().qemu_name());
-        match profile.pointer() {
-            PointerDevice::Virtio => {
-                a.opt("-device", "virtio-tablet-pci");
-                a.opt("-device", "virtio-keyboard-pci");
-            }
-            PointerDevice::UsbXhciTablet | PointerDevice::UsbUhciTablet => {
-                let controller = if profile.pointer() == PointerDevice::UsbXhciTablet {
-                    "qemu-xhci"
-                } else {
-                    "piix3-usb-uhci"
-                };
-                a.opt("-device", format!("{controller},id={USB_CONTROLLER_ID}"));
-                a.opt("-device", format!("usb-tablet,bus={USB_CONTROLLER_ID}.0"));
-            }
+        if !usb_first {
+            push_input(&mut a, profile);
         }
+        let tpm = if profile.needs_tpm() {
+            let program = paths.swtpm()?;
+            let state = paths.tpm_state_dir(run)?.ok_or_else(|| {
+                BackendError::invalid("tpm_state", "the TPM profile needs the VM's TPM state")
+            })?;
+            let socket = private_dir.join_file(names::TPM_SOCKET)?;
+            socket.check_socket_len("tpm_socket")?;
+            let log = run_dir.join_file(names::SWTPM_LOG)?;
+            a.opt(
+                "-chardev",
+                format!("socket,id=chrtpm,path={}", socket.qemu_value()),
+            );
+            a.opt("-tpmdev", "emulator,id=tpm0,chardev=chrtpm");
+            a.opt("-device", "tpm-tis-device,tpmdev=tpm0,ppi=off");
+            let args = [
+                "socket".to_owned(),
+                "--tpm2".to_owned(),
+                "--tpmstate".to_owned(),
+                format!("dir={}", state.qemu_value()),
+                "--ctrl".to_owned(),
+                format!("type=unixio,path={}", socket.qemu_value()),
+                "--terminate".to_owned(),
+                "--log".to_owned(),
+                format!("file={}", log.qemu_value()),
+            ]
+            .into_iter()
+            .map(OsString::from)
+            .collect();
+            Some(TpmCommand {
+                program,
+                args,
+                socket,
+                log,
+                stdout: run_dir.join_file(names::SWTPM_STDOUT)?,
+                stderr: run_dir.join_file(names::SWTPM_STDERR)?,
+            })
+        } else {
+            None
+        };
         a.opt("-display", "none");
         a.opt("-vnc", format!("unix:{}", vnc_socket.qemu_value()));
         a.opt(
@@ -792,7 +1058,26 @@ impl VmLaunchSpec {
             stderr: run_dir.join_file(names::STDERR)?,
             private_dir,
             limits: self.limits,
+            tpm,
         })
+    }
+}
+
+/// Pointer (and keyboard) devices of `profile`, with their USB controller.
+fn push_input(a: &mut Args, profile: &DeviceProfile) {
+    let pointer = profile.pointer();
+    match pointer.usb_controller() {
+        None => {
+            a.opt("-device", "virtio-tablet-pci");
+            a.opt("-device", "virtio-keyboard-pci");
+        }
+        Some(controller) => {
+            a.opt("-device", format!("{controller},id={USB_CONTROLLER_ID}"));
+            if pointer == PointerDevice::UsbXhciKeyboardTablet {
+                a.opt("-device", format!("usb-kbd,bus={USB_CONTROLLER_ID}.0"));
+            }
+            a.opt("-device", format!("usb-tablet,bus={USB_CONTROLLER_ID}.0"));
+        }
     }
 }
 
@@ -812,7 +1097,16 @@ fn push_cdrom(
             iso.qemu_value()
         ),
     );
-    let mut dev = format!("ide-cd,drive={node},{}", profile.cdrom_location(slot));
+    let mut dev = match profile.cdrom_bus() {
+        CdromBus::Ide => format!("ide-cd,drive={node},{}", profile.cdrom_location(slot)),
+        CdromBus::UsbBot => {
+            a.opt(
+                "-device",
+                format!("usb-bot,id=bot{slot},bus={USB_CONTROLLER_ID}.0"),
+            );
+            format!("scsi-cd,drive={node},bus=bot{slot}.0")
+        }
+    };
     if let Some(b) = boot {
         dev.push_str(&format!(",bootindex={b}"));
     }
@@ -839,11 +1133,12 @@ pub fn build_probe_command(
     a.opt("-name", format!("guest=lightvm-probe-{tag}"));
     a.flag("-no-user-config");
     a.flag("-nodefaults");
+    let fixed = machine.family().fixed_properties();
     match firmware {
-        ProbeFirmware::Uefi(code) => {
+        ProbeFirmware::Uefi(code) | ProbeFirmware::UefiAarch64(code) => {
             a.opt(
                 "-machine",
-                format!("type={},pflash0=fw-code", machine.as_str()),
+                format!("type={}{fixed},pflash0=fw-code", machine.as_str()),
             );
             a.opt(
                 "-blockdev",
@@ -854,7 +1149,7 @@ pub fn build_probe_command(
             );
         }
         ProbeFirmware::SeaBios(bios) => {
-            a.opt("-machine", format!("type={}", machine.as_str()));
+            a.opt("-machine", format!("type={}{fixed}", machine.as_str()));
             a.opt("-bios", bios.qemu_value());
         }
     }
@@ -878,6 +1173,7 @@ pub fn build_probe_command(
         stderr: private_dir.join_file("probe.stderr.log")?,
         private_dir,
         limits: crate::process::JobLimits::default(),
+        tpm: None,
     })
 }
 
@@ -973,6 +1269,12 @@ pub(crate) mod tests {
         fn private_dir(&self, run: &RunId) -> Result<ManagedPath> {
             ManagedPath::verify(self.root.join("p").join(run.to_string()))
         }
+        fn swtpm(&self) -> Result<ManagedPath> {
+            ManagedPath::verify(self.root.join("qemu").join("swtpm"))
+        }
+        fn tpm_state_dir(&self, _run: &RunId) -> Result<Option<ManagedPath>> {
+            ManagedPath::verify(self.root.join("vms").join("vm1").join("tpm")).map(Some)
+        }
     }
 
     /// Deterministic run identifier for tests.
@@ -1006,13 +1308,21 @@ pub(crate) mod tests {
         }
     }
 
-    /// [`spec`] with `profile` and a machine of its family.
+    /// [`spec`] with `profile` and a machine of its family (AArch64:
+    /// `virt`, HVF and `-cpu host`).
     pub(crate) fn spec_for(profile: DeviceProfile) -> VmLaunchSpec {
         let mut s = spec();
         s.machine = match profile.machine_family() {
             MachineFamily::Q35 => MachineType::versioned_q35("pc-q35-11.1").unwrap(),
             MachineFamily::I440fx => MachineType::versioned_i440fx("pc-i440fx-11.1").unwrap(),
+            MachineFamily::Virt => {
+                MachineType::versioned_in(MachineFamily::Virt, "virt-11.1").unwrap()
+            }
         };
+        if profile.cpu_policy() == CpuPolicy::Host {
+            s.accelerator = Accelerator::Hvf;
+            s.cpu = CpuModel::host_for(&profile, Accelerator::Hvf).unwrap();
+        }
         s.profile = profile;
         s
     }
@@ -1025,7 +1335,10 @@ pub(crate) mod tests {
         t.insert("-no-user-config", Some(&[]));
         t.insert("-nodefaults", Some(&[]));
         t.insert("-S", Some(&[]));
-        t.insert("-machine", Some(&["type", "pflash0", "pflash1"]));
+        t.insert(
+            "-machine",
+            Some(&["type", "gic-version", "pflash0", "pflash1"]),
+        );
         t.insert("-accel", None);
         t.insert("-cpu", None);
         t.insert("-smp", Some(&["cpus"]));
@@ -1045,8 +1358,19 @@ pub(crate) mod tests {
         );
         t.insert(
             "-device",
-            Some(&["drive", "bootindex", "bus", "unit", "id"]),
+            Some(&[
+                "drive",
+                "bootindex",
+                "bus",
+                "unit",
+                "id",
+                "serial",
+                "tpmdev",
+                "ppi",
+            ]),
         );
+        t.insert("-chardev", Some(&["id", "path"]));
+        t.insert("-tpmdev", Some(&["id", "chardev"]));
         // Path value, checked separately.
         t.insert("-bios", None);
         t.insert("-nic", None);
@@ -1068,7 +1392,22 @@ pub(crate) mod tests {
         "qemu-xhci",
         "piix3-usb-uhci",
         "usb-tablet",
+        "nvme",
+        "ramfb",
+        "usb-kbd",
+        "usb-bot",
+        "scsi-cd",
+        "tpm-tis-device",
     ];
+    /// Allowed first part (type) of the options that have one.
+    fn typed_option(opt: &str) -> Option<&'static [&'static str]> {
+        match opt {
+            "-device" => Some(DEVICES),
+            "-chardev" => Some(&["socket"]),
+            "-tpmdev" => Some(&["emulator"]),
+            _ => None,
+        }
+    }
 
     /// The only `:` allowed in a path value is the drive letter.
     fn path_has_separators(v: &str) -> bool {
@@ -1091,6 +1430,8 @@ pub(crate) mod tests {
         let mut seen_nic_none = false;
         let mut seen_bios = false;
         let mut seen_pflash = false;
+        let mut accel = String::new();
+        let mut cpu = String::new();
         while i < args.len() {
             let opt = args[i].to_str().ok_or("argument is not UTF-8")?;
             let keys = table
@@ -1132,13 +1473,19 @@ pub(crate) mod tests {
                     if opt == "-accel" && val == "tcg" {
                         return Err("TCG".into());
                     }
+                    if opt == "-accel" {
+                        val.clone_into(&mut accel);
+                    }
+                    if opt == "-cpu" {
+                        val.clone_into(&mut cpu);
+                    }
                 }
                 Some(allowed) => {
                     let mut parts = val.split(',');
-                    if opt == "-device" {
+                    if let Some(types) = typed_option(opt) {
                         let dev = parts.next().unwrap_or_default();
-                        if !DEVICES.contains(&dev) {
-                            return Err(format!("device not allowed {dev:?}"));
+                        if !types.contains(&dev) {
+                            return Err(format!("{opt} type not allowed {dev:?}"));
                         }
                     }
                     for p in parts {
@@ -1165,7 +1512,10 @@ pub(crate) mod tests {
                         if v.is_empty() {
                             return Err(format!("{opt}: empty value for {k}"));
                         }
-                        let colon_ok = k == "filename" || k == "file.filename" || k == "unix";
+                        let colon_ok = k == "filename"
+                            || k == "file.filename"
+                            || k == "unix"
+                            || (opt == "-chardev" && k == "path");
                         let extra = if colon_ok {
                             path_has_separators(v)
                         } else {
@@ -1185,6 +1535,9 @@ pub(crate) mod tests {
         }
         if seen_bios && seen_pflash {
             return Err("-bios together with pflash firmware".into());
+        }
+        if (cpu == "host" || cpu == "max") && accel != "hvf" {
+            return Err(format!("-cpu {cpu} with -accel {accel}"));
         }
         Ok(())
     }
@@ -1401,17 +1754,28 @@ pub(crate) mod tests {
         let run = run_id(2);
         let code = p.firmware_code().unwrap();
         let bios = p.seabios().unwrap();
+        let host = CpuModel::host_for(&DeviceProfile::WINDOWS11_ARM64, Accelerator::Hvf).unwrap();
         for (machine, fw) in [
             ("pc-q35-11.1", ProbeFirmware::Uefi(code.clone())),
             ("pc-q35-11.1", ProbeFirmware::SeaBios(bios.clone())),
             ("pc-i440fx-11.1", ProbeFirmware::SeaBios(bios.clone())),
+            ("virt-11.1", ProbeFirmware::UefiAarch64(code.clone())),
         ] {
+            let aarch64 = machine.starts_with("virt-");
             let cmd = build_probe_command(
                 p.qemu_system().unwrap(),
                 &MachineType::versioned(machine).unwrap(),
                 &fw,
-                Accelerator::Whpx,
-                &CpuModel::nominal("qemu64").unwrap(),
+                if aarch64 {
+                    Accelerator::Hvf
+                } else {
+                    Accelerator::Whpx
+                },
+                &if aarch64 {
+                    host.clone()
+                } else {
+                    CpuModel::nominal("qemu64").unwrap()
+                },
                 p.private_dir(&run).unwrap(),
                 &run,
             )
@@ -1422,6 +1786,12 @@ pub(crate) mod tests {
             let j = s.join(" ");
             assert!(!j.contains("pflash1"), "the probe has no variables");
             match fw {
+                ProbeFirmware::UefiAarch64(_) => {
+                    assert!(j.contains(&format!(
+                        "-machine type={machine},gic-version=3,pflash0=fw-code"
+                    )));
+                    assert!(j.contains("-accel hvf -cpu host"));
+                }
                 ProbeFirmware::Uefi(_) => {
                     assert!(j.contains(&format!("-machine type={machine},pflash0=fw-code")));
                     assert!(j.contains(&format!(
@@ -1447,7 +1817,7 @@ pub(crate) mod tests {
     /// installation ISO, data medium and disk (no backing file).
     #[test]
     fn profile_rows_exact_argv() {
-        for profile in DeviceProfile::ALL {
+        for profile in DeviceProfile::ALL.into_iter().filter(|p| !p.is_aarch64()) {
             let mut s = spec_for(profile);
             s.data_media = Some(media_data());
             let p = FakePaths::for_profile(&profile);
@@ -1568,6 +1938,7 @@ pub(crate) mod tests {
                     "-device",
                     "usb-tablet,bus=usb0.0",
                 ])),
+                PointerDevice::UsbXhciKeyboardTablet => panic!("AArch64 profile"),
             }
             want.extend([
                 "-display".to_owned(),
@@ -1611,6 +1982,7 @@ pub(crate) mod tests {
             (GuestOs::WindowsVista, Firmware::Bios, P::WINDOWS_VISTA_7),
             (GuestOs::Windows7, Firmware::Bios, P::WINDOWS_VISTA_7),
             (GuestOs::WindowsXp, Firmware::Bios, P::WINDOWS_XP),
+            (GuestOs::Windows11Arm64, Firmware::Uefi, P::WINDOWS11_ARM64),
         ];
         for (os, fw, want) in table {
             assert_eq!(
@@ -1618,8 +1990,22 @@ pub(crate) mod tests {
                 want,
                 "{os:?} {fw:?}"
             );
-            assert_eq!(want.firmware(), FirmwareKind::from_proto(fw));
+            assert_eq!(want.is_aarch64(), os.is_aarch64(), "{os:?}");
+            assert_eq!(want.needs_tpm(), os.needs_tpm(), "{os:?}");
+            assert_eq!(want.runs_on_this_host(), os.runs_on_this_host(), "{os:?}");
+            if !want.is_aarch64() {
+                assert_eq!(want.firmware(), FirmwareKind::from_proto(fw));
+            }
         }
+        assert_eq!(P::WINDOWS11_ARM64.firmware(), FirmwareKind::UefiAarch64);
+        assert_eq!(
+            P::WINDOWS11_ARM64.probe_target(),
+            ProbeTarget::REFERENCE_AARCH64
+        );
+        assert_eq!(
+            P::host_reference().probe_target(),
+            ProbeTarget::host_reference()
+        );
         for os in GuestOs::ALL {
             for fw in [Firmware::Uefi, Firmware::Bios] {
                 let r = DeviceProfile::for_guest(os, fw);
@@ -1639,6 +2025,7 @@ pub(crate) mod tests {
             (GuestOs::WindowsXp, Firmware::Uefi),
             (GuestOs::WindowsVista, Firmware::Uefi),
             (GuestOs::Windows7, Firmware::Uefi),
+            (GuestOs::Windows11Arm64, Firmware::Bios),
         ] {
             assert!(DeviceProfile::for_guest(os, fw).is_err(), "{os:?} {fw:?}");
         }
@@ -1689,7 +2076,7 @@ pub(crate) mod tests {
         for profile in DeviceProfile::ALL {
             let mut s = spec_for(profile);
             s.machine = match profile.machine_family() {
-                MachineFamily::Q35 => fx.clone(),
+                MachineFamily::Q35 | MachineFamily::Virt => fx.clone(),
                 MachineFamily::I440fx => q35.clone(),
             };
             let e = s.build(&FakePaths::for_profile(&profile)).unwrap_err();
@@ -1752,6 +2139,212 @@ pub(crate) mod tests {
         assert!(!strs(&cmd).iter().any(|x| x.starts_with("ide-hd")));
     }
 
+    /// ADR-0028 row: exact argument list of the Windows 11 ARM64 profile
+    /// (HVF, `virt` + GICv3, `-cpu host`, edk2 pflash, CDs on `usb-bot`
+    /// after the xHCI controller, NVMe, `ramfb`, TPM on the private socket),
+    /// and the swtpm command.
+    #[test]
+    fn windows11_arm64_exact_argv() {
+        let profile = DeviceProfile::WINDOWS11_ARM64;
+        let mut s = spec_for(profile);
+        s.data_media = Some(media_data());
+        let p = FakePaths::for_profile(&profile);
+        let cmd = s.build(&p).unwrap();
+        audit_args(&cmd.args).unwrap();
+        let r = s.run_id;
+        let pd = p.private_dir(&r).unwrap();
+        let rd = p.run_dir(&r).unwrap();
+        let iso = p.media(&media_ubuntu()).unwrap();
+        let data = p.media(&media_data()).unwrap();
+        let disk = p.disk(&r).unwrap().unwrap();
+        let tpm_sock = pd.join_file("tpm.sock").unwrap();
+        let want: Vec<String> = vec![
+            "-name".into(),
+            format!("guest=lightvm-{r}"),
+            "-no-user-config".into(),
+            "-nodefaults".into(),
+            "-machine".into(),
+            "type=virt-11.1,gic-version=3,pflash0=fw-code,pflash1=fw-vars".into(),
+            "-accel".into(),
+            "hvf".into(),
+            "-cpu".into(),
+            "host".into(),
+            "-smp".into(),
+            "cpus=2".into(),
+            "-m".into(),
+            "size=4096M".into(),
+            "-blockdev".into(),
+            format!(
+                "driver=file,node-name=fw-code,filename={},read-only=on",
+                p.firmware_code().unwrap().qemu_value()
+            ),
+            "-blockdev".into(),
+            format!(
+                "driver=file,node-name=fw-vars,filename={}",
+                p.firmware_vars(&r).unwrap().unwrap().qemu_value()
+            ),
+            "-device".into(),
+            "qemu-xhci,id=usb0".into(),
+            "-device".into(),
+            "usb-kbd,bus=usb0.0".into(),
+            "-device".into(),
+            "usb-tablet,bus=usb0.0".into(),
+            "-blockdev".into(),
+            format!(
+                "driver=raw,node-name=cd-install,read-only=on,file.driver=file,file.filename={},file.read-only=on",
+                iso.qemu_value()
+            ),
+            "-device".into(),
+            "usb-bot,id=bot0,bus=usb0.0".into(),
+            "-device".into(),
+            "scsi-cd,drive=cd-install,bus=bot0.0,bootindex=0".into(),
+            "-blockdev".into(),
+            format!(
+                "driver=qcow2,node-name=disk0,file.driver=file,file.filename={}",
+                disk.qemu_value()
+            ),
+            "-device".into(),
+            "nvme,drive=disk0,serial=lv0,bootindex=1".into(),
+            "-blockdev".into(),
+            format!(
+                "driver=raw,node-name=cd-data,read-only=on,file.driver=file,file.filename={},file.read-only=on",
+                data.qemu_value()
+            ),
+            "-device".into(),
+            "usb-bot,id=bot1,bus=usb0.0".into(),
+            "-device".into(),
+            "scsi-cd,drive=cd-data,bus=bot1.0".into(),
+            "-nic".into(),
+            "none".into(),
+            "-device".into(),
+            "ramfb".into(),
+            "-chardev".into(),
+            format!("socket,id=chrtpm,path={}", tpm_sock.qemu_value()),
+            "-tpmdev".into(),
+            "emulator,id=tpm0,chardev=chrtpm".into(),
+            "-device".into(),
+            "tpm-tis-device,tpmdev=tpm0,ppi=off".into(),
+            "-display".into(),
+            "none".into(),
+            "-vnc".into(),
+            format!("unix:{}", pd.join_file("vnc.sock").unwrap().qemu_value()),
+            "-qmp".into(),
+            format!(
+                "unix:{},server=on,wait=off",
+                pd.join_file("qmp.sock").unwrap().qemu_value()
+            ),
+            "-S".into(),
+        ];
+        assert_eq!(strs(&cmd), want);
+        let mut emitted: Vec<String> = strs(&cmd)
+            .windows(2)
+            .filter(|w| w[0] == "-device")
+            .map(|w| w[1].split(',').next().unwrap().to_owned())
+            .collect();
+        emitted.sort();
+        emitted.dedup();
+        let mut req = vec_of(&profile.required_devices());
+        req.sort();
+        assert_eq!(emitted, req);
+        // swtpm: per-VM state, control socket in the private directory,
+        // `--terminate`, log in the run directory.
+        let tpm = cmd.tpm.expect("swtpm command");
+        assert_eq!(tpm.program, p.swtpm().unwrap());
+        assert_eq!(tpm.socket, tpm_sock);
+        let targs: Vec<String> = tpm
+            .args
+            .iter()
+            .map(|a| a.to_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(
+            targs,
+            vec![
+                "socket".to_owned(),
+                "--tpm2".into(),
+                "--tpmstate".into(),
+                format!("dir={}", p.tpm_state_dir(&r).unwrap().unwrap().qemu_value()),
+                "--ctrl".into(),
+                format!("type=unixio,path={}", tpm_sock.qemu_value()),
+                "--terminate".into(),
+                "--log".into(),
+                format!("file={}", rd.join_file("swtpm.log").unwrap().qemu_value()),
+            ]
+        );
+        // The x86 profiles have no TPM.
+        assert!(spec().build(&FakePaths::new()).unwrap().tpm.is_none());
+    }
+
+    /// `-cpu host` only for the AArch64 profile under HVF; that profile
+    /// runs with nothing else (ADR-0028).
+    #[test]
+    fn host_cpu_only_for_aarch64_under_hvf() {
+        let a64 = DeviceProfile::WINDOWS11_ARM64;
+        assert!(CpuModel::host_for(&a64, Accelerator::Hvf).is_ok());
+        assert!(CpuModel::host_for(&a64, Accelerator::Kvm).is_err());
+        assert!(CpuModel::host_for(&a64, Accelerator::Whpx).is_err());
+        for p in DeviceProfile::ALL.iter().filter(|p| !p.is_aarch64()) {
+            assert!(CpuModel::host_for(p, Accelerator::Hvf).is_err(), "{p:?}");
+        }
+        assert!(CpuModel::nominal("host").is_err());
+        let paths = FakePaths::for_profile(&a64);
+        // Nominal model on the AArch64 profile: refused.
+        let mut s = spec_for(a64);
+        s.cpu = CpuModel::nominal("cortex-a76").unwrap();
+        assert!(s.build(&paths).is_err());
+        // `host` under another accelerator: refused.
+        let mut s = spec_for(a64);
+        s.accelerator = Accelerator::Kvm;
+        assert!(s.build(&paths).is_err());
+        // `host` on an x86 profile: refused even under HVF.
+        let mut s = spec();
+        s.accelerator = Accelerator::Hvf;
+        s.cpu = CpuModel::host_for(&a64, Accelerator::Hvf).unwrap();
+        assert!(s.build(&FakePaths::new()).is_err());
+        // The audit refuses `-cpu host` without HVF.
+        let mut args = spec_for(a64).build(&paths).unwrap().args;
+        let i = args.iter().position(|a| a == "hvf").unwrap();
+        args[i] = OsString::from("kvm");
+        assert!(audit_args(&args).is_err());
+    }
+
+    /// The TPM profile needs the VM's TPM state and swtpm.
+    #[test]
+    fn tpm_profile_needs_state_and_swtpm() {
+        struct NoTpm(FakePaths);
+        impl ManagedPaths for NoTpm {
+            fn qemu_system(&self) -> Result<ManagedPath> {
+                self.0.qemu_system()
+            }
+            fn firmware_code(&self) -> Result<ManagedPath> {
+                self.0.firmware_code()
+            }
+            fn firmware_vars(&self, run: &RunId) -> Result<Option<ManagedPath>> {
+                self.0.firmware_vars(run)
+            }
+            fn disk(&self, run: &RunId) -> Result<Option<ManagedPath>> {
+                self.0.disk(run)
+            }
+            fn protected_readonly(&self, run: &RunId) -> Result<Vec<ManagedPath>> {
+                self.0.protected_readonly(run)
+            }
+            fn media(&self, media: &MediaId) -> Result<ManagedPath> {
+                self.0.media(media)
+            }
+            fn run_dir(&self, run: &RunId) -> Result<ManagedPath> {
+                self.0.run_dir(run)
+            }
+            fn private_dir(&self, run: &RunId) -> Result<ManagedPath> {
+                self.0.private_dir(run)
+            }
+        }
+        let a64 = DeviceProfile::WINDOWS11_ARM64;
+        assert!(
+            spec_for(a64)
+                .build(&NoTpm(FakePaths::for_profile(&a64)))
+                .is_err()
+        );
+    }
+
     /// The audit itself rejects what the builder must never emit.
     #[test]
     fn audit_rejects_foreign_devices_and_keys() {
@@ -1767,6 +2360,10 @@ pub(crate) mod tests {
         assert!(with(&["-bios", "C:/x,y"]).is_err());
         assert!(with(&["-bios", "/x/y"]).is_err(), "-bios with pflash");
         assert!(with(&["-netdev", "user,id=n"]).is_err());
+        assert!(with(&["-chardev", "pty,id=c"]).is_err());
+        assert!(with(&["-chardev", "socket,id=c,host=0.0.0.0"]).is_err());
+        assert!(with(&["-tpmdev", "passthrough,id=t"]).is_err());
+        assert!(with(&["-device", "virtio-net-pci,id=n"]).is_err());
     }
 }
 

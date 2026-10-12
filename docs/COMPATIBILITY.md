@@ -31,6 +31,7 @@ Columns required by section 5. The machine type must be recorded in versioned fo
 | Ubuntu LTS x86_64 → Linux x86_64 (KVM) | not verified | not verified | not verified | not verified | not verified | not verified | not verified | not verified | not verified | not verified | not verified | no physical Linux host in F0; WSL2 tests not valid for this cell (`F0-07`) | none |
 | Debian/Fedora x86_64 → Linux x86_64 (KVM) | not verified | not verified | not verified | not verified | not verified | not verified | not verified | not verified | not verified | not verified | not verified | not verified | none |
 | macOS Apple Silicon → Linux ARM64 (HVF) | not verified | not verified | not verified | not verified | not verified | not verified | not verified | not verified | not verified | not verified | not verified | not verified | none |
+| macOS Apple Silicon → Windows 11 ARM64 (HVF) | not verified | not verified | not verified | not verified | not verified | not verified | not verified | not verified | not verified | not verified | not verified | ADR-0028; spike `R2b-01` outside the product; VM start through the supervisor not implemented yet | none |
 | macOS Intel → Linux x86_64 (HVF) | not verified | not verified | not verified | not verified | not verified | not verified | not verified | not verified | not verified | not verified | not verified | not verified | none |
 | Windows/Linux x86_64 → Windows x86_64 (WHPX/KVM) | not verified | not verified | not verified | not verified | not verified | not verified | not verified | not verified | not verified | not verified | not verified | not verified | none |
 | ARM64 host → x86_64 guest (TCG) | not verified | not verified | not verified | not verified | not verified | not verified | not verified | not verified | not verified | not verified | not verified | not verified | none |
@@ -49,7 +50,7 @@ Notes:
 
 ## Windows guest profiles (ADR-0027)
 
-Host for every row: Windows 11 x86_64 with WHPX, QEMU 11.1.0, CPU `Skylake-Client-v4`, no NIC. Keyboard: built-in PS/2 (i8042); pointer: `usb-tablet`. Windows 8 (6.2) and Windows 11 are not supported (ADR-0027). The Ubuntu/KVM host named by R2c is not addressed here and stays "not verified".
+Host for every row: Windows 11 x86_64 with WHPX, QEMU 11.1.0, CPU `Skylake-Client-v4`, no NIC. Keyboard: built-in PS/2 (i8042); pointer: `usb-tablet`. Windows 8 (6.2) and Windows 11 x86/x64 are not supported (ADR-0027); Windows 11 ARM64 has its own profile on macOS Apple Silicon (below, ADR-0028). The Ubuntu/KVM host named by R2c is not addressed here and stays "not verified".
 
 | Guest system | Machine type | Firmware | Disk / CDs | Display / USB | Status | Last test passed | Evidence |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -61,6 +62,16 @@ Host for every row: Windows 11 x86_64 with WHPX, QEMU 11.1.0, CPU `Skylake-Clien
 
 The modes of these systems (manual, baseline, AI offline) are all "not verified"; filtered Internet and guest agent stay "not verified" as for every combination (R1, R4), and the Windows guests are offline only.
 
+## Windows 11 ARM64 on macOS Apple Silicon (ADR-0028)
+
+Host: macOS on Apple Silicon with HVF; the x86 profiles above are not offered on this host. The profile is normative in ADR-0028; the spike `R2b-01` reached the Windows 11 ARM64 setup without bypass, but outside the product (no start through `qemu-backend` and the supervisor yet), so the cell stays "not verified".
+
+| Guest system | Machine type | Firmware | Disk / CDs | Display / USB | TPM | Status | Last test passed | Evidence |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Windows 11 ARM64 (build 22000 and later) | `virt`, `gic-version=3`; CPU `host` | project edk2 build (ArmVirtQemu, Secure Boot on, Microsoft keys only) | `nvme` / `scsi-cd` on `usb-bot`, one per medium | `ramfb` / `qemu-xhci` + `usb-kbd` + `usb-tablet` | `tpm-tis-device` on a per-VM swtpm (TPM 2.0) | not verified | none | `R2b-01` (spike, outside the product); ADR-0028 required evidence pending |
+
+Modes (manual, baseline, AI offline, filtered Internet, guest agent): all "not verified"; agent mode stays disabled on this host (ADR-0028, process containment). Offline only.
+
 ## Mode matrix
 
 Modes are tracked separately: manual support of a host does not imply the AI modes (section 5).
@@ -71,6 +82,7 @@ Modes are tracked separately: manual support of a host does not imply the AI mod
 | Ubuntu LTS x86_64 → Linux x86_64 (KVM) | not verified | not verified | not verified | not verified | not verified |
 | Debian/Fedora x86_64 → Linux x86_64 (KVM) | not verified | not verified | not verified | not verified | not verified |
 | macOS Apple Silicon → Linux ARM64 (HVF) | not verified | not verified | not verified | not verified | not verified |
+| macOS Apple Silicon → Windows 11 ARM64 (HVF) | not verified | not verified | not verified | not verified | not verified |
 | macOS Intel → Linux x86_64 (HVF) | not verified | not verified | not verified | not verified | not verified |
 | Windows/Linux x86_64 → Windows x86_64 (WHPX/KVM) | not verified | not verified | not verified | not verified | not verified |
 

@@ -3,7 +3,14 @@
 //! Contract with the parent (no secrets in the arguments, ROADMAP 9):
 //! - structured arguments: `--catalog <dir>` (required),
 //!   `--qemu-dir <dir>` (approved QEMU distribution; without it, starting VMs
-//!   is rejected with `unsupported`), `--audit-log <file>` (default in the
+//!   is rejected with `unsupported`; the folder of the Windows build, or a
+//!   Unix prefix such as Homebrew's `/opt/homebrew` with `bin/` and
+//!   `share/qemu/`), `--firmware-dir <dir>` (project AArch64 firmware,
+//!   ADR-0028; default `<state dir>/firmware`), `--swtpm <file>` (default:
+//!   `swtpm` in the QEMU folder), `--approved-hashes <file>` (development
+//!   approvals of QEMU, firmware and swtpm hashes; default
+//!   `<state dir>/approved-dev.sha256` when present; the state dir is the
+//!   one of the default audit log), `--audit-log <file>` (default in the
 //!   user profile), `--runtime-dir <dir>` (IPC socket on Unix and private
 //!   directories of the QEMU sockets), `--parent-watch stdin|none`,
 //!   `--parent-loss-policy kill-vms|shutdown-vms|keep-vms` (default
@@ -49,7 +56,7 @@ use lightvm_service::supervisor::{Backend, ParentLossPolicy};
 use lightvm_service::{ServiceConfig, start};
 
 const USAGE: &str = "usage: lightvm-service --catalog <dir> [--qemu-dir <dir>] \
-[--audit-log <file>] [--runtime-dir <dir>] [--parent-watch stdin|none] \
+[--firmware-dir <dir>] [--swtpm <file>] [--approved-hashes <file>] [--audit-log <file>] [--runtime-dir <dir>] [--parent-watch stdin|none] \
 [--parent-loss-policy kill-vms|shutdown-vms|keep-vms] [--parent-loss-powerdown-s N]
        lightvm-service --emergency-stop --catalog <dir>";
 
@@ -60,6 +67,9 @@ const ALREADY_RUNNING: &str = "another instance of lightvm-service is already us
 struct Args {
     catalog: PathBuf,
     qemu_dir: Option<PathBuf>,
+    firmware_dir: Option<PathBuf>,
+    swtpm: Option<PathBuf>,
+    approved_hashes: Option<PathBuf>,
     audit_log: Option<PathBuf>,
     runtime_dir: Option<PathBuf>,
     parent_watch: bool,
@@ -71,6 +81,9 @@ fn parse_args() -> Result<Args, String> {
     let mut it = std::env::args_os().skip(1);
     let mut catalog = None;
     let mut qemu_dir = None;
+    let mut firmware_dir = None;
+    let mut swtpm = None;
+    let mut approved_hashes = None;
     let mut audit_log = None;
     let mut runtime_dir = None;
     let mut parent_watch = true;
@@ -85,6 +98,9 @@ fn parse_args() -> Result<Args, String> {
         match a.as_str() {
             "--catalog" => catalog = Some(PathBuf::from(value()?)),
             "--qemu-dir" => qemu_dir = Some(PathBuf::from(value()?)),
+            "--firmware-dir" => firmware_dir = Some(PathBuf::from(value()?)),
+            "--swtpm" => swtpm = Some(PathBuf::from(value()?)),
+            "--approved-hashes" => approved_hashes = Some(PathBuf::from(value()?)),
             "--audit-log" => audit_log = Some(PathBuf::from(value()?)),
             "--runtime-dir" => runtime_dir = Some(PathBuf::from(value()?)),
             "--parent-watch" => {
@@ -133,6 +149,9 @@ fn parse_args() -> Result<Args, String> {
     Ok(Args {
         catalog,
         qemu_dir,
+        firmware_dir,
+        swtpm,
+        approved_hashes,
         audit_log,
         runtime_dir,
         parent_watch,
@@ -226,6 +245,35 @@ fn private_root(
     Ok(short)
 }
 
+/// Firmware directory, swtpm and development approvals (ADR-0028): from the
+/// arguments, else the defaults under the user state directory. An
+/// approvals file given explicitly must exist and be valid; the default one
+/// is used only when present (and must then be valid too).
+fn configure_aarch64_and_approvals(setup: &mut QemuSetup, args: &Args) -> Result<(), (u8, String)> {
+    let state = default_state_dir();
+    setup.firmware_dir = args
+        .firmware_dir
+        .clone()
+        .or_else(|| state.as_ref().map(|d| d.join("firmware")));
+    setup.swtpm.clone_from(&args.swtpm);
+    let approvals = match (&args.approved_hashes, &state) {
+        (Some(p), _) => Some(p.clone()),
+        (None, Some(d)) => Some(d.join("approved-dev.sha256")).filter(|p| p.is_file()),
+        (None, None) => None,
+    };
+    if let Some(p) = approvals {
+        let text = std::fs::read_to_string(&p)
+            .map_err(|e| (4, format!("approved hashes {}: {e}", p.display())))?;
+        let n = backend::load_approvals(&mut setup.probe, &text)
+            .map_err(|e| (4, format!("approved hashes {}: {e}", p.display())))?;
+        lightvm_service::diag!(
+            "lightvm-service: {n} development hash approvals from {} (not approved for release)",
+            p.display()
+        );
+    }
+    Ok(())
+}
+
 fn compose(args: &Args) -> Result<Composed, (u8, String)> {
     let store = match SqliteStore::open(&args.catalog) {
         Ok(s) => s,
@@ -257,7 +305,8 @@ fn compose(args: &Args) -> Result<Composed, (u8, String)> {
     let display_dir = private_root.join("d");
     match &args.qemu_dir {
         Some(dir) => {
-            let setup = QemuSetup::new(dir.clone(), root, private_root);
+            let mut setup = QemuSetup::new(dir.clone(), root, private_root);
+            configure_aarch64_and_approvals(&mut setup, args)?;
             let (host, vm_backend, capacity) =
                 backend::probe(setup).map_err(|e| (4, format!("backend QEMU: {e}")))?;
             let engine =

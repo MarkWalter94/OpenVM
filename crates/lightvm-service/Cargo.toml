@@ -100,6 +100,10 @@ name = "f3_real"
 required-features = ["supervisor"]
 
 [[test]]
+name = "macos_real"
+required-features = ["supervisor"]
+
+[[test]]
 name = "f4"
 required-features = ["supervisor"]
 

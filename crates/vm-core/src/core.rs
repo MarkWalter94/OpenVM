@@ -27,12 +27,12 @@ use std::collections::{BTreeMap, VecDeque};
 use lightvm_proto::ipc::InputOwner;
 use lightvm_proto::{
     Actor, Admission, AuditAction, AuditEvent, AuditOutcome, BackendObservation, Caller,
-    Capability, DisplayGeometry, EffectivePolicy, ErrorCode, FileIdentity, Grant, HostCapacity,
-    InputEvent, Label, Lease, ManagedRelPath, MediaEntry, MediaKind, MediaRecord, OperationId,
-    OperationKind, OperationRecord, OperationStatus, PolicyLayer, PolicyRevision, PublicError,
-    ResourceLimits, RevocationReport, RunEndReason, RunId, RunRecord, Screenshot, SessionId,
-    SessionState, SessionToken, Sha256Digest, TerminationCause, UtcTimestamp, VmAction, VmConfig,
-    VmId, VmRecord, VmRequest, VmState,
+    Capability, DisplayGeometry, EffectivePolicy, ErrorCode, FileIdentity, Grant, GuestOs,
+    HostCapacity, InputEvent, Label, Lease, ManagedRelPath, MediaEntry, MediaKind, MediaRecord,
+    OperationId, OperationKind, OperationRecord, OperationStatus, PolicyLayer, PolicyRevision,
+    PublicError, ResourceLimits, RevocationReport, RunEndReason, RunId, RunRecord, Screenshot,
+    SessionId, SessionState, SessionToken, Sha256Digest, TerminationCause, UtcTimestamp, VmAction,
+    VmConfig, VmId, VmRecord, VmRequest, VmState,
 };
 
 use crate::media::{check_media_kind, verify_media};
@@ -40,7 +40,7 @@ use crate::policy::{
     effective_policy, effective_resource_limits, effective_user_policy, host_layer,
 };
 use crate::ports::{AuditSink, CatalogStore, Clock, IdGenerator, MediaInspector, VmBackend};
-use crate::resources::{existing_disk_limits, validate_config};
+use crate::resources::{GuestSupport, check_guest_host, existing_disk_limits, validate_config};
 use crate::session::{SessionRegistry, SessionSpec, discard_code_for};
 
 /// Hard limit of queued operations per VM, independent of quotas.
@@ -337,6 +337,9 @@ pub struct Core<S, C, I, A> {
     input_owners: BTreeMap<VmId, SessionId>,
     /// Runs whose pressed keys and buttons must be released (owner change).
     input_releases: Vec<(VmId, RunId)>,
+    /// Guests this host can run (ADR-0007, ADR-0028); see
+    /// [`Core::set_guest_support`].
+    guest_support: GuestSupport,
 }
 
 impl<S, C, I, A> Core<S, C, I, A>
@@ -363,6 +366,7 @@ where
             audit_failures: 0,
             input_owners: BTreeMap::new(),
             input_releases: Vec::new(),
+            guest_support: GuestOs::runs_on_this_host,
         }
     }
 
@@ -401,6 +405,15 @@ where
     pub fn set_host_capacity(&mut self, host: HostCapacity) {
         self.config.host = host;
         self.revision = PolicyRevision(self.revision.0 + 1);
+    }
+
+    /// Replaces the rule deciding which guests this host can run (default
+    /// [`GuestOs::runs_on_this_host`]). Creating, modifying or starting a VM
+    /// whose guest the rule refuses fails with `unsupported`. Fake backends
+    /// and tests that exercise guests of another architecture pass
+    /// [`crate::resources::any_guest`].
+    pub fn set_guest_support(&mut self, supported: GuestSupport) {
+        self.guest_support = supported;
     }
 
     /// Sets the policy of a VM. Increments the policy revision.
@@ -973,7 +986,8 @@ where
             let err = PublicError::permission_denied("VM creation not available to agent sessions");
             return Err(self.deny(actor, AuditAction::VmCreate, ev(), err));
         }
-        let checks = validate_config(&config, &self.effective_limits())
+        let checks = check_guest_host(config.guest_os, self.guest_support)
+            .and_then(|()| validate_config(&config, &self.effective_limits()))
             .and_then(|()| self.check_config_media(&config));
         if let Err(err) = checks {
             return Err(self.deny(actor, AuditAction::VmCreate, ev(), err));
@@ -1055,6 +1069,7 @@ where
             ))
         } else {
             crate::resources::check_profile_change(&current.config, &config)
+                .and_then(|()| check_guest_host(config.guest_os, self.guest_support))
                 .and_then(|()| {
                     validate_config(
                         &config,
@@ -1216,6 +1231,9 @@ where
             .vms
             .get(&vm_id)
             .ok_or_else(|| PublicError::not_found("VM does not exist"))?;
+        // A catalog moved from another host may hold guests this one cannot
+        // run with acceleration.
+        check_guest_host(rt.record.config.guest_os, self.guest_support)?;
         // Per-VM limits recomputed at start: host capacity may have changed
         // after creation (new probe, increased reserve). The disk already
         // exists: free space only matters to create or enlarge it.

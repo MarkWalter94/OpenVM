@@ -563,9 +563,21 @@ impl CatalogStore for SqliteStore {
 /// reserve for manifests and the minimal outcome, ROADMAP 8).
 const BASELINE_FREE_MARGIN: u64 = 1 << 30;
 
+/// Baselines of a TPM guest (ADR-0028, required evidence 3): refused until
+/// the swtpm state is part of the baseline.
+fn tpm_baseline_unsupported() -> PublicError {
+    PublicError::unsupported(
+        "baselines of VMs with a TPM (Windows 11) are not supported yet: the TPM state is not part of the baseline",
+    )
+    .with_detail("reason", "tpm_state")
+}
+
 /// Public error of a baseline operation, without paths.
 fn baseline_error(e: &st::StorageError) -> PublicError {
     match e {
+        st::StorageError::Unsupported(m) if *m == st::TPM_BASELINE_UNSUPPORTED => {
+            tpm_baseline_unsupported()
+        }
         st::StorageError::Referenced(r @ ("baseline_referenced" | "baseline_protected")) => {
             PublicError::state_conflict(if *r == "baseline_referenced" {
                 "the baseline is in use by the VM's current state"
@@ -754,6 +766,9 @@ impl BaselinePort for SqliteStore {
         tool: Arc<dyn ImageTool>,
         cancel: CancelCheck,
     ) -> Result<StorageWork, PublicError> {
+        if vm.config.guest_os.needs_tpm() {
+            return Err(tpm_baseline_unsupported());
+        }
         let sid = self.sid(vm.id)?;
         let clean = self
             .cat
@@ -854,6 +869,9 @@ impl BaselinePort for SqliteStore {
         tool: Arc<dyn ImageTool>,
         cancel: CancelCheck,
     ) -> Result<StorageWork, PublicError> {
+        if vm.config.guest_os.needs_tpm() {
+            return Err(tpm_baseline_unsupported());
+        }
         let sid = self.sid(vm.id)?;
         let job = self
             .cat

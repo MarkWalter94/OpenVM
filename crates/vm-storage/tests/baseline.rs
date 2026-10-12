@@ -730,3 +730,45 @@ fn backing_reference_has_the_fixed_shape() {
         CatalogLayout::baseline_disk(&vm, &b)
     );
 }
+
+/// ADR-0028 (required evidence 3): until the swtpm state is part of
+/// baselines, baseline creation and restore are refused for a TPM guest
+/// (Windows 11 ARM64) with `unsupported`, before any file is touched; the
+/// per-VM TPM state directory is private (0700 on Unix).
+#[test]
+fn tpm_guest_has_no_baselines_yet() {
+    let dir = common::tempdir();
+    let mut cat = Catalog::open(dir.path()).unwrap();
+    let vm = cat
+        .with_tx(|tx| {
+            tx.insert_vm(&vm_storage::NewVm {
+                name: "win11".into(),
+                guest_os: "windows11_arm64".into(),
+                config_version: 1,
+                config: serde_json::json!({}),
+            })
+        })
+        .unwrap();
+    let fx = Fx { dir, vm };
+    std::fs::create_dir_all(fx.path("firmware")).unwrap();
+    std::fs::write(fx.path("primary.qcow2"), qcow2(None, b"installed")).unwrap();
+    std::fs::write(fx.path("firmware/primary.vars.fd"), b"VARS").unwrap();
+    let e = fx.create(&mut cat, "b").unwrap_err();
+    assert!(
+        matches!(e, StorageError::Unsupported(m) if m == vm_storage::TPM_BASELINE_UNSUPPORTED),
+        "{e}"
+    );
+    let e = fx.restore(&mut cat, &BaselineId::new_v7()).unwrap_err();
+    assert!(matches!(e, StorageError::Unsupported(_)), "{e}");
+    let tpm = cat
+        .layout()
+        .ensure_private_dir(&CatalogLayout::tpm_state_dir(&fx.vm))
+        .unwrap();
+    assert_eq!(tpm, fx.path("tpm"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&tpm).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+    }
+}

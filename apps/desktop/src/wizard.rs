@@ -6,7 +6,10 @@
 //! confirms or corrects it. When the media is not recognized no system is
 //! preselected: the user must choose one before going on. The guest system
 //! decides the firmware (a choice only for Windows 8.1 and 10) and the
-//! hardware profile, and suggests the resources.
+//! hardware profile, and suggests the resources. Only the systems this host
+//! runs are offered (x86 guests on x86 hosts, Windows 11 ARM64 on Apple
+//! Silicon, ADR-0028); a detected system the host cannot run is shown but
+//! not preselected.
 //!
 //! The VM name is the **only** text field of the whole interface: it is a
 //! label validated live with [`VmName::parse`] and never reaches QEMU (which
@@ -32,10 +35,36 @@ pub const MIN_DISK_GIB: u64 = 8;
 /// Smallest memory of any guest system, in MiB.
 pub const MIN_MEMORY_MIB: u64 = 256;
 
+/// Which guest systems the host can run (ADR-0007, ADR-0028): the wizard
+/// offers only these. The app uses [`GuestOs::runs_on_this_host`]; tests
+/// replace it to exercise the other host family.
+pub type GuestSupport = fn(GuestOs) -> bool;
+
 /// System whose suggested resources fill the sliders before any system is
-/// chosen. It is never preselected: until the user (or the detection)
-/// picks a system, [`Wizard::os`] stays `None`.
-const INITIAL_RESOURCES_OS: GuestOs = GuestOs::UbuntuLtsX86_64;
+/// chosen: the first system the host runs (Ubuntu LTS on x86 hosts,
+/// Windows 11 ARM64 on Apple Silicon). It is never preselected: until the
+/// user (or the detection) picks a system, [`Wizard::os`] stays `None`.
+fn initial_resources_os(supported: GuestSupport) -> GuestOs {
+    GuestOs::ALL
+        .into_iter()
+        .find(|os| supported(*os))
+        .unwrap_or(GuestOs::UbuntuLtsX86_64)
+}
+
+/// [`GuestSupport`] compared by what it accepts, not by address.
+#[derive(Clone, Copy, Debug)]
+struct Supported(GuestSupport);
+
+impl PartialEq for Supported {
+    fn eq(&self, other: &Self) -> bool {
+        GuestOs::ALL.into_iter().all(|os| self.0(os) == other.0(os))
+    }
+}
+
+impl Eq for Supported {}
+
+/// Suffix of a detected system the host cannot run.
+pub const NOT_SUPPORTED_ON_HOST: &str = " — not supported on this host";
 
 /// Hint on the System step while no system is chosen.
 pub const CHOOSE_SYSTEM_HINT: &str = "Choose the system to continue";
@@ -160,8 +189,18 @@ pub fn firmware_label(f: Firmware) -> &'static str {
     }
 }
 
+/// Firmware of `os` as shown to the user: guests with a TPM boot with
+/// Secure Boot on (ADR-0028).
+pub fn firmware_text(os: GuestOs, f: Firmware) -> &'static str {
+    if os.needs_tpm() && f == Firmware::Uefi {
+        "UEFI with Secure Boot"
+    } else {
+        firmware_label(f)
+    }
+}
+
 /// One-line summary of the virtual hardware of the profile of `os`
-/// (ADR-0027 table): the firmware does not change the devices.
+/// (ADR-0027 and ADR-0028 tables): the firmware does not change the devices.
 pub fn hardware_summary(os: GuestOs) -> &'static str {
     match os {
         GuestOs::UbuntuLtsX86_64 | GuestOs::OtherLinuxX86_64 => {
@@ -170,6 +209,9 @@ pub fn hardware_summary(os: GuestOs) -> &'static str {
         GuestOs::WindowsXp => "IDE disk, standard VGA, USB tablet",
         GuestOs::WindowsVista | GuestOs::Windows7 | GuestOs::Windows81 | GuestOs::Windows10 => {
             "AHCI disk, standard VGA, USB tablet"
+        }
+        GuestOs::Windows11Arm64 => {
+            "NVMe disk, ramfb display, USB keyboard and tablet, TPM 2.0, UEFI with Secure Boot"
         }
     }
 }
@@ -180,6 +222,7 @@ pub fn detected_label(d: &DetectedGuest) -> String {
     match d.arch {
         Some(GuestArch::X86) => s.push_str(", 32-bit"),
         Some(GuestArch::X86_64) => s.push_str(", 64-bit"),
+        Some(GuestArch::Aarch64) => s.push_str(", ARM64"),
         None => {}
     }
     if let Some(b) = d.build {
@@ -230,13 +273,21 @@ pub struct Wizard {
     /// Installation media whose detection was applied (`None` before any).
     detected_for: Option<MediaId>,
     focus_name: bool,
+    /// Systems the host can run: the only ones offered and preselected.
+    supported: Supported,
 }
 
 impl Wizard {
-    /// New wizard with defaults fitting the host.
+    /// New wizard with defaults fitting the host; it offers the systems
+    /// this host runs ([`GuestOs::runs_on_this_host`]).
     pub fn new(host: Option<HostCapacity>) -> Self {
+        Self::with_guest_support(host, GuestOs::runs_on_this_host)
+    }
+
+    /// New wizard offering the systems `supported` accepts.
+    pub fn with_guest_support(host: Option<HostCapacity>, supported: GuestSupport) -> Self {
         let b = Bounds::new(host);
-        let base = INITIAL_RESOURCES_OS;
+        let base = initial_resources_os(supported);
         let t = base.template(None);
         let (vcpus, memory_mib, disk_gib) = (t.vcpus, t.memory_mib, t.disk_gib);
         Self {
@@ -256,7 +307,13 @@ impl Wizard {
             detected: None,
             detected_for: None,
             focus_name: true,
+            supported: Supported(supported),
         }
+    }
+
+    /// The host can run `os`: it is offered in the System step.
+    pub fn supports(&self, os: GuestOs) -> bool {
+        self.supported.0(os)
     }
 
     /// Sets the guest system: the firmware becomes the recommended one for
@@ -323,8 +380,9 @@ impl Wizard {
     }
 
     /// Applies the detection of the chosen installation media once per
-    /// media: the system detected, or no system when not recognized (the
-    /// user must choose one), unless the user already picked a system.
+    /// media: the system detected, or no system when not recognized or not
+    /// runnable on this host (the user must choose one), unless the user
+    /// already picked a system.
     /// `media` are the records to look the media up in; nothing happens
     /// while it is not among them.
     pub fn apply_detection<'a>(&mut self, media: impl IntoIterator<Item = &'a MediaRecord>) {
@@ -343,8 +401,8 @@ impl Wizard {
         self.detected = record.detected_guest.clone();
         if !self.os_chosen {
             match self.detected.as_ref().map(|d| d.os) {
-                Some(os) => self.set_os(os),
-                None => self.os = None,
+                Some(os) if self.supports(os) => self.set_os(os),
+                _ => self.os = None,
             }
         } else if let Some(os) = self.os {
             // The user's system stays; the firmware, the template and the
@@ -627,11 +685,18 @@ fn system_step(ui: &mut egui::Ui, w: &mut Wizard, b: Bounds) {
     );
     ui.add_space(4.0);
     match &w.detected {
-        Some(d) => {
+        Some(d) if w.supports(d.os) => {
             theme::status(
                 ui,
                 &format!("Detected: {}", detected_label(d)),
                 Tone::Positive,
+            );
+        }
+        Some(d) => {
+            theme::status(
+                ui,
+                &format!("Detected: {}{NOT_SUPPORTED_ON_HOST}", detected_label(d)),
+                Tone::Warning,
             );
         }
         None => {
@@ -639,21 +704,34 @@ fn system_step(ui: &mut egui::Ui, w: &mut Wizard, b: Bounds) {
         }
     }
     ui.add_space(6.0);
-    // Two columns, Linux then Windows: the reading (and Tab) order stays
-    // the order of `GuestOs::ALL`.
+    // Two columns, Linux then Windows, with only the systems this host
+    // runs (an empty column is not shown): the reading (and Tab) order
+    // stays the order of `GuestOs::ALL`.
     let mut picked = None;
+    let supported = w.supported.0;
+    let columns: Vec<(&str, Vec<GuestOs>)> = [("Linux", false), ("Windows", true)]
+        .into_iter()
+        .map(|(caption, windows)| {
+            let list = GuestOs::ALL
+                .into_iter()
+                .filter(|o| o.is_windows() == windows && supported(*o))
+                .collect::<Vec<_>>();
+            (caption, list)
+        })
+        .filter(|(_, list)| !list.is_empty())
+        .collect();
+    let arm_host = columns
+        .iter()
+        .all(|(_, l)| l.iter().all(|o| o.is_aarch64()));
     ui.horizontal_top(|ui| {
-        for (caption, windows) in [("Linux", false), ("Windows", true)] {
+        for (caption, list) in &columns {
             ui.allocate_ui_with_layout(
                 egui::vec2(380.0, 0.0),
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
                     ui.set_min_width(380.0);
                     group_caption(ui, caption);
-                    for os in GuestOs::ALL
-                        .into_iter()
-                        .filter(|o| o.is_windows() == windows)
-                    {
+                    for &os in list {
                         if ui.radio(w.os == Some(os), os_choice_label(os)).clicked() {
                             picked = Some(os);
                         }
@@ -670,9 +748,11 @@ fn system_step(ui: &mut egui::Ui, w: &mut Wizard, b: Bounds) {
         }
     }
     ui.label(
-        egui::RichText::new(
-            "Windows guests run offline, without a network adapter. Windows 8 and Windows 11 are not supported.",
-        )
+        egui::RichText::new(if arm_host {
+            ARM_HOST_NOTE
+        } else {
+            X86_HOST_NOTE
+        })
         .small()
         .color(p.text_weak),
     );
@@ -705,7 +785,7 @@ fn system_step(ui: &mut egui::Ui, w: &mut Wizard, b: Bounds) {
         let fixed = allowed.first().copied().unwrap_or_default();
         theme::row(ui, "Firmware", Some("Fixed by the system."), |ui| {
             ui.add_space(4.0);
-            ui.label(egui::RichText::new(firmware_label(fixed)).color(p.text));
+            ui.label(egui::RichText::new(firmware_text(os, fixed)).color(p.text));
         });
     }
     theme::row(ui, "Virtual hardware", None, |ui| {
@@ -718,6 +798,11 @@ fn system_step(ui: &mut egui::Ui, w: &mut Wizard, b: Bounds) {
     }
 }
 
+/// Note under the systems on x86 hosts.
+pub const X86_HOST_NOTE: &str = "Windows guests run offline, without a network adapter. Windows 8 and Windows 11 are not supported.";
+/// Note under the systems on Apple Silicon hosts (ADR-0028).
+pub const ARM_HOST_NOTE: &str = "Windows guests run offline, without a network adapter. On this Mac only Windows 11 ARM64 runs: bring your own installation ISO and licence.";
+
 fn os_choice_label(os: GuestOs) -> &'static str {
     match os {
         GuestOs::UbuntuLtsX86_64 => "Ubuntu LTS (x86-64), the reference system",
@@ -727,6 +812,7 @@ fn os_choice_label(os: GuestOs) -> &'static str {
         GuestOs::Windows7 => "Windows 7",
         GuestOs::Windows81 => "Windows 8.1",
         GuestOs::Windows10 => "Windows 10",
+        GuestOs::Windows11Arm64 => "Windows 11 (ARM64)",
     }
 }
 
@@ -745,8 +831,12 @@ pub const MEMORY_CAP_NOTE: &str = "32-bit Windows uses at most 4 GiB of memory."
 
 /// Name of the standard template of `os` for the media architecture:
 /// "Windows 7 64-bit"; just "Windows 7" when the architecture is unknown.
-/// Linux guests are x86-64 only and carry no suffix.
+/// Linux guests are x86-64 only and carry no suffix; Windows 11 is ARM64
+/// only: "Windows 11 ARM64".
 pub fn template_name(os: GuestOs, arch: Option<GuestArch>) -> String {
+    if os.is_aarch64() {
+        return format!("{} ARM64", os_label(os));
+    }
     match (os.is_windows(), arch) {
         (true, Some(GuestArch::X86)) => format!("{} 32-bit", os_label(os)),
         (true, Some(GuestArch::X86_64)) => format!("{} 64-bit", os_label(os)),
@@ -812,6 +902,7 @@ fn media_step(
         }
     }
 
+    let supported = w.supported.0;
     let selected = if install {
         &mut w.install_media
     } else {
@@ -826,13 +917,16 @@ fn media_step(
         if install && let Some(d) = &m.detected_guest {
             detail.push_str(" · ");
             detail.push_str(&detected_label(d));
+            if !supported(d.os) {
+                detail.push_str(NOT_SUPPORTED_ON_HOST);
+            }
         }
         ui.horizontal(|ui| {
             let r = ui.radio(*selected == Some(m.id), &title);
             if r.clicked() {
                 *selected = Some(m.id);
             }
-            ui.label(egui::RichText::new(detail).small().color(p.text_weak));
+            ui.add(egui::Label::new(egui::RichText::new(detail).small().color(p.text_weak)).wrap());
         });
     }
     if let Some(e) = &env.media.error {
@@ -1055,7 +1149,7 @@ fn summary_step(ui: &mut egui::Ui, w: &Wizard, env: &WizardEnv<'_>) {
             row("System", w.os.map_or_else(dash, |os| os_label(os).into()));
             row(
                 "Firmware",
-                w.os.map_or_else(dash, |_| firmware_label(w.firmware).into()),
+                w.os.map_or_else(dash, |os| firmware_text(os, w.firmware).into()),
             );
             row(
                 "Virtual hardware",
@@ -1091,6 +1185,21 @@ fn summary_step(ui: &mut egui::Ui, w: &Wizard, env: &WizardEnv<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An x86 host (every build but Apple Silicon macOS).
+    fn x86_host(os: GuestOs) -> bool {
+        !os.is_aarch64()
+    }
+
+    /// An Apple Silicon host (ADR-0028).
+    fn arm_host(os: GuestOs) -> bool {
+        os.is_aarch64()
+    }
+
+    /// Wizard of an x86 host, whatever the build host.
+    fn x86_wizard(host: Option<HostCapacity>) -> Wizard {
+        Wizard::with_guest_support(host, x86_host)
+    }
 
     #[test]
     fn name_validation_is_live_and_friendly() {
@@ -1129,7 +1238,7 @@ mod tests {
             (4, 6144, 80)
         );
         assert!(b.sufficient());
-        let w = Wizard::new(Some(h));
+        let w = x86_wizard(Some(h));
         assert_eq!((w.vcpus, w.memory_mib, w.disk_gib), (2, 4096, 32));
         let tiny = HostCapacity {
             free_storage_gib: 10,
@@ -1160,7 +1269,7 @@ mod tests {
     }
 
     fn with_media(m: &MediaRecord) -> Wizard {
-        let mut w = Wizard::new(None);
+        let mut w = x86_wizard(None);
         w.name = "lab".into();
         w.install_media = Some(m.id);
         w.apply_detection([m]);
@@ -1257,7 +1366,7 @@ mod tests {
         assert_eq!(w.firmware, Firmware::Uefi, "64-bit media → UEFI");
         assert_eq!((w.vcpus, w.memory_mib, w.disk_gib), (2, 4096, 64));
         // Media not in the list yet: nothing applied until it appears.
-        let mut w = Wizard::new(None);
+        let mut w = x86_wizard(None);
         w.install_media = Some(xp.id);
         w.apply_detection(&all[..1]);
         assert_eq!(w.os, None);
@@ -1285,7 +1394,7 @@ mod tests {
 
     #[test]
     fn system_change_keeps_edited_resources_above_the_minimums() {
-        let mut w = Wizard::new(None);
+        let mut w = x86_wizard(None);
         w.set_os(GuestOs::Windows10);
         assert_eq!((w.vcpus, w.memory_mib, w.disk_gib), (2, 4096, 64));
         w.set_os(GuestOs::WindowsXp);
@@ -1324,7 +1433,7 @@ mod tests {
     #[test]
     fn config_per_system() {
         for os in GuestOs::ALL {
-            let mut w = Wizard::new(None);
+            let mut w = x86_wizard(None);
             w.name = "lab".into();
             w.set_os(os);
             let c = w.config().unwrap();
@@ -1334,7 +1443,7 @@ mod tests {
             assert!(c.memory_mib >= os.min_memory_mib() && c.disk_gib >= os.min_disk_gib());
             assert_eq!(c.network, NetworkProfile::Offline);
         }
-        let mut w = Wizard::new(None);
+        let mut w = x86_wizard(None);
         w.name = "lab".into();
         w.set_os(GuestOs::Windows10);
         w.firmware = Firmware::Bios;
@@ -1434,5 +1543,88 @@ mod tests {
             hardware_summary(GuestOs::WindowsXp),
             "IDE disk, standard VGA, USB tablet"
         );
+    }
+
+    #[test]
+    fn windows_11_arm64_labels() {
+        let d = DetectedGuest {
+            os: GuestOs::Windows11Arm64,
+            arch: Some(GuestArch::Aarch64),
+            build: Some(26200),
+            edition: Some(lightvm_proto::Label::parse("Windows 11 Home").unwrap()),
+        };
+        assert_eq!(
+            detected_label(&d),
+            "Windows 11, ARM64, build 26200 — Windows 11 Home"
+        );
+        assert_eq!(
+            template_name(GuestOs::Windows11Arm64, Some(GuestArch::Aarch64)),
+            "Windows 11 ARM64"
+        );
+        assert_eq!(
+            template_name(GuestOs::Windows11Arm64, None),
+            "Windows 11 ARM64"
+        );
+        assert_eq!(
+            hardware_summary(GuestOs::Windows11Arm64),
+            "NVMe disk, ramfb display, USB keyboard and tablet, TPM 2.0, UEFI with Secure Boot"
+        );
+        assert_eq!(
+            firmware_text(GuestOs::Windows11Arm64, Firmware::Uefi),
+            "UEFI with Secure Boot"
+        );
+        assert_eq!(firmware_text(GuestOs::Windows10, Firmware::Uefi), "UEFI");
+    }
+
+    #[test]
+    fn detection_preselects_only_what_the_host_runs() {
+        let w11 = record(
+            7,
+            Some(DetectedGuest {
+                os: GuestOs::Windows11Arm64,
+                arch: Some(GuestArch::Aarch64),
+                build: Some(26200),
+                edition: None,
+            }),
+        );
+        let w10 = record(8, detected(GuestOs::Windows10, Some(GuestArch::X86_64)));
+        // Apple Silicon: Windows 11 ARM64 prefilled with its template.
+        let mut w = Wizard::with_guest_support(None, arm_host);
+        w.name = "w11".into();
+        w.install_media = Some(w11.id);
+        w.apply_detection([&w11]);
+        assert_eq!(
+            (w.os, w.firmware),
+            (Some(GuestOs::Windows11Arm64), Firmware::Uefi)
+        );
+        assert_eq!((w.vcpus, w.memory_mib, w.disk_gib), (4, 6144, 64));
+        assert_eq!(w.config().unwrap().guest_os, GuestOs::Windows11Arm64);
+        // Apple Silicon, x86 media: detected but not preselected.
+        w.install_media = Some(w10.id);
+        w.apply_detection([&w10]);
+        assert_eq!(w.os, None);
+        assert_eq!(w.detected.as_ref().unwrap().os, GuestOs::Windows10);
+        // x86 host, ARM64 media: the same.
+        let mut w = x86_wizard(None);
+        w.install_media = Some(w11.id);
+        w.apply_detection([&w11]);
+        assert_eq!(w.os, None);
+        assert!(!w.supports(GuestOs::Windows11Arm64));
+        assert!(w.supports(GuestOs::UbuntuLtsX86_64));
+    }
+
+    #[test]
+    fn initial_resources_follow_the_host() {
+        assert_eq!(initial_resources_os(x86_host), GuestOs::UbuntuLtsX86_64);
+        assert_eq!(initial_resources_os(arm_host), GuestOs::Windows11Arm64);
+        let w = Wizard::with_guest_support(None, arm_host);
+        assert_eq!(w.os, None, "never preselected");
+        assert!(w.memory_mib >= GuestOs::Windows11Arm64.min_memory_mib());
+        assert!(w.disk_gib >= GuestOs::Windows11Arm64.min_disk_gib());
+        // The app's default is the build host.
+        let w = Wizard::new(None);
+        for os in GuestOs::ALL {
+            assert_eq!(w.supports(os), os.runs_on_this_host(), "{os:?}");
+        }
     }
 }

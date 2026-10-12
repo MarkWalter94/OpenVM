@@ -49,7 +49,35 @@ fn guest_name(os: GuestOs) -> &'static str {
         GuestOs::Windows7 => "Windows 7",
         GuestOs::Windows81 => "Windows 8.1",
         GuestOs::Windows10 => "Windows 10",
+        GuestOs::Windows11Arm64 => "Windows 11 ARM64",
     }
+}
+
+/// Which guests the host can run with hardware acceleration (ADR-0007,
+/// ADR-0028). The production rule is [`GuestOs::runs_on_this_host`]
+/// (Apple Silicon macOS runs only AArch64 guests, every other host only x86
+/// guests); tests and fake backends replace it with
+/// [`crate::Core::set_guest_support`].
+pub type GuestSupport = fn(GuestOs) -> bool;
+
+/// Every guest is accepted (fake backends, tests).
+#[must_use]
+pub fn any_guest(_: GuestOs) -> bool {
+    true
+}
+
+/// The guest must be one the host can run (`unsupported` otherwise): an
+/// x86 guest on Apple Silicon or Windows 11 ARM64 on an x86 host would only
+/// run under TCG, which ADR-0007 excludes.
+pub fn check_guest_host(os: GuestOs, supported: GuestSupport) -> Result<(), PublicError> {
+    if supported(os) {
+        return Ok(());
+    }
+    Err(PublicError::unsupported(format!(
+        "{} cannot run on this host: no hardware acceleration for its architecture",
+        guest_name(os)
+    ))
+    .with_detail("field", "guest_os"))
 }
 
 fn firmware_name(f: Firmware) -> &'static str {
@@ -78,7 +106,8 @@ pub fn check_firmware(config: &VmConfig) -> Result<(), PublicError> {
     .with_detail("allowed", names.join(",")))
 }
 
-/// Changes of the hardware profile after creation are refused: the guest
+/// Changes of the hardware profile after creation are refused (Windows 11
+/// ARM64 included, ADR-0028): the guest
 /// was installed for one firmware, disk controller and display, and would
 /// not boot on another (ADR-0027). Changing between the two Linux variants
 /// is allowed (same profile).

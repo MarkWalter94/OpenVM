@@ -75,6 +75,41 @@ fn windows_versions_through_udf() {
 }
 
 #[test]
+fn windows_11_only_on_arm64() {
+    let o = UdfOpts::default();
+    // ARM64 Windows 11 (25H2) is a guest (ADR-0028).
+    let g = expect(
+        &windows_udf(10, 0, 26200, 12, o),
+        GuestOs::Windows11Arm64,
+        GuestArch::Aarch64,
+        Some(26200),
+    );
+    assert_eq!(g.edition.unwrap().as_str(), "Windows Pro");
+    expect(
+        &windows_udf(10, 0, 22000, 12, o),
+        GuestOs::Windows11Arm64,
+        GuestArch::Aarch64,
+        Some(22000),
+    );
+    // Windows 11 x86 / x64 stays excluded (ADR-0027).
+    assert!(run(&windows_udf(10, 0, 26200, 9, o)).unwrap().is_none());
+    assert!(run(&windows_udf(10, 0, 22000, 0, o)).unwrap().is_none());
+    // Windows 10 on ARM is not a guest.
+    assert!(run(&windows_udf(10, 0, 19045, 12, o)).unwrap().is_none());
+    // Server editions on ARM64 are not guests.
+    let wim = build_wim(&wim_xml(
+        10,
+        0,
+        26100,
+        12,
+        "ServerStandard",
+        "Windows Server 2025 Standard",
+    ));
+    let img = build_udf(&[("sources/install.wim", &wim)], o);
+    assert!(run(&img).unwrap().is_none());
+}
+
+#[test]
 fn udf_variants() {
     let variants = [
         UdfOpts {

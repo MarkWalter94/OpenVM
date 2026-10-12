@@ -34,11 +34,14 @@ pub enum GuestOs {
     /// Windows 10 (NT 10.0, build < 22000): UEFI (x64) or legacy BIOS
     /// (32-bit), q35, AHCI.
     Windows10,
+    /// Windows 11 on ARM64 (build 22000 and later): macOS/HVF hosts only,
+    /// `virt`, UEFI with Secure Boot, TPM 2.0 (ADR-0028).
+    Windows11Arm64,
 }
 
 impl GuestOs {
     /// Every variant, in display order.
-    pub const ALL: [GuestOs; 7] = [
+    pub const ALL: [GuestOs; 8] = [
         GuestOs::UbuntuLtsX86_64,
         GuestOs::OtherLinuxX86_64,
         GuestOs::WindowsXp,
@@ -46,7 +49,34 @@ impl GuestOs {
         GuestOs::Windows7,
         GuestOs::Windows81,
         GuestOs::Windows10,
+        GuestOs::Windows11Arm64,
     ];
+
+    /// CPU architecture the guest runs on: AArch64 for Windows 11 ARM64,
+    /// x86 (32/64-bit) for every other guest.
+    #[must_use]
+    pub const fn is_aarch64(self) -> bool {
+        matches!(self, GuestOs::Windows11Arm64)
+    }
+
+    /// Whether the guest needs an emulated TPM 2.0 and Secure Boot
+    /// (Windows 11, ADR-0028).
+    #[must_use]
+    pub const fn needs_tpm(self) -> bool {
+        self.is_aarch64()
+    }
+
+    /// Whether this build's host can run the guest with hardware
+    /// acceleration (no TCG, ADR-0007): Apple Silicon macOS (HVF) runs only
+    /// AArch64 guests, every other host only x86 guests.
+    #[must_use]
+    pub const fn runs_on_this_host(self) -> bool {
+        if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            self.is_aarch64()
+        } else {
+            !self.is_aarch64()
+        }
+    }
 
     /// Whether the guest is a Windows release.
     #[must_use]
@@ -63,6 +93,7 @@ impl GuestOs {
             GuestOs::UbuntuLtsX86_64 | GuestOs::OtherLinuxX86_64 => &[Firmware::Uefi],
             GuestOs::WindowsXp | GuestOs::WindowsVista | GuestOs::Windows7 => &[Firmware::Bios],
             GuestOs::Windows81 | GuestOs::Windows10 => &[Firmware::Uefi, Firmware::Bios],
+            GuestOs::Windows11Arm64 => &[Firmware::Uefi],
         }
     }
 
@@ -75,8 +106,9 @@ impl GuestOs {
             GuestOs::WindowsXp | GuestOs::WindowsVista | GuestOs::Windows7 => Firmware::Bios,
             GuestOs::Windows81 | GuestOs::Windows10 => match arch {
                 Some(GuestArch::X86) => Firmware::Bios,
-                Some(GuestArch::X86_64) | None => Firmware::Uefi,
+                Some(GuestArch::X86_64 | GuestArch::Aarch64) | None => Firmware::Uefi,
             },
+            GuestOs::Windows11Arm64 => Firmware::Uefi,
         }
     }
 
@@ -88,6 +120,7 @@ impl GuestOs {
             GuestOs::WindowsXp => 256,
             GuestOs::WindowsVista | GuestOs::Windows7 => 1024,
             GuestOs::Windows81 | GuestOs::Windows10 => 2048,
+            GuestOs::Windows11Arm64 => 4096,
         }
     }
 
@@ -99,6 +132,7 @@ impl GuestOs {
             GuestOs::WindowsXp => 8,
             GuestOs::WindowsVista | GuestOs::Windows7 => 20,
             GuestOs::Windows81 | GuestOs::Windows10 => 32,
+            GuestOs::Windows11Arm64 => 64,
         }
     }
 
@@ -110,7 +144,7 @@ impl GuestOs {
     pub const fn template(self, arch: Option<GuestArch>) -> ResourceTemplate {
         let x86 = match arch {
             Some(GuestArch::X86) => true,
-            Some(GuestArch::X86_64) => false,
+            Some(GuestArch::X86_64 | GuestArch::Aarch64) => false,
             None => matches!(self, GuestOs::WindowsXp),
         };
         let (vcpus, memory_mib, disk_gib) = match (self, x86) {
@@ -125,6 +159,7 @@ impl GuestOs {
             (GuestOs::Windows81, false) => (2, 4096, 50),
             (GuestOs::Windows10, true) => (2, 2048, 40),
             (GuestOs::Windows10, false) => (2, 4096, 64),
+            (GuestOs::Windows11Arm64, _) => (4, 6144, 64),
         };
         ResourceTemplate {
             vcpus,
@@ -134,11 +169,12 @@ impl GuestOs {
     }
 
     /// Largest guest memory that makes sense for the guest, in MiB: 32-bit
-    /// Windows clients address at most 4 GiB. `None` = no OS-specific cap
-    /// (host and catalog limits still apply).
+    /// x86 Windows clients address at most 4 GiB (an x86 architecture paired
+    /// with Windows 11 ARM64 is meaningless and not capped). `None` = no
+    /// OS-specific cap (host and catalog limits still apply).
     #[must_use]
     pub const fn max_memory_mib(self, arch: Option<GuestArch>) -> Option<u64> {
-        match (self.is_windows(), arch) {
+        match (self.is_windows() && !self.is_aarch64(), arch) {
             (true, Some(GuestArch::X86)) => Some(4096),
             _ => None,
         }
@@ -174,6 +210,8 @@ pub enum GuestArch {
     X86,
     /// x86_64.
     X86_64,
+    /// ARM64 (AArch64).
+    Aarch64,
 }
 
 /// Guest detected from the contents of an installation ISO at import

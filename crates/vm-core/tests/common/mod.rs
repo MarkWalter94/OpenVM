@@ -366,7 +366,7 @@ impl Harness {
         let cell = Rc::new(Cell::new(T0));
         let clock = FakeClock(cell.clone());
         let audit = MemAudit::default();
-        let core = Core::new(
+        let mut core = Core::new(
             store.clone(),
             clock.clone(),
             SeqIds {
@@ -376,6 +376,9 @@ impl Harness {
             audit.clone(),
             cfg,
         );
+        // The fake backend runs every guest whatever the build host; the
+        // host rule itself is tested in `windows_guests.rs`.
+        core.set_guest_support(vm_core::resources::any_guest);
         Self {
             core,
             clock,

@@ -135,14 +135,14 @@ The Windows cells of `docs/COMPATIBILITY.md` stay "not verified". Windows instal
 
 ## R2b work: macOS Apple Silicon and Windows 11 ARM64
 
-Started on 2026-10-12 at the owner's request (ADR-0028, Proposed). It does not change the MVP scope or any exit criterion.
+Started on 2026-10-12 at the owner's request (ADR-0028, Accepted on 2026-10-12 with evidence partial). It does not change the MVP scope or any exit criterion.
 
 | Item | Evidence | Declared outcome |
 | --- | --- | --- |
 | Windows 11 ARM64 setup under HVF passes the requirements check (TPM 2.0 via swtpm, Secure Boot) without bypass | `R2b-01` | verified up to the licence terms page; installation, OOBE offline, reboot, baseline not executed |
 | Project-built AArch64 Secure Boot firmware (edk2-stable202408 + one patch) | `R2b-01`; `packaging/firmware/edk2-aarch64/` | build script verified from an empty directory; release hashes not yet recorded |
 | QEMU containment without cgroups (watchdog, kqueue, process group) | `R2b-01` | verified with a test harness: 0 orphans in 60 cycles, p95 9.89 ms; not in the product |
-| macOS host layer of the product (private directories, host resources, handle path, process identity, watchdog) | — | not implemented: no VM can start from the product on macOS |
+| macOS host layer of the product (private directories, host resources, handle path, process group + lifeline watchdog) and the Windows 11 ARM64 profile through the service | `R2b-01` §5 | verified on hardware up to Windows Setup (ignored test `macos_real`); installation, OOBE, baselines with TPM state not done; development hash approvals only |
 
 ## Linux lab outcome
 

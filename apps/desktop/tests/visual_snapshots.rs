@@ -83,6 +83,9 @@ fn app(state: ServiceState) -> (LightVmApp, common::Handles) {
     let mut app = LightVmApp::new(false);
     app.set_supervisor(fake);
     app.rendering = glow_info();
+    // The reference snapshots show an x86 host (the wizard lists the x86
+    // systems), whatever the build host.
+    app.set_guest_support(|os| !os.is_aarch64());
     // Fixed path: the default one depends on the user's profile.
     app.set_settings(
         UiSettings {

@@ -87,7 +87,8 @@ impl ManagedPath {
 /// supervisor; the backend does not build paths from caller text, except for
 /// fixed file names inside the returned directories.
 pub trait ManagedPaths: Send + Sync {
-    /// Approved `qemu-system-x86_64` executable.
+    /// Approved QEMU system emulator of this host (`qemu-system-x86_64`, or
+    /// `qemu-system-aarch64` on Apple Silicon, ADR-0028).
     fn qemu_system(&self) -> Result<ManagedPath>;
 
     /// UEFI firmware code (opened read-only as pflash0). Used only by the
@@ -131,17 +132,39 @@ pub trait ManagedPaths: Send + Sync {
     /// Run directory (stdout/stderr logs).
     fn run_dir(&self, run: &RunId) -> Result<ManagedPath>;
 
-    /// Private run directory (ACL limited to the supervisor user): QMP and
-    /// VNC sockets, temporary `screendump` files.
+    /// Private run directory (ACL limited to the supervisor user): QMP,
+    /// VNC and TPM sockets, temporary `screendump` files.
     fn private_dir(&self, run: &RunId) -> Result<ManagedPath>;
+
+    /// Approved swtpm executable (found and hashed by the probe,
+    /// [`crate::probe::SwtpmInfo`]). Used only by the TPM profiles
+    /// (ADR-0028); [`crate::QemuRun::start`] verifies that it is the file
+    /// verified by the probe.
+    fn swtpm(&self) -> Result<ManagedPath> {
+        Err(BackendError::Unsupported {
+            what: "TPM emulator".into(),
+            hint: "no swtpm provided for this run".into(),
+        })
+    }
+
+    /// Per-VM swtpm state directory (`vms/<vm_id>/tpm`, mode 0700),
+    /// required by the TPM profiles. `None`: no TPM state for this run.
+    fn tpm_state_dir(&self, _run: &RunId) -> Result<Option<ManagedPath>> {
+        Ok(None)
+    }
 }
 
 /// Fixed names of the files created by the backend in the managed directories.
-pub(crate) mod names {
+pub mod names {
     pub(crate) const QMP_SOCKET: &str = "qmp.sock";
     pub(crate) const VNC_SOCKET: &str = "vnc.sock";
     pub(crate) const STDOUT: &str = "qemu.stdout.log";
     pub(crate) const STDERR: &str = "qemu.stderr.log";
+    /// swtpm control socket (private directory, ADR-0028).
+    pub const TPM_SOCKET: &str = "tpm.sock";
+    pub(crate) const SWTPM_LOG: &str = "swtpm.log";
+    pub(crate) const SWTPM_STDOUT: &str = "swtpm.stdout.log";
+    pub(crate) const SWTPM_STDERR: &str = "swtpm.stderr.log";
 }
 
 #[cfg(all(test, windows))]
