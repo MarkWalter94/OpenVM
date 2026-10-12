@@ -1,0 +1,63 @@
+diff --git a/MdePkg/Library/BaseRngLib/AArch64/Rndr.c b/MdePkg/Library/BaseRngLib/AArch64/Rndr.c
+index 2c53443..5e00ade 100644
+--- a/MdePkg/Library/BaseRngLib/AArch64/Rndr.c
++++ b/MdePkg/Library/BaseRngLib/AArch64/Rndr.c
+@@ -19,7 +19,22 @@
+ #include "ArmRng.h"
+ #include "BaseRngLibInternals.h"
+ 
+-STATIC BOOLEAN  mRndrSupported;
++//
++// RNDR support is read from ID_AA64ISAR0_EL1 on every check instead of being
++// cached in a global: PEIMs run in place from read-only flash, and a store
++// to the flash faults under some hypervisors (Hypervisor.framework).
++//
++STATIC
++BOOLEAN
++RndrSupported (
++  VOID
++  )
++{
++  UINT64  Isar0;
++
++  Isar0 = ArmReadIdAA64Isar0Reg ();
++  return !!((Isar0 >> ARM_ID_AA64ISAR0_EL1_RNDR_SHIFT) & ARM_ID_AA64ISAR0_EL1_RNDR_MASK);
++}
+ 
+ /**
+   The constructor function checks whether or not RNDR instruction is supported
+@@ -38,15 +53,9 @@ BaseRngLibConstructor (
+   VOID
+   )
+ {
+-  UINT64  Isar0;
+-
+   //
+-  // Determine RNDR support by examining bits 63:60 of the ISAR0 register returned by
+-  // MSR. A non-zero value indicates that the processor supports the RNDR instruction.
++  // RNDR support is determined on demand by RndrSupported ().
+   //
+-  Isar0          = ArmReadIdAA64Isar0Reg ();
+-  mRndrSupported = !!((Isar0 >> ARM_ID_AA64ISAR0_EL1_RNDR_SHIFT) & ARM_ID_AA64ISAR0_EL1_RNDR_MASK);
+-
+   return EFI_SUCCESS;
+ }
+ 
+@@ -131,7 +140,7 @@ ArchIsRngSupported (
+   VOID
+   )
+ {
+-  return mRndrSupported;
++  return RndrSupported ();
+ }
+ 
+ /**
+@@ -156,7 +165,7 @@ GetRngGuid (
+     return EFI_INVALID_PARAMETER;
+   }
+ 
+-  if (!mRndrSupported) {
++  if (!RndrSupported ()) {
+     return EFI_UNSUPPORTED;
+   }
+ 

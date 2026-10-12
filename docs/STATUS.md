@@ -80,7 +80,7 @@ Started on 2026-10-10 at the owner's request, before the closure of F0 and of th
 | Config changes only with the VM stopped; media detach | `F2-02`, `F1-10` | verified headless; baseline invalidation not applicable until F3 |
 | Dark/light mode, resizable layout, keyboard operation, AccessKit, status not by colour only; Settings (QEMU paths, host capacity, security, network/MCP shown unavailable) | `F2-02` | verified headless; screen reader, DPI scaling and multi-monitor **not executed** (manual) |
 | Experimental installer and first test on a clean machine | `F2-03` | per-user zip and Inno Setup installer verified on the development host; clean machine **not executed** (Windows Sandbox procedure ready) |
-| macOS build on a runner (portability probe) | `F2-03` | job written; **never run on GitHub** |
+| macOS build on a runner (portability probe) | `F2-03`; `R2b-01` | GitHub job never run; on 2026-10-12 build, clippy and the whole test suite run on an Apple Silicon Mac (698 passed, 0 failed); portability defects fixed (IPC socket path fallback, media source opened with `O_NOFOLLOW | O_NONBLOCK` on Unix: links refused and FIFOs no longer block, Windows-only assumptions in tests) |
 
 Decisions taken in F2: default CPU model `Skylake-Client-v4` (with `qemu64` the reference guest does not reach the desktop, deviation D-1); per-VM persistent UEFI variables; graceful stop asynchronous; user console input allowed while a VM is stopping; the wizard VM name is the only text field of the UI (it never reaches QEMU).
 
@@ -132,6 +132,17 @@ Started on 2026-10-12 at the owner's request (ADR-0027); it does not change the 
 | Ubuntu/KVM host for Windows guests (R2c) | — | not verified (no physical Linux host, ADR-0016) |
 
 The Windows cells of `docs/COMPATIBILITY.md` stay "not verified". Windows installation media and licences are provided by the user.
+
+## R2b work: macOS Apple Silicon and Windows 11 ARM64
+
+Started on 2026-10-12 at the owner's request (ADR-0028, Proposed). It does not change the MVP scope or any exit criterion.
+
+| Item | Evidence | Declared outcome |
+| --- | --- | --- |
+| Windows 11 ARM64 setup under HVF passes the requirements check (TPM 2.0 via swtpm, Secure Boot) without bypass | `R2b-01` | verified up to the licence terms page; installation, OOBE offline, reboot, baseline not executed |
+| Project-built AArch64 Secure Boot firmware (edk2-stable202408 + one patch) | `R2b-01`; `packaging/firmware/edk2-aarch64/` | build script verified from an empty directory; release hashes not yet recorded |
+| QEMU containment without cgroups (watchdog, kqueue, process group) | `R2b-01` | verified with a test harness: 0 orphans in 60 cycles, p95 9.89 ms; not in the product |
+| macOS host layer of the product (private directories, host resources, handle path, process identity, watchdog) | — | not implemented: no VM can start from the product on macOS |
 
 ## Linux lab outcome
 
