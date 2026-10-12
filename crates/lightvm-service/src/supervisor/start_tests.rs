@@ -63,6 +63,7 @@ fn fixture() -> Fx {
             size_bytes: ISO_BYTES,
             declared_origin: Label::parse("test").unwrap(),
             approved_at: UtcTimestamp::now(),
+            detected_guest: None,
         },
         managed_path: ManagedRelPath::parse("media/x.iso").unwrap(),
         file_identity: None,

@@ -1,0 +1,24 @@
+[package]
+name = "guest-detect"
+description = "LightVM: guest OS detection from installation ISO images (ISO 9660, UDF, WIM)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# No external dependencies (ADR-0023): minimal read-only ISO 9660, UDF and WIM
+# XML readers over untrusted bytes, bounded in work and memory.
+[dependencies]
+lightvm-proto = { path = "../lightvm-proto" }
+
+# `test-images`: the synthetic image builders of the tests (ISO 9660,
+# UDF, WIM) as `guest_detect::testing`, for the tests of other crates only.
+[features]
+test-images = []
+
+[dev-dependencies]
+proptest = "=1.11.0"
+
+[lints]
+workspace = true

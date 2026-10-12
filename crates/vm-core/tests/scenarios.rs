@@ -128,6 +128,7 @@ fn verify_media_checks_every_field() {
             size_bytes: 10,
             declared_origin: Label::parse("x").unwrap(),
             approved_at: UtcTimestamp::from_unix_millis(0).unwrap(),
+            detected_guest: None,
         },
         managed_path: ManagedRelPath::parse("media/x.iso").unwrap(),
         file_identity: Some(FileIdentity {

@@ -32,6 +32,11 @@
 //! the runs. New VMs are stored under the core's identifier
 //! (`insert_vm_with_id`), so all their files live under one `vms/<vm_id>/`;
 //! VMs created before keep the two directories (mapping above).
+//!
+//! ADR-0027: the guest OS of an installation ISO is detected on the copied
+//! bytes at import (`guest_detect`) and stored with the registry row; media
+//! imported before are examined once when the registry is listed. Baselines
+//! of a legacy BIOS VM carry no UEFI variables.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -42,9 +47,9 @@ use std::sync::Arc;
 
 use lightvm_proto::ipc::{BaselineSummary, VmBaselines};
 use lightvm_proto::{
-    BaselineId, ErrorCode, Label, ManagedRelPath, MediaEntry, MediaId, MediaKind, MediaRecord,
-    OperationId, OperationKind, OperationRecord, OperationStatus, PublicError, RunEndReason, RunId,
-    RunRecord, Sha256Digest, UtcTimestamp, VmId, VmRecord, VmState,
+    BaselineId, DetectedGuest, ErrorCode, Label, ManagedRelPath, MediaEntry, MediaId, MediaKind,
+    MediaRecord, OperationId, OperationKind, OperationRecord, OperationStatus, PublicError,
+    RunEndReason, RunId, RunRecord, Sha256Digest, UtcTimestamp, VmId, VmRecord, VmState,
 };
 use serde::{Deserialize, Serialize};
 use vm_core::ports::CatalogStore;
@@ -232,6 +237,11 @@ impl SqliteStore {
                 declared_origin: Label::parse(m.declared_origin)
                     .map_err(|_| infra("invalid origin"))?,
                 approved_at: ts(&m.approved_at)?,
+                // Installation media only: a data ISO is never a guest hint.
+                detected_guest: match kind {
+                    MediaKind::InstallIso => m.detected_guest,
+                    MediaKind::DataIso => None,
+                },
             },
             managed_path: ManagedRelPath::parse(m.managed_path.as_str())
                 .map_err(|_| infra("invalid managed path"))?,
@@ -352,6 +362,8 @@ impl CatalogStore for SqliteStore {
             managed_path: st::ManagedPath::parse(entry.managed_path.as_str())
                 .map_err(|e| storage_error(&e))?,
             status: st::MediaStatus::Approved,
+            guest_examined: r.detected_guest.is_some(),
+            detected_guest: r.detected_guest.clone(),
         };
         self.write(|tx| tx.insert_media(&rec))
     }
@@ -452,13 +464,37 @@ impl CatalogStore for SqliteStore {
         self.write(|tx| tx.end_run(&id, state, cause))
     }
 
+    /// Installation media approved before the guest detection existed
+    /// (`guest_examined = 0`) are examined here, once: the managed copy is
+    /// read (bounded, see `guest_detect`) and the outcome persisted, so the
+    /// next listings do not read it again.
     fn list_media(&self) -> Result<Vec<MediaRecord>, PublicError> {
-        let rows = self.read(|tx| {
+        let mut rows = self.read(|tx| {
             tx.media_ids()?
                 .iter()
                 .map(|id| tx.media(id))
                 .collect::<st::Result<Vec<_>>>()
         })?;
+        let root = self.root();
+        for row in rows.iter_mut().filter(|r| {
+            !r.guest_examined
+                && r.kind == st::MediaKind::Iso
+                && r.status == st::MediaStatus::Approved
+        }) {
+            let copy = managed_abs(&root, row.managed_path.as_str());
+            let guest = detect_guest(&copy, &format!("media {}", row.media_id));
+            match self.write(|tx| tx.set_media_detected_guest(&row.media_id, guest.as_ref())) {
+                Ok(()) => {
+                    row.detected_guest = guest;
+                    row.guest_examined = true;
+                }
+                Err(e) => crate::diag!(
+                    "lightvm-service: guest detection of media {} not recorded: {}",
+                    row.media_id,
+                    e.message
+                ),
+            }
+        }
         let mut out = Vec::new();
         for row in rows {
             if let Some(e) = Self::media_entry(row)? {
@@ -600,11 +636,16 @@ fn parse_sha(s: &str) -> Result<Sha256Digest, PublicError> {
 
 impl SqliteStore {
     /// Standalone working files of a VM (F2 layout, core identifier): they
-    /// are produced by the backend.
-    fn standalone(vm: VmId) -> st::CurrentStateFiles {
+    /// are produced by the backend. A legacy BIOS VM has no UEFI variables
+    /// (ADR-0027): its baselines and restored states carry none.
+    fn standalone(vm: &VmRecord) -> st::CurrentStateFiles {
         st::CurrentStateFiles {
-            disk: st::CatalogLayout::primary_disk(&vm),
-            vars: Some(st::CatalogLayout::primary_vars(&vm)),
+            disk: st::CatalogLayout::primary_disk(&vm.id),
+            vars: vm
+                .config
+                .firmware
+                .has_nvram()
+                .then(|| st::CatalogLayout::primary_vars(&vm.id)),
         }
     }
 
@@ -725,16 +766,20 @@ impl BaselinePort for SqliteStore {
             )
             .with_detail("reason", "unclean_shutdown"));
         }
-        // A VM that never started has no UEFI variables yet: they are
+        // A UEFI VM that never started has no UEFI variables yet: they are
         // created from the firmware template (as the first start would), so
-        // that every baseline carries its firmware state.
+        // that every baseline of a UEFI VM carries its firmware state. A
+        // legacy BIOS VM has none (ADR-0027).
         let has_overlay = self
             .cat
             .borrow_mut()
             .baseline_overview(&sid)
             .map(|o| o.current.is_some())
             .unwrap_or(false);
-        if !has_overlay && let Some(template) = tool.firmware_vars_template() {
+        if !has_overlay
+            && vm.config.firmware.has_nvram()
+            && let Some(template) = tool.firmware_vars_template()
+        {
             let vars = managed_abs(
                 &self.root(),
                 st::CatalogLayout::primary_vars(&vm.id).as_str(),
@@ -758,7 +803,7 @@ impl BaselinePort for SqliteStore {
                 label: label.as_str().to_owned(),
                 clean_shutdown: clean,
                 protected: false,
-                standalone: Self::standalone(vm.id),
+                standalone: Self::standalone(vm),
             })
             .map_err(|e| baseline_error(&e))?;
         // Upper bound of the image: the source (and its base for an overlay).
@@ -816,7 +861,7 @@ impl BaselinePort for SqliteStore {
             .begin_restore(st::RestoreBaseline {
                 vm_id: sid,
                 baseline_id: baseline,
-                standalone: Self::standalone(vm.id),
+                standalone: Self::standalone(vm),
             })
             .map_err(|e| baseline_error(&e))?;
         let slot: ToolError = Arc::default();
@@ -924,6 +969,31 @@ impl BaselinePort for SqliteStore {
 /// Absolute path of a managed relative path (`/` separator).
 fn managed_abs(root: &Path, rel: &str) -> PathBuf {
     rel.split('/').fold(root.to_path_buf(), |p, c| p.join(c))
+}
+
+/// Guest OS of the installation image at `path` (ADR-0027): a hint for the
+/// wizard. Unreadable or unrecognized media give `None`; the reason goes to
+/// the service log only (no paths in public errors).
+fn detect_guest(path: &Path, what: &dyn std::fmt::Display) -> Option<DetectedGuest> {
+    match guest_detect::detect_path(path) {
+        Ok(Some(g)) => {
+            crate::diag!(
+                "lightvm-service: {what}: detected guest {:?} ({:?}, build {:?})",
+                g.os,
+                g.arch,
+                g.build
+            );
+            Some(g)
+        }
+        Ok(None) => {
+            crate::diag!("lightvm-service: {what}: guest not recognized or not supported");
+            None
+        }
+        Err(e) => {
+            crate::diag!("lightvm-service: {what}: guest detection failed: {e}");
+            None
+        }
+    }
 }
 
 /// Free space that must remain on the catalog volume after a media copy.
@@ -1245,7 +1315,7 @@ impl crate::engine::MediaImportPort for SqliteStore {
                 }));
             }
             let mut rejected = None;
-            let copied = reservation.open_and_copy(|file| {
+            let mut copied = reservation.open_and_copy(|file| {
                 let check = check_import_handle(file, &requested, kind)
                     .and_then(|()| check_free_space(&root, file));
                 check.map_err(|e| {
@@ -1253,6 +1323,15 @@ impl crate::engine::MediaImportPort for SqliteStore {
                     st::StorageError::Unsupported(SOURCE_REFUSED)
                 })
             });
+            // ADR-0027: the guest OS is read from the copied (hashed) bytes,
+            // which are published unchanged; a failure never blocks the
+            // import, the wizard then asks the user.
+            if kind == MediaKind::InstallIso
+                && let Some(file) = copied.copied_file().map(Path::to_path_buf)
+            {
+                let guest = detect_guest(&file, &"the imported medium");
+                copied.set_detected_guest(guest);
+            }
             ImportCopied(Box::new(SqliteCopied { copied, rejected }))
         }))
     }
@@ -1620,6 +1699,7 @@ mod tests {
                 size_bytes: bytes.len() as u64,
                 declared_origin: Label::parse("test").unwrap(),
                 approved_at: UtcTimestamp::now(),
+                detected_guest: None,
             },
             managed_path: ManagedRelPath::parse("media/m.iso").unwrap(),
             file_identity: None,

@@ -80,5 +80,4 @@ When a Proposed ADR is closed, the following are updated: the ADR's status and D
 | [0024](0024-separate-rfb-client-crate.md) | Separate `rfb-client` crate used by the UI; `qemu-backend` stays in the supervisor | Accepted | 6.1, 6.2, 6.4 |
 | [0025](0025-disk-exclusion-in-supervisor.md) | Disk exclusion guaranteed by the supervisor, not by the QEMU lock | Accepted (Windows; Linux in R2a) | 3, 6.3, 7.1, 7.4, 8, 10 |
 | [0026](0026-authentication-authorization-codes.md) | Public codes for authentication and authorization | Accepted (2026-10-10) | 6.3, 7.3, 7.4, 9 |
-| [0025](0025-disk-exclusion-in-supervisor.md) | Disk exclusion guaranteed by the supervisor, not by the QEMU lock | Accepted (Windows; Linux in R2a) | 3, 6.3, 7.1, 8 |
-| [0026](0026-authentication-authorization-codes.md) | Public codes `unauthenticated`, `session_expired`, `permission_denied` | Proposed | 6.3, 7, 9 |
+| [0027](0027-windows-guest-hardware-profiles.md) | Windows guest hardware profiles (XP, Vista, 7, 8.1, 10; SeaBIOS; offline) | Accepted (2026-10-12): direction set; evidence pending | 4, 5, 12 (R2c) |

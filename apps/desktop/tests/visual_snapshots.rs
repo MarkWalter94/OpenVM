@@ -224,7 +224,7 @@ fn snapshot_wizard_steps() {
     let _serial = serial();
     let (mut app, _hs) = app(catalog());
     app.set_file_picker(Some(Box::new(|_t: &str| None)));
-    let mut h = harness(app, egui::vec2(1100.0, 640.0));
+    let mut h = harness(app, egui::vec2(1100.0, 760.0));
     open_wizard(&mut h);
     h.get_by_role(Role::TextInput).type_text("ubuntu-dev");
     h.run();
@@ -236,18 +236,63 @@ fn snapshot_wizard_steps() {
     h.run();
     h.snapshot("wizard_name");
     next(&mut h);
-    next(&mut h);
     h.get_by_label("ubuntu-24.04.3-live-server-amd64.iso")
         .click();
     h.run();
     h.snapshot("wizard_install_media");
     next(&mut h);
+    h.get_by_label("Step 3 of 7: System");
+    // Not recognized: nothing preselected, Next disabled until a choice.
+    h.snapshot("wizard_system_unrecognized");
+    h.get_by_label("Ubuntu LTS (x86-64), the reference system")
+        .click();
+    h.run();
     next(&mut h);
+    next(&mut h);
+    h.get_by_label("Step 5 of 7: Resources");
     h.snapshot("wizard_resources");
     next(&mut h);
+    h.get_by_label("Step 6 of 7: Network");
     h.snapshot("wizard_network");
     next(&mut h);
+    h.get_by_label("Step 7 of 7: Summary");
     h.snapshot("wizard_summary");
+}
+
+/// ADR-0027: Windows media detected at import, firmware choice, summary
+/// with the hardware profile; dark and light themes.
+#[test]
+fn snapshot_wizard_windows() {
+    let _serial = serial();
+    let mut state = catalog();
+    state.media.records.push(common::detected_media(
+        5,
+        "Win10_22H2_English_x64.iso",
+        lightvm_proto::GuestOs::Windows10,
+        Some(lightvm_proto::GuestArch::X86_64),
+        Some(19045),
+        Some("Windows 10 Pro"),
+    ));
+    let (app, _hs) = app(state);
+    let mut h = harness(app, egui::vec2(1100.0, 820.0));
+    open_wizard(&mut h);
+    h.get_by_role(Role::TextInput).type_text("win10");
+    h.run();
+    next(&mut h);
+    h.get_by_label("Win10_22H2_English_x64.iso").click();
+    h.run();
+    next(&mut h);
+    h.snapshot("wizard_system_windows");
+    h.state_mut().set_theme(UiTheme::Light);
+    h.run();
+    h.snapshot("wizard_system_windows_light");
+    h.state_mut().set_theme(UiTheme::Dark);
+    h.run();
+    for _ in 0..4 {
+        next(&mut h);
+    }
+    h.get_by_label("Step 7 of 7: Summary");
+    h.snapshot("wizard_summary_windows");
 }
 
 #[test]

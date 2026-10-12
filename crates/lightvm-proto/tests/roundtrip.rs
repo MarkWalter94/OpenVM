@@ -93,6 +93,7 @@ fn models_roundtrip() {
         size_bytes: 1 << 30,
         declared_origin: Label::parse("ISO produced by the user").unwrap(),
         approved_at: ts(10),
+        detected_guest: None,
     };
     rt(&media);
     rt(&MediaEntry {
@@ -109,7 +110,7 @@ fn models_roundtrip() {
         config_revision: 3,
         origin: BaselineOrigin::CleanShutdown,
         disk_sha256: Sha256Digest::from_bytes([1; 32]),
-        firmware_sha256: Sha256Digest::from_bytes([2; 32]),
+        firmware_sha256: Some(Sha256Digest::from_bytes([2; 32])),
         protected: true,
         label: None,
         created_at: ts(20),

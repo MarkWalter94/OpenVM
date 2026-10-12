@@ -579,6 +579,51 @@
         "token"
       ]
     },
+    "DetectedGuest": {
+      "description": "Guest detected from the contents of an installation ISO at import\n(ADR-0027). A hint for the wizard, never a guarantee: the user confirms\nor corrects it, and nothing in the guest is trusted because of it.",
+      "type": "object",
+      "properties": {
+        "arch": {
+          "description": "Detected architecture, if the medium says.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GuestArch"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "build": {
+          "description": "Build number (for example 6002 for Vista SP2, 19045 for Windows 10\n22H2), if the medium says.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "edition": {
+          "description": "Edition or product name read from the medium (text, never interpreted).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Label"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "os": {
+          "description": "Detected operating system.",
+          "$ref": "#/$defs/GuestOs"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "os"
+      ]
+    },
     "DisplayGeometry": {
       "description": "Guest display geometry in pixels.",
       "type": "object",
@@ -686,12 +731,17 @@
       ]
     },
     "Firmware": {
-      "description": "Guest firmware. In the MVP only UEFI with managed NVRAM state (ROADMAP 8).",
+      "description": "Guest firmware. Linux guests use UEFI with managed NVRAM state (ROADMAP 8,\nADR-0011); legacy Windows guests use SeaBIOS, which has no NVRAM\n(ADR-0027). [`GuestOs::allowed_firmware`] says which applies.",
       "oneOf": [
         {
           "description": "UEFI (OVMF) with per-VM NVRAM.",
           "type": "string",
           "const": "uefi"
+        },
+        {
+          "description": "Legacy BIOS (SeaBIOS from the verified QEMU build), no NVRAM.",
+          "type": "string",
+          "const": "bios"
         }
       ]
     },
@@ -752,8 +802,23 @@
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     },
+    "GuestArch": {
+      "description": "Architecture of an installation medium, as detected from its contents.",
+      "oneOf": [
+        {
+          "description": "32-bit x86.",
+          "type": "string",
+          "const": "x86"
+        },
+        {
+          "description": "x86_64.",
+          "type": "string",
+          "const": "x86_64"
+        }
+      ]
+    },
     "GuestOs": {
-      "description": "Declared guest operating system. In the MVP the reference is Ubuntu LTS\nx86_64 with the version and checksum pinned in F0 (ROADMAP 4).",
+      "description": "Declared guest operating system. In the MVP the reference is Ubuntu LTS\nx86_64 with the version and checksum pinned in F0 (ROADMAP 4). The\nWindows variants (ADR-0027, ROADMAP R2c) select a hardware profile with\ndevices the guest has inbox drivers for; they are manual, offline guests\nand their compatibility cells stay \"not verified\" until real evidence.",
       "oneOf": [
         {
           "description": "Ubuntu LTS x86_64 (MVP reference guest).",
@@ -764,6 +829,31 @@
           "description": "Other Linux x86_64: manageable manually, without compatibility guarantees.",
           "type": "string",
           "const": "other_linux_x86_64"
+        },
+        {
+          "description": "Windows XP (NT 5.1, and XP x64 / NT 5.2): legacy BIOS, i440fx, PIIX IDE.",
+          "type": "string",
+          "const": "windows_xp"
+        },
+        {
+          "description": "Windows Vista (NT 6.0): legacy BIOS, q35, AHCI.",
+          "type": "string",
+          "const": "windows_vista"
+        },
+        {
+          "description": "Windows 7 (NT 6.1): legacy BIOS, q35, AHCI.",
+          "type": "string",
+          "const": "windows7"
+        },
+        {
+          "description": "Windows 8.1 (NT 6.3): UEFI (x64) or legacy BIOS (32-bit), q35, AHCI.",
+          "type": "string",
+          "const": "windows81"
+        },
+        {
+          "description": "Windows 10 (NT 10.0, build < 22000): UEFI (x64) or legacy BIOS\n(32-bit), q35, AHCI.",
+          "type": "string",
+          "const": "windows10"
         }
       ]
     },
@@ -982,6 +1072,17 @@
         "declared_origin": {
           "description": "Origin declared by the user (text, never interpreted).",
           "$ref": "#/$defs/Label"
+        },
+        "detected_guest": {
+          "description": "Guest detected from the contents at import (installation ISOs only;\n`None` = not recognized, data medium, or imported before detection).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DetectedGuest"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "id": {
           "description": "Identifier.",
@@ -4151,7 +4252,7 @@
           "minimum": 0
         },
         "firmware": {
-          "description": "Firmware; in the MVP only `uefi`.",
+          "description": "Firmware; must be one of [`GuestOs::allowed_firmware`].",
           "$ref": "#/$defs/Firmware",
           "default": "uefi"
         },

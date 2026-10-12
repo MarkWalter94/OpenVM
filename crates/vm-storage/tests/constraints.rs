@@ -161,6 +161,8 @@ fn referenced_media_cannot_be_deleted() {
             approved_at: now_rfc3339(),
             managed_path: CatalogLayout::media_file(&media, "iso")?,
             status: MediaStatus::Approved,
+            detected_guest: None,
+            guest_examined: false,
         })?;
         tx.attach_media(&vm, MediaSlot::Install, &media)
     })

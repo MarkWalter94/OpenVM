@@ -702,6 +702,7 @@ where
             size_bytes: reg.size_bytes,
             declared_origin: reg.declared_origin,
             approved_at: self.clock.now(),
+            detected_guest: None,
         };
         let entry = MediaEntry {
             record: record.clone(),
@@ -1004,7 +1005,10 @@ where
     /// F1 (the MCP tools, F5, will stay within the user's limits).
     /// Rejects VMs not stopped or with operations in progress (`state_conflict`),
     /// a different revision (`state_conflict`), a reduced disk
-    /// (`invalid_argument`) and resources beyond the effective limits.
+    /// (`invalid_argument`), a change of firmware or of operating system
+    /// other than between the Linux variants (`invalid_argument`: the
+    /// hardware profile follows them, ADR-0027) and resources beyond the
+    /// effective limits.
     pub fn update_vm_config(
         &mut self,
         caller: &Caller,
@@ -1050,11 +1054,14 @@ where
                 "shrinking the disk is not supported: it can only be enlarged",
             ))
         } else {
-            validate_config(
-                &config,
-                &existing_disk_limits(self.effective_limits(), &current.config),
-            )
-            .and_then(|()| self.check_config_media(&config))
+            crate::resources::check_profile_change(&current.config, &config)
+                .and_then(|()| {
+                    validate_config(
+                        &config,
+                        &existing_disk_limits(self.effective_limits(), &current.config),
+                    )
+                })
+                .and_then(|()| self.check_config_media(&config))
         };
         if let Err(err) = check {
             return Err(self.deny(actor, AuditAction::VmConfigure, ev, err));

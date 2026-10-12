@@ -158,6 +158,27 @@ pub(crate) fn media(n: u8, kind: MediaKind, origin: &str) -> MediaRecord {
         size_bytes: 3_213_064_192,
         declared_origin: Label::parse(origin).unwrap(),
         approved_at: UtcTimestamp::from_unix_millis(1_760_000_000_000 + i64::from(n)).unwrap(),
+        detected_guest: None,
+    }
+}
+
+/// Installation media in which the supervisor detected `os`.
+pub(crate) fn detected_media(
+    n: u8,
+    origin: &str,
+    os: lightvm_proto::GuestOs,
+    arch: Option<lightvm_proto::GuestArch>,
+    build: Option<u32>,
+    edition: Option<&str>,
+) -> MediaRecord {
+    MediaRecord {
+        detected_guest: Some(lightvm_proto::DetectedGuest {
+            os,
+            arch,
+            build,
+            edition: edition.map(|e| Label::parse(e).unwrap()),
+        }),
+        ..media(n, MediaKind::InstallIso, origin)
     }
 }
 

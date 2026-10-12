@@ -19,6 +19,7 @@ use crate::ids::{
 };
 use crate::paths::ManagedPath;
 use crate::time::now_rfc3339;
+use lightvm_proto::DetectedGuest;
 
 fn to_i64(v: u64) -> Result<i64> {
     i64::try_from(v).map_err(|_| StorageError::Constraint(format!("value out of range: {v}")))
@@ -26,6 +27,20 @@ fn to_i64(v: u64) -> Result<i64> {
 
 fn to_u64(v: i64) -> u64 {
     u64::try_from(v).unwrap_or(0)
+}
+
+/// JSON text of a detected guest for the `media.detected_guest` column.
+fn guest_json(g: Option<&DetectedGuest>) -> Result<Option<String>> {
+    g.map(serde_json::to_string)
+        .transpose()
+        .map_err(|e| StorageError::Constraint(format!("detected guest not serializable: {e}")))
+}
+
+/// `media.detected_guest`: a value this version cannot read (written by a
+/// newer one) is a hint lost, not a broken registry: read as `None`.
+fn guest_col(row: &Row<'_>, idx: usize) -> rusqlite::Result<Option<DetectedGuest>> {
+    let s: Option<String> = row.get(idx)?;
+    Ok(s.and_then(|s| serde_json::from_str(&s).ok()))
 }
 
 fn path_col(row: &Row<'_>, idx: usize) -> rusqlite::Result<ManagedPath> {
@@ -92,6 +107,14 @@ pub struct MediaRecord {
     pub managed_path: ManagedPath,
     /// Status.
     pub status: MediaStatus,
+    /// Guest OS detected from the managed copy (installation media only,
+    /// ADR-0027); `None` if nothing supported was recognized or the copy was
+    /// not examined yet.
+    pub detected_guest: Option<DetectedGuest>,
+    /// `true` once the managed copy has been examined for the guest OS
+    /// (whatever the outcome); `false` for media approved before the
+    /// detection existed (schema 7).
+    pub guest_examined: bool,
 }
 
 /// Managed disk.
@@ -481,8 +504,8 @@ impl Tx<'_> {
         self.inner
             .execute(
                 "INSERT INTO media(media_id, sha256, size_bytes, kind, declared_origin, approved_at,
-                                   managed_path, status)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                                   managed_path, status, detected_guest, guest_examined)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     m.media_id.sql(),
                     m.sha256,
@@ -491,10 +514,36 @@ impl Tx<'_> {
                     m.declared_origin,
                     m.approved_at,
                     m.managed_path.as_str(),
-                    m.status
+                    m.status,
+                    guest_json(m.detected_guest.as_ref())?,
+                    m.guest_examined
                 ],
             )
             .db()?;
+        Ok(())
+    }
+
+    /// Records the outcome of the guest OS detection on a media's managed
+    /// copy (ADR-0027): `guest` (or `None`, nothing recognized) and
+    /// `guest_examined = 1`.
+    pub fn set_media_detected_guest(
+        &self,
+        id: &MediaId,
+        guest: Option<&DetectedGuest>,
+    ) -> Result<()> {
+        let n = self
+            .inner
+            .execute(
+                "UPDATE media SET detected_guest = ?2, guest_examined = 1 WHERE media_id = ?1",
+                params![id.sql(), guest_json(guest)?],
+            )
+            .db()?;
+        if n == 0 {
+            return Err(StorageError::NotFound {
+                kind: "media",
+                id: id.to_string(),
+            });
+        }
         Ok(())
     }
 
@@ -503,7 +552,8 @@ impl Tx<'_> {
         self.inner
             .query_row(
                 "SELECT media_id, sha256, size_bytes, kind, declared_origin, approved_at,
-                        managed_path, status FROM media WHERE media_id = ?1",
+                        managed_path, status, detected_guest, guest_examined
+                 FROM media WHERE media_id = ?1",
                 params![id.sql()],
                 |r| {
                     Ok(MediaRecord {
@@ -515,6 +565,8 @@ impl Tx<'_> {
                         approved_at: r.get(5)?,
                         managed_path: path_col(r, 6)?,
                         status: r.get(7)?,
+                        detected_guest: guest_col(r, 8)?,
+                        guest_examined: r.get(9)?,
                     })
                 },
             )

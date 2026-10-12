@@ -1,0 +1,425 @@
+//! Windows hardware profiles with real QEMU through the service (ignored
+//! test, ADR-0027): a VM declared Windows 7 (legacy BIOS: q35, SeaBIOS,
+//! AHCI disk, VGA, UHCI tablet) and one declared Windows 10 (UEFI: q35,
+//! OVMF, AHCI disk, VGA, xHCI tablet) boot the reference Ubuntu ISO as
+//! installation media (no Windows medium is needed to exercise the profile:
+//! the firmware, the controllers and the display are those of the Windows
+//! profile). Each one starts, reaches `running`, shows a frame that is not
+//! black on the console, stops (gracefully or, failing that, forcibly), and
+//! leaves no QEMU process behind.
+//!
+//! Requires `LIGHTVM_E2E_QEMU_DIR`; optional `LIGHTVM_E2E_ISO` (default
+//! `lab/media/ubuntu-26.04.1-desktop-amd64.iso`), `LIGHTVM_E2E_CPU`
+//! (`Skylake-Client-v4`), `LIGHTVM_WIN_EVIDENCE_DIR` (PNG of the frames).
+
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use lightvm_proto::ipc::{ConsoleTicket, Request, ResponseBody, Role, ServerMessage, VmSummary};
+use lightvm_proto::{
+    Firmware, GuestOs, MediaKind, OperationId, OperationStatus, VmAction, VmId, VmRequest, VmState,
+};
+use lightvm_service::adapters::audit::FileAuditSink;
+use lightvm_service::adapters::backend::{QemuSetup, probe};
+use lightvm_service::adapters::catalog::{ManagedMediaInspector, SqliteStore};
+use lightvm_service::client::Client;
+use lightvm_service::engine::{CoreEngine, core_config};
+use lightvm_service::fakes::sample_guest_config;
+use lightvm_service::test_support::temp_dir;
+use lightvm_service::{ServiceConfig, start};
+
+const T: Duration = Duration::from_secs(120);
+
+fn qemu_dir() -> PathBuf {
+    PathBuf::from(std::env::var_os("LIGHTVM_E2E_QEMU_DIR").expect("LIGHTVM_E2E_QEMU_DIR not set"))
+}
+
+fn short_dir(prefix: &str) -> PathBuf {
+    let mut b = [0u8; 4];
+    getrandom::fill(&mut b).unwrap();
+    let d = std::env::temp_dir().join(format!(
+        "{prefix}{:02x}{:02x}{:02x}{:02x}",
+        b[0], b[1], b[2], b[3]
+    ));
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+/// Removes a test catalog even if the test fails (read-only managed copies).
+struct RemoveCatalog(PathBuf);
+
+impl Drop for RemoveCatalog {
+    fn drop(&mut self) {
+        for _ in 0..60 {
+            clear_readonly(&self.0);
+            if std::fs::remove_dir_all(&self.0).is_ok() || !self.0.exists() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        eprintln!("test catalog not removed: {}", self.0.display());
+    }
+}
+
+fn clear_readonly(p: &Path) {
+    if let Ok(rd) = std::fs::read_dir(p) {
+        for e in rd.flatten() {
+            let path = e.path();
+            if path.is_dir() {
+                clear_readonly(&path);
+            } else if let Ok(m) = e.metadata() {
+                let mut perm = m.permissions();
+                #[allow(clippy::permissions_set_readonly_false)]
+                perm.set_readonly(false);
+                let _ = std::fs::set_permissions(&path, perm);
+            }
+        }
+    }
+}
+
+async fn req(c: &mut Client, r: Request) -> ServerMessage {
+    tokio::time::timeout(Duration::from_secs(600), c.request(r))
+        .await
+        .expect("timeout")
+        .unwrap()
+}
+
+async fn submit(c: &mut Client, vm_id: VmId, action: VmAction) -> ServerMessage {
+    req(
+        c,
+        Request::SubmitVm {
+            request: VmRequest {
+                operation_id: OperationId::new_v7(),
+                vm_id,
+                expected_run_id: None,
+                action,
+            },
+        },
+    )
+    .await
+}
+
+fn op_ok(m: &ServerMessage) -> bool {
+    matches!(
+        m,
+        ServerMessage::Response {
+            result: ResponseBody::Operation {
+                operation: Some(op),
+                ..
+            },
+            ..
+        } if matches!(op.status, OperationStatus::Succeeded | OperationStatus::Forwarded)
+    )
+}
+
+async fn status(c: &mut Client, vm_id: VmId) -> VmSummary {
+    match req(c, Request::VmStatus { vm_id }).await {
+        ServerMessage::Response {
+            result: ResponseBody::Vm { vm },
+            ..
+        } => vm,
+        other => panic!("{other:?}"),
+    }
+}
+
+async fn wait_state(c: &mut Client, vm_id: VmId, want: VmState, limit: Duration) -> bool {
+    let t0 = Instant::now();
+    while t0.elapsed() < limit {
+        if status(c, vm_id).await.state == want {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    false
+}
+
+async fn import(c: &mut Client, path: &Path, kind: MediaKind) -> lightvm_proto::MediaRecord {
+    let p = std::fs::canonicalize(path).unwrap();
+    let p = p.to_str().unwrap().trim_start_matches(r"\\?\").to_owned();
+    match req(
+        c,
+        Request::ImportMedia {
+            source_path: p,
+            media_kind: kind,
+            declared_origin: "lab media".into(),
+        },
+    )
+    .await
+    {
+        ServerMessage::Response {
+            result: ResponseBody::MediaImported { media },
+            ..
+        } => media,
+        other => panic!("{other:?}"),
+    }
+}
+
+// ----- console framebuffer -------------------------------------------------
+
+#[derive(Default)]
+struct Screen {
+    width: usize,
+    height: usize,
+    rgb: Vec<u8>,
+    ended: Option<String>,
+}
+
+fn watch(ticket: &ConsoleTicket) -> Arc<Mutex<Screen>> {
+    let seen = Arc::new(Mutex::new(Screen::default()));
+    let s2 = seen.clone();
+    let transport = rfb_client::Transport::Ticket {
+        path: PathBuf::from(&ticket.socket_path),
+        imp: rfb_client::UnixImpl::Socket2,
+        token: ticket.token.clone(),
+    };
+    std::thread::spawn(move || {
+        let mut conn = match rfb_client::Connection::connect(&transport) {
+            Ok(c) => c,
+            Err(e) => {
+                s2.lock().unwrap().ended = Some(format!("connect: {e}"));
+                return;
+            }
+        };
+        loop {
+            let r = conn.request_update().and_then(|()| conn.read_update());
+            let mut s = s2.lock().unwrap();
+            match r {
+                Ok(_) => {
+                    let fb = conn.framebuffer();
+                    s.width = usize::from(fb.width());
+                    s.height = usize::from(fb.height());
+                    s.rgb = fb.to_rgb();
+                }
+                Err(e) => {
+                    s.ended = Some(e.to_string());
+                    return;
+                }
+            }
+            drop(s);
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    });
+    seen
+}
+
+fn snap(s: &Arc<Mutex<Screen>>) -> (usize, usize, Vec<u8>) {
+    let s = s.lock().unwrap();
+    (s.width, s.height, s.rgb.clone())
+}
+
+/// Lit pixels (any channel above 16) in thousandths of the frame.
+fn non_black_permille(rgb: &[u8]) -> u64 {
+    let px = rgb.as_chunks::<3>().0;
+    let n = px.len().max(1) as u64;
+    let lit = px.iter().filter(|p| p.iter().any(|&c| c > 16)).count() as u64;
+    lit * 1000 / n
+}
+
+fn save_png(s: &Arc<Mutex<Screen>>, path: &Path) {
+    let (w, h, rgb) = snap(s);
+    if w == 0 {
+        return;
+    }
+    let img = qemu_backend::screenshot::RgbImage {
+        width: w as u32,
+        height: h as u32,
+        data: rgb,
+    };
+    if let Ok(png) = qemu_backend::screenshot::encode_png(&img) {
+        let _ = std::fs::write(path, png);
+    }
+}
+
+/// Waits for a frame with at least 1 % lit pixels; returns the time and the
+/// geometry and lit share of that frame.
+async fn wait_not_black(
+    s: &Arc<Mutex<Screen>>,
+    limit: Duration,
+) -> Option<(Duration, usize, usize, u64)> {
+    let t0 = Instant::now();
+    while t0.elapsed() < limit {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let (w, h, rgb) = snap(s);
+        let lit = non_black_permille(&rgb);
+        if w > 0 && lit >= 10 {
+            return Some((t0.elapsed(), w, h, lit));
+        }
+        if let Some(e) = &s.lock().unwrap().ended {
+            eprintln!("console ended: {e}");
+            return None;
+        }
+    }
+    None
+}
+
+/// QEMU processes whose command line mentions `marker` (the private root of
+/// this test: every run and probe of the test has its sockets there).
+fn qemu_processes_with(marker: &str) -> Vec<String> {
+    if !cfg!(windows) {
+        return Vec::new();
+    }
+    let script = "Get-CimInstance Win32_Process -Filter \"Name='qemu-system-x86_64.exe'\" | \
+                  ForEach-Object { \"$($_.ProcessId) $($_.CommandLine)\" }";
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .output()
+        .expect("process list");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| l.contains(marker))
+        .map(|l| l.chars().take(200).collect())
+        .collect()
+}
+
+#[test]
+#[ignore = "requires approved QEMU, WHPX and the Ubuntu ISO (LIGHTVM_E2E_QEMU_DIR)"]
+fn e2e_real_qemu_windows_profiles_boot_and_stop() {
+    let lab = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../lab");
+    let iso = std::env::var_os("LIGHTVM_E2E_ISO").map_or_else(
+        || lab.join("media").join("ubuntu-26.04.1-desktop-amd64.iso"),
+        PathBuf::from,
+    );
+    let cpu = std::env::var("LIGHTVM_E2E_CPU").unwrap_or_else(|_| "Skylake-Client-v4".into());
+    let evidence = std::env::var_os("LIGHTVM_WIN_EVIDENCE_DIR").map_or_else(
+        || std::env::temp_dir().join("lightvm-win-evidence"),
+        PathBuf::from,
+    );
+    std::fs::create_dir_all(&evidence).unwrap();
+    let dir = temp_dir("win-real");
+    let _cleanup = RemoveCatalog(dir.clone());
+    let private_root = short_dir("lvw");
+    let marker = private_root
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+
+    let store = SqliteStore::open(&dir).unwrap();
+    let mut setup = QemuSetup::new(qemu_dir(), store.root(), private_root.clone());
+    setup.cpu_model = cpu;
+    // A live ISO at its boot menu may ignore ACPI: a short escalation.
+    setup.stop_policy = qemu_backend::ShutdownPolicy {
+        powerdown_timeout: Duration::from_secs(20),
+        quit_timeout: Duration::from_secs(5),
+        kill_timeout: Duration::from_secs(10),
+    };
+    let (host, vm_backend, capacity) = probe(setup).expect("QEMU probe");
+    assert!(
+        capacity.accelerator_available,
+        "reference accelerator probe"
+    );
+    let audit = FileAuditSink::open(&dir.join("audit").join("audit.jsonl")).unwrap();
+    let inspector = ManagedMediaInspector::new(store.root());
+    let engine =
+        CoreEngine::new(store, audit, vm_backend, inspector, core_config(capacity)).unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let mut cfg = ServiceConfig::new(&dir);
+        cfg.runtime_dir = Some(dir.join("run"));
+        cfg.display_dir = Some(short_dir("lvd"));
+        let (handle, ui) = start(cfg, Box::new(engine), Box::new(host)).await.unwrap();
+        let mut c = tokio::time::timeout(T, Client::connect(handle.endpoint()))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            c.hello(&ui).await.unwrap(),
+            ServerMessage::HelloOk { role: Role::Ui, .. }
+        ));
+        let t = Instant::now();
+        let install = import(&mut c, &iso, MediaKind::InstallIso).await;
+        eprintln!(
+            "imported in {:?}: detected guest {:?}",
+            t.elapsed(),
+            install.detected_guest
+        );
+
+        let mut failures = Vec::new();
+        for (name, os, fw) in [
+            ("win7-bios", GuestOs::Windows7, Firmware::Bios),
+            ("win10-uefi", GuestOs::Windows10, Firmware::Uefi),
+        ] {
+            let mut vmc = sample_guest_config(name, os, fw);
+            vmc.install_media = Some(install.id);
+            let vm = match req(&mut c, Request::CreateVm { config: vmc }).await {
+                ServerMessage::Response {
+                    result: ResponseBody::VmCreated { vm },
+                    ..
+                } => vm.id,
+                other => panic!("{name}: {other:?}"),
+            };
+            let t = Instant::now();
+            let m = submit(&mut c, vm, VmAction::Start).await;
+            if !op_ok(&m) {
+                failures.push(format!("{name}: start refused: {m:?}"));
+                continue;
+            }
+            if !wait_state(&mut c, vm, VmState::Running, T).await {
+                failures.push(format!("{name}: not running"));
+                continue;
+            }
+            eprintln!("{name}: running after {:?}", t.elapsed());
+            let ticket = match req(&mut c, Request::OpenConsole { vm_id: vm }).await {
+                ServerMessage::Response {
+                    result: ResponseBody::Console { ticket },
+                    ..
+                } => ticket,
+                other => panic!("{name}: {other:?}"),
+            };
+            let screen = watch(&ticket);
+            match wait_not_black(&screen, Duration::from_secs(180)).await {
+                Some((after, w, h, lit)) => {
+                    // A later frame too (boot menu or kernel splash).
+                    tokio::time::sleep(Duration::from_secs(20)).await;
+                    let png = evidence.join(format!("{name}.png"));
+                    save_png(&screen, &png);
+                    eprintln!(
+                        "{name}: frame {w}x{h} with {lit}/1000 lit pixels after {after:?}; saved {}",
+                        png.display()
+                    );
+                }
+                None => {
+                    save_png(&screen, &evidence.join(format!("{name}-black.png")));
+                    failures.push(format!("{name}: only black frames"));
+                }
+            }
+            let t = Instant::now();
+            let m = submit(&mut c, vm, VmAction::Stop).await;
+            let stopped = op_ok(&m)
+                && wait_state(&mut c, vm, VmState::Stopped, Duration::from_secs(60)).await;
+            if stopped {
+                eprintln!("{name}: stopped in {:?}", t.elapsed());
+            } else {
+                eprintln!("{name}: graceful stop not completed ({m:?}): forced stop");
+                let m = submit(&mut c, vm, VmAction::ForceStop).await;
+                assert!(op_ok(&m), "{name}: force stop: {m:?}");
+                assert!(
+                    wait_state(&mut c, vm, VmState::Stopped, T).await,
+                    "{name}: not stopped"
+                );
+                eprintln!("{name}: force-stopped after {:?}", t.elapsed());
+            }
+            let left = qemu_processes_with(&marker);
+            if !left.is_empty() {
+                failures.push(format!("{name}: QEMU processes left: {left:?}"));
+            }
+            // The legacy BIOS VM has no UEFI variables.
+            let vars = dir
+                .join("vms")
+                .join(vm.to_string())
+                .join("firmware")
+                .join("primary.vars.fd");
+            assert_eq!(vars.exists(), fw == Firmware::Uefi, "{name}: UEFI variables");
+        }
+        handle.shutdown().await;
+        let left = qemu_processes_with(&marker);
+        assert!(left.is_empty(), "orphan QEMU processes: {left:?}");
+        assert!(failures.is_empty(), "{failures:#?}");
+    });
+    let _ = std::fs::remove_dir_all(&private_root);
+}

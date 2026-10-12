@@ -7,7 +7,7 @@
 //! the accelerator, machine and CPU model that will be used and verifies
 //! via QMP `query-accelerators` which accelerator is active.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fmt;
 use std::io::Read;
@@ -17,7 +17,10 @@ use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
-use crate::cmdline::{Accelerator, CpuModel, MachineType, build_probe_command, parse_q35_version};
+use crate::cmdline::{
+    Accelerator, CpuModel, DeviceProfile, FirmwareKind, MachineFamily, MachineType, ProbeFirmware,
+    ProbeTarget, build_probe_command, parse_versioned_machine,
+};
 use crate::error::{BackendError, Result};
 use crate::paths::ManagedPath;
 use crate::qmp::QmpConfig;
@@ -83,14 +86,24 @@ pub const VERIFIED_OVMF_CODE_SHA256: &str =
 pub const VERIFIED_OVMF_VARS_SHA256: &str =
     "5d2ac383371b408398accee7ec27c8c09ea5b74a0de0ceea6513388b15be5d1e";
 
-/// Devices required by the command built by [`crate::cmdline`].
-pub const REQUIRED_DEVICES: &[&str] = &[
-    "virtio-vga",
-    "virtio-tablet-pci",
-    "virtio-keyboard-pci",
-    "virtio-blk-pci",
-    "ide-cd",
-];
+/// SHA-256 of `share/bios-256k.bin` (SeaBIOS) of the verified QEMU 11.1.0
+/// build (F0-02, ADR-0027).
+pub const VERIFIED_SEABIOS_SHA256: &str =
+    "ae6f6aa973aaccc143f57aa960fb035fd9de4daee4ad0cd713322f8c259e7650";
+
+/// File name of the SeaBIOS image in the `share` folder.
+pub const SEABIOS_FILE: &str = "bios-256k.bin";
+
+/// SeaBIOS image found next to the binary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BiosInfo {
+    /// `share/bios-256k.bin`.
+    pub path: PathBuf,
+    /// SHA-256 of the image.
+    pub sha256: String,
+    /// `true` if the hash matches [`VERIFIED_SEABIOS_SHA256`].
+    pub matches_verified: bool,
+}
 
 /// Required image formats.
 pub const REQUIRED_IMAGE_FORMATS: &[&str] = &["qcow2", "raw", "file"];
@@ -280,10 +293,11 @@ pub struct HostCapabilities {
     pub machines: Vec<MachineEntry>,
     /// Non-deprecated versioned q35 machines, newest first.
     pub q35_machines: Vec<MachineType>,
-    /// Devices listed by `-device help` (names and aliases).
+    /// Non-deprecated versioned i440fx machines, newest first.
+    pub i440fx_machines: Vec<MachineType>,
+    /// Devices listed by `-device help` (names and aliases); see
+    /// [`HostCapabilities::missing_devices`].
     pub devices: BTreeSet<String>,
-    /// Missing required devices.
-    pub missing_devices: Vec<String>,
     /// Available CPU models.
     pub cpu_models: BTreeSet<String>,
     /// Formats supported by `qemu-img`.
@@ -292,8 +306,17 @@ pub struct HostCapabilities {
     pub remote_protocols_present: Vec<String>,
     /// UEFI firmware.
     pub firmware: Option<FirmwareInfo>,
-    /// Outcome of the real accelerator probe.
+    /// SeaBIOS image.
+    pub seabios: Option<BiosInfo>,
+    /// Outcome of the real accelerator probe for [`ProbeTarget::REFERENCE`]
+    /// (q35 + UEFI, the Linux profile).
     pub accelerator: AcceleratorStatus,
+    /// Outcomes of the accelerator probes for the other machine family /
+    /// firmware combinations, one per combination (ADR-0007: the probe is
+    /// verified with the configuration actually used). Read and written
+    /// through [`HostCapabilities::accelerator_for`] and
+    /// [`HostCapabilities::record_accelerator`].
+    pub profile_accelerators: BTreeMap<ProbeTarget, AcceleratorStatus>,
 }
 
 /// Problem detected by the probe, with a message for the user.
@@ -306,9 +329,87 @@ pub struct Diagnostic {
 }
 
 impl HostCapabilities {
-    /// Recommended versioned q35 machine (the newest non-deprecated one).
-    pub fn recommended_machine(&self) -> Option<&MachineType> {
-        self.q35_machines.first()
+    /// Non-deprecated versioned machines of `family`, newest first.
+    pub fn machines_of(&self, family: MachineFamily) -> &[MachineType] {
+        match family {
+            MachineFamily::Q35 => &self.q35_machines,
+            MachineFamily::I440fx => &self.i440fx_machines,
+        }
+    }
+
+    /// Recommended versioned machine of `family` (the newest non-deprecated one).
+    pub fn recommended_machine(&self, family: MachineFamily) -> Option<&MachineType> {
+        self.machines_of(family).first()
+    }
+
+    /// Devices of `profile` not listed by `-device help`: a start with that
+    /// profile is refused, the other profiles are not affected.
+    pub fn missing_devices(&self, profile: &DeviceProfile) -> Vec<&'static str> {
+        profile
+            .required_devices()
+            .into_iter()
+            .filter(|d| !self.devices.contains(*d))
+            .collect()
+    }
+
+    /// Outcome of the accelerator probe for `target` (`NotProbed` if that
+    /// combination was never probed).
+    pub fn accelerator_for(&self, target: ProbeTarget) -> &AcceleratorStatus {
+        if target == ProbeTarget::REFERENCE {
+            &self.accelerator
+        } else {
+            self.profile_accelerators
+                .get(&target)
+                .unwrap_or(&AcceleratorStatus::NotProbed)
+        }
+    }
+
+    /// Records the outcome of the accelerator probe for `target` (cache per
+    /// combination; [`ProbeTarget::REFERENCE`] is stored in `accelerator`).
+    pub fn record_accelerator(&mut self, target: ProbeTarget, status: AcceleratorStatus) {
+        if target == ProbeTarget::REFERENCE {
+            self.accelerator = status;
+        } else {
+            self.profile_accelerators.insert(target, status);
+        }
+    }
+
+    /// Firmware image for the accelerator probe of `kind`: the OVMF code,
+    /// or the SeaBIOS image only if its hash is the verified one.
+    pub fn probe_firmware(&self, kind: FirmwareKind) -> Result<ProbeFirmware> {
+        match kind {
+            FirmwareKind::Uefi => {
+                let fw = self
+                    .firmware
+                    .as_ref()
+                    .ok_or_else(|| BackendError::Unsupported {
+                        what: "UEFI firmware".into(),
+                        hint: "edk2-x86_64-code.fd not found in the QEMU share folder".into(),
+                    })?;
+                Ok(ProbeFirmware::Uefi(ManagedPath::verify(fw.code.clone())?))
+            }
+            FirmwareKind::SeaBios => Ok(ProbeFirmware::SeaBios(ManagedPath::verify(
+                self.verified_seabios()?.path.clone(),
+            )?)),
+        }
+    }
+
+    /// SeaBIOS image, only if its hash is [`VERIFIED_SEABIOS_SHA256`].
+    pub fn verified_seabios(&self) -> Result<&BiosInfo> {
+        match &self.seabios {
+            None => Err(BackendError::Unsupported {
+                what: "SeaBIOS firmware".into(),
+                hint: format!("{SEABIOS_FILE} not found in the QEMU share folder"),
+            }),
+            Some(b) if !b.matches_verified => Err(BackendError::Unsupported {
+                what: "SeaBIOS firmware".into(),
+                hint: format!(
+                    "{SEABIOS_FILE} has a hash different from the verified one ({})",
+                    b.sha256
+                ),
+            }),
+            Some(b) => Ok(b),
+        }
     }
 
     /// Verified CPU model present in the binary.
@@ -323,10 +424,11 @@ impl HostCapabilities {
         Ok(m)
     }
 
-    /// Versioned q35 machine present in the binary.
+    /// Versioned machine (q35 or i440fx) present, and not deprecated, in
+    /// the binary; checked against the list of its own family.
     pub fn machine(&self, name: &str) -> Result<MachineType> {
-        let m = MachineType::versioned_q35(name)?;
-        if !self.q35_machines.contains(&m) {
+        let m = MachineType::versioned(name)?;
+        if !self.machines_of(m.family()).contains(&m) {
             return Err(BackendError::Unsupported {
                 what: format!("machine `{name}`"),
                 hint: "not listed (or deprecated) in `-machine help` of this binary".into(),
@@ -344,14 +446,56 @@ impl HostCapabilities {
                 message: "no non-deprecated versioned q35 machine available".into(),
             });
         }
-        if !self.missing_devices.is_empty() {
+        let missing = self.missing_devices(&DeviceProfile::LINUX);
+        if !missing.is_empty() {
             d.push(Diagnostic {
                 code: "device_missing",
                 message: format!(
                     "required devices missing from the binary: {}",
-                    self.missing_devices.join(", ")
+                    missing.join(", ")
                 ),
             });
+        }
+        let mut other: Vec<&'static str> = DeviceProfile::ALL
+            .iter()
+            .flat_map(|p| self.missing_devices(p))
+            .filter(|d| !missing.contains(d))
+            .collect();
+        other.sort_unstable();
+        other.dedup();
+        if !other.is_empty() {
+            d.push(Diagnostic {
+                code: "profile_device_missing",
+                message: format!(
+                    "devices of the Windows hardware profiles missing from the binary: {}",
+                    other.join(", ")
+                ),
+            });
+        }
+        if self.i440fx_machines.is_empty() {
+            d.push(Diagnostic {
+                code: "i440fx_machine_missing",
+                message: "no non-deprecated versioned i440fx machine available (Windows XP \
+                          profile)"
+                    .into(),
+            });
+        }
+        match &self.seabios {
+            None => d.push(Diagnostic {
+                code: "seabios_missing",
+                message: format!(
+                    "SeaBIOS ({SEABIOS_FILE}) not found in the QEMU share folder (legacy BIOS \
+                     profiles)"
+                ),
+            }),
+            Some(b) if !b.matches_verified => d.push(Diagnostic {
+                code: "seabios_unverified",
+                message: format!(
+                    "SeaBIOS with a hash different from the verified one ({})",
+                    b.sha256
+                ),
+            }),
+            Some(_) => {}
         }
         let missing_fmt: Vec<_> = REQUIRED_IMAGE_FORMATS
             .iter()
@@ -482,16 +626,20 @@ pub fn parse_machine_help(text: &str) -> Vec<MachineEntry> {
 
 /// Non-deprecated versioned q35 machines, newest first.
 pub fn q35_versioned(machines: &[MachineEntry]) -> Vec<MachineType> {
-    let mut v: Vec<(u32, u32, MachineType)> = machines
+    versioned_machines(machines, MachineFamily::Q35)
+}
+
+/// Non-deprecated versioned machines of `family`, newest first (aliases
+/// such as `q35` and `pc` are not versioned names and are skipped).
+pub fn versioned_machines(machines: &[MachineEntry], family: MachineFamily) -> Vec<MachineType> {
+    let mut v: Vec<MachineType> = machines
         .iter()
         .filter(|m| !m.deprecated)
-        .filter_map(|m| {
-            let (a, b) = parse_q35_version(&m.name)?;
-            Some((a, b, MachineType::versioned_q35(&m.name).ok()?))
-        })
+        .filter(|m| matches!(parse_versioned_machine(&m.name), Some((f, _, _)) if f == family))
+        .filter_map(|m| MachineType::versioned_in(family, &m.name).ok())
         .collect();
-    v.sort_by_key(|x| std::cmp::Reverse((x.0, x.1)));
-    v.into_iter().map(|(_, _, m)| m).collect()
+    v.sort_by_key(|m| std::cmp::Reverse(m.version()));
+    v
 }
 
 /// `-device help`: names and aliases.
@@ -716,8 +864,27 @@ pub fn find_firmware(qemu_system: &Path) -> Result<Option<FirmwareInfo>> {
     }))
 }
 
+/// Looks for the SeaBIOS image (`share/bios-256k.bin`) next to the binary
+/// and hashes it.
+pub fn find_seabios(qemu_system: &Path) -> Result<Option<BiosInfo>> {
+    let Some(dir) = qemu_system.parent() else {
+        return Ok(None);
+    };
+    let path = dir.join("share").join(SEABIOS_FILE);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let sha256 = sha256_file(&path)?;
+    let matches_verified = sha256 == VERIFIED_SEABIOS_SHA256;
+    Ok(Some(BiosInfo {
+        path,
+        sha256,
+        matches_verified,
+    }))
+}
+
 /// Hashes of the files a probe result depends on: the two binaries and the
-/// UEFI firmware next to them (F6: "ripetizione dei probe dopo cambi
+/// UEFI and SeaBIOS firmware next to them (F6: "ripetizione dei probe dopo cambi
 /// QEMU/firmware").
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProbeFingerprint {
@@ -727,6 +894,8 @@ pub struct ProbeFingerprint {
     pub qemu_img_sha256: String,
     /// SHA-256 of the firmware code and variables template, if present.
     pub firmware: Option<(String, String)>,
+    /// SHA-256 of the SeaBIOS image, if present.
+    pub seabios: Option<String>,
 }
 
 impl ProbeFingerprint {
@@ -757,6 +926,11 @@ impl ProbeFingerprint {
             (None, None) => {}
             _ => v.push("firmware presence"),
         }
+        match (&self.seabios, &other.seabios) {
+            (Some(a), Some(b)) if a != b => v.push("SeaBIOS image"),
+            (Some(_), None) | (None, Some(_)) => v.push("SeaBIOS presence"),
+            _ => {}
+        }
         v
     }
 }
@@ -771,6 +945,7 @@ impl HostCapabilities {
                 .firmware
                 .as_ref()
                 .map(|f| (f.code_sha256.clone(), f.vars_sha256.clone())),
+            seabios: self.seabios.as_ref().map(|b| b.sha256.clone()),
         }
     }
 }
@@ -784,6 +959,7 @@ pub fn current_fingerprint(caps: &HostCapabilities) -> Result<ProbeFingerprint> 
         qemu_img_sha256: sha256_file(caps.qemu_img.as_path())?,
         firmware: find_firmware(caps.qemu_system.as_path())?
             .map(|f| (f.code_sha256, f.vars_sha256)),
+        seabios: find_seabios(caps.qemu_system.as_path())?.map(|b| b.sha256),
     })
 }
 
@@ -906,12 +1082,8 @@ pub fn probe_host(
         .filter(|p| image_formats.contains(**p))
         .map(|p| (*p).to_owned())
         .collect();
-    let missing_devices = REQUIRED_DEVICES
-        .iter()
-        .filter(|d| !devices.contains(**d))
-        .map(|d| (*d).to_owned())
-        .collect();
-    let q35_machines = q35_versioned(&machines);
+    let q35_machines = versioned_machines(&machines, MachineFamily::Q35);
+    let i440fx_machines = versioned_machines(&machines, MachineFamily::I440fx);
     Ok(HostCapabilities {
         qemu_system_sha256,
         qemu_img_sha256,
@@ -922,23 +1094,29 @@ pub fn probe_host(
         accelerators,
         machines,
         q35_machines,
+        i440fx_machines,
         devices,
-        missing_devices,
         cpu_models,
         image_formats,
         remote_protocols_present,
         firmware: find_firmware(exe)?,
+        seabios: find_seabios(exe)?,
         accelerator: AcceleratorStatus::NotProbed,
+        profile_accelerators: BTreeMap::new(),
     })
 }
 
-/// Real accelerator probe: paused launch (`-S`) with the given machine and CPU,
-/// `query-accelerators` via QMP, then `quit`. The process is in the
-/// run's container and is terminated in every case.
+/// Real accelerator probe: paused launch (`-S`) with the given machine,
+/// firmware kind and CPU, `query-accelerators` via QMP, then `quit`. The
+/// process is in the run's container and is terminated in every case. The
+/// caller stores the outcome with [`HostCapabilities::record_accelerator`]
+/// under `ProbeTarget { family: machine.family(), firmware }`, or uses
+/// [`probe_accelerator_for`].
 pub async fn probe_accelerator(
     caps: &HostCapabilities,
     accelerator: Accelerator,
     machine: &MachineType,
+    firmware: FirmwareKind,
     cpu: &CpuModel,
     private_dir: &ManagedPath,
     cfg: &ProbeConfig,
@@ -947,11 +1125,20 @@ pub async fn probe_accelerator(
         accelerator,
         reason,
     };
+    let image = match caps.probe_firmware(firmware) {
+        Ok(i) => i,
+        Err(e) => {
+            return unavailable(UnavailableReason::ProbeFailed {
+                detail: e.to_string(),
+            });
+        }
+    };
     // Every probe is a distinct run with its own `run_id`.
     let tag = RunId::new_v7();
     let cmd = match build_probe_command(
         caps.qemu_system.clone(),
         machine,
+        &image,
         accelerator,
         cpu,
         private_dir.clone(),
@@ -997,6 +1184,56 @@ pub async fn probe_accelerator(
             detail: e.to_string(),
         }),
     }
+}
+
+/// Accelerator probe for the combination of `profile` with the cache of
+/// `caps`: if that combination ([`DeviceProfile::probe_target`]) was
+/// already probed its outcome is returned unchanged, otherwise the probe
+/// runs with `machine` (which must belong to the profile's family) and its
+/// outcome is recorded with [`HostCapabilities::record_accelerator`].
+pub async fn probe_accelerator_for(
+    caps: &mut HostCapabilities,
+    accelerator: Accelerator,
+    profile: &DeviceProfile,
+    machine: &MachineType,
+    cpu: &CpuModel,
+    private_dir: &ManagedPath,
+    cfg: &ProbeConfig,
+) -> AcceleratorStatus {
+    let target = profile.probe_target();
+    if machine.family() != target.family {
+        return AcceleratorStatus::Unavailable {
+            accelerator,
+            reason: UnavailableReason::ProbeFailed {
+                detail: format!(
+                    "machine `{}` is not a {} type, required by the hardware profile",
+                    machine.as_str(),
+                    target.family.label()
+                ),
+            },
+        };
+    }
+    match caps.accelerator_for(target) {
+        cached @ (AcceleratorStatus::Available { accelerator: a, .. }
+        | AcceleratorStatus::Unavailable { accelerator: a, .. })
+            if *a == accelerator =>
+        {
+            return cached.clone();
+        }
+        _ => {}
+    }
+    let status = probe_accelerator(
+        caps,
+        accelerator,
+        machine,
+        target.firmware,
+        cpu,
+        private_dir,
+        cfg,
+    )
+    .await;
+    caps.record_accelerator(target, status.clone());
+    status
 }
 
 #[cfg(test)]
@@ -1054,16 +1291,194 @@ mod tests {
                 "pc-q35-8.2"
             ]
         );
+        assert_eq!(v, versioned_machines(&m, MachineFamily::Q35));
+        let fx = versioned_machines(&m, MachineFamily::I440fx);
+        let names: Vec<_> = fx.iter().map(MachineType::as_str).collect();
+        // `pc` alias skipped, deprecated ones (8.1 and older) excluded.
+        assert_eq!(
+            names,
+            vec![
+                "pc-i440fx-11.1",
+                "pc-i440fx-11.0",
+                "pc-i440fx-10.2",
+                "pc-i440fx-10.1",
+                "pc-i440fx-10.0",
+                "pc-i440fx-9.2",
+                "pc-i440fx-9.1",
+                "pc-i440fx-9.0",
+                "pc-i440fx-8.2"
+            ]
+        );
+        assert!(fx.iter().all(|m| m.family() == MachineFamily::I440fx));
     }
 
     #[test]
     fn real_devices() {
         let d = parse_device_help(DEVICE);
-        for r in REQUIRED_DEVICES {
-            assert!(d.contains(*r), "{r}");
+        for p in DeviceProfile::ALL {
+            for r in p.required_devices() {
+                assert!(d.contains(r), "{r} ({p:?})");
+            }
         }
         assert!(d.contains("virtio-tablet"), "alias");
         assert!(d.contains("e1000e"));
+    }
+
+    /// Capabilities parsed from the real fixtures, without binaries.
+    fn fixture_caps() -> HostCapabilities {
+        let dir = std::env::temp_dir().join("lightvm-qemu-backend-tests");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mp = ManagedPath::verify(dir.join("fixture-qemu.bin")).unwrap();
+        let machines = parse_machine_help(MACHINE);
+        let v = parse_qemu_version(VERSION).unwrap();
+        HostCapabilities {
+            qemu_system: mp.clone(),
+            qemu_system_sha256: String::new(),
+            qemu_img: mp,
+            qemu_img_sha256: String::new(),
+            version: v.clone(),
+            qemu_img_version: v,
+            accelerators: parse_accel_help(ACCEL),
+            q35_machines: versioned_machines(&machines, MachineFamily::Q35),
+            i440fx_machines: versioned_machines(&machines, MachineFamily::I440fx),
+            machines,
+            devices: parse_device_help(DEVICE),
+            cpu_models: parse_cpu_help(CPU),
+            image_formats: parse_qemu_img_formats(IMG_HELP),
+            remote_protocols_present: Vec::new(),
+            firmware: None,
+            seabios: None,
+            accelerator: AcceleratorStatus::NotProbed,
+            profile_accelerators: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn machines_and_devices_per_family_and_profile() {
+        let mut caps = fixture_caps();
+        assert_eq!(
+            caps.recommended_machine(MachineFamily::Q35)
+                .unwrap()
+                .as_str(),
+            "pc-q35-11.1"
+        );
+        assert_eq!(
+            caps.recommended_machine(MachineFamily::I440fx)
+                .unwrap()
+                .as_str(),
+            "pc-i440fx-11.1"
+        );
+        assert_eq!(
+            caps.machine("pc-i440fx-10.0").unwrap().family(),
+            MachineFamily::I440fx
+        );
+        assert!(caps.machine("pc-i440fx-8.1").is_err(), "deprecated");
+        assert!(caps.machine("pc-i440fx-12.0").is_err(), "not listed");
+        assert!(caps.machine("pc").is_err(), "alias");
+        assert!(caps.machine("pc-q35-11.1").is_ok());
+        for p in DeviceProfile::ALL {
+            assert!(caps.missing_devices(&p).is_empty(), "{p:?}");
+        }
+        // A binary without USB tablet: only the Windows profiles are affected.
+        caps.devices.remove("usb-tablet");
+        assert!(caps.missing_devices(&DeviceProfile::LINUX).is_empty());
+        assert_eq!(
+            caps.missing_devices(&DeviceProfile::WINDOWS_XP),
+            ["usb-tablet"]
+        );
+        let d = caps.diagnostics();
+        assert!(!d.iter().any(|x| x.code == "device_missing"));
+        assert!(d.iter().any(|x| x.code == "profile_device_missing"));
+        assert!(d.iter().any(|x| x.code == "seabios_missing"));
+        caps.i440fx_machines.clear();
+        assert!(caps.recommended_machine(MachineFamily::I440fx).is_none());
+        assert!(caps.machine("pc-i440fx-11.1").is_err());
+        assert!(
+            caps.diagnostics()
+                .iter()
+                .any(|x| x.code == "i440fx_machine_missing")
+        );
+    }
+
+    #[test]
+    fn accelerator_cache_per_target() {
+        let mut caps = fixture_caps();
+        let avail = |m: &str| AcceleratorStatus::Available {
+            accelerator: Accelerator::Whpx,
+            machine: m.into(),
+            cpu: "qemu64".into(),
+        };
+        let xp = DeviceProfile::WINDOWS_XP.probe_target();
+        let w7 = DeviceProfile::WINDOWS_VISTA_7.probe_target();
+        assert_eq!(caps.accelerator_for(xp), &AcceleratorStatus::NotProbed);
+        caps.record_accelerator(ProbeTarget::REFERENCE, avail("pc-q35-11.1"));
+        assert!(caps.accelerator.is_available());
+        assert!(caps.accelerator_for(ProbeTarget::REFERENCE).is_available());
+        // The reference probe does not cover the other combinations.
+        assert_eq!(caps.accelerator_for(xp), &AcceleratorStatus::NotProbed);
+        assert_eq!(
+            caps.accelerator_for(DeviceProfile::WINDOWS_UEFI.probe_target()),
+            caps.accelerator_for(ProbeTarget::REFERENCE),
+            "same machine family and firmware as Linux"
+        );
+        caps.record_accelerator(xp, avail("pc-i440fx-11.1"));
+        assert!(caps.accelerator_for(xp).is_available());
+        assert_eq!(caps.accelerator_for(w7), &AcceleratorStatus::NotProbed);
+        assert_eq!(w7, DeviceProfile::WINDOWS_BIOS.probe_target());
+        // Probe firmware: none found in this distribution.
+        assert!(caps.probe_firmware(FirmwareKind::Uefi).is_err());
+        assert!(caps.probe_firmware(FirmwareKind::SeaBios).is_err());
+    }
+
+    #[test]
+    fn seabios_discovery_and_hash() {
+        let dir = std::env::temp_dir().join(format!(
+            "lightvm-qemu-backend-seabios-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("share")).unwrap();
+        let exe = dir.join("qemu-system-x86_64.exe");
+        assert!(find_seabios(&exe).unwrap().is_none());
+        let bios = dir.join("share").join(SEABIOS_FILE);
+        std::fs::write(&bios, b"not the verified image").unwrap();
+        let found = find_seabios(&exe).unwrap().unwrap();
+        assert_eq!(found.path, bios);
+        assert_eq!(found.sha256, sha256_file(&bios).unwrap());
+        assert!(!found.matches_verified, "hash mismatch");
+        let mut caps = fixture_caps();
+        caps.seabios = Some(found.clone());
+        let e = caps.verified_seabios().unwrap_err();
+        assert!(matches!(e, BackendError::Unsupported { .. }), "{e}");
+        assert!(caps.probe_firmware(FirmwareKind::SeaBios).is_err());
+        assert!(
+            caps.diagnostics()
+                .iter()
+                .any(|x| x.code == "seabios_unverified")
+        );
+        // Same record with the verified hash: accepted.
+        caps.seabios = Some(BiosInfo {
+            sha256: VERIFIED_SEABIOS_SHA256.into(),
+            matches_verified: true,
+            ..found
+        });
+        assert_eq!(caps.verified_seabios().unwrap().path, bios);
+        match caps.probe_firmware(FirmwareKind::SeaBios).unwrap() {
+            ProbeFirmware::SeaBios(p) => assert_eq!(p.as_path(), bios.as_path()),
+            other => panic!("{other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The SeaBIOS image of the lab distribution has the pinned hash (only
+    /// when the lab QEMU is present).
+    #[test]
+    fn lab_seabios_hash_if_present() {
+        let exe = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../lab/qemu/qemu-11.1.0/qemu-system-x86_64.exe");
+        if let Some(b) = find_seabios(&exe).unwrap() {
+            assert!(b.matches_verified, "{}", b.sha256);
+        }
     }
 
     #[test]
@@ -1164,6 +1579,7 @@ mod tests {
         std::fs::write(&img, b"img v1").unwrap();
         std::fs::write(dir.join("share").join("edk2-x86_64-code.fd"), b"code v1").unwrap();
         std::fs::write(dir.join("share").join("edk2-i386-vars.fd"), b"vars v1").unwrap();
+        std::fs::write(dir.join("share").join(SEABIOS_FILE), b"bios v1").unwrap();
         let v = QemuVersion {
             major: 11,
             minor: 1,
@@ -1180,13 +1596,15 @@ mod tests {
             accelerators: vec!["whpx".into()],
             machines: Vec::new(),
             q35_machines: Vec::new(),
+            i440fx_machines: Vec::new(),
             devices: BTreeSet::new(),
-            missing_devices: Vec::new(),
             cpu_models: BTreeSet::new(),
             image_formats: BTreeSet::new(),
             remote_protocols_present: Vec::new(),
             firmware: find_firmware(&dir.join("qemu-system-x86_64.exe")).unwrap(),
+            seabios: find_seabios(&dir.join("qemu-system-x86_64.exe")).unwrap(),
             accelerator: AcceleratorStatus::NotProbed,
+            profile_accelerators: BTreeMap::new(),
         }
     }
 
@@ -1249,6 +1667,15 @@ mod tests {
         let now = current_fingerprint(&caps).unwrap();
         assert!(now.firmware.is_none());
         assert!(recorded.changes(&now).contains(&"firmware presence"));
+
+        // SeaBIOS image replaced, then removed.
+        assert!(recorded.seabios.is_some());
+        std::fs::write(dir.join("share").join(SEABIOS_FILE), b"bios v2").unwrap();
+        let now = current_fingerprint(&caps).unwrap();
+        assert!(recorded.changes(&now).contains(&"SeaBIOS image"));
+        std::fs::remove_file(dir.join("share").join(SEABIOS_FILE)).unwrap();
+        let now = current_fingerprint(&caps).unwrap();
+        assert!(recorded.changes(&now).contains(&"SeaBIOS presence"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -700,8 +700,9 @@ pub fn report_sections(
                 short_hash(&r.vm_manifest_sha256)
             ));
             ui.label(match r.guest_os {
-                lightvm_proto::GuestOs::UbuntuLtsX86_64 => "Guest: Ubuntu LTS x86_64",
-                lightvm_proto::GuestOs::OtherLinuxX86_64 => "Guest: other Linux x86_64",
+                lightvm_proto::GuestOs::UbuntuLtsX86_64 => "Guest: Ubuntu LTS x86_64".to_owned(),
+                lightvm_proto::GuestOs::OtherLinuxX86_64 => "Guest: other Linux x86_64".to_owned(),
+                os => format!("Guest: {}", crate::dashboard::os_label(os)),
             });
         });
         theme::row(ui, "Started from", None, |ui| match &r.baseline {

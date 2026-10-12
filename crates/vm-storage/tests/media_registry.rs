@@ -369,3 +369,61 @@ fn reserved_import_opens_the_source_only_on_the_worker() {
         1
     );
 }
+
+#[test]
+fn detected_guest_is_recorded_with_the_copy_and_can_be_updated() {
+    use lightvm_proto::{DetectedGuest, GuestArch, GuestOs, Label};
+    let dir = common::tempdir();
+    let src_dir = common::tempdir();
+    let src = src_dir.path().join("win7.iso");
+    let content = b"CD001 fake windows medium".repeat(100);
+    std::fs::write(&src, &content).unwrap();
+    let mut cat = Catalog::open(dir.path()).unwrap();
+    let job = cat
+        .begin_media_import(&src, MediaKind::Iso, "x", vm_storage::MediaLimits::NONE)
+        .unwrap();
+    let mut copied = job.copy();
+    // The copied bytes can be examined before publication.
+    let file = copied.copied_file().expect("copy succeeded").to_path_buf();
+    assert_eq!(std::fs::read(&file).unwrap(), content);
+    let guest = DetectedGuest {
+        os: GuestOs::Windows7,
+        arch: Some(GuestArch::X86_64),
+        build: Some(7601),
+        edition: Some(Label::parse("Windows 7 Professional").unwrap()),
+    };
+    copied.set_detected_guest(Some(guest.clone()));
+    let m = cat.finish_media_import(copied).unwrap();
+    assert_eq!(m.detected_guest.as_ref(), Some(&guest));
+    assert!(m.guest_examined);
+    assert_eq!(cat.read(|tx| tx.media(&m.media_id)).unwrap(), m);
+
+    // Not examined: stored as such.
+    let src2 = src_dir.path().join("data.iso");
+    std::fs::write(&src2, b"data").unwrap();
+    let d = cat.approve_media(&src2, MediaKind::Data, "x").unwrap();
+    assert!(!d.guest_examined && d.detected_guest.is_none());
+    // Examined later with no result, then with one.
+    cat.with_tx(|tx| tx.set_media_detected_guest(&d.media_id, None))
+        .unwrap();
+    let r = cat.read(|tx| tx.media(&d.media_id)).unwrap();
+    assert!(r.guest_examined && r.detected_guest.is_none());
+    cat.with_tx(|tx| tx.set_media_detected_guest(&d.media_id, Some(&guest)))
+        .unwrap();
+    let r = cat.read(|tx| tx.media(&d.media_id)).unwrap();
+    assert_eq!(r.detected_guest, Some(guest));
+    // Unknown media.
+    assert!(matches!(
+        cat.with_tx(|tx| tx.set_media_detected_guest(&MediaId::new_v7(), None)),
+        Err(StorageError::NotFound { .. })
+    ));
+    // A value this version cannot read is a lost hint, not a broken registry.
+    let conn = vm_storage::migrate::open_connection(&dir.path().join(vm_storage::DB_FILE)).unwrap();
+    conn.execute(
+        "UPDATE media SET detected_guest = '{\"os\":\"windows_99\"}' WHERE media_id = ?1",
+        rusqlite::params![d.media_id.to_string()],
+    )
+    .unwrap();
+    let r = cat.read(|tx| tx.media(&d.media_id)).unwrap();
+    assert!(r.detected_guest.is_none() && r.guest_examined);
+}

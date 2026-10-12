@@ -69,6 +69,11 @@ pub fn os_label(os: GuestOs) -> &'static str {
     match os {
         GuestOs::UbuntuLtsX86_64 => "Ubuntu LTS",
         GuestOs::OtherLinuxX86_64 => "Other Linux",
+        GuestOs::WindowsXp => "Windows XP",
+        GuestOs::WindowsVista => "Windows Vista",
+        GuestOs::Windows7 => "Windows 7",
+        GuestOs::Windows81 => "Windows 8.1",
+        GuestOs::Windows10 => "Windows 10",
     }
 }
 

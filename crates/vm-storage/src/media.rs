@@ -41,6 +41,7 @@ use crate::layout::CatalogLayout;
 use crate::paths::ManagedPath;
 use crate::records::MediaRecord;
 use crate::time::now_rfc3339;
+use lightvm_proto::DetectedGuest;
 
 /// Maximum length of the declared origin (free text, never a path to open).
 pub const MAX_DECLARED_ORIGIN: usize = 512;
@@ -113,6 +114,27 @@ pub struct CopiedMedia {
     meta: ImportMeta,
     /// SHA-256 and size of the copied bytes.
     outcome: Result<(String, u64)>,
+    /// Outcome of the guest OS detection on the copy (`None`: not examined).
+    detected: Option<Option<DetectedGuest>>,
+}
+
+impl CopiedMedia {
+    /// The copied bytes (the temporary file, synced and hashed) when the
+    /// copy succeeded: they can be examined (for example the guest OS
+    /// detection, ADR-0027) before [`Catalog::finish_media_import`]
+    /// publishes them unchanged as the managed copy.
+    pub fn copied_file(&self) -> Option<&Path> {
+        self.outcome
+            .as_ref()
+            .ok()
+            .map(|_| self.meta.intent.temp_path.as_path())
+    }
+
+    /// Records the guest OS detected on [`Self::copied_file`] (`None`:
+    /// nothing supported recognized): stored with the registry row.
+    pub fn set_detected_guest(&mut self, guest: Option<DetectedGuest>) {
+        self.detected = Some(guest);
+    }
 }
 
 impl MediaImportJob {
@@ -146,7 +168,11 @@ impl MediaImportJob {
             },
         );
         drop(src);
-        CopiedMedia { meta, outcome }
+        CopiedMedia {
+            meta,
+            outcome,
+            detected: None,
+        }
     }
 }
 
@@ -221,6 +247,7 @@ impl MediaImportReservation {
         CopiedMedia {
             meta: self.meta,
             outcome: Err(reason),
+            detected: None,
         }
     }
 
@@ -254,7 +281,11 @@ impl MediaImportReservation {
                 })
             }
         })();
-        CopiedMedia { meta, outcome }
+        CopiedMedia {
+            meta,
+            outcome,
+            detected: None,
+        }
     }
 }
 
@@ -398,7 +429,11 @@ impl Catalog {
     /// the copy failed, or publishing fails, the intent is aborted and the
     /// temporary removed.
     pub fn finish_media_import(&mut self, copied: CopiedMedia) -> Result<MediaRecord> {
-        let CopiedMedia { meta, outcome } = copied;
+        let CopiedMedia {
+            meta,
+            outcome,
+            detected,
+        } = copied;
         let result = outcome.and_then(|(sha256, size)| {
             self.mark_applied(&meta.intent)?;
             let record = MediaRecord {
@@ -410,6 +445,8 @@ impl Catalog {
                 approved_at: now_rfc3339(),
                 managed_path: meta.final_rel.clone(),
                 status: MediaStatus::Approved,
+                guest_examined: detected.is_some(),
+                detected_guest: detected.flatten(),
             };
             self.commit(&meta.intent, |tx| tx.insert_media(&record))?;
             Ok(record)

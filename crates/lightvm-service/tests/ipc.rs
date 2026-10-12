@@ -940,6 +940,7 @@ async fn start_reply_waits_for_the_checks_while_the_connection_keeps_serving() {
             size_bytes: 1 << 30,
             declared_origin: Label::parse("test").unwrap(),
             approved_at: UtcTimestamp::now(),
+            detected_guest: None,
         },
         managed_path: ManagedRelPath::parse("media/a.iso").unwrap(),
         file_identity: None,
