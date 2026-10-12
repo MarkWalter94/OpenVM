@@ -27,6 +27,18 @@ use unix as imp;
 #[cfg(windows)]
 use windows as imp;
 
+/// Prefix of the fallback private roots in the temporary directory
+/// (`lightvm-p-<pid>`, used when the catalog path is too long for the
+/// AF_UNIX sockets).
+pub const FALLBACK_ROOT_PREFIX: &str = "lightvm-p-";
+
+/// Fallback private root of this process in the user's temporary folder
+/// (`<temp>/lightvm-p-<pid>`), shared by the QEMU sockets and the IPC
+/// endpoint when the configured paths are too long for AF_UNIX.
+pub fn fallback_root() -> PathBuf {
+    std::env::temp_dir().join(format!("{FALLBACK_ROOT_PREFIX}{}", std::process::id()))
+}
+
 /// Bidirectional stream of an IPC connection.
 pub trait IpcStream: AsyncRead + AsyncWrite + Send + Unpin {}
 impl<T: AsyncRead + AsyncWrite + Send + Unpin> IpcStream for T {}
