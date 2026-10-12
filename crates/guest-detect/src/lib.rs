@@ -1,7 +1,7 @@
 //! Guest OS detection from installation ISO images (ADR-0027).
 //!
 //! [`detect`] reads an approved ISO (untrusted bytes) through `Read + Seek`
-//! and identifies Windows XP, Vista, 7, 8.1 and 10 and Ubuntu / other Linux
+//! and identifies Windows XP, Vista, 7, 8.1, 10 and 11 ARM64 and Ubuntu / other Linux
 //! media:
 //!
 //! - Windows Vista and later: `sources/install.wim` or `sources/install.esd`,
@@ -11,8 +11,10 @@
 //!   root of the ISO 9660 / Joliet hierarchy.
 //! - Linux: `.disk/info`.
 //!
-//! Windows 8 (6.2) and Windows 11 (build 22000 and later) are recognized and
-//! reported as `Ok(None)`: they are not supported guests. The result is a
+//! Windows 11 (build 22000 and later) is a guest only on ARM64 media
+//! (ADR-0028). Windows 8 (6.2), Windows 11 x86/x64, Windows 10 on ARM and
+//! server editions are recognized and reported as `Ok(None)`: they are not
+//! supported guests. The result is a
 //! hint for the wizard, never a guarantee.
 //!
 //! The work is bounded: bytes read, directory entries visited, directory
@@ -96,7 +98,7 @@ impl From<std::io::Error> for DetectError {
 enum Decision {
     /// A supported guest.
     Found(DetectedGuest),
-    /// A recognized but unsupported system (Windows 8, Windows 11, ...).
+    /// A recognized but unsupported system (Windows 8, Windows 11 x86, ...).
     Unsupported,
     /// Nothing recognized: try the next file system.
     Unknown,
@@ -224,23 +226,24 @@ fn windows_decision(info: &wim::ImageInfo) -> Decision {
     if server {
         return Decision::Unsupported;
     }
-    let os = match (major, minor) {
-        (6, 0) => GuestOs::WindowsVista,
-        (6, 1) => GuestOs::Windows7,
-        (6, 3) => GuestOs::Windows81,
+    let (os, arch) = match (major, minor) {
+        (6, 0) => (GuestOs::WindowsVista, x86_arch(info.arch)),
+        (6, 1) => (GuestOs::Windows7, x86_arch(info.arch)),
+        (6, 3) => (GuestOs::Windows81, x86_arch(info.arch)),
         (10, 0) => match info.build {
-            Some(b) if b < WINDOWS_11_FIRST_BUILD => GuestOs::Windows10,
+            Some(b) if b < WINDOWS_11_FIRST_BUILD => (GuestOs::Windows10, x86_arch(info.arch)),
+            // Windows 11 only on ARM64 (ADR-0028); x86 Windows 11 stays
+            // excluded (ADR-0027), and so does an unknown architecture.
+            Some(_) if info.arch == Some(WIM_ARCH_ARM64) => {
+                (GuestOs::Windows11Arm64, Ok(Some(GuestArch::Aarch64)))
+            }
             _ => return Decision::Unsupported,
         },
         // 6.2 is Windows 8; anything else is not a supported desktop guest.
         _ => return Decision::Unsupported,
     };
-    let arch = match info.arch {
-        Some(0) => Some(GuestArch::X86),
-        Some(9) => Some(GuestArch::X86_64),
-        None => None,
-        // ARM, ARM64, Itanium: not runnable on this host.
-        Some(_) => return Decision::Unsupported,
+    let Ok(arch) = arch else {
+        return Decision::Unsupported;
     };
     let edition = info
         .display_name
@@ -258,6 +261,21 @@ fn windows_decision(info: &wim::ImageInfo) -> Decision {
         build: info.build,
         edition,
     })
+}
+
+/// WIM `<ARCH>` value of ARM64 media (`PROCESSOR_ARCHITECTURE_ARM64`).
+const WIM_ARCH_ARM64: u32 = 12;
+
+/// Architecture of an x86 Windows release from the WIM `<ARCH>` value;
+/// `Err` for ARM, ARM64 and Itanium (Windows 10 on ARM and older ARM
+/// releases are not supported guests).
+fn x86_arch(arch: Option<u32>) -> Result<Option<GuestArch>, ()> {
+    match arch {
+        Some(0) => Ok(Some(GuestArch::X86)),
+        Some(9) => Ok(Some(GuestArch::X86_64)),
+        None => Ok(None),
+        Some(_) => Err(()),
+    }
 }
 
 /// Windows XP markers: `I386/` with `WIN51*` (x86), `AMD64/` with
@@ -378,6 +396,49 @@ mod tests {
         ));
         assert!(matches!(
             windows_decision(&image(&xml(10, 0, 19045, 12))),
+            Decision::Unsupported
+        ));
+        let g = found(windows_decision(&image(&xml(10, 0, 26200, 12))));
+        assert_eq!(g.os, GuestOs::Windows11Arm64);
+        assert_eq!(g.arch, Some(GuestArch::Aarch64));
+        assert_eq!(g.build, Some(26200));
+        assert_eq!(g.edition.unwrap().as_str(), "Windows X Pro");
+        assert_eq!(
+            found(windows_decision(&image(&xml(10, 0, 22000, 12)))).os,
+            GuestOs::Windows11Arm64
+        );
+        // Windows 11 x86 / x64 and Windows 11 with unknown architecture.
+        assert!(matches!(
+            windows_decision(&image(&xml(10, 0, 22000, 0))),
+            Decision::Unsupported
+        ));
+        let no_arch = "<WIM><IMAGE INDEX=\"1\"><WINDOWS><EDITIONID>Professional</EDITIONID>\
+                       <VERSION><MAJOR>10</MAJOR><MINOR>0</MINOR><BUILD>26200</BUILD></VERSION>\
+                       </WINDOWS></IMAGE></WIM>";
+        assert!(matches!(
+            windows_decision(&image(no_arch)),
+            Decision::Unsupported
+        ));
+        // ARM (32-bit) Windows 11 does not exist as a guest either.
+        assert!(matches!(
+            windows_decision(&image(&xml(10, 0, 26200, 5))),
+            Decision::Unsupported
+        ));
+        // Windows 8 on ARM64 stays Windows 8.
+        assert!(matches!(
+            windows_decision(&image(&xml(6, 2, 9200, 12))),
+            Decision::Unsupported
+        ));
+    }
+
+    #[test]
+    fn server_editions_are_unsupported_on_arm64() {
+        let xml = "<WIM><IMAGE INDEX=\"1\"><WINDOWS><ARCH>12</ARCH><EDITIONID>ServerDatacenter</EDITIONID>\
+                   <INSTALLATIONTYPE>Server</INSTALLATIONTYPE>\
+                   <VERSION><MAJOR>10</MAJOR><MINOR>0</MINOR><BUILD>26100</BUILD></VERSION>\
+                   </WINDOWS></IMAGE></WIM>";
+        assert!(matches!(
+            windows_decision(&image(xml)),
             Decision::Unsupported
         ));
     }

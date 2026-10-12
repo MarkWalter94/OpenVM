@@ -8,7 +8,9 @@
 //!    devices);
 //! 2. protective opening of the files ([`crate::storage_guard`]);
 //! 3. removal of orphan sockets, spawn in the run's container (Job
-//!    Object), QEMU with `-S`;
+//!    Object, or the watchdog process group on Unix): first swtpm for the
+//!    TPM profiles (ADR-0028), waiting for its control socket, then QEMU
+//!    with `-S`;
 //! 4. QMP connection (sole client, socket in the private directory);
 //! 5. verification of the active accelerator (`query-accelerators`) and of the absence
 //!    of NICs (empty `info network` and no PCI device of the network class);
@@ -31,7 +33,7 @@ use lightvm_proto::{
 };
 use tokio::sync::{broadcast, watch};
 
-use crate::cmdline::{FirmwareKind, QemuCommand, VmLaunchSpec};
+use crate::cmdline::{FirmwareKind, QemuCommand, TpmCommand, VmLaunchSpec};
 use crate::error::{BackendError, Result};
 use crate::input::{PressedInput, validate_events};
 use crate::paths::{ManagedPath, ManagedPaths};
@@ -246,6 +248,76 @@ fn remove_sockets(cmd: &QemuCommand) {
     if let Some(v) = &cmd.vnc_socket {
         let _ = std::fs::remove_file(v.as_path());
     }
+    if let Some(t) = &cmd.tpm {
+        let _ = std::fs::remove_file(t.socket.as_path());
+    }
+}
+
+/// Maximum wait for the swtpm control socket.
+const SWTPM_SOCKET_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Starts swtpm in `container` and waits for its control socket. The socket
+/// is only checked for existence, never connected to: with `--terminate`
+/// swtpm exits when its first control connection closes, which must be
+/// QEMU's. A reaper thread waits for the process so that it never lingers
+/// as a zombie counted as active by the container.
+async fn start_swtpm(
+    container: &Arc<dyn ProcessContainer>,
+    run_id: RunId,
+    tpm: &TpmCommand,
+) -> Result<()> {
+    let req = SpawnRequest {
+        run_id,
+        program: tpm.program.clone(),
+        args: tpm.args.clone(),
+        env: minimal_environment(),
+        stdout: tpm.stdout.clone(),
+        stderr: tpm.stderr.clone(),
+    };
+    let child = {
+        let c = container.clone();
+        tokio::task::spawn_blocking(move || c.spawn(&req))
+            .await
+            .map_err(|e| BackendError::Io(std::io::Error::other(e.to_string())))??
+    };
+    if let Err(e) = container.verify_membership(&child) {
+        let _ = container.kill_all(EMERGENCY_EXIT_CODE);
+        return Err(e);
+    }
+    let child = Arc::new(child);
+    let deadline = Instant::now() + SWTPM_SOCKET_TIMEOUT;
+    loop {
+        if let Some(code) = child.try_exit_code()? {
+            let mut tail = read_stderr_tail(&tpm.stderr);
+            if tail.is_empty() {
+                tail = read_stderr_tail(&tpm.log);
+            }
+            return Err(BackendError::StartupFailed {
+                exit_code: Some(code),
+                stderr_tail: format!("swtpm exited before QEMU started: {tail}"),
+            });
+        }
+        if tpm.socket.as_path().exists() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            let _ = container.kill_all(EMERGENCY_EXIT_CODE);
+            return Err(BackendError::StartupFailed {
+                exit_code: None,
+                stderr_tail: format!(
+                    "swtpm control socket not created within {SWTPM_SOCKET_TIMEOUT:?}"
+                ),
+            });
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    std::thread::Builder::new()
+        .name("swtpm-reaper".into())
+        .spawn(move || {
+            let _ = child.wait(None);
+        })
+        .map_err(BackendError::Io)?;
+    Ok(())
 }
 
 fn read_stderr_tail(p: &ManagedPath) -> String {
@@ -269,6 +341,12 @@ pub(crate) async fn launch(
     }
     remove_sockets(cmd);
     let container = new_container(&cmd.limits)?;
+    if let Some(tpm) = &cmd.tpm
+        && let Err(e) = start_swtpm(&container, cmd.run_id, tpm).await
+    {
+        remove_sockets(cmd);
+        return Err(e);
+    }
     let req = SpawnRequest {
         run_id: cmd.run_id,
         program: cmd.program.clone(),
@@ -527,7 +605,7 @@ impl QemuRun {
             }
         }
         caps.machine(spec.machine.as_str())?;
-        caps.cpu_model(spec.cpu.as_str())?;
+        caps.check_cpu(&spec.cpu)?;
         let missing = caps.missing_devices(&spec.profile);
         if !missing.is_empty() {
             return Err(BackendError::Unsupported {
@@ -541,6 +619,33 @@ impl QemuRun {
             if paths.seabios()?.as_path() != verified.path.as_path() {
                 return Err(BackendError::StateConflict(
                     "the run's SeaBIOS image is not the one verified by the probe".into(),
+                ));
+            }
+        }
+        if spec.profile.firmware() == FirmwareKind::UefiAarch64 {
+            // ADR-0028: only the firmware code hashed by the probe, with an
+            // approved hash.
+            let verified = caps.verified_aarch64_firmware()?;
+            if paths.firmware_code()?.as_path() != verified.code.path.as_path() {
+                return Err(BackendError::StateConflict(
+                    "the run's AArch64 firmware is not the one verified by the probe".into(),
+                ));
+            }
+        }
+        if spec.profile.needs_tpm() {
+            let verified = caps.verified_swtpm()?;
+            if paths.swtpm()?.as_path() != verified.path.as_path() {
+                return Err(BackendError::StateConflict(
+                    "the run's swtpm is not the one verified by the probe".into(),
+                ));
+            }
+            let state = paths.tpm_state_dir(&spec.run_id)?.ok_or_else(|| {
+                BackendError::invalid("tpm_state", "the TPM profile needs the VM's TPM state")
+            })?;
+            if !state.as_path().is_dir() {
+                return Err(BackendError::invalid(
+                    "tpm_state",
+                    "the VM's TPM state directory does not exist",
                 ));
             }
         }

@@ -460,6 +460,7 @@ impl Catalog {
     /// `copy_vars` intents are recorded.
     pub fn begin_create_baseline(&mut self, req: CreateBaseline) -> Result<BaselineJob> {
         let vm = self.stopped_without_runs(&req.vm_id, "baseline")?;
+        refuse_tpm_guest(&vm)?;
         let current = self.read(|tx| {
             let Some(cs) = tx.current_state(&req.vm_id)? else {
                 return Ok(None);
@@ -694,7 +695,8 @@ impl Catalog {
     /// the new overlay and variables (`create_overlay`, `copy_vars`) and for
     /// the files of the previous current state (`discard_file`).
     pub fn begin_restore(&mut self, req: RestoreBaseline) -> Result<RestoreJob> {
-        self.stopped_without_runs(&req.vm_id, "restore")?;
+        let vm = self.stopped_without_runs(&req.vm_id, "restore")?;
+        refuse_tpm_guest(&vm)?;
         let (b, base, base_vars, current) = self.read(|tx| {
             let b = tx.baseline(&req.baseline_id)?;
             let d = tx.disk(&b.base_disk_id)?;
@@ -1213,6 +1215,25 @@ fn be64(b: &[u8], o: usize) -> Option<u64> {
         a.copy_from_slice(s);
         u64::from_be_bytes(a)
     })
+}
+
+/// Message of [`refuse_tpm_guest`].
+pub const TPM_BASELINE_UNSUPPORTED: &str =
+    "baselines of VMs with a TPM are not supported yet: the TPM state is not part of the baseline";
+
+/// ADR-0028 (required evidence 3): a baseline of a TPM guest must contain
+/// its swtpm state, and a restore must return it. Until it does, baseline
+/// creation and restore are refused for these guests instead of producing a
+/// baseline whose TPM state silently diverges from disk and variables.
+fn refuse_tpm_guest(vm: &crate::records::VmRecord) -> Result<()> {
+    let tpm = serde_json::from_value::<lightvm_proto::GuestOs>(serde_json::Value::String(
+        vm.guest_os.clone(),
+    ))
+    .is_ok_and(lightvm_proto::GuestOs::needs_tpm);
+    if tpm {
+        return Err(StorageError::Unsupported(TPM_BASELINE_UNSUPPORTED));
+    }
+    Ok(())
 }
 
 /// Backing reference of a QCOW2 image read from its header, without

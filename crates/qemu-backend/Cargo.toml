@@ -33,6 +33,11 @@ features = [
     "Win32_System_Threading",
 ]
 
+# Unix (macOS, Linux): file system and process calls without `unsafe`
+# (same version as lightvm-service).
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "=1.1.5", features = ["fs", "process"] }
+
 [dev-dependencies]
 proptest = "=1.11.0"
 tokio = { version = "=1.53.2", default-features = false, features = ["sync", "time", "rt", "rt-multi-thread", "macros"] }

@@ -80,9 +80,9 @@ pub type SavePicker = Box<dyn FnMut(&str) -> Option<std::path::PathBuf>>;
 pub type ReportPicker =
     Box<dyn FnMut(&str, lightvm_proto::report::ReportFormat) -> Option<std::path::PathBuf>>;
 
-/// Native save dialog for session reports (Windows only).
+/// Native save dialog for session reports (Windows and macOS).
 pub fn native_report_picker() -> Option<ReportPicker> {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     {
         Some(Box::new(
             |name: &str, format: lightvm_proto::report::ReportFormat| {
@@ -98,29 +98,29 @@ pub fn native_report_picker() -> Option<ReportPicker> {
             },
         ))
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         None
     }
 }
 
-/// Native folder picker (Windows only; elsewhere no picker).
+/// Native folder picker (Windows and macOS; elsewhere no picker).
 pub fn native_folder_picker() -> Option<FolderPicker> {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     {
         Some(Box::new(|title: &str| {
             rfd::FileDialog::new().set_title(title).pick_folder()
         }))
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         None
     }
 }
 
-/// Native ISO picker (Windows only).
+/// Native ISO picker (Windows and macOS).
 pub fn native_file_picker() -> Option<FilePicker> {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     {
         Some(Box::new(|title: &str| {
             rfd::FileDialog::new()
@@ -129,15 +129,15 @@ pub fn native_file_picker() -> Option<FilePicker> {
                 .pick_file()
         }))
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         None
     }
 }
 
-/// Native save dialog for PNG screenshots (Windows only).
+/// Native save dialog for PNG screenshots (Windows and macOS).
 pub fn native_save_picker() -> Option<SavePicker> {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     {
         Some(Box::new(|name: &str| {
             rfd::FileDialog::new()
@@ -147,7 +147,7 @@ pub fn native_save_picker() -> Option<SavePicker> {
                 .save_file()
         }))
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         None
     }
@@ -439,6 +439,8 @@ pub struct LightVmApp {
     restart: Option<std::sync::mpsc::Receiver<RestartOutcome>>,
     vm_edit: Option<vm_settings::VmEdit>,
     wizard: Option<wizard::Wizard>,
+    /// Systems the New VM wizard offers (the host's, fake in tests).
+    guest_support: wizard::GuestSupport,
     dialog: Option<ConfirmDialog>,
     /// VM whose Baselines page is open (F3).
     baselines_vm: Option<VmId>,
@@ -518,6 +520,7 @@ impl LightVmApp {
             cli_config: None,
             restart: None,
             vm_edit: None,
+            guest_support: lightvm_proto::GuestOs::runs_on_this_host,
             wizard: None,
             dialog: None,
             baselines_vm: None,
@@ -593,6 +596,13 @@ impl LightVmApp {
     /// Folder picker of the Settings page (native in the app, fake in tests).
     pub fn set_folder_picker(&mut self, s: Option<FolderPicker>) {
         self.folder_picker = s;
+    }
+
+    /// Systems the New VM wizard offers: by default those this host runs
+    /// ([`lightvm_proto::GuestOs::runs_on_this_host`]); tests pass another
+    /// rule to exercise the other host family.
+    pub fn set_guest_support(&mut self, s: wizard::GuestSupport) {
+        self.guest_support = s;
     }
 
     /// ISO picker of the wizard (native in the app, fake in tests).
@@ -2074,7 +2084,10 @@ impl LightVmApp {
             Some(DashboardAction::Command(c)) => self.send(c),
             Some(DashboardAction::NewVm) => {
                 self.vm_edit = None;
-                self.wizard = Some(wizard::Wizard::new(state.host));
+                self.wizard = Some(wizard::Wizard::with_guest_support(
+                    state.host,
+                    self.guest_support,
+                ));
                 self.send(ServiceCommand::ListMedia);
             }
             Some(DashboardAction::Console(id)) => self.open_console(id),
@@ -3267,8 +3280,8 @@ fn agent_input_notice(ui: &mut egui::Ui, client: Option<&str>, taking: bool) -> 
     let p = theme::Palette::of(ui);
     let mut clicked = false;
     egui::Frame::new()
-        .fill(p.warning.linear_multiply(0.12))
-        .corner_radius(egui::CornerRadius::same(6))
+        .fill(p.warning.linear_multiply(0.08))
+        .stroke(egui::Stroke::new(1.0, p.warning.linear_multiply(0.4)))
         .inner_margin(egui::Margin::symmetric(12, 6))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -3316,24 +3329,22 @@ fn page(ui: &mut egui::Ui, id: &str, content: impl FnOnce(&mut egui::Ui)) {
         });
 }
 
-/// Brand in the sidebar: an accent square with a stylised screen and the
-/// product name.
+/// Brand in the sidebar: an accent square with a stylised pixel screen and
+/// the product name in the pixel face.
 fn brand(ui: &mut egui::Ui) {
     let p = theme::Palette::of(ui);
     ui.horizontal(|ui| {
         ui.add_space(6.0);
         let (r, _) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::hover());
         let painter = ui.painter();
-        painter.rect_filled(r, egui::CornerRadius::same(6), p.accent);
-        let screen = egui::Rect::from_center_size(r.center(), egui::vec2(12.0, 9.0));
-        painter.rect_stroke(
-            screen,
-            egui::CornerRadius::same(2),
-            egui::Stroke::new(1.5, p.on_accent),
-            egui::StrokeKind::Middle,
-        );
+        painter.rect_filled(r, 0.0, p.accent);
+        let screen = egui::Rect::from_center_size(r.center(), egui::vec2(12.0, 8.0));
+        painter.rect_filled(screen, 0.0, p.on_accent);
+        let inner = screen.shrink(2.0);
+        painter.rect_filled(inner, 0.0, p.accent);
         ui.add_space(4.0);
-        ui.label(egui::RichText::new("LightVM").size(17.0).color(p.text));
+        let font = theme::pixel_font(ui, 22.0);
+        ui.label(egui::RichText::new("LightVM").font(font).color(p.text));
     });
 }
 

@@ -69,14 +69,16 @@ mod sys;
 pub mod validate;
 
 pub use cmdline::{
-    Accelerator, CpuModel, DeviceProfile, DiskBus, DiskFormat, DiskSpec, DisplayDevice,
-    FirmwareKind, MachineFamily, MachineType, PointerDevice, ProbeFirmware, ProbeTarget,
-    QemuCommand, VmLaunchSpec,
+    Accelerator, CdromBus, CpuModel, CpuPolicy, DeviceProfile, DiskBus, DiskFormat, DiskSpec,
+    DisplayDevice, FirmwareKind, MachineFamily, MachineType, PointerDevice, ProbeFirmware,
+    ProbeTarget, QemuCommand, TpmCommand, VmLaunchSpec,
 };
 pub use error::BackendError;
 pub use paths::{ManagedPath, ManagedPaths};
 pub use prepare::{HostResources, RunDirs};
-pub use probe::{AcceleratorStatus, BiosInfo, HostCapabilities, ProbeConfig};
+pub use probe::{
+    Aarch64FirmwareInfo, AcceleratorStatus, BiosInfo, HostCapabilities, ProbeConfig, SwtpmInfo,
+};
 pub use process::{
     ContainmentMechanism, ExitCodeClass, IdentityStatus, JobLimitReport, JobLimits,
     ProcessContainer, ProcessIdentity,

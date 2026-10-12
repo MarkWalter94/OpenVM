@@ -7,10 +7,10 @@
 //!   the process enters it **at creation** (`PROC_THREAD_ATTRIBUTE_JOB_LIST`).
 //!   The death of the supervisor closes the job handle and terminates QEMU (F0-06,
 //!   scenario a). The Emergency Stop is `TerminateJobObject`.
-//! - Linux: signature ready, implementation deferred. F0-07 proposes
-//!   `PR_SET_PDEATHSIG(SIGKILL)` set from a dedicated spawn thread plus a
-//!   per-VM cgroup v2 with `cgroup.kill` inside a delegated systemd scope;
-//!   [`new_container`] currently returns an `unsupported` error.
+//! - Unix (macOS; Linux until the delegated cgroup of F0-07 exists): a
+//!   process group led by a lifeline watchdog (`unix.rs`, ADR-0028); the
+//!   death of the supervisor closes the lifeline and the watchdog kills the
+//!   group. No per-tree CPU/memory limits on this mechanism.
 
 use std::ffi::OsString;
 use std::fmt;
@@ -22,6 +22,8 @@ use lightvm_proto::RunId;
 use crate::error::Result;
 use crate::paths::ManagedPath;
 
+#[cfg(unix)]
+mod unix;
 #[cfg(windows)]
 mod windows;
 
@@ -32,6 +34,8 @@ pub enum ContainmentMechanism {
     WindowsJobObject,
     /// Linux: delegated cgroup v2 with `cgroup.kill` plus `PR_SET_PDEATHSIG` (deferred).
     LinuxCgroupPdeathsig,
+    /// Unix: process group led by a lifeline watchdog (ADR-0028); no limits.
+    UnixProcessGroupWatchdog,
 }
 
 /// Serializable process identity: PID plus creation time. The PID alone
@@ -81,11 +85,14 @@ impl ProcessIdentity {
                 PidStatus::Alive => IdentityStatus::Alive,
             })
         }
-        #[cfg(not(windows))]
+        #[cfg(unix)]
         {
-            Err(crate::error::BackendError::Unsupported {
-                what: "process identity verification on this system".into(),
-                hint: "Linux implementation (pidfd) not yet available".into(),
+            // No creation time on this mechanism: a reused PID reads as
+            // alive (conservative for the orphan checks).
+            Ok(if unix::pid_alive(self.pid) {
+                IdentityStatus::Alive
+            } else {
+                IdentityStatus::NotFound
             })
         }
     }
@@ -245,16 +252,9 @@ pub fn new_container(limits: &JobLimits) -> Result<Arc<dyn ProcessContainer>> {
     {
         Ok(Arc::new(windows::JobContainer::new(limits)?))
     }
-    #[cfg(not(windows))]
+    #[cfg(unix)]
     {
-        let _ = limits;
-        // TODO(F1/R2a): delegated cgroup v2 + `cgroup.kill` and
-        // `PR_SET_PDEATHSIG(SIGKILL)` from a dedicated spawn thread (F0-07).
-        Err(crate::error::BackendError::Unsupported {
-            what: "containment of QEMU processes on this operating system".into(),
-            hint: "Linux implementation (cgroup v2 + PR_SET_PDEATHSIG, F0-07) not yet available"
-                .into(),
-        })
+        Ok(Arc::new(unix::GroupContainer::new(limits)?))
     }
 }
 
@@ -264,6 +264,8 @@ pub struct ChildProcess {
     identity: ProcessIdentity,
     #[cfg(windows)]
     handle: std::os::windows::io::OwnedHandle,
+    #[cfg(unix)]
+    child: std::sync::Mutex<std::process::Child>,
 }
 
 impl ChildProcess {
@@ -280,12 +282,9 @@ impl ChildProcess {
             let ms = timeout.map(|t| u32::try_from(t.as_millis()).unwrap_or(u32::MAX - 1));
             Ok(crate::sys::windows::wait_process(&self.handle, ms)?)
         }
-        #[cfg(not(windows))]
+        #[cfg(unix)]
         {
-            let _ = timeout;
-            Err(crate::error::BackendError::StateConflict(
-                "process not managed on this system".into(),
-            ))
+            unix::wait_child(&self.child, timeout)
         }
     }
 

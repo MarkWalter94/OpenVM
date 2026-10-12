@@ -53,7 +53,7 @@ mod vm_delete;
 pub use baseline::{
     BaselineInfo, BaselineJob, BaselineJobDone, BaselineOverview, CreateBaseline,
     CurrentStateFiles, FaultAction, FaultPoint, ProducedImage, RestoreBaseline, RestoreJob,
-    RestoreJobDone, StartFiles, qcow2_backing,
+    RestoreJobDone, StartFiles, TPM_BASELINE_UNSUPPORTED, qcow2_backing,
 };
 pub use budget::{
     BUDGET_MANIFEST_FILE, BaselineUsage, BudgetCheck, BudgetConfig, BudgetManifest, Enforcement,

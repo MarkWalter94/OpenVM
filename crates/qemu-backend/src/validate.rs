@@ -88,9 +88,19 @@ pub fn check_block_protocol(name: &str) -> Result<&'static str> {
     ))
 }
 
-/// Maximum length of a Unix socket path (`sun_path`, 108 bytes including
-/// the terminator on Windows and Linux).
-pub const UNIX_SOCKET_PATH_MAX: usize = 107;
+/// Maximum length of a Unix socket path, terminator excluded: `sun_path`
+/// is 108 bytes on Windows and Linux, 104 on macOS and the BSDs.
+pub const UNIX_SOCKET_PATH_MAX: usize = if cfg!(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd"
+)) {
+    103
+} else {
+    107
+};
 
 /// Characters forbidden in a path passed to QEMU, besides control
 /// characters: option separators, protocol prefixes, metacharacters and

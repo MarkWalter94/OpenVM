@@ -674,6 +674,12 @@ pub struct ConsoleTarget {
 pub trait BackendPort: VmBackend + Send + 'static {
     /// Accumulated observations to apply to the core with `Core::observe`.
     fn drain_observations(&mut self) -> Vec<(VmId, BackendObservation)>;
+    /// Guests this backend can run on this host (ADR-0007, ADR-0028): by
+    /// default the ones the host accelerates
+    /// ([`lightvm_proto::GuestOs::runs_on_this_host`]).
+    fn guest_support(&self) -> vm_core::resources::GuestSupport {
+        lightvm_proto::GuestOs::runs_on_this_host
+    }
     /// Display socket of the run (QEMU `vnc.sock`), if the backend has one.
     fn display_socket(&self, _vm_id: VmId, _run_id: RunId) -> Option<PathBuf> {
         None
@@ -883,6 +889,7 @@ where
         config: CoreConfig,
     ) -> Result<Self, PublicError> {
         let mut core = Core::new(store, SystemClock, SystemIds::default(), audit, config);
+        core.set_guest_support(backend.guest_support());
         core.load_catalog()?;
         // A freshly started supervisor owns no processes: those of a previous
         // supervisor terminated with its Job Object (ADR-0009).

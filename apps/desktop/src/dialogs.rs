@@ -37,7 +37,7 @@ fn frame(ui: &egui::Ui) -> egui::Frame {
     egui::Frame::new()
         .fill(p.surface)
         .stroke(egui::Stroke::new(1.0, p.border))
-        .corner_radius(egui::CornerRadius::same(10))
+        .corner_radius(egui::CornerRadius::ZERO)
         .inner_margin(egui::Margin::same(20))
         .shadow(ui.visuals().window_shadow)
 }

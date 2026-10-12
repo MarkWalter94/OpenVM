@@ -95,6 +95,22 @@ macOS has neither cgroups nor `PR_SET_PDEATHSIG`. Mechanism tested (script outsi
 
 After the runs `pgrep` found no `qemu-system-aarch64` or test child. Note: on macOS `killpg(pgid, 0)` returns `EPERM` while only zombies remain in the group; the measurement treats that as terminated. Not tested: killing the watchdog itself, descendants that leave the group, swtpm in the same group.
 
+## 5. Product path (2026-10-12, later the same day)
+
+Ignored test `crates/lightvm-service/tests/macos_real.rs` (`LIGHTVM_E2E_QEMU_DIR=/opt/homebrew`, `LIGHTVM_E2E_FIRMWARE_DIR=<build.sh output>`, `LIGHTVM_E2E_WIN11_ARM64_ISO=<ISO>`; `cargo test -p lightvm-service --test macos_real -- --ignored --nocapture`), through the service, `qemu-backend` and the Unix host layer (process group + lifeline watchdog, 0700 private directories): passed in 166 s.
+
+| Item | Outcome |
+| --- | --- |
+| Import of the 7.3 GB ISO into the catalog | 36 s; detected `Windows11Arm64`, build 26200 |
+| Start through the service | running 36 s after the request (mostly the start-time hash of the medium); HVF verified with `virt-11.1`, GICv3, `-cpu host`; firmware and swtpm verified against the approved (development) hashes; swtpm in the run's process group |
+| No NIC | `info network` and `query-pci` checked by the backend before the VM is reported running |
+| Console | frame 995/1000 lit after 128 s; `screendump` through the product screenshot path shows Windows 11 Setup "Select language settings" |
+| Emergency Stop | completed; no `qemu-system-aarch64` or `swtpm` left (`ps`, `pgrep`) |
+| Disk | 64 GiB qcow2, 393 KB used on the host |
+| Without media | firmware with TPM and Secure Boot reaches the EDK II shell and lists the NVMe disk |
+
+Development approvals only: Homebrew QEMU and swtpm and the project firmware are accepted through built-in development entries and `approved-dev.sha256`, not approved for release. Baselines of TPM VMs are refused until the swtpm state is part of them.
+
 ## Pending (ADR-0028 required evidence)
 
 - Installation to the NVMe disk, reboot from disk, OOBE **offline** (24H2/25H2 OOBE expects a network; a path without network and without bypass must be found for the editions offered, or the limit declared), ACPI shutdown.

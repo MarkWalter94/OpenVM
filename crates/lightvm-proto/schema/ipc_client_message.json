@@ -575,6 +575,11 @@
           "description": "Windows 10 (NT 10.0, build < 22000): UEFI (x64) or legacy BIOS\n(32-bit), q35, AHCI.",
           "type": "string",
           "const": "windows10"
+        },
+        {
+          "description": "Windows 11 on ARM64 (build 22000 and later): macOS/HVF hosts only,\n`virt`, UEFI with Secure Boot, TPM 2.0 (ADR-0028).",
+          "type": "string",
+          "const": "windows11_arm64"
         }
       ]
     },

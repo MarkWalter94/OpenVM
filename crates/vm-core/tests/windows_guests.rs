@@ -147,3 +147,123 @@ fn hardware_profile_cannot_change_after_creation() {
             .update_vm_config(&Caller::User, lin, r.config_revision, w),
     );
 }
+
+#[test]
+fn windows_11_arm64_profile_cannot_change_after_creation() {
+    let mut h = Harness::new();
+    let c = windows(&mut h, "w11", GuestOs::Windows11Arm64, Firmware::Uefi);
+    let vm = h.core.create_vm(&Caller::User, c.clone()).unwrap();
+    for os in [
+        GuestOs::Windows10,
+        GuestOs::UbuntuLtsX86_64,
+        GuestOs::OtherLinuxX86_64,
+    ] {
+        let mut n = c.clone();
+        n.guest_os = os;
+        let e = invalid(h.core.update_vm_config(&Caller::User, vm.id, 1, n));
+        assert_eq!(detail(&e, "field").as_deref(), Some("guest_os"));
+    }
+    let mut n = c.clone();
+    n.firmware = Firmware::Bios;
+    let e = invalid(h.core.update_vm_config(&Caller::User, vm.id, 1, n));
+    assert_eq!(detail(&e, "field").as_deref(), Some("firmware"));
+    // No x86 Windows becomes Windows 11 ARM64 either.
+    let c10 = windows(&mut h, "w10", GuestOs::Windows10, Firmware::Uefi);
+    let w10 = h.core.create_vm(&Caller::User, c10.clone()).unwrap();
+    let mut n = c10;
+    n.guest_os = GuestOs::Windows11Arm64;
+    invalid(h.core.update_vm_config(&Caller::User, w10.id, 1, n));
+    // Minimums: 4096 MiB and 64 GiB; BIOS refused at creation.
+    let mut n = windows(&mut h, "w11b", GuestOs::Windows11Arm64, Firmware::Uefi);
+    n.memory_mib = 4095;
+    invalid(h.core.create_vm(&Caller::User, n));
+    let mut n = windows(&mut h, "w11b", GuestOs::Windows11Arm64, Firmware::Uefi);
+    n.disk_gib = 63;
+    invalid(h.core.create_vm(&Caller::User, n));
+    let n = windows(&mut h, "w11b", GuestOs::Windows11Arm64, Firmware::Bios);
+    invalid(h.core.create_vm(&Caller::User, n));
+}
+
+/// An x86 host (the rule of every build except Apple Silicon macOS).
+fn x86_host(os: GuestOs) -> bool {
+    !os.is_aarch64()
+}
+
+/// An Apple Silicon host.
+fn arm_host(os: GuestOs) -> bool {
+    os.is_aarch64()
+}
+
+fn unsupported(r: Result<VmRecord, PublicError>) -> PublicError {
+    let e = r.expect_err("refused");
+    assert_eq!(e.code, ErrorCode::Unsupported, "{e:?}");
+    assert_eq!(detail(&e, "field").as_deref(), Some("guest_os"));
+    e
+}
+
+#[test]
+fn guests_the_host_cannot_run_are_refused() {
+    let mut h = Harness::new();
+    // Created while every guest was accepted (a catalog from another host).
+    let c11 = windows(&mut h, "w11", GuestOs::Windows11Arm64, Firmware::Uefi);
+    let w11 = h.core.create_vm(&Caller::User, c11.clone()).unwrap();
+    let c10 = windows(&mut h, "w10", GuestOs::Windows10, Firmware::Uefi);
+    let w10 = h.core.create_vm(&Caller::User, c10.clone()).unwrap();
+
+    // x86 host: Windows 11 ARM64 cannot be created, modified or started.
+    h.core.set_guest_support(x86_host);
+    let n = windows(&mut h, "w11-new", GuestOs::Windows11Arm64, Firmware::Uefi);
+    let e = unsupported(h.core.create_vm(&Caller::User, n));
+    assert!(e.message.contains("Windows 11 ARM64"), "{}", e.message);
+    let mut n = c11.clone();
+    n.memory_mib = 8192;
+    unsupported(h.core.update_vm_config(&Caller::User, w11.id, 1, n));
+    let r = h.req(w11.id, None, VmAction::Start);
+    let e = h.core.submit(&Caller::User, r).expect_err("start refused");
+    assert_eq!(e.code, ErrorCode::Unsupported, "{e:?}");
+    // x86 guests still work.
+    let n = windows(&mut h, "w10-new", GuestOs::Windows10, Firmware::Uefi);
+    h.core
+        .create_vm(&Caller::User, n)
+        .expect("x86 guest on x86 host");
+    h.start(w10.id);
+    h.stop(w10.id);
+
+    // Apple Silicon host: the opposite.
+    h.core.set_guest_support(arm_host);
+    for os in [GuestOs::UbuntuLtsX86_64, GuestOs::Windows10] {
+        let n = windows(&mut h, "x86-new", os, os.allowed_firmware()[0]);
+        unsupported(h.core.create_vm(&Caller::User, n));
+    }
+    let r = h.req(w10.id, None, VmAction::Start);
+    let e = h.core.submit(&Caller::User, r).expect_err("start refused");
+    assert_eq!(e.code, ErrorCode::Unsupported, "{e:?}");
+    let n = windows(&mut h, "w11-arm", GuestOs::Windows11Arm64, Firmware::Uefi);
+    h.core
+        .create_vm(&Caller::User, n)
+        .expect("ARM64 guest on Apple Silicon");
+    h.start(w11.id);
+    // Refusals are audited.
+    assert!(
+        h.audit_events()
+            .iter()
+            .any(|e| e.action == AuditAction::VmCreate
+                && e.outcome == AuditOutcome::Denied
+                && e.error == Some(ErrorCode::Unsupported))
+    );
+}
+
+#[test]
+fn runs_on_this_host_rule() {
+    let mut h = Harness::new();
+    h.core.set_guest_support(GuestOs::runs_on_this_host);
+    for os in GuestOs::ALL {
+        let c = windows(&mut h, "vm", os, os.allowed_firmware()[0]);
+        let r = h.core.create_vm(&Caller::User, c);
+        if os.runs_on_this_host() {
+            r.expect("native guest");
+        } else {
+            unsupported(r);
+        }
+    }
+}

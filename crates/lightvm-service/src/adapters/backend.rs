@@ -17,21 +17,33 @@
 //!   with `qemu-img` on first start, without going through the catalog
 //!   journal (F3);
 //! - the run directory is created here; the private socket directory (QMP,
-//!   VNC, screendumps) gets the explicit user-only ACL
-//!   (`qemu_backend::prepare::prepare_run_dirs`, F2); the private directory
+//!   VNC, TPM, screendumps) gets the explicit user-only ACL, mode 0700 on
+//!   Unix (`qemu_backend::prepare::prepare_run_dirs`, F2); the private directory
 //!   is removed when the run is released, the run directory (`runs/<run_id>/`,
 //!   QEMU log) stays for diagnostics until the VM is deleted and does not
 //!   count towards the VM storage budget (it counts in `disk_used_bytes`);
 //! - the UEFI variables are per VM (`vms/<vm_id>/firmware/primary.vars.fd`),
-//!   copied from the firmware template of the QEMU distribution on the first
-//!   start and reused afterwards ([`ensure_vm_vars`], F2); a legacy BIOS VM
+//!   copied from the firmware template of the profile on the first start
+//!   (x86: OVMF of the QEMU distribution; Windows 11 ARM64: the Secure Boot
+//!   template of the project's AArch64 firmware, ADR-0028) and reused
+//!   afterwards ([`ensure_vm_vars`], F2); a legacy BIOS VM
 //!   (SeaBIOS, ADR-0027) has none, and runs with the SeaBIOS image verified
 //!   by the probe;
 //! - each VM runs with the hardware profile of its declared guest and
-//!   firmware (`DeviceProfile::for_guest`, ADR-0027) on the newest machine of
-//!   the profile's family; the accelerator is probed with that family and
-//!   firmware before the first start that needs them (ADR-0007), the q35 +
-//!   UEFI reference at service start;
+//!   firmware (`DeviceProfile::for_guest`, ADR-0027/0028) on the newest
+//!   machine of the profile's family; the accelerator is probed with that
+//!   family and firmware before the first start that needs them (ADR-0007),
+//!   the host reference at service start (q35 + UEFI on x86 hosts, `virt` +
+//!   AArch64 UEFI with `-cpu host` under HVF on Apple Silicon);
+//! - a TPM guest (Windows 11 ARM64) gets its swtpm state directory
+//!   `vms/<vm_id>/tpm` (0700) and the approved swtpm, started by the backend
+//!   in the run's container before QEMU (ADR-0028);
+//! - QEMU distribution folder (`--qemu-dir`, the desktop's Settings): either
+//!   the flat layout of the Windows build (binaries and `share/` together)
+//!   or a Unix prefix (`bin/` + `share/qemu/`, for example Homebrew's
+//!   `/opt/homebrew`, or its `bin/` folder); symbolic links of the binaries
+//!   are resolved once here ([`resolve_qemu_layout`]) and the resolved files
+//!   are hashed and run;
 //! - the graceful stop runs in the background on the backend runtime
 //!   ([`BackendPort::begin_shutdown`]): the supervisor thread is free during
 //!   the ACPI wait and a forced stop can overtake it (F2); a stop whose
@@ -80,8 +92,8 @@ use qemu_backend::probe::{
     probe_host,
 };
 use qemu_backend::{
-    Accelerator, BackendError, CpuModel, DeviceProfile, ExitCause, FirmwareKind, HostCapabilities,
-    JobLimits, MachineFamily, MachineType, ManagedPath, ManagedPaths, ProcessState, QemuRun,
+    Accelerator, BackendError, CpuModel, CpuPolicy, DeviceProfile, ExitCause, FirmwareKind,
+    HostCapabilities, JobLimits, MachineType, ManagedPath, ManagedPaths, ProcessState, QemuRun,
     RunConfig, ShutdownPolicy, VmLaunchSpec, image, prepare,
 };
 use vm_core::media::VerifiedMedia;
@@ -116,17 +128,123 @@ fn io_public(what: &str, e: &std::io::Error) -> PublicError {
     PublicError::infrastructure(format!("QEMU backend: {what}"))
 }
 
-/// Name of the QEMU executable in the approved distribution.
+/// Name of the QEMU system emulator of this host in the distribution
+/// (`qemu-system-aarch64` on Apple Silicon, ADR-0028).
 const QEMU_SYSTEM: &str = if cfg!(windows) {
     "qemu-system-x86_64.exe"
 } else {
-    "qemu-system-x86_64"
+    qemu_backend::probe::QEMU_SYSTEM_NAME
 };
 const QEMU_IMG: &str = if cfg!(windows) {
     "qemu-img.exe"
 } else {
     "qemu-img"
 };
+const SWTPM: &str = if cfg!(windows) { "swtpm.exe" } else { "swtpm" };
+
+/// Executables of a QEMU distribution folder, symbolic links resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QemuLayout {
+    /// QEMU system emulator of this host.
+    pub qemu_system: PathBuf,
+    /// `qemu-img`.
+    pub qemu_img: PathBuf,
+    /// swtpm next to the binaries (or in the prefix `bin/`), if present.
+    pub swtpm: Option<PathBuf>,
+}
+
+/// A path whose last component is a symbolic link is replaced by its
+/// target (Homebrew's `bin/` links into the `Cellar`); other paths are kept
+/// as they are (no `\\?\` form on Windows).
+fn resolve_link(p: &Path) -> std::io::Result<PathBuf> {
+    match std::fs::symlink_metadata(p) {
+        Ok(m) if m.file_type().is_symlink() => std::fs::canonicalize(p),
+        Ok(_) => Ok(p.to_path_buf()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Executables of the QEMU distribution folder chosen by the user:
+/// `<dir>/<qemu-system>` (Windows distribution, or a `bin/` folder chosen
+/// directly) or `<dir>/bin/<qemu-system>` (Unix prefix such as
+/// `/opt/homebrew`). `qemu-img` and `swtpm` are taken from the same folder.
+/// Links are resolved so that the files hashed and run are the real ones;
+/// the QEMU data folder is then found next to the resolved binary
+/// (`share/` or `../share/qemu`, `qemu_backend::probe::qemu_share_dir`).
+pub fn resolve_qemu_layout(dir: &Path) -> Result<QemuLayout, PublicError> {
+    let exists = |p: &Path| std::fs::symlink_metadata(p).is_ok();
+    let bin = if exists(&dir.join(QEMU_SYSTEM)) {
+        dir.to_path_buf()
+    } else if exists(&dir.join("bin").join(QEMU_SYSTEM)) {
+        dir.join("bin")
+    } else {
+        return Err(PublicError::unsupported(format!(
+            "{QEMU_SYSTEM} not found in the QEMU distribution folder (nor in its bin folder)"
+        )));
+    };
+    let real = |name: &str| {
+        resolve_link(&bin.join(name))
+            .map_err(|e| io_public(&format!("QEMU distribution: {name}"), &e))
+    };
+    let swtpm = exists(&bin.join(SWTPM)).then(|| real(SWTPM)).transpose()?;
+    Ok(QemuLayout {
+        qemu_system: real(QEMU_SYSTEM)?,
+        qemu_img: real(QEMU_IMG)?,
+        swtpm,
+    })
+}
+
+/// Kinds of approved hashes a development approvals file can extend.
+const APPROVAL_KINDS: [&str; 4] = ["qemu-system", "qemu-img", "firmware", "swtpm"];
+
+/// Extends the approved hash lists of `probe` with a development approvals
+/// file: one entry per line, `<sha256> <kind> [comment]`, `kind` one of
+/// `qemu-system`, `qemu-img`, `firmware`, `swtpm`; empty lines and lines
+/// starting with `#` are skipped. Any other line is an error: the file is
+/// refused whole rather than partly applied. Returns the number of entries.
+///
+/// These approvals are for development (ADR-0028: the AArch64 firmware
+/// hashes are pinned only when it is released; the macOS QEMU build is not
+/// an ADR-0010 build): they never skip a verification, they only say which
+/// files pass it.
+pub fn load_approvals(probe: &mut ProbeConfig, text: &str) -> Result<usize, String> {
+    let mut n = 0;
+    let mut add: Vec<(&str, String)> = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut it = line.split_whitespace();
+        let (Some(hash), Some(kind)) = (it.next(), it.next()) else {
+            return Err(format!("line {}: expected `<sha256> <kind>`", i + 1));
+        };
+        if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(format!("line {}: not a SHA-256", i + 1));
+        }
+        let Some(kind) = APPROVAL_KINDS.iter().find(|k| **k == kind) else {
+            return Err(format!(
+                "line {}: unknown kind `{kind}` (expected {})",
+                i + 1,
+                APPROVAL_KINDS.join(", ")
+            ));
+        };
+        add.push((kind, hash.to_ascii_lowercase()));
+        n += 1;
+    }
+    for (kind, hash) in add {
+        let list = match kind {
+            "qemu-system" => &mut probe.approved_qemu_system_sha256,
+            "qemu-img" => &mut probe.approved_qemu_img_sha256,
+            "firmware" => &mut probe.approved_firmware_sha256,
+            _ => &mut probe.approved_swtpm_sha256,
+        };
+        if !list.contains(&hash) {
+            list.push(hash);
+        }
+    }
+    Ok(n)
+}
 
 /// Configuration of the real QEMU backend.
 #[derive(Debug, Clone)]
@@ -158,6 +276,13 @@ pub struct QemuSetup {
     /// at creation and disk growth; a disk already created stays bootable even
     /// with less free space.
     pub free_storage_gib: u64,
+    /// Directory of the project's AArch64 firmware (ADR-0028:
+    /// `lightvm-aarch64-code.fd`, `lightvm-aarch64-vars-blank.fd`,
+    /// `lightvm-aarch64-vars-win.fd`); `None`: not looked for.
+    pub firmware_dir: Option<PathBuf>,
+    /// swtpm executable; `None`: the one in the QEMU distribution folder,
+    /// if any ([`resolve_qemu_layout`]).
+    pub swtpm: Option<PathBuf>,
 }
 
 impl QemuSetup {
@@ -173,30 +298,16 @@ impl QemuSetup {
             run_config: RunConfig::default(),
             probe: ProbeConfig::default(),
             free_storage_gib: 256,
+            firmware_dir: None,
+            swtpm: None,
         }
     }
 }
 
 /// Total physical memory in MiB, if detectable.
 fn total_memory_mib() -> Option<u64> {
-    #[cfg(windows)]
-    {
-        let mut s = sysinfo::System::new();
-        s.refresh_memory();
-        let b = s.total_memory();
-        (b > 0).then_some(b / (1024 * 1024))
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let text = std::fs::read_to_string("/proc/meminfo").ok()?;
-        let line = text.lines().find(|l| l.starts_with("MemTotal:"))?;
-        let kib: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
-        Some(kib / 1024)
-    }
-    #[cfg(not(any(windows, target_os = "linux")))]
-    {
-        None
-    }
+    let b = prepare::total_memory_bytes().ok()?;
+    (b > 0).then_some(b / (1024 * 1024))
 }
 
 /// Logical processors of the host.
@@ -246,6 +357,23 @@ fn dir_usage(dir: &Path, excluded: &Path) -> u64 {
         .sum()
 }
 
+/// Whether the firmware (and the TPM emulator) of the host reference
+/// profile passed the probe's verification.
+fn reference_ready(caps: &HostCapabilities) -> bool {
+    let reference = DeviceProfile::host_reference();
+    let firmware = match reference.firmware() {
+        FirmwareKind::Uefi => caps.firmware.is_some(),
+        FirmwareKind::SeaBios => caps.verified_seabios().is_ok(),
+        FirmwareKind::UefiAarch64 => caps.verified_aarch64_firmware().is_ok(),
+    };
+    let tpm = !reference.needs_tpm() || caps.verified_swtpm().is_ok();
+    firmware
+        && tpm
+        && caps
+            .recommended_machine(reference.machine_family())
+            .is_some()
+}
+
 /// Host capacity for the core, derived from the probe.
 fn host_capacity(caps: &HostCapabilities, free_storage_gib: u64) -> HostCapacity {
     HostCapacity {
@@ -254,9 +382,7 @@ fn host_capacity(caps: &HostCapabilities, free_storage_gib: u64) -> HostCapacity
         reserved_memory_mib: 2048,
         free_storage_gib,
         reserved_storage_gib: 16,
-        accelerator_available: caps.accelerator.is_available()
-            && caps.firmware.is_some()
-            && caps.recommended_machine(MachineFamily::Q35).is_some(),
+        accelerator_available: caps.accelerator.is_available() && reference_ready(caps),
         // `screendump` and `input-send-event` through QMP (F2).
         screenshot_available: true,
         input_available: true,
@@ -294,8 +420,22 @@ fn profile_for(config: &lightvm_proto::VmConfig) -> Result<DeviceProfile, Public
     })
 }
 
+/// CPU model of a run with `profile`: `host` for the AArch64 profile under
+/// HVF (ADR-0028), the configured nominal model otherwise.
+fn cpu_for(profile: &DeviceProfile, nominal: Option<&CpuModel>) -> Result<CpuModel, PublicError> {
+    match profile.cpu_policy() {
+        CpuPolicy::Host => {
+            CpuModel::host_for(profile, Accelerator::for_current_host()).map_err(|e| public(&e))
+        }
+        CpuPolicy::Nominal => nominal.cloned().ok_or_else(|| {
+            PublicError::unsupported("no CPU model for this hardware profile on this host")
+        }),
+    }
+}
+
 /// Machine type for `profile`: the newest versioned machine of its family
-/// (q35 for Linux and Windows Vista to 10, i440fx for Windows XP).
+/// (q35 for Linux and Windows Vista to 10, i440fx for Windows XP, virt for
+/// Windows 11 ARM64).
 fn machine_for(
     caps: &HostCapabilities,
     profile: &DeviceProfile,
@@ -322,22 +462,64 @@ fn verified_seabios(caps: &HostCapabilities) -> Result<ManagedPath, PublicError>
     ManagedPath::verify(bios.path.clone()).map_err(|e| public(&e))
 }
 
+/// AArch64 firmware of the run: only the files hashed by the probe with an
+/// approved hash (ADR-0028).
+fn verified_aarch64_firmware(
+    caps: &HostCapabilities,
+) -> Result<&qemu_backend::Aarch64FirmwareInfo, PublicError> {
+    caps.verified_aarch64_firmware().map_err(|e| {
+        crate::diag!("lightvm-service: AArch64 firmware: {e}");
+        PublicError::unsupported(
+            "Windows 11 ARM64 VMs need the LightVM AArch64 firmware with an approved hash: firmware missing from the firmware folder or not approved",
+        )
+    })
+}
+
+/// swtpm of the run: only the executable hashed by the probe with an
+/// approved hash (ADR-0028).
+fn verified_swtpm(caps: &HostCapabilities) -> Result<&qemu_backend::SwtpmInfo, PublicError> {
+    caps.verified_swtpm().map_err(|e| {
+        crate::diag!("lightvm-service: swtpm: {e}");
+        PublicError::unsupported(
+            "VMs with a TPM need the swtpm TPM emulator with an approved hash: swtpm not found or not approved",
+        )
+    })
+}
+
 /// Static probe of the approved binaries (hashes checked before running
-/// them) and real accelerator probe with the machine and CPU model that the
-/// VMs will use.
+/// them) and real accelerator probe with the machine and CPU model of the
+/// host reference profile (ADR-0007). Returns the capabilities, the
+/// reference machine and the nominal CPU model of the x86 profiles (`None`
+/// on Apple Silicon, where every profile runs with `-cpu host`).
 fn probe_caps(
     setup: &QemuSetup,
     rt: &tokio::runtime::Runtime,
-) -> Result<(HostCapabilities, MachineType, CpuModel), PublicError> {
-    let qemu_system =
-        ManagedPath::verify(setup.qemu_dir.join(QEMU_SYSTEM)).map_err(|e| public(&e))?;
-    let qemu_img = ManagedPath::verify(setup.qemu_dir.join(QEMU_IMG)).map_err(|e| public(&e))?;
-    let mut caps = probe_host(&qemu_system, &qemu_img, &setup.probe).map_err(|e| public(&e))?;
+) -> Result<(HostCapabilities, MachineType, Option<CpuModel>), PublicError> {
+    let layout = resolve_qemu_layout(&setup.qemu_dir)?;
+    let qemu_system = ManagedPath::verify(layout.qemu_system).map_err(|e| public(&e))?;
+    let qemu_img = ManagedPath::verify(layout.qemu_img).map_err(|e| public(&e))?;
+    let mut cfg = setup.probe.clone();
+    cfg.firmware_dir.clone_from(&setup.firmware_dir);
+    cfg.swtpm = setup.swtpm.clone().or(layout.swtpm);
+    let mut caps = probe_host(&qemu_system, &qemu_img, &cfg).map_err(|e| public(&e))?;
+    let reference = DeviceProfile::host_reference();
     let machine = caps
-        .recommended_machine(MachineFamily::Q35)
+        .recommended_machine(reference.machine_family())
         .cloned()
-        .ok_or_else(|| PublicError::unsupported("no versioned q35 machine in the binary"))?;
-    let cpu = caps.cpu_model(&setup.cpu_model).map_err(|e| public(&e))?;
+        .ok_or_else(|| {
+            PublicError::unsupported(format!(
+                "no versioned {} machine in the binary",
+                reference.machine_family().label()
+            ))
+        })?;
+    let nominal = match reference.cpu_policy() {
+        CpuPolicy::Nominal => Some(caps.cpu_model(&setup.cpu_model).map_err(|e| public(&e))?),
+        CpuPolicy::Host => None,
+    };
+    let cpu = cpu_for(&reference, nominal.as_ref())?;
+    for d in caps.diagnostics() {
+        crate::diag!("lightvm-service: QEMU probe: {}: {}", d.code, d.message);
+    }
     let probe_dir = setup.private_root.join("probe");
     std::fs::create_dir_all(&probe_dir).map_err(|e| io_public("probe directory", &e))?;
     let probe_dir = ManagedPath::verify(probe_dir).map_err(|e| public(&e))?;
@@ -345,10 +527,10 @@ fn probe_caps(
         &caps,
         Accelerator::for_current_host(),
         &machine,
-        FirmwareKind::Uefi,
+        reference.firmware(),
         &cpu,
         &probe_dir,
-        &setup.probe,
+        &cfg,
     ));
     if !caps.accelerator.is_available() {
         crate::diag!(
@@ -356,7 +538,7 @@ fn probe_caps(
             caps.accelerator.public_message()
         );
     }
-    Ok((caps, machine, cpu))
+    Ok((caps, machine, nominal))
 }
 
 /// Probe of the approved binaries and of the accelerator; returns the host,
@@ -399,9 +581,7 @@ pub fn probe(setup: QemuSetup) -> Result<(QemuHost, QemuVmBackend, HostCapacity)
         }
     }
     let img_dir = ManagedPath::verify(img_dir).map_err(|e| public(&e))?;
-    if cfg!(windows) {
-        prepare::restrict_to_current_user(&img_dir).map_err(|e| public(&e))?;
-    }
+    prepare::restrict_to_current_user(&img_dir).map_err(|e| public(&e))?;
     let image_tool = Arc::new(QemuImageTool {
         qemu_img: caps.qemu_img.clone(),
         log_dir: img_dir,
@@ -519,6 +699,10 @@ struct RunPaths {
     firmware_vars: Option<ManagedPath>,
     /// SeaBIOS image verified by the probe (SeaBIOS profiles only).
     seabios: Option<ManagedPath>,
+    /// swtpm verified by the probe (TPM profiles only).
+    swtpm: Option<ManagedPath>,
+    /// swtpm state directory of the VM (TPM profiles only).
+    tpm_state: Option<ManagedPath>,
     disk: ManagedPath,
     /// Base of the overlay (F3), explicit backing node.
     backing: Option<ManagedPath>,
@@ -589,6 +773,16 @@ impl ManagedPaths for RunPaths {
         self.check(run)?;
         Ok(self.private_dir.clone())
     }
+    fn swtpm(&self) -> qemu_backend::error::Result<ManagedPath> {
+        self.swtpm.clone().ok_or_else(|| BackendError::Unsupported {
+            what: "TPM emulator".into(),
+            hint: "no swtpm prepared for this run".into(),
+        })
+    }
+    fn tpm_state_dir(&self, run: &RunId) -> qemu_backend::error::Result<Option<ManagedPath>> {
+        self.check(run)?;
+        Ok(self.tpm_state.clone())
+    }
 }
 
 /// Absolute path of a managed copy (`ManagedRelPath`, `/` separator).
@@ -607,7 +801,8 @@ pub struct QemuVmBackend {
     rt: tokio::runtime::Runtime,
     caps: HostCapabilities,
     machine: MachineType,
-    cpu: CpuModel,
+    /// Nominal CPU model of the x86 profiles (`None` on Apple Silicon).
+    cpu: Option<CpuModel>,
     setup: QemuSetup,
     runs: BTreeMap<VmId, Arc<QemuRun>>,
     /// Graceful stops running in the background (escalation of
@@ -756,13 +951,28 @@ impl QemuVmBackend {
                 missing.join(", ")
             )));
         }
-        if profile.firmware() == FirmwareKind::SeaBios {
-            verified_seabios(&self.caps)?;
+        if !profile.runs_on_this_host() {
+            return Err(PublicError::unsupported(
+                "this host cannot run the VM's operating system with hardware acceleration",
+            ));
         }
+        match profile.firmware() {
+            FirmwareKind::SeaBios => {
+                verified_seabios(&self.caps)?;
+            }
+            FirmwareKind::UefiAarch64 => {
+                verified_aarch64_firmware(&self.caps)?;
+            }
+            FirmwareKind::Uefi => {}
+        }
+        if profile.needs_tpm() {
+            verified_swtpm(&self.caps)?;
+        }
+        let cpu = cpu_for(profile, self.cpu.as_ref())?;
         let target = profile.probe_target();
         // A probe that did not complete (timeout, launch error) is not a
         // verdict on the host: it is retried at the next start.
-        if target != qemu_backend::ProbeTarget::REFERENCE
+        if target != qemu_backend::ProbeTarget::host_reference()
             && matches!(
                 self.caps.accelerator_for(target),
                 AcceleratorStatus::Unavailable {
@@ -782,7 +992,7 @@ impl QemuVmBackend {
             Accelerator::for_current_host(),
             profile,
             machine,
-            &self.cpu,
+            &cpu,
             &probe_dir,
             &self.setup.probe,
         ));
@@ -936,8 +1146,9 @@ impl QemuVmBackend {
         Ok(())
     }
 
-    /// Firmware files of a run for `kind`: OVMF code (UEFI) or the SeaBIOS
-    /// image verified by the probe (SeaBIOS).
+    /// Firmware files of a run for `kind`: OVMF code (UEFI), the AArch64
+    /// code verified by the probe (ADR-0028) or the SeaBIOS image verified
+    /// by the probe (SeaBIOS).
     fn firmware_files(
         &self,
         kind: FirmwareKind,
@@ -956,7 +1167,49 @@ impl QemuVmBackend {
                 let path = verified_seabios(&self.caps)?;
                 Ok((None, Some(path)))
             }
+            FirmwareKind::UefiAarch64 => {
+                let fw = verified_aarch64_firmware(&self.caps)?;
+                let code = ManagedPath::verify(fw.code.path.clone()).map_err(|e| public(&e))?;
+                Ok((Some(code), None))
+            }
         }
+    }
+
+    /// Template of the per-VM UEFI variables of `profile`: OVMF's for the
+    /// x86 UEFI profiles, the Secure Boot template with the Windows db for
+    /// Windows 11 ARM64 (ADR-0028).
+    fn vars_template(&self, profile: &DeviceProfile) -> Result<Option<PathBuf>, PublicError> {
+        Ok(match profile.firmware() {
+            FirmwareKind::Uefi => self.caps.firmware.as_ref().map(|f| f.vars_template.clone()),
+            FirmwareKind::UefiAarch64 => Some(
+                verified_aarch64_firmware(&self.caps)?
+                    .vars_windows
+                    .path
+                    .clone(),
+            ),
+            FirmwareKind::SeaBios => None,
+        })
+    }
+
+    /// swtpm and the VM's TPM state directory (`vms/<vm_id>/tpm`, created
+    /// with mode 0700) for a TPM profile; `(None, None)` otherwise.
+    fn tpm_files(
+        &self,
+        vm: &VmRecord,
+        profile: &DeviceProfile,
+    ) -> Result<(Option<ManagedPath>, Option<ManagedPath>), PublicError> {
+        if !profile.needs_tpm() {
+            return Ok((None, None));
+        }
+        let swtpm = verified_swtpm(&self.caps)?;
+        let swtpm = ManagedPath::verify(swtpm.path.clone()).map_err(|e| public(&e))?;
+        let dir = managed_abs(
+            &self.setup.catalog_root,
+            CatalogLayout::tpm_state_dir(&vm.id).as_str(),
+        );
+        let dir = ManagedPath::verify(dir).map_err(|e| public(&e))?;
+        prepare::restrict_to_current_user(&dir).map_err(|e| public(&e))?;
+        Ok((Some(swtpm), Some(dir)))
     }
 
     fn prepare(
@@ -977,14 +1230,10 @@ impl QemuVmBackend {
         let private_dir = self.private_dir_for(run_id);
         let run_dir_m = ManagedPath::verify(run_dir.clone()).map_err(|e| public(&e))?;
         let private_m = ManagedPath::verify(private_dir.clone()).map_err(|e| public(&e))?;
-        if cfg!(windows) {
-            // Run directory plus private directory with the user-only ACL.
-            prepare::prepare_run_dirs(&run_dir_m, &private_m).map_err(|e| public(&e))?;
-        } else {
-            std::fs::create_dir_all(&run_dir).map_err(|e| io_public("run directory", &e))?;
-            std::fs::create_dir_all(&private_dir)
-                .map_err(|e| io_public("private directory", &e))?;
-        }
+        // Run directory plus private directory with the user-only ACL
+        // (Windows) or mode 0700 (Unix).
+        prepare::prepare_run_dirs(&run_dir_m, &private_m).map_err(|e| public(&e))?;
+        let (swtpm, tpm_state) = self.tpm_files(vm, profile)?;
         let mut media_paths = BTreeMap::new();
         for m in media {
             let p = managed_abs(&self.setup.catalog_root, m.entry().managed_path.as_str());
@@ -1023,6 +1272,8 @@ impl QemuVmBackend {
                 firmware_code,
                 firmware_vars: vars,
                 seabios,
+                swtpm,
+                tpm_state,
                 disk,
                 backing: Some(readonly[0].clone()),
                 readonly,
@@ -1034,13 +1285,13 @@ impl QemuVmBackend {
         // Firmware state of a UEFI VM: created from the template on the
         // first start, then reused (boot entries written by an installer
         // persist). SeaBIOS keeps no state: nothing is created.
-        let firmware_vars = match (uefi, self.caps.firmware.as_ref()) {
-            (true, Some(fw)) => {
+        let firmware_vars = match (uefi, self.vars_template(profile)?) {
+            (true, Some(template)) => {
                 let vars = managed_abs(
                     &self.setup.catalog_root,
                     CatalogLayout::primary_vars(&vm.id).as_str(),
                 );
-                if ensure_vm_vars(&fw.vars_template, &vars)
+                if ensure_vm_vars(&template, &vars)
                     .map_err(|e| io_public("UEFI variables of the VM", &e))?
                 {
                     crate::diag!(
@@ -1059,6 +1310,8 @@ impl QemuVmBackend {
             firmware_code,
             firmware_vars,
             seabios,
+            swtpm,
+            tpm_state,
             disk,
             backing: None,
             readonly: Vec::new(),
@@ -1135,7 +1388,7 @@ impl VmBackend for QemuVmBackend {
             machine,
             profile,
             accelerator: Accelerator::for_current_host(),
-            cpu: self.cpu.clone(),
+            cpu: cpu_for(&profile, self.cpu.as_ref())?,
             vcpus: vm.config.vcpus,
             memory_mib: u32::try_from(vm.config.memory_mib)
                 .map_err(|_| PublicError::resource_limit("memory out of range"))?,
@@ -1624,6 +1877,11 @@ impl BackendPort for UnavailableBackend {
     fn drain_observations(&mut self) -> Vec<(VmId, BackendObservation)> {
         Vec::new()
     }
+    /// Nothing can start without QEMU: VMs of any guest can be created and
+    /// edited (the start is refused anyway with `unsupported`).
+    fn guest_support(&self) -> vm_core::resources::GuestSupport {
+        vm_core::resources::any_guest
+    }
 }
 
 /// Host without QEMU: no process to terminate.
@@ -1680,6 +1938,75 @@ mod tests {
     use super::*;
     use crate::fakes::sample_config;
     use lightvm_proto::VmLimits;
+    use qemu_backend::MachineFamily;
+
+    /// The QEMU distribution folder: flat (Windows build or a `bin/`
+    /// folder) or a Unix prefix (`/opt/homebrew`), links resolved to the
+    /// real files, swtpm taken from the same folder when present.
+    #[cfg(unix)]
+    #[test]
+    fn qemu_distribution_layouts() {
+        let d = crate::test_support::temp_dir("qemu-layout");
+        assert!(resolve_qemu_layout(&d).is_err());
+        // Homebrew-like prefix: bin/ links into a cellar.
+        let cellar = d.join("Cellar").join("qemu").join("bin");
+        std::fs::create_dir_all(&cellar).unwrap();
+        std::fs::create_dir_all(d.join("bin")).unwrap();
+        for n in [QEMU_SYSTEM, QEMU_IMG] {
+            std::fs::write(cellar.join(n), b"x").unwrap();
+            std::os::unix::fs::symlink(cellar.join(n), d.join("bin").join(n)).unwrap();
+        }
+        let real = |p: PathBuf| std::fs::canonicalize(p).unwrap();
+        let l = resolve_qemu_layout(&d).unwrap();
+        assert_eq!(l.qemu_system, real(cellar.join(QEMU_SYSTEM)));
+        assert_eq!(l.qemu_img, real(cellar.join(QEMU_IMG)));
+        assert_eq!(l.swtpm, None);
+        std::fs::write(d.join("bin").join(SWTPM), b"t").unwrap();
+        // The bin/ folder chosen directly: same files.
+        let b = resolve_qemu_layout(&d.join("bin")).unwrap();
+        assert_eq!((b.qemu_system, b.qemu_img), (l.qemu_system, l.qemu_img));
+        assert_eq!(b.swtpm, Some(d.join("bin").join(SWTPM)));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Development approvals: well-formed entries extend the lists, any
+    /// malformed line refuses the whole file.
+    #[test]
+    fn development_approvals_file() {
+        let h = |c: char| c.to_string().repeat(64);
+        let mut p = ProbeConfig::default();
+        let before = p.approved_qemu_system_sha256.len();
+        let text = format!(
+            "# development\n\n{} firmware code\n{} swtpm\n{} qemu-system Homebrew\n{} qemu-img\n",
+            h('a'),
+            h('B'),
+            h('c'),
+            h('d')
+        );
+        assert_eq!(load_approvals(&mut p, &text).unwrap(), 4);
+        assert!(p.approved_firmware_sha256.contains(&h('a')));
+        assert!(p.approved_swtpm_sha256.contains(&h('b')));
+        assert_eq!(p.approved_qemu_system_sha256.len(), before + 1);
+        assert!(p.approved_qemu_img_sha256.contains(&h('d')));
+        for bad in [
+            format!("{} kernel", h('a')),
+            "abc firmware".to_owned(),
+            h('a'),
+            format!("{}z firmware", &h('a')[1..]),
+        ] {
+            let mut q = ProbeConfig::default();
+            let fw = q.approved_firmware_sha256.clone();
+            assert!(
+                load_approvals(&mut q, &format!("{} swtpm\n{bad}", h('e'))).is_err(),
+                "{bad}"
+            );
+            assert_eq!(q.approved_firmware_sha256, fw, "nothing applied");
+            assert!(
+                !q.approved_swtpm_sha256.contains(&h('e')),
+                "nothing applied"
+            );
+        }
+    }
 
     /// F6: a start on an almost full catalog volume is refused with a
     /// clear `resource_limit` (injected free-space readings).
@@ -1733,6 +2060,11 @@ mod tests {
                 Firmware::Bios,
                 DeviceProfile::WINDOWS_XP,
             ),
+            (
+                GuestOs::Windows11Arm64,
+                Firmware::Uefi,
+                DeviceProfile::WINDOWS11_ARM64,
+            ),
         ] {
             assert_eq!(profile_for(&cfg(os, fw)).unwrap(), want, "{os:?} {fw:?}");
         }
@@ -1762,6 +2094,8 @@ mod tests {
             firmware_code: uefi.then(|| p("code.fd")),
             firmware_vars: uefi.then(|| p("vars.fd")),
             seabios: (!uefi).then(|| p("bios-256k.bin")),
+            swtpm: None,
+            tpm_state: None,
             disk: p("disk.qcow2"),
             backing: None,
             readonly: Vec::new(),

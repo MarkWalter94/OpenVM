@@ -57,9 +57,10 @@ tokio = { version = "=1.53.2", features = ["rt", "sync", "time", "macros"] }
 sha2 = "=0.11.0"
 png = "=0.18.1"
 
-# Native folder picker for the Settings page (no text field): Windows only,
-# the MVP target; elsewhere the paths come from the command line.
-[target.'cfg(windows)'.dependencies]
+# Native file and folder dialogs (no text field): Windows and macOS (AppKit);
+# on Linux rfd needs GTK or the XDG portal, so the paths come from the
+# command line there.
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 rfd = { version = "=0.15.4", default-features = false }
 
 [dev-dependencies]

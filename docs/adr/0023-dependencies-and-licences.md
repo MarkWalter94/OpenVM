@@ -28,6 +28,17 @@ Criteria:
 2. Known advisories checked on every change. — `cargo-deny` job defined; verified locally, CI not yet run (`F1-08`).
 3. Inventory reproducible from the lockfile. — met (`F1-07`, procedure).
 
+### Fonts embedded by the desktop UI (2026-10-12)
+
+Besides the egui default fonts, `lightvm-desktop` embeds two fonts with `include_bytes!` (`apps/desktop/src/theme.rs`); both are under the same `OFL-1.1` already accepted for the egui fonts, ship unmodified, and carry their licence text next to them in `apps/desktop/assets/fonts/`. egui's default fonts stay behind them as fallback for glyph coverage.
+
+| Font | Version | File | Source | SHA-256 of the file | Licence |
+| --- | --- | --- | --- | --- | --- |
+| Departure Mono (Helena Zhang) — headings and labels | 1.500 | `DepartureMono-Regular.otf` | <https://github.com/rektdeckard/departure-mono/releases/download/v1.500/DepartureMono-1.500.zip> (zip SHA-256 `bf3e48059aeef4617ec585bdea81dcc3491c576b3e7a472f52faf40e09ee5c3a`) | `4d53f663155cf8bf7ffc8e688776e719625f7bbb80a8d90073438b249261a2e0` | OFL-1.1 (`DepartureMono-OFL.txt`, identical to `public/assets/LICENSE` in the upstream repository; the repository's MIT `LICENSE` covers only the website) |
+| JetBrains Mono (JetBrains) — body text | 2.304 | `JetBrainsMono-Regular.ttf` | <https://github.com/JetBrains/JetBrainsMono/releases/download/v2.304/JetBrainsMono-2.304.zip> (zip SHA-256 `6f6376c6ed2960ea8a963cd7387ec9d76e3f629125bc33d1fdcd7eb7012f7bbf`) | `a0bf60ef0f83c5ed4d7a75d45838548b1f6873372dfac88f71804491898d138f` | OFL-1.1 (`JetBrainsMono-OFL.txt`, identical to `OFL.txt` upstream) |
+
+They are assets of a workspace crate, not Cargo packages: `cargo-deny` and `lightvm-sbom` do not see them, so this table is their inventory entry; the third-party notices of the F6 package must add the two licence files. OFL conditions kept: the fonts are not sold by themselves, are not modified or renamed, and each copy of the software contains the copyright notice and licence.
+
 ### Patched dependencies (2026-10-10)
 
 `egui-winit` 0.36.2 (MIT OR Apache-2.0) is used as a patched copy in `vendor/egui-winit` (`[patch.crates-io]`, `vendor/README.md`) so that the host clipboard is never read (F1-13). Rules: minimal, marked patches, the same version pinned in ADR-0014, original licence unchanged, reapplication and re-verification on every upgrade; the licence inventory counts the copy as the original dependency.

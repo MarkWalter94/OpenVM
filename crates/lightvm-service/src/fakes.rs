@@ -637,6 +637,11 @@ impl VmBackend for FakeVmBackend {
 }
 
 impl BackendPort for FakeVmBackend {
+    /// The fake runs every guest, whatever the host (service tests create
+    /// x86 VMs on Apple Silicon too).
+    fn guest_support(&self) -> vm_core::resources::GuestSupport {
+        vm_core::resources::any_guest
+    }
     fn image_tool(&self) -> Option<Arc<dyn ImageTool>> {
         self.image_tool.clone().map(|t| t as Arc<dyn ImageTool>)
     }

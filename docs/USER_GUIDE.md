@@ -212,7 +212,7 @@ The new VM appears on the Dashboard as **Stopped**, with system, CPU, memory, vi
 
 ### 6.1 Create a Windows VM
 
-LightVM can also create VMs for **Windows XP, Vista, 7, 8.1 and 10**, with the same wizard. **This is experimental and not yet tested by the project with any Windows installation image** (`docs/COMPATIBILITY.md`, "Windows guest profiles"). **Windows 11 and Windows 8 are not supported**: Windows 11 needs TPM and Secure Boot, which LightVM does not provide and does not work around; Windows 8 is replaced by 8.1.
+LightVM can also create VMs for **Windows XP, Vista, 7, 8.1 and 10**, with the same wizard. **This is experimental and not yet tested by the project with any Windows installation image** (`docs/COMPATIBILITY.md`, "Windows guest profiles"). **Windows 11 (x86/x64) and Windows 8 are not supported** on Windows and Linux hosts: Windows 11 needs TPM and Secure Boot, which LightVM does not provide there and does not work around; Windows 8 is replaced by 8.1. On a Mac with Apple Silicon only Windows 11 ARM64 is offered (section 6.2).
 
 What you need:
 
@@ -222,7 +222,7 @@ What you need:
 Steps (only what differs from section 6):
 
 1. **Installation media**: import the Windows ISO with **Import ISO…**.
-2. **System**: LightVM reads the image and shows what it found, for example *Detected: Windows 7 (64-bit, build 7601)*. If it shows *Not recognized: choose the system*, nothing is selected and you must pick the system in the list before going on; if the suggestion is wrong, pick the right one. The detection is only a suggestion; your choice is what counts. An image of Windows 8 or Windows 11 is not recognized, and those systems are not in the list.
+2. **System**: LightVM reads the image and shows what it found, for example *Detected: Windows 7 (64-bit, build 7601)*. If it shows *Not recognized: choose the system*, nothing is selected and you must pick the system in the list before going on; if the suggestion is wrong, pick the right one. The detection is only a suggestion; your choice is what counts. An image of Windows 8 or of Windows 11 for x86/x64 is not recognized, and those systems are not in the list. An image for another architecture (for example Windows 11 ARM64 on a Windows PC) is shown as *Detected: … — not supported on this host* and nothing is selected.
 3. **Firmware** (Windows 8.1 and 10 only): choose **UEFI** or **Legacy BIOS (SeaBIOS)**. The wizard preselects **UEFI** for 64-bit images and **Legacy BIOS** for 32-bit images; keep the preselection unless you know you need the other one. Windows XP, Vista and 7 always use Legacy BIOS. Choose before installing: a system installed with one firmware does not boot with the other.
 4. **Resources**: when you choose the system, the wizard fills in the standard template for that system and for the architecture of the image (32-bit or 64-bit; see the table below), unless you already changed the values. The step names the template, for example *Template: Windows 7 64-bit — 2 vCPU, 4 GiB RAM, 40 GiB disk*. You can change the values within what the host can give, and **Reset to template** puts them back. For 32-bit Windows the memory stops at 4 GiB, the most a 32-bit Windows can use.
 5. **Network**: **Offline** only, as for every VM. Networking for Windows VMs is planned as separate work.
@@ -253,6 +253,21 @@ During and after the installation:
 - Baselines work as for Ubuntu (section 10). A VM with Legacy BIOS has no firmware settings to save, so its baselines contain only the disk.
 
 **Security note.** Windows XP, Vista, 7 and 8.1 no longer receive security updates, and ordinary support for Windows 10 ended on 14 October 2025. Keeping these VMs offline removes the network as a way in or out, but the systems themselves stay unpatched: only bring in software you trust, through the read-only data disc.
+
+
+### 6.2 Windows 11 ARM64 on a Mac
+
+On a Mac with Apple Silicon (M1 and later) the wizard offers only **Windows 11 (ARM64)**: the Mac's hypervisor runs only ARM64 systems, so the x86 systems of section 6.1 and Ubuntu x86-64 are not in the list (an x86 image is shown as *not supported on this host*). **This is experimental and not verified** (`docs/COMPATIBILITY.md`, "Windows 11 ARM64 on macOS Apple Silicon"; ADR-0028). **Starting the VM is not available yet**: you can create it, but the start waits for the macOS backend, which is still being built.
+
+What you need:
+
+- **Your own Windows 11 ARM64 installation image** (ISO, for example `Win11_25H2_EnglishInternational_Arm64.iso` from Microsoft) and **a valid licence**. LightVM does not include Windows, does not provide keys and does not handle activation; Microsoft names Parallels Desktop and VMware Fusion as the authorised ways to run Windows 11 on Apple Silicon, and LightVM claims no such authorisation. Setup uses *I don't have a product key*; no requirement check is bypassed.
+- At least **4 GiB of memory and 64 GiB of disk** for the VM; the template is 4 vCPU, 6 GiB RAM, 64 GiB disk.
+
+What the wizard shows: after you import the ISO, the System step reads *Detected: Windows 11, ARM64, build 26200 — …* and preselects **Windows 11 (ARM64)**. The firmware is fixed to **UEFI with Secure Boot**, and the hardware summary is *NVMe disk, ramfb display, USB keyboard and tablet, TPM 2.0, UEFI with Secure Boot*. The system and the firmware cannot be changed after creation.
+
+- **TPM 2.0 and Secure Boot** are provided by LightVM: an emulated TPM 2.0 per VM and a firmware built by the project with Secure Boot on and the Microsoft keys, so Windows setup passes its requirement check without workarounds. The TPM state belongs to the VM; baselines are planned to save and restore it together with the disk and the firmware settings (ADR-0028), so secrets sealed to the TPM (BitLocker, Windows Hello) follow the baseline they were created in.
+- **Offline only**, as for every VM: during setup choose to continue without internet / with a local account where setup offers it. If an edition of setup cannot complete offline, it cannot be installed in LightVM.
 
 ---
 
