@@ -90,11 +90,25 @@ pub trait ManagedPaths: Send + Sync {
     /// Approved `qemu-system-x86_64` executable.
     fn qemu_system(&self) -> Result<ManagedPath>;
 
-    /// UEFI firmware code (opened read-only as pflash0).
+    /// UEFI firmware code (opened read-only as pflash0). Used only by the
+    /// UEFI profiles.
     fn firmware_code(&self) -> Result<ManagedPath>;
 
-    /// Per-run copy of the UEFI variables (pflash1, writable).
-    fn firmware_vars(&self, run: &RunId) -> Result<ManagedPath>;
+    /// Per-run copy of the UEFI variables (pflash1, writable). Required
+    /// (`Some`) by the UEFI profiles and refused by the SeaBIOS ones, which
+    /// have no NVRAM (`None`).
+    fn firmware_vars(&self, run: &RunId) -> Result<Option<ManagedPath>>;
+
+    /// SeaBIOS image (`share/bios-256k.bin` found and hashed by the probe,
+    /// [`crate::probe::BiosInfo`]), passed with `-bios`. Used only by the
+    /// SeaBIOS profiles; [`crate::QemuRun::start`] verifies that it is the
+    /// file verified by the probe.
+    fn seabios(&self) -> Result<ManagedPath> {
+        Err(BackendError::Unsupported {
+            what: "SeaBIOS firmware".into(),
+            hint: "no SeaBIOS image provided for this run".into(),
+        })
+    }
 
     /// VM disk for this run (overlay), if any.
     fn disk(&self, run: &RunId) -> Result<Option<ManagedPath>>;

@@ -31,7 +31,7 @@ use lightvm_proto::{
 };
 use tokio::sync::{broadcast, watch};
 
-use crate::cmdline::{QemuCommand, VmLaunchSpec};
+use crate::cmdline::{FirmwareKind, QemuCommand, VmLaunchSpec};
 use crate::error::{BackendError, Result};
 use crate::input::{PressedInput, validate_events};
 use crate::paths::{ManagedPath, ManagedPaths};
@@ -493,7 +493,10 @@ impl QemuRun {
         paths: &dyn ManagedPaths,
         cfg: RunConfig,
     ) -> Result<Self> {
-        match &caps.accelerator {
+        // ADR-0007: the probe must have verified the machine family and
+        // firmware kind of this profile.
+        let probed = caps.accelerator_for(spec.profile.probe_target());
+        match probed {
             AcceleratorStatus::Available { accelerator, .. }
                 if *accelerator == spec.accelerator => {}
             AcceleratorStatus::Available { accelerator, .. } => {
@@ -511,23 +514,35 @@ impl QemuRun {
                 ));
             }
             AcceleratorStatus::Unavailable { .. } => {
-                return Err(BackendError::AcceleratorUnavailable(
-                    caps.accelerator.clone(),
-                ));
+                return Err(BackendError::AcceleratorUnavailable(probed.clone()));
             }
             AcceleratorStatus::NotProbed => {
-                return Err(BackendError::StateConflict(
-                    "accelerator not verified: run the probe first".into(),
-                ));
+                let t = spec.profile.probe_target();
+                return Err(BackendError::StateConflict(format!(
+                    "accelerator not verified with the {} machine and {} firmware: run the \
+                     probe first",
+                    t.family.label(),
+                    t.firmware.label()
+                )));
             }
         }
         caps.machine(spec.machine.as_str())?;
         caps.cpu_model(spec.cpu.as_str())?;
-        if !caps.missing_devices.is_empty() {
+        let missing = caps.missing_devices(&spec.profile);
+        if !missing.is_empty() {
             return Err(BackendError::Unsupported {
-                what: format!("devices {}", caps.missing_devices.join(", ")),
-                hint: "the QEMU binary does not include the required devices".into(),
+                what: format!("devices {}", missing.join(", ")),
+                hint: "the QEMU binary does not include the devices of the hardware profile".into(),
             });
+        }
+        if spec.profile.firmware() == FirmwareKind::SeaBios {
+            // Only the image hashed by the probe, with the verified hash.
+            let verified = caps.verified_seabios()?;
+            if paths.seabios()?.as_path() != verified.path.as_path() {
+                return Err(BackendError::StateConflict(
+                    "the run's SeaBIOS image is not the one verified by the probe".into(),
+                ));
+            }
         }
         let command = spec.build(paths)?;
         if command.program != caps.qemu_system {
@@ -537,7 +552,7 @@ impl QemuRun {
         }
         let run = &spec.run_id;
         let readonly = paths.protected_readonly(run)?;
-        let mut no_delete = vec![paths.firmware_vars(run)?];
+        let mut no_delete: Vec<ManagedPath> = paths.firmware_vars(run)?.into_iter().collect();
         if let Some(d) = paths.disk(run)? {
             no_delete.push(d);
         }

@@ -1,6 +1,6 @@
 # Compatibility
 
-Last updated: 2026-10-09
+Last updated: 2026-10-12
 
 Operational document required by section 17 of `docs/ROADMAP.md`: versions and combinations **actually tested**. **It does not claim support without evidence.** The combinations and release commitments are those of section 5; this document only records the outcome of the tests.
 
@@ -45,6 +45,21 @@ Notes:
 - The TCG row stays outside the AI profile in any case (ADR-0007).
 - The Ubuntu row stays "not verified" if F0 closes with the outcome "verified on Windows only" (section 10 F0; ADR-0016). WSL2, nested VMs and runners without verifiable acceleration do not update it.
 - The "experimental" status of the Windows row reflects F0 feasibility tests passed with known limits; it cannot be advertised as supported and does not imply any mode of the following matrix.
+- The Windows guest row (R2c) stays "not verified": ADR-0027 sets the hardware profiles for Windows XP, Vista, 7, 8.1 and 10, but no Windows guest has been tested. The only recorded test is the SeaBIOS + WHPX spike with the Ubuntu ISO (`R2c-01`), which updates the SeaBIOS component row below and no matrix cell. The per-system status is in "Windows guest profiles".
+
+## Windows guest profiles (ADR-0027)
+
+Host for every row: Windows 11 x86_64 with WHPX, QEMU 11.1.0, CPU `Skylake-Client-v4`, no NIC. Keyboard: built-in PS/2 (i8042); pointer: `usb-tablet`. Windows 8 (6.2) and Windows 11 are not supported (ADR-0027). The Ubuntu/KVM host named by R2c is not addressed here and stays "not verified".
+
+| Guest system | Machine type | Firmware | Disk / CDs | Display / USB | Status | Last test passed | Evidence |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Windows XP (x86, x64) | `pc-i440fx-11.1` | SeaBIOS | `ide-hd` `ide.0` unit 0 / `ide-cd` `ide.1` units 0, 1 | `VGA` / `piix3-usb-uhci` | not verified | none | `R2c-01` (pending) |
+| Windows Vista (x86, x64) | `pc-q35-11.1` | SeaBIOS | `ide-hd` `ide.2` (AHCI) / `ide.0`, `ide.1` | `VGA` / `piix3-usb-uhci` | not verified | none | `R2c-01` (pending) |
+| Windows 7 (x86, x64) | `pc-q35-11.1` | SeaBIOS | `ide-hd` `ide.2` (AHCI) / `ide.0`, `ide.1` | `VGA` / `piix3-usb-uhci` | not verified | none | `R2c-01` (pending) |
+| Windows 8.1 (x86, x64) | `pc-q35-11.1` | OVMF (UEFI, Secure Boot off) or SeaBIOS | `ide-hd` `ide.2` (AHCI) / `ide.0`, `ide.1` | `VGA` / `qemu-xhci` | not verified | none | `R2c-01` (pending) |
+| Windows 10 (x86, x64; build below 22000) | `pc-q35-11.1` | OVMF (UEFI, Secure Boot off) or SeaBIOS | `ide-hd` `ide.2` (AHCI) / `ide.0`, `ide.1` | `VGA` / `qemu-xhci` | not verified | none | `R2c-01` (pending) |
+
+The modes of these systems (manual, baseline, AI offline) are all "not verified"; filtered Internet and guest agent stay "not verified" as for every combination (R1, R4), and the Windows guests are offline only.
 
 ## Mode matrix
 
@@ -87,6 +102,7 @@ If the screendump fallback is used, the update latency must be measured and decl
 | --- | --- | --- | --- | --- | --- | --- |
 | QEMU (`qemu-system-x86_64`, `qemu-img`, `qemu-io`) | 11.1.0 (`v11.1.0-12130-ge470268ff4`) | `https://qemu.weilnetz.de/w64/qemu-w64-setup-20260811.exe` (published SHA-512 verified; SHA-256 matching the winget manifest); Authenticode signature expired | `qemu-system-x86_64.exe` `47d57a6072e0bb3bd98f87926eb129eb1736dfe818c67b3b81ef7ce4edd0b3cd`; `qemu-img.exe` `9d930582d0d574bb106d89982c547688e10b8f356192d302cc3d0ae4e8674534`; `qemu-io.exe` `2b4bce81239a3982d3e274a1409251a8c67b26876ff07e5ce921017e2d42da9a` | Windows 11 | experimental | `F0-02` §2–§3; ADR-0010 |
 | UEFI firmware (OVMF/edk2, from the QEMU build) | `edk2-x86_64-code.fd`; template `edk2-i386-vars.fd` | `share/` of the QEMU 11.1.0 build | code `33090cc07675baa5190d9f1e84bf5176b33bcbfa9bacac522961150cdb6dbb2a`; vars `5d2ac383371b408398accee7ec27c8c09ea5b74a0de0ceea6513388b15be5d1e` | Windows 11 | experimental | `F0-02` §2.3, §9; `F0-05` §6; ADR-0011 |
+| SeaBIOS (legacy firmware, from the QEMU build) | `bios-256k.bin`, `rel-1.17.0-0-gb52ca86e094d-prebuilt.qemu.org` | `share/` of the QEMU 11.1.0 build | `ae6f6aa973aaccc143f57aa960fb035fd9de4daee4ad0cd713322f8c259e7650` | Windows 11 (boot of the Ubuntu ISO to the kernel under WHPX with `Skylake-Client-v4` on `pc-q35-11.1` and `pc-i440fx-11.1`; pauses with `-cpu host`) | experimental | `R2c-01`; `F0-02` §2.3, §9.1; ADR-0027 |
 | Ubuntu LTS guest (ISO) | 26.04.1 LTS desktop amd64 | `releases.ubuntu.com/26.04.1/`, `SHA256SUMS` signed by key `8439 38DF 228D 22F7 B374 2BC0 D94A A3F0 EFE2 1092` | `601e30fbf5d97759367c632e2c33630665039b7e2158fd068403da3ccf1bda1f` | Windows 11 (live boot under WHPX) | experimental | `F0-03`; `F0-02` §9; ADR-0011 |
 
 ## MCP SDK and MCP clients tested

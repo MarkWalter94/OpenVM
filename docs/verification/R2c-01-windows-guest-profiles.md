@@ -1,0 +1,123 @@
+# R2c-01 — Windows guest hardware profiles: SeaBIOS under WHPX and pending tests
+
+- Execution date (UTC): 2026-10-12
+- Executed by: development agent on the project host
+- Roadmap step: section 12, R2 (increment R2c, Windows guest x86_64 on Windows 11/WHPX)
+- Related ADRs: ADR-0027 (Windows guest hardware profiles), ADR-0011, ADR-0007, ADR-0004, ADR-0010
+- Overall outcome: partial (SeaBIOS + WHPX spike and the product command line of every profile verified with the Ubuntu ISO; every Windows guest test not executed)
+
+## Purpose
+
+ADR-0011 excludes legacy BIOS because SeaBIOS with `-cpu host` under WHPX pauses with `WHPX: Unexpected VP exit code 4` (`F0-02` §9.1). ADR-0027 adopts SeaBIOS for the Windows profiles with the nominal CPU model already used by the product. This file records:
+
+1. a spike that checks whether SeaBIOS, passed explicitly with `-bios`, boots under WHPX with the nominal CPU model `Skylake-Client-v4` on `pc-q35-11.1` and on `pc-i440fx-11.1`;
+2. the list of tests still to be run for each Windows guest system (section "Pending").
+
+What this test does NOT demonstrate: anything about a Windows guest. The spike boots the Ubuntu reference ISO, uses `-drive` instead of the product's `-blockdev` command line, has no disk, no `usb-tablet`, no `ide-hd`, no input and no ACPI shutdown. It does not update any cell of `docs/COMPATIBILITY.md` beyond the component row for SeaBIOS.
+
+## Environment
+
+| Item | Value |
+| --- | --- |
+| Host (model, CPU, RAM, storage) | Intel Core i7-12800HX, 31.6 GiB RAM, volume E: |
+| OS and build | Windows 11 Pro 10.0.26200 |
+| Accelerator and state | WHPX (`-accel whpx`) |
+| Toolchain / relevant versions | Windows PowerShell 5.1 (spike script) |
+| QEMU binary (version, origin, SHA-256) | QEMU 11.1.0, `lab/qemu/qemu-11.1.0/qemu-system-x86_64.exe`, SHA-256 `47d57a6072e0bb3bd98f87926eb129eb1736dfe818c67b3b81ef7ce4edd0b3cd` (ADR-0010; recomputed on 2026-10-12: matches) |
+| Firmware (file, version, SHA-256) | SeaBIOS `share/bios-256k.bin` of the same build, 262 144 bytes, SHA-256 `ae6f6aa973aaccc143f57aa960fb035fd9de4daee4ad0cd713322f8c259e7650` (matches `F0-02` §2.3; recomputed on 2026-10-12). Version shown on screen in F0: `rel-1.17.0-0-gb52ca86e094d-prebuilt.qemu.org` |
+| Guest / media (name, version, SHA-256) | `lab/media/ubuntu-26.04.1-desktop-amd64.iso`, SHA-256 `601e30fbf5d97759367c632e2c33630665039b7e2158fd068403da3ccf1bda1f` (recomputed on 2026-10-12: matches) |
+| Graphics session (local, RDP, headless) | `-display none`; screenshots through the human monitor `screendump` |
+| Other conditions (antivirus, group policies, etc.) | as in `F0-02`; Hyper-V and VBS/HVCI active |
+
+## Procedure
+
+Script `lab/logs/seabios-whpx-spike.ps1` (git-ignored, in `E:\OpenVM\lab\logs\`). It starts QEMU with the arguments below, connects to a loopback human monitor, takes a `screendump` at the requested seconds after the start, then sends `quit` (and kills the process if it is still alive):
+
+```text
+qemu-system-x86_64.exe -no-user-config -nodefaults -accel whpx -machine type=<machine>
+  -cpu Skylake-Client-v4 -m 3072 -smp 2 -bios <QEMU>\share\bios-256k.bin
+  -device VGA -nic none -display none -monitor tcp:127.0.0.1:<port>,server,nowait
+  -drive if=none,id=cd0,media=cdrom,readonly=on,file=<ubuntu-26.04.1-desktop-amd64.iso>
+  -device ide-cd,drive=cd0,<bus>,bootindex=0
+```
+
+| Run | `<machine>` | `<bus>` |
+| --- | --- | --- |
+| q35 | `pc-q35-11.1` | `bus=ide.0` |
+| i440fx | `pc-i440fx-11.1` | `bus=ide.1,unit=0` |
+
+Files kept in `E:\OpenVM\lab\logs\` (outside the repository): `seabios-whpx-spike.ps1`, `seabios-whpx-q35-6.png`, `seabios-whpx-q35-25.png`, `seabios-whpx-q35-100.png`, `seabios-whpx-fx-25.png`, `seabios-whpx-fx-100.png`, `seabios-whpx-q35.stderr.txt`, `seabios-whpx-fx.stderr.txt`. The number in each PNG name is the second of the screenshot.
+
+## Results
+
+| Item | Outcome | Evidence |
+| --- | --- | --- |
+| SeaBIOS + `Skylake-Client-v4` under WHPX, `pc-q35-11.1`: boot loader | verified | GRUB menu of the ISO ("Try or Install Ubuntu") in `seabios-whpx-q35-6.png` and `seabios-whpx-q35-25.png` |
+| Same, `pc-q35-11.1`: kernel | verified | Plymouth splash at 1280×800 at 100 s, `seabios-whpx-q35-100.png` |
+| SeaBIOS + `Skylake-Client-v4` under WHPX, `pc-i440fx-11.1`: boot loader | verified | GRUB menu at 25 s, `seabios-whpx-fx-25.png` |
+| Same, `pc-i440fx-11.1`: kernel | verified | Plymouth splash at 1280×800 at 100 s, `seabios-whpx-fx-100.png` |
+| No `Unexpected VP exit` | verified (both runs) | the stderr files contain no WHPX error |
+| stderr content | recorded | both files contain only `host doesn't support requested feature: CPUID[eax=06h].EAX.arat [bit 2]` (twice) and `Ignoring request for interrupt vector 0` |
+
+Reference for the failure that motivated ADR-0011: `lab/logs/fw-seabios-iso.stderr.txt` (F0, 2026-10-09, SeaBIOS with `-cpu host`) contains `Ignoring request for interrupt vector 0` and `WHPX: Unexpected VP exit code 4`.
+
+No measurement samples are taken in this spike (single run per machine type).
+
+## Limits
+
+- Linux ISO only. No Windows installation medium was booted; nothing here shows that any Windows version installs or runs.
+- Not tested: `usb-tablet` (with `qemu-xhci` or `piix3-usb-uhci`), `ide-hd` on `ide.2` (AHCI) or on `ide.0` (i440fx), installation to disk, reboot from disk, Windows ACPI shutdown, the PS/2 keyboard through the console, the per-profile accelerator probe of the product, baseline and restore without NVRAM.
+- One run per machine type; the screenshots show the boot progress at fixed seconds, not the end of the boot.
+- The command line is the spike's (`-drive`, human monitor over TCP), not the product's (`-blockdev`, private QMP and console channels).
+- The `arat` CPUID warning means the host does not expose that feature of the nominal model; its effect on Windows guests is not known.
+
+## Pending
+
+Tests to run on this host for each guest system of ADR-0027, each with its own real installation ISO (identified by name and SHA-256) and the product's command line. None is executed.
+
+Common to every system and firmware:
+
+1. Detection at import: the wizard shows the expected system, architecture and build; correcting it by hand works.
+2. Accelerator probe of the product with the profile's machine type and firmware (ADR-0007): passes, or the start is refused with an explicit error.
+3. Devices observed with QMP match the profile; no NIC (`info network`, `query-pci`; ADR-0004).
+4. Installation to the `ide-hd` disk from the installation CD, with the data CD attached and read-only.
+5. Reboot from the disk after removing the installation medium; the installed system reaches the desktop.
+6. Pointer (`usb-tablet`) follows the console's absolute coordinates, also after resizing; keyboard (PS/2) with the IT and US layouts.
+7. Orderly stop (ACPI power button) completes within the supervisor timeout; forced stop leaves no orphan processes.
+8. Baseline with the VM off, change in the guest, restore: the disk returns to the baseline state; for UEFI the vars are restored and the firmware hash is recorded; for Legacy BIOS the firmware hash is absent.
+
+Per system:
+
+| System | Profile(s) to test | Specific checks |
+| --- | --- | --- |
+| Windows XP (x86; x64 if a medium is available) | `pc-i440fx-11.1`, SeaBIOS, `ide-hd` on `ide.0` unit 0, CDs on `ide.1`, `piix3-usb-uhci` + `usb-tablet` | text-mode setup sees the IDE disk without an F6 driver; USB tablet driver loaded by the installed system |
+| Windows Vista (x86, x64) | `pc-q35-11.1`, SeaBIOS, AHCI `ide.2`, `piix3-usb-uhci` + `usb-tablet` | AHCI disk seen by setup with inbox drivers; VGA resolution available after installation |
+| Windows 7 (x86, x64) | as Vista | as Vista |
+| Windows 8.1 (x86, x64) | `pc-q35-11.1`, UEFI (x64) and SeaBIOS (x86 and x64), AHCI `ide.2`, `qemu-xhci` + `usb-tablet` | UEFI boot of the x64 medium with Secure Boot off; vars persistence across reboots; BIOS default for x86 media |
+| Windows 10 (x86, x64; build below 22000) | as Windows 8.1 | as Windows 8.1 |
+| Windows 8 (6.2) and Windows 11 (build 22000 and later) | none | the media produce no suggestion and the systems are not offered (negative test) |
+
+Also pending: detection of real Windows installation media (the parser's UDF and WIM paths are covered only by synthetic images built in the tests).
+
+## Product command line with the Ubuntu ISO (2026-10-12)
+
+After the spike the profiles were implemented in `qemu-backend`, `lightvm-service`, `vm-core`, `vm-storage` and `guest-detect`. Two ignored real tests run the product's own command line (`-blockdev`, private QMP and console channels, per-profile accelerator probe) with the Ubuntu reference ISO as installation medium. They show that each profile's machine, firmware, controllers and display start under WHPX; they still say nothing about a Windows guest.
+
+| Test | Command | Outcome |
+| --- | --- | --- |
+| `qemu-backend` `real_windows_hardware_profiles` | `LIGHTVM_QEMU_DIR=E:/OpenVM/lab/qemu/qemu-11.1.0 cargo test -p qemu-backend --test real_qemu real_windows_hardware_profiles -- --ignored --test-threads=1` | passed. Profiles Windows 10 BIOS (q35, xHCI), Windows 7 BIOS (q35, UHCI), Windows XP BIOS (`pc-i440fx-11.1`), Windows 10 UEFI (q35, AHCI), each with an empty 1 GiB qcow2 disk: accelerator probe "Available" per (machine family, firmware), state Running, no NIC (`verify_no_nic`), non-black display, no orphan process. Log `lab/logs/f1-03/s1791813424183-profiles.log` |
+| `lightvm-service` `windows_real` | `LIGHTVM_E2E_QEMU_DIR=E:\OpenVM\lab\qemu\qemu-11.1.0 cargo test -p lightvm-service --test windows_real -- --ignored` | passed. Through the real service: import of the Ubuntu ISO detected as `UbuntuLtsX86_64`; VM declared Windows 7 (BIOS) reached Running with a 720×400 frame (BIOS GRUB text menu); VM declared Windows 10 (UEFI) reached Running with a 1280×800 frame (UEFI GRUB menu); screenshots in `lab/logs/win-profiles-service/`. The BIOS VM had no vars file, the UEFI VM had one. Both stops escalated from the ACPI power button to QMP `quit` after the 20 s timeout because the live ISO ignores ACPI at its GRUB menu; no QEMU process was left |
+| Linux path unchanged | `core_path` and `f2` real tests of `lightvm-service`; `real_qemu` probe, start/stop cycles, path rejection and NIC detector of `qemu-backend` | passed |
+
+Parser robustness on synthetic input (`cargo test -p guest-detect`): truncation of every image at every half sector, malformed WIM headers, compressed XML resources, and three property tests (mutated UDF images, mutated ISO 9660 images, random bytes; 512 cases each) return an error or "not recognized" without panic.
+
+Storage: migration `0007_media_detected_guest.sql` adds the detected guest to the media registry (`detected_guest` JSON, `guest_examined` flag). Media imported before the migration are examined once, the first time the media list is read, and the result is stored.
+
+## Required actions
+
+- Obtain installation media for the systems above from the user (LightVM does not redistribute Windows images; licences are the user's).
+- Run the pending tests and record them as dated sections appended to this file or in new `R2c-nn` files.
+
+## Proposed decisions
+
+- None beyond ADR-0027. If a profile fails and no alternative of ADR-0027 passes, propose removing that system from the wizard.

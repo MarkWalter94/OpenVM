@@ -7,9 +7,12 @@
 //! - [`probe`]: [`probe::probe_host`] runs the approved QEMU binary
 //!   (`--version`, `-accel help`, `-machine help`, `-device help`, `-cpu help`,
 //!   `qemu-img --version`/`--help`) with a timeout and produces [`HostCapabilities`];
-//!   [`probe::probe_accelerator`] actually starts QEMU paused and queries
-//!   `query-accelerators` via QMP ([`AcceleratorStatus`]).
-//! - [`cmdline`]: typed [`VmLaunchSpec`] → `Vec<OsString>` arguments;
+//!   [`probe::probe_accelerator`] actually starts QEMU paused with the machine
+//!   family and firmware kind of a hardware profile and queries
+//!   `query-accelerators` via QMP ([`AcceleratorStatus`], cached per
+//!   [`ProbeTarget`] in [`HostCapabilities`]).
+//! - [`cmdline`]: typed [`VmLaunchSpec`] with a closed [`DeviceProfile`]
+//!   (ADR-0027) → `Vec<OsString>` arguments;
 //!   paths come only from [`ManagedPaths`] as already verified
 //!   [`ManagedPath`]s, text values are tokens of a restricted alphabet.
 //! - [`qmp`]: asynchronous (tokio) [`QmpClient`] over a Unix socket, typed
@@ -66,12 +69,14 @@ mod sys;
 pub mod validate;
 
 pub use cmdline::{
-    Accelerator, CpuModel, DiskFormat, DiskSpec, MachineType, QemuCommand, VmLaunchSpec,
+    Accelerator, CpuModel, DeviceProfile, DiskBus, DiskFormat, DiskSpec, DisplayDevice,
+    FirmwareKind, MachineFamily, MachineType, PointerDevice, ProbeFirmware, ProbeTarget,
+    QemuCommand, VmLaunchSpec,
 };
 pub use error::BackendError;
 pub use paths::{ManagedPath, ManagedPaths};
 pub use prepare::{HostResources, RunDirs};
-pub use probe::{AcceleratorStatus, HostCapabilities, ProbeConfig};
+pub use probe::{AcceleratorStatus, BiosInfo, HostCapabilities, ProbeConfig};
 pub use process::{
     ContainmentMechanism, ExitCodeClass, IdentityStatus, JobLimitReport, JobLimits,
     ProcessContainer, ProcessIdentity,

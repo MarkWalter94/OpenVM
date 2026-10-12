@@ -10,7 +10,10 @@ use crate::{
 };
 
 /// Declared guest operating system. In the MVP the reference is Ubuntu LTS
-/// x86_64 with the version and checksum pinned in F0 (ROADMAP 4).
+/// x86_64 with the version and checksum pinned in F0 (ROADMAP 4). The
+/// Windows variants (ADR-0027, ROADMAP R2c) select a hardware profile with
+/// devices the guest has inbox drivers for; they are manual, offline guests
+/// and their compatibility cells stay "not verified" until real evidence.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
 )]
@@ -20,6 +23,177 @@ pub enum GuestOs {
     UbuntuLtsX86_64,
     /// Other Linux x86_64: manageable manually, without compatibility guarantees.
     OtherLinuxX86_64,
+    /// Windows XP (NT 5.1, and XP x64 / NT 5.2): legacy BIOS, i440fx, PIIX IDE.
+    WindowsXp,
+    /// Windows Vista (NT 6.0): legacy BIOS, q35, AHCI.
+    WindowsVista,
+    /// Windows 7 (NT 6.1): legacy BIOS, q35, AHCI.
+    Windows7,
+    /// Windows 8.1 (NT 6.3): UEFI (x64) or legacy BIOS (32-bit), q35, AHCI.
+    Windows81,
+    /// Windows 10 (NT 10.0, build < 22000): UEFI (x64) or legacy BIOS
+    /// (32-bit), q35, AHCI.
+    Windows10,
+}
+
+impl GuestOs {
+    /// Every variant, in display order.
+    pub const ALL: [GuestOs; 7] = [
+        GuestOs::UbuntuLtsX86_64,
+        GuestOs::OtherLinuxX86_64,
+        GuestOs::WindowsXp,
+        GuestOs::WindowsVista,
+        GuestOs::Windows7,
+        GuestOs::Windows81,
+        GuestOs::Windows10,
+    ];
+
+    /// Whether the guest is a Windows release.
+    #[must_use]
+    pub const fn is_windows(self) -> bool {
+        !matches!(self, GuestOs::UbuntuLtsX86_64 | GuestOs::OtherLinuxX86_64)
+    }
+
+    /// Firmware allowed for this guest (ADR-0027). Linux keeps UEFI only
+    /// (ADR-0011); XP, Vista and 7 boot with legacy BIOS only; 8.1 and 10
+    /// boot with UEFI (x64 media) or legacy BIOS (32-bit media).
+    #[must_use]
+    pub const fn allowed_firmware(self) -> &'static [Firmware] {
+        match self {
+            GuestOs::UbuntuLtsX86_64 | GuestOs::OtherLinuxX86_64 => &[Firmware::Uefi],
+            GuestOs::WindowsXp | GuestOs::WindowsVista | GuestOs::Windows7 => &[Firmware::Bios],
+            GuestOs::Windows81 | GuestOs::Windows10 => &[Firmware::Uefi, Firmware::Bios],
+        }
+    }
+
+    /// Recommended firmware for the guest and the architecture of its
+    /// installation media (`None` = unknown).
+    #[must_use]
+    pub const fn recommended_firmware(self, arch: Option<GuestArch>) -> Firmware {
+        match self {
+            GuestOs::UbuntuLtsX86_64 | GuestOs::OtherLinuxX86_64 => Firmware::Uefi,
+            GuestOs::WindowsXp | GuestOs::WindowsVista | GuestOs::Windows7 => Firmware::Bios,
+            GuestOs::Windows81 | GuestOs::Windows10 => match arch {
+                Some(GuestArch::X86) => Firmware::Bios,
+                Some(GuestArch::X86_64) | None => Firmware::Uefi,
+            },
+        }
+    }
+
+    /// Minimum guest memory accepted at creation, in MiB.
+    #[must_use]
+    pub const fn min_memory_mib(self) -> u64 {
+        match self {
+            GuestOs::UbuntuLtsX86_64 | GuestOs::OtherLinuxX86_64 => 512,
+            GuestOs::WindowsXp => 256,
+            GuestOs::WindowsVista | GuestOs::Windows7 => 1024,
+            GuestOs::Windows81 | GuestOs::Windows10 => 2048,
+        }
+    }
+
+    /// Minimum main disk size accepted at creation, in GiB.
+    #[must_use]
+    pub const fn min_disk_gib(self) -> u64 {
+        match self {
+            GuestOs::UbuntuLtsX86_64 | GuestOs::OtherLinuxX86_64 => 8,
+            GuestOs::WindowsXp => 8,
+            GuestOs::WindowsVista | GuestOs::Windows7 => 20,
+            GuestOs::Windows81 | GuestOs::Windows10 => 32,
+        }
+    }
+
+    /// Standard starting template for the guest and the architecture of its
+    /// installation media: typical requirements, comfortably above the
+    /// vendor minimums. `None` = unknown architecture: x86 for XP (most XP
+    /// media), x86_64 for everything else.
+    #[must_use]
+    pub const fn template(self, arch: Option<GuestArch>) -> ResourceTemplate {
+        let x86 = match arch {
+            Some(GuestArch::X86) => true,
+            Some(GuestArch::X86_64) => false,
+            None => matches!(self, GuestOs::WindowsXp),
+        };
+        let (vcpus, memory_mib, disk_gib) = match (self, x86) {
+            (GuestOs::UbuntuLtsX86_64, _) => (2, 4096, 32),
+            (GuestOs::OtherLinuxX86_64, _) => (2, 2048, 20),
+            (GuestOs::WindowsXp, true) => (1, 1024, 16),
+            (GuestOs::WindowsXp, false) => (1, 2048, 20),
+            (GuestOs::WindowsVista, _) => (2, 2048, 40),
+            (GuestOs::Windows7, true) => (2, 2048, 32),
+            (GuestOs::Windows7, false) => (2, 4096, 40),
+            (GuestOs::Windows81, true) => (2, 2048, 32),
+            (GuestOs::Windows81, false) => (2, 4096, 50),
+            (GuestOs::Windows10, true) => (2, 2048, 40),
+            (GuestOs::Windows10, false) => (2, 4096, 64),
+        };
+        ResourceTemplate {
+            vcpus,
+            memory_mib,
+            disk_gib,
+        }
+    }
+
+    /// Largest guest memory that makes sense for the guest, in MiB: 32-bit
+    /// Windows clients address at most 4 GiB. `None` = no OS-specific cap
+    /// (host and catalog limits still apply).
+    #[must_use]
+    pub const fn max_memory_mib(self, arch: Option<GuestArch>) -> Option<u64> {
+        match (self.is_windows(), arch) {
+            (true, Some(GuestArch::X86)) => Some(4096),
+            _ => None,
+        }
+    }
+
+    /// Template resources for unknown architecture, as
+    /// `(vcpus, memory_mib, disk_gib)`; see [`GuestOs::template`].
+    #[must_use]
+    pub const fn suggested_resources(self) -> (u32, u64, u64) {
+        let t = self.template(None);
+        (t.vcpus, t.memory_mib, t.disk_gib)
+    }
+}
+
+/// Standard starting resources of a guest (see [`GuestOs::template`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ResourceTemplate {
+    /// Number of vCPUs.
+    pub vcpus: u32,
+    /// Guest memory in MiB.
+    pub memory_mib: u64,
+    /// Main disk size in GiB.
+    pub disk_gib: u64,
+}
+
+/// Architecture of an installation medium, as detected from its contents.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum GuestArch {
+    /// 32-bit x86.
+    X86,
+    /// x86_64.
+    X86_64,
+}
+
+/// Guest detected from the contents of an installation ISO at import
+/// (ADR-0027). A hint for the wizard, never a guarantee: the user confirms
+/// or corrects it, and nothing in the guest is trusted because of it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DetectedGuest {
+    /// Detected operating system.
+    pub os: GuestOs,
+    /// Detected architecture, if the medium says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arch: Option<GuestArch>,
+    /// Build number (for example 6002 for Vista SP2, 19045 for Windows 10
+    /// 22H2), if the medium says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<u32>,
+    /// Edition or product name read from the medium (text, never interpreted).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edition: Option<Label>,
 }
 
 /// Network profile. In the MVP the only allowed value is `offline` (ADR-0004): no
@@ -45,7 +219,9 @@ pub enum NetworkProfile {
     Offline,
 }
 
-/// Guest firmware. In the MVP only UEFI with managed NVRAM state (ROADMAP 8).
+/// Guest firmware. Linux guests use UEFI with managed NVRAM state (ROADMAP 8,
+/// ADR-0011); legacy Windows guests use SeaBIOS, which has no NVRAM
+/// (ADR-0027). [`GuestOs::allowed_firmware`] says which applies.
 #[derive(
     Clone,
     Copy,
@@ -65,6 +241,16 @@ pub enum Firmware {
     /// UEFI (OVMF) with per-VM NVRAM.
     #[default]
     Uefi,
+    /// Legacy BIOS (SeaBIOS from the verified QEMU build), no NVRAM.
+    Bios,
+}
+
+impl Firmware {
+    /// Whether the firmware keeps per-VM NVRAM state.
+    #[must_use]
+    pub const fn has_nvram(self) -> bool {
+        matches!(self, Firmware::Uefi)
+    }
 }
 
 /// VM configuration requested by the user. No field is a path or
@@ -91,7 +277,7 @@ pub struct VmConfig {
     /// Optional read-only data media (kind `data_iso`), attached with the VM off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_media: Option<MediaId>,
-    /// Firmware; in the MVP only `uefi`.
+    /// Firmware; must be one of [`GuestOs::allowed_firmware`].
     #[serde(default)]
     pub firmware: Firmware,
     /// Execution limits applied by the supervisor to the QEMU process
@@ -223,6 +409,10 @@ pub struct MediaRecord {
     pub declared_origin: Label,
     /// Instant of the approval.
     pub approved_at: UtcTimestamp,
+    /// Guest detected from the contents at import (installation ISOs only;
+    /// `None` = not recognized, data medium, or imported before detection).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detected_guest: Option<DetectedGuest>,
 }
 
 /// Identity of the managed file according to the OS (for example volume serial
@@ -274,8 +464,10 @@ pub struct BaselineRecord {
     pub origin: BaselineOrigin,
     /// SHA-256 of the baseline's disk image.
     pub disk_sha256: Sha256Digest,
-    /// SHA-256 of the baseline's firmware state (NVRAM).
-    pub firmware_sha256: Sha256Digest,
+    /// SHA-256 of the baseline's firmware state (NVRAM); `None` for a
+    /// firmware without NVRAM (legacy BIOS, ADR-0027).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub firmware_sha256: Option<Sha256Digest>,
     /// Protected initial baseline: cannot be deleted or replaced by agent tools.
     pub protected: bool,
     /// Optional label.

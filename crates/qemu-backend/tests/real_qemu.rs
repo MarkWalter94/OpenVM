@@ -26,7 +26,10 @@ use lightvm_proto::{
     DisplayGeometry, ErrorCode, InputEvent, KeyAction, MediaId, PointerMove, QCode, RunId,
     UtcTimestamp, VmState,
 };
-use qemu_backend::cmdline::{Accelerator, CpuModel, DiskFormat, DiskSpec, VmLaunchSpec};
+use qemu_backend::cmdline::{
+    Accelerator, CpuModel, DeviceProfile, DiskFormat, DiskSpec, FirmwareKind, MachineFamily,
+    VmLaunchSpec,
+};
 use qemu_backend::probe::{self, AcceleratorStatus, HostCapabilities, ProbeConfig};
 use qemu_backend::qmp::{QmpClient, QmpConfig};
 use qemu_backend::run::{ExitCause, ProcessState, StopPhase, check_no_nic};
@@ -166,8 +169,8 @@ impl ManagedPaths for LabPaths {
     fn firmware_code(&self) -> qemu_backend::error::Result<ManagedPath> {
         ManagedPath::verify(self.qemu_dir.join("share").join("edk2-x86_64-code.fd"))
     }
-    fn firmware_vars(&self, run: &RunId) -> qemu_backend::error::Result<ManagedPath> {
-        ManagedPath::verify(self.run_dir_path(run).join("vars.fd"))
+    fn firmware_vars(&self, run: &RunId) -> qemu_backend::error::Result<Option<ManagedPath>> {
+        ManagedPath::verify(self.run_dir_path(run).join("vars.fd")).map(Some)
     }
     fn disk(&self, run: &RunId) -> qemu_backend::error::Result<Option<ManagedPath>> {
         ManagedPath::verify(self.run_dir_path(run).join("overlay.qcow2")).map(Some)
@@ -259,12 +262,15 @@ fn probe_caps(lab: &Lab, paths: &LabPaths, log: &mut Log) -> HostCapabilities {
         caps.qemu_system_sha256,
         caps.qemu_img_sha256,
         caps.accelerators,
-        caps.recommended_machine().map(|m| m.as_str().to_owned()),
+        caps.recommended_machine(MachineFamily::Q35).map(|m| m.as_str().to_owned()),
         caps.diagnostics()
     ));
     let probe_dir = ManagedPath::verify(lab.work.join("p").join("probe")).unwrap();
     std::fs::create_dir_all(probe_dir.as_path()).unwrap();
-    let machine = caps.recommended_machine().unwrap().clone();
+    let machine = caps
+        .recommended_machine(MachineFamily::Q35)
+        .unwrap()
+        .clone();
     let cpu = caps.cpu_model(CpuModel::VERIFIED_DEFAULT).unwrap();
     let rt = rt();
     let t0 = Instant::now();
@@ -272,6 +278,7 @@ fn probe_caps(lab: &Lab, paths: &LabPaths, log: &mut Log) -> HostCapabilities {
         &caps,
         Accelerator::Whpx,
         &machine,
+        FirmwareKind::Uefi,
         &cpu,
         &probe_dir,
         &cfg,
@@ -296,7 +303,11 @@ fn rt() -> tokio::runtime::Runtime {
 fn spec(caps: &HostCapabilities, paths: &LabPaths, run_id: RunId) -> VmLaunchSpec {
     VmLaunchSpec {
         run_id,
-        machine: caps.recommended_machine().unwrap().clone(),
+        machine: caps
+            .recommended_machine(MachineFamily::Q35)
+            .unwrap()
+            .clone(),
+        profile: DeviceProfile::LINUX,
         accelerator: Accelerator::Whpx,
         cpu: caps.cpu_model(CpuModel::VERIFIED_DEFAULT).unwrap(),
         vcpus: 2,
@@ -406,7 +417,10 @@ fn real_probe_hash_and_missing_accelerator() {
 
     // 2. Missing accelerator: real probe with `-accel kvm`.
     let probe_dir = ManagedPath::verify(lab.work.join("p").join("probe")).unwrap();
-    let machine = caps.recommended_machine().unwrap().clone();
+    let machine = caps
+        .recommended_machine(MachineFamily::Q35)
+        .unwrap()
+        .clone();
     let cpu = caps.cpu_model("qemu64").unwrap();
     let before = qemu_pids();
     let t0 = Instant::now();
@@ -414,6 +428,7 @@ fn real_probe_hash_and_missing_accelerator() {
         &caps,
         Accelerator::Kvm,
         &machine,
+        FirmwareKind::Uefi,
         &cpu,
         &probe_dir,
         &ProbeConfig::default(),
@@ -1183,8 +1198,8 @@ impl ManagedPaths for FixedDisk<'_> {
     fn firmware_code(&self) -> qemu_backend::error::Result<ManagedPath> {
         self.base.firmware_code()
     }
-    fn firmware_vars(&self, _run: &RunId) -> qemu_backend::error::Result<ManagedPath> {
-        ManagedPath::verify(&self.vars)
+    fn firmware_vars(&self, _run: &RunId) -> qemu_backend::error::Result<Option<ManagedPath>> {
+        ManagedPath::verify(&self.vars).map(Some)
     }
     fn disk(&self, _run: &RunId) -> qemu_backend::error::Result<Option<ManagedPath>> {
         ManagedPath::verify(&self.disk).map(Some)
@@ -1505,4 +1520,184 @@ fn real_cpu_cap_effect_during_boot() {
         uncapped > capped * 1.5,
         "the cap does not reduce consumption: without {uncapped:.1} s, with {capped:.1} s"
     );
+}
+
+/// Paths of a Windows hardware profile run: empty disk created for the
+/// run, UEFI variables only for the UEFI profile, SeaBIOS image of the lab
+/// distribution.
+struct ProfilePaths<'a> {
+    base: &'a LabPaths,
+    disk: PathBuf,
+    vars: Option<PathBuf>,
+}
+
+impl ManagedPaths for ProfilePaths<'_> {
+    fn qemu_system(&self) -> qemu_backend::error::Result<ManagedPath> {
+        self.base.qemu_system()
+    }
+    fn firmware_code(&self) -> qemu_backend::error::Result<ManagedPath> {
+        self.base.firmware_code()
+    }
+    fn firmware_vars(&self, _run: &RunId) -> qemu_backend::error::Result<Option<ManagedPath>> {
+        self.vars.as_ref().map(ManagedPath::verify).transpose()
+    }
+    fn seabios(&self) -> qemu_backend::error::Result<ManagedPath> {
+        ManagedPath::verify(self.base.qemu_dir.join("share").join("bios-256k.bin"))
+    }
+    fn disk(&self, _run: &RunId) -> qemu_backend::error::Result<Option<ManagedPath>> {
+        ManagedPath::verify(&self.disk).map(Some)
+    }
+    fn protected_readonly(&self, _run: &RunId) -> qemu_backend::error::Result<Vec<ManagedPath>> {
+        Ok(Vec::new())
+    }
+    fn media(&self, media: &MediaId) -> qemu_backend::error::Result<ManagedPath> {
+        self.base.media(media)
+    }
+    fn run_dir(&self, run: &RunId) -> qemu_backend::error::Result<ManagedPath> {
+        self.base.run_dir(run)
+    }
+    fn private_dir(&self, run: &RunId) -> qemu_backend::error::Result<ManagedPath> {
+        self.base.private_dir(run)
+    }
+}
+
+/// ADR-0027: the Windows hardware profiles (SeaBIOS on q35 with xHCI and
+/// UHCI, SeaBIOS on i440fx with PIIX IDE, UEFI on q35 with AHCI) start
+/// under WHPX with an empty disk and the lab ISO on the install CD: the
+/// accelerator probe of each machine family / firmware combination
+/// passes, the VM reaches `running`, the no-NIC check passes, the display
+/// is not black after a few seconds, and the process leaves no orphan.
+#[test]
+#[ignore = "needs real QEMU: set LIGHTVM_QEMU_DIR"]
+fn real_windows_hardware_profiles() {
+    let _g = SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let lab = require_lab!();
+    let mut log = Log::new(&lab, "profiles");
+    let paths = lab_paths(&lab, &mut log);
+    let mut caps = probe_caps(&lab, &paths, &mut log);
+    log.line(format!(
+        "SeaBIOS: {:?}; i440fx machines: {:?}",
+        caps.seabios,
+        caps.recommended_machine(MachineFamily::I440fx)
+            .map(|m| m.as_str().to_owned())
+    ));
+    assert!(caps.verified_seabios().is_ok(), "{:?}", caps.seabios);
+    let probe_dir = ManagedPath::verify(lab.work.join("p").join("probe")).unwrap();
+    let cpu = caps.cpu_model("Skylake-Client-v4").unwrap();
+    let rt = rt();
+    for (name, profile) in [
+        ("win10-bios-q35-xhci", DeviceProfile::WINDOWS_BIOS),
+        ("win7-bios-q35-uhci", DeviceProfile::WINDOWS_VISTA_7),
+        ("xp-bios-i440fx", DeviceProfile::WINDOWS_XP),
+        ("win10-uefi-q35-ahci", DeviceProfile::WINDOWS_UEFI),
+    ] {
+        let machine = caps
+            .recommended_machine(profile.machine_family())
+            .unwrap()
+            .clone();
+        let t0 = Instant::now();
+        let status = rt.block_on(probe::probe_accelerator_for(
+            &mut caps,
+            Accelerator::Whpx,
+            &profile,
+            &machine,
+            &cpu,
+            &probe_dir,
+            &ProbeConfig::default(),
+        ));
+        log.line(format!(
+            "{name}: probe {:?} ({:?}) -> {status} in {:?}",
+            profile.probe_target(),
+            machine.as_str(),
+            t0.elapsed()
+        ));
+        assert!(status.is_available(), "{name}: {status}");
+        assert!(caps.accelerator_for(profile.probe_target()).is_available());
+
+        let run_id = RunId::new_v7();
+        let mp = |p: PathBuf| ManagedPath::verify(p).unwrap();
+        let rd = paths.run_dir_path(&run_id);
+        prepare::prepare_run_dirs(&mp(rd.clone()), &mp(paths.private_dir_path(&run_id)))
+            .expect("run directories");
+        let disk = rd.join("disk.qcow2");
+        prepare::create_disk(
+            &mp(paths.qemu_img()),
+            &mp(disk.clone()),
+            DiskFormat::Qcow2,
+            1024,
+            prepare::QEMU_IMG_TIMEOUT,
+        )
+        .expect("qemu-img create");
+        let vars = profile.firmware().has_vars().then(|| {
+            let v = rd.join("vars.fd");
+            prepare::copy_firmware_vars(
+                &mp(paths.qemu_dir.join("share").join("edk2-i386-vars.fd")),
+                &mp(v.clone()),
+            )
+            .unwrap();
+            v
+        });
+        let pp = ProfilePaths {
+            base: &paths,
+            disk,
+            vars,
+        };
+        let s = VmLaunchSpec {
+            run_id,
+            machine: machine.clone(),
+            profile,
+            accelerator: Accelerator::Whpx,
+            cpu: cpu.clone(),
+            vcpus: 2,
+            memory_mib: 2048,
+            disk: Some(DiskSpec {
+                format: DiskFormat::Qcow2,
+            }),
+            install_media: Some(paths.iso_id),
+            data_media: None,
+            limits: qemu_backend::JobLimits::default(),
+        };
+        let t0 = Instant::now();
+        let run = rt
+            .block_on(QemuRun::start(&caps, &s, &pp, RunConfig::default()))
+            .unwrap_or_else(|e| panic!("{name}: start failed: {e}"));
+        log.line(format!(
+            "{name}: started in {:?}, args {:?}",
+            t0.elapsed(),
+            run.command().args
+        ));
+        assert_eq!(run.state(), ProcessState::Running, "{name}");
+        assert_eq!(run.accelerator().enabled, "whpx");
+        let t_run = Instant::now();
+        let mut non_black = 0.0;
+        while t_run.elapsed() < Duration::from_secs(8) {
+            std::thread::sleep(Duration::from_secs(1));
+            let (_, img) = rt.block_on(run.screenshot_rgb()).unwrap();
+            non_black = img.non_black_percent();
+            assert_eq!(run.state(), ProcessState::Running, "{name}: exited early");
+        }
+        rt.block_on(run.verify_no_nic())
+            .unwrap_or_else(|e| panic!("{name}: NIC check: {e}"));
+        let rec = rt.block_on(run.reconcile(Duration::from_secs(5))).unwrap();
+        log.line(format!(
+            "{name}: after {:?} state {:?}, non-black {non_black:.2}%, no NIC",
+            t_run.elapsed(),
+            rec.observed.state
+        ));
+        assert_eq!(rec.observed.state, VmState::Running, "{name}: {rec:?}");
+        assert!(non_black > 0.0, "{name}: display still black");
+        let id = run.identity();
+        let _ = rt.block_on(run.emergency_stop(Duration::from_secs(10)));
+        let _ = rt.block_on(run.close());
+        assert_no_orphan(&id);
+    }
+    // Probe cache: one entry per non-reference combination.
+    log.line(format!(
+        "accelerator cache: reference {}; others {:?}",
+        caps.accelerator,
+        caps.profile_accelerators.keys().collect::<Vec<_>>()
+    ));
+    assert_eq!(caps.profile_accelerators.len(), 2);
 }

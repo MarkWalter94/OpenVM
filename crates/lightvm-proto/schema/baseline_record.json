@@ -19,8 +19,15 @@
       "$ref": "#/$defs/Sha256Digest"
     },
     "firmware_sha256": {
-      "description": "SHA-256 of the baseline's firmware state (NVRAM).",
-      "$ref": "#/$defs/Sha256Digest"
+      "description": "SHA-256 of the baseline's firmware state (NVRAM); `None` for a\nfirmware without NVRAM (legacy BIOS, ADR-0027).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "id": {
       "description": "Identifier.",
@@ -56,7 +63,6 @@
     "config_revision",
     "origin",
     "disk_sha256",
-    "firmware_sha256",
     "protected",
     "created_at"
   ],

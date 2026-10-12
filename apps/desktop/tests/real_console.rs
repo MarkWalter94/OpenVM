@@ -120,13 +120,11 @@ fn wizard_start_and_console_with_real_qemu() {
     h.run_steps(3);
     wait(&mut h, "supervisor connected", 30, |h| enabled(h, "New VM"));
 
-    // Wizard: name, system, import of the ISO, resources, create.
+    // Wizard: name, import of the ISO, system, resources, create.
     h.get_by_role_and_label(Role::Button, "New VM").click();
     h.run_steps(3);
     h.run_steps(3);
     h.get_by_role(Role::TextInput).type_text("e2e-ubuntu");
-    h.run_steps(3);
-    h.get_by_role_and_label(Role::Button, "Next").click();
     h.run_steps(3);
     h.get_by_role_and_label(Role::Button, "Next").click();
     h.run_steps(3);

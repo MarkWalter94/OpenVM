@@ -413,3 +413,39 @@ fn needs_review_state_requires_the_latest_schema() {
     migrate::migrate(&mut conn, &db).unwrap();
     insert(&conn).unwrap();
 }
+
+#[test]
+fn media_of_a_v6_catalog_are_not_examined_after_the_upgrade() {
+    let dir = common::tempdir();
+    let db = dir.path().join(DB_FILE);
+    let id = "0190f7a4-0000-7000-8000-0000000000e1";
+    {
+        let mut conn = migrate::open_connection(&db).unwrap();
+        migrate::migrate_to(&mut conn, &db, 6).unwrap();
+        conn.execute(
+            "INSERT INTO media(media_id, sha256, size_bytes, kind, declared_origin, approved_at,
+                               managed_path, status)
+             VALUES (?1, ?2, 10, 'iso', 'legacy', 'x', ?3, 'approved')",
+            params![id, "a".repeat(64), format!("media/{id}.iso")],
+        )
+        .unwrap();
+    }
+    let mut cat = Catalog::open(dir.path()).unwrap();
+    assert_eq!(cat.schema_version().unwrap(), LATEST_VERSION);
+    let mid: vm_storage::MediaId = id.parse().unwrap();
+    let m = cat.read(|tx| tx.media(&mid)).unwrap();
+    assert!(!m.guest_examined, "imported before the detection");
+    assert!(m.detected_guest.is_none());
+    // The CHECK rejects text that is not JSON.
+    let conn = migrate::open_connection(&db).unwrap();
+    assert!(
+        conn.execute(
+            "UPDATE media SET detected_guest = 'not json' WHERE media_id = ?1",
+            params![id],
+        )
+        .is_err()
+    );
+    cat.with_tx(|tx| tx.set_media_detected_guest(&mid, None))
+        .unwrap();
+    assert!(cat.read(|tx| tx.media(&mid)).unwrap().guest_examined);
+}

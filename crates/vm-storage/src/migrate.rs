@@ -62,6 +62,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "0006_baseline_state.sql",
         sql: include_str!("../migrations/0006_baseline_state.sql"),
     },
+    Migration {
+        version: 7,
+        name: "0007_media_detected_guest.sql",
+        sql: include_str!("../migrations/0007_media_detected_guest.sql"),
+    },
 ];
 
 /// Latest schema version known to this binary.

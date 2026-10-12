@@ -1,6 +1,6 @@
 # Project status
 
-Last updated: 2026-10-11
+Last updated: 2026-10-12
 
 Operational document required by section 17 of `docs/ROADMAP.md`: current phase, impediments and progress. **This file does not change the Definition of Done (section 11), the scope or the exit criteria.** A status reported here does not count as verification: the evidence is in `docs/verification/`.
 
@@ -120,6 +120,19 @@ Started on 2026-10-11 at the owner's request; not usable for the exit criteria u
 - F5: two real LLM clients with a successful path each (Claude Code: `claude auth login`, then the F5 real-client test; a second client with native MCP stdio support to be chosen).
 - F6: code signing and independent review (ADR-0020, not available), tests on at least two physical hosts (Intel/AMD if both declared), Linux (R2a).
 
+## R2c work: Windows guests
+
+Started on 2026-10-12 at the owner's request (ADR-0027); it does not change the MVP scope or any exit criterion, and R2c is not closed by it.
+
+| Item | Evidence | Declared outcome |
+| --- | --- | --- |
+| Scope: Windows XP, Vista, 7, 8.1, 10 guests through the normal wizard, ISO detection confirmed by the user, offline only; Windows 8 and 11 not supported | ADR-0027 | decided; implementation in progress |
+| SeaBIOS (`bios-256k.bin`, pinned hash) under WHPX with `Skylake-Client-v4` on `pc-q35-11.1` and `pc-i440fx-11.1` | `R2c-01` | verified with the Ubuntu ISO only (boot loader and kernel reached, no `Unexpected VP exit`) |
+| Install, reboot, pointer/keyboard, shutdown, baseline/restore for each Windows system | `R2c-01` (pending) | not verified: no Windows installation image tested |
+| Ubuntu/KVM host for Windows guests (R2c) | — | not verified (no physical Linux host, ADR-0016) |
+
+The Windows cells of `docs/COMPATIBILITY.md` stay "not verified". Windows installation media and licences are provided by the user.
+
 ## Linux lab outcome
 
 **"Verified on Windows only"**, confirmed by the project owner on 2026-10-10 (ADR-0016); the physical Linux server for R2a will be obtained later. With this outcome Windows is the only MVP target, the Ubuntu cell of `docs/COMPATIBILITY.md` stays "not verified" and Linux qualification is deferred to R2a, which does not close without the test on a physical host. WSL2 was used only for builds and accelerator-independent tests (`F0-07`).
@@ -133,7 +146,7 @@ Started on 2026-10-11 at the owner's request; not usable for the exit criteria u
 | `docs/COMPATIBILITY.md` | Windows 11 row → Linux "experimental" with the F0 data; Ubuntu row "not verified"; completed in commit `aa04ccd` |
 | `docs/TESTING.md` | F0 measurements recorded; egui_kittest tested; completed in commit `aa04ccd`; F1-18 measurements missing |
 | `docs/RELEASE_PLAN.md` | F0 backlog with outcomes; F1 backlog with per-item progress |
-| `docs/adr/` | 21 ADRs Accepted, of which 0016 conditional on user confirmation and 0021, 0023 partially accepted; ADRs Proposed or partially open on 2026-10-10: 0015 part A (Linux, R2a), 0017 (per-VM limits accepted; host thresholds and full storage in F3); accepted on 2026-10-10: 0015 part B, 0016, 0020, 0022, 0026 |
+| `docs/adr/` | 21 ADRs Accepted, of which 0016 conditional on user confirmation and 0021, 0023 partially accepted; ADRs Proposed or partially open on 2026-10-10: 0015 part A (Linux, R2a), 0017 (per-VM limits accepted; host thresholds and full storage in F3); accepted on 2026-10-10: 0015 part B, 0016, 0020, 0022, 0026; ADR-0027 (Windows guest hardware profiles) Accepted on 2026-10-12 with evidence pending |
 
 ## Impediments and open points
 

@@ -110,6 +110,24 @@ pub fn sample_config(name: &str) -> VmConfig {
     }
 }
 
+/// Test configuration for `guest_os` with `firmware` (ADR-0027) and the
+/// suggested resources of that guest (within the MVP limits).
+pub fn sample_guest_config(
+    name: &str,
+    guest_os: GuestOs,
+    firmware: lightvm_proto::Firmware,
+) -> VmConfig {
+    let (vcpus, memory_mib, disk_gib) = guest_os.suggested_resources();
+    VmConfig {
+        guest_os,
+        firmware,
+        vcpus,
+        memory_mib,
+        disk_gib,
+        ..sample_config(name)
+    }
+}
+
 #[derive(Debug, Default)]
 struct MemoryInner {
     vms: BTreeMap<VmId, VmRecord>,
@@ -359,6 +377,7 @@ fn fake_entry(
             size_bytes: size,
             declared_origin,
             approved_at: UtcTimestamp::now(),
+            detected_guest: None,
         },
         managed_path: ManagedRelPath::parse(format!("media/{id}.iso"))
             .map_err(|_| PublicError::infrastructure("path"))?,
@@ -527,17 +546,21 @@ impl VmBackend for FakeVmBackend {
         run_id: RunId,
         media: &[VerifiedMedia],
     ) -> Result<(), PublicError> {
-        let overlay = self
+        let disks = self
             .start_disks
             .get(&vm.id)
-            .is_some_and(|(r, _)| *r == run_id);
+            .filter(|(r, _)| *r == run_id)
+            .map(|(_, d)| d);
+        // A current state without UEFI variables (legacy BIOS VM, ADR-0027).
+        let no_vars = disks.is_some_and(|d| d.vars.is_none());
         push(
             &self.calls,
             format!(
-                "vm_start:{}:media={}{}",
+                "vm_start:{}:media={}{}{}",
                 vm.config.name,
                 media.len(),
-                if overlay { ":overlay" } else { "" }
+                if no_vars { ":no_vars" } else { "" },
+                if disks.is_some() { ":overlay" } else { "" }
             ),
         );
         Ok(())

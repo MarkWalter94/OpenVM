@@ -24,7 +24,14 @@
 //!   count towards the VM storage budget (it counts in `disk_used_bytes`);
 //! - the UEFI variables are per VM (`vms/<vm_id>/firmware/primary.vars.fd`),
 //!   copied from the firmware template of the QEMU distribution on the first
-//!   start and reused afterwards ([`ensure_vm_vars`], F2);
+//!   start and reused afterwards ([`ensure_vm_vars`], F2); a legacy BIOS VM
+//!   (SeaBIOS, ADR-0027) has none, and runs with the SeaBIOS image verified
+//!   by the probe;
+//! - each VM runs with the hardware profile of its declared guest and
+//!   firmware (`DeviceProfile::for_guest`, ADR-0027) on the newest machine of
+//!   the profile's family; the accelerator is probed with that family and
+//!   firmware before the first start that needs them (ADR-0007), the q35 +
+//!   UEFI reference at service start;
 //! - the graceful stop runs in the background on the backend runtime
 //!   ([`BackendPort::begin_shutdown`]): the supervisor thread is free during
 //!   the ACPI wait and a forced stop can overtake it (F2); a stop whose
@@ -68,11 +75,14 @@ use lightvm_proto::{
     Screenshot, VmId, VmRecord,
 };
 use qemu_backend::cmdline::{DiskFormat, DiskSpec};
-use qemu_backend::probe::{ProbeConfig, probe_accelerator, probe_host};
+use qemu_backend::probe::{
+    AcceleratorStatus, ProbeConfig, UnavailableReason, probe_accelerator, probe_accelerator_for,
+    probe_host,
+};
 use qemu_backend::{
-    Accelerator, BackendError, CpuModel, ExitCause, HostCapabilities, JobLimits, MachineType,
-    ManagedPath, ManagedPaths, ProcessState, QemuRun, RunConfig, ShutdownPolicy, VmLaunchSpec,
-    image, prepare,
+    Accelerator, BackendError, CpuModel, DeviceProfile, ExitCause, FirmwareKind, HostCapabilities,
+    JobLimits, MachineFamily, MachineType, ManagedPath, ManagedPaths, ProcessState, QemuRun,
+    RunConfig, ShutdownPolicy, VmLaunchSpec, image, prepare,
 };
 use vm_core::media::VerifiedMedia;
 use vm_core::ports::VmBackend;
@@ -246,7 +256,7 @@ fn host_capacity(caps: &HostCapabilities, free_storage_gib: u64) -> HostCapacity
         reserved_storage_gib: 16,
         accelerator_available: caps.accelerator.is_available()
             && caps.firmware.is_some()
-            && caps.recommended_machine().is_some(),
+            && caps.recommended_machine(MachineFamily::Q35).is_some(),
         // `screendump` and `input-send-event` through QMP (F2).
         screenshot_available: true,
         input_available: true,
@@ -274,6 +284,44 @@ fn check_start_space(free_bytes: Option<u64>) -> Result<(), PublicError> {
     }
 }
 
+/// Hardware profile of a VM (ADR-0027): from its declared guest and firmware.
+fn profile_for(config: &lightvm_proto::VmConfig) -> Result<DeviceProfile, PublicError> {
+    DeviceProfile::for_guest(config.guest_os, config.firmware).map_err(|e| {
+        crate::diag!("lightvm-service: hardware profile: {e}");
+        PublicError::invalid_argument(
+            "the firmware of the VM is not supported by its operating system",
+        )
+    })
+}
+
+/// Machine type for `profile`: the newest versioned machine of its family
+/// (q35 for Linux and Windows Vista to 10, i440fx for Windows XP).
+fn machine_for(
+    caps: &HostCapabilities,
+    profile: &DeviceProfile,
+) -> Result<MachineType, PublicError> {
+    let family = profile.machine_family();
+    caps.recommended_machine(family).cloned().ok_or_else(|| {
+        PublicError::unsupported(format!(
+            "the QEMU binary has no versioned {} machine type, required by the hardware profile of this VM",
+            family.label()
+        ))
+    })
+}
+
+/// SeaBIOS image of the run: only the file found and hashed by the probe,
+/// with the hash of the verified QEMU build (ADR-0027).
+fn verified_seabios(caps: &HostCapabilities) -> Result<ManagedPath, PublicError> {
+    let bios = caps.verified_seabios().map_err(|e| {
+        crate::diag!("lightvm-service: SeaBIOS: {e}");
+        PublicError::unsupported(format!(
+            "legacy BIOS VMs need the SeaBIOS image of the approved QEMU build: {} not found or not the verified build; reinstall the approved QEMU distribution",
+            qemu_backend::probe::SEABIOS_FILE
+        ))
+    })?;
+    ManagedPath::verify(bios.path.clone()).map_err(|e| public(&e))
+}
+
 /// Static probe of the approved binaries (hashes checked before running
 /// them) and real accelerator probe with the machine and CPU model that the
 /// VMs will use.
@@ -286,7 +334,7 @@ fn probe_caps(
     let qemu_img = ManagedPath::verify(setup.qemu_dir.join(QEMU_IMG)).map_err(|e| public(&e))?;
     let mut caps = probe_host(&qemu_system, &qemu_img, &setup.probe).map_err(|e| public(&e))?;
     let machine = caps
-        .recommended_machine()
+        .recommended_machine(MachineFamily::Q35)
         .cloned()
         .ok_or_else(|| PublicError::unsupported("no versioned q35 machine in the binary"))?;
     let cpu = caps.cpu_model(&setup.cpu_model).map_err(|e| public(&e))?;
@@ -297,6 +345,7 @@ fn probe_caps(
         &caps,
         Accelerator::for_current_host(),
         &machine,
+        FirmwareKind::Uefi,
         &cpu,
         &probe_dir,
         &setup.probe,
@@ -464,8 +513,12 @@ impl ImageTool for QemuImageTool {
 struct RunPaths {
     run_id: RunId,
     qemu_system: ManagedPath,
-    firmware_code: ManagedPath,
-    firmware_vars: ManagedPath,
+    /// OVMF code (UEFI profiles only).
+    firmware_code: Option<ManagedPath>,
+    /// UEFI variables of the VM (UEFI profiles only: SeaBIOS has no NVRAM).
+    firmware_vars: Option<ManagedPath>,
+    /// SeaBIOS image verified by the probe (SeaBIOS profiles only).
+    seabios: Option<ManagedPath>,
     disk: ManagedPath,
     /// Base of the overlay (F3), explicit backing node.
     backing: Option<ManagedPath>,
@@ -491,11 +544,24 @@ impl ManagedPaths for RunPaths {
         Ok(self.qemu_system.clone())
     }
     fn firmware_code(&self) -> qemu_backend::error::Result<ManagedPath> {
-        Ok(self.firmware_code.clone())
+        self.firmware_code
+            .clone()
+            .ok_or_else(|| BackendError::Unsupported {
+                what: "UEFI firmware".into(),
+                hint: "no UEFI firmware prepared for this run".into(),
+            })
     }
-    fn firmware_vars(&self, run: &RunId) -> qemu_backend::error::Result<ManagedPath> {
+    fn firmware_vars(&self, run: &RunId) -> qemu_backend::error::Result<Option<ManagedPath>> {
         self.check(run)?;
         Ok(self.firmware_vars.clone())
+    }
+    fn seabios(&self) -> qemu_backend::error::Result<ManagedPath> {
+        self.seabios
+            .clone()
+            .ok_or_else(|| BackendError::Unsupported {
+                what: "SeaBIOS firmware".into(),
+                hint: "no SeaBIOS image prepared for this run".into(),
+            })
     }
     fn disk(&self, run: &RunId) -> qemu_backend::error::Result<Option<ManagedPath>> {
         self.check(run)?;
@@ -672,6 +738,66 @@ impl QemuVmBackend {
         Ok(())
     }
 
+    /// ADR-0007 per profile: the accelerator must have been probed with the
+    /// machine family and firmware of `profile` (q35 + UEFI is probed at
+    /// service start; the others on the first start that needs them, then
+    /// cached until QEMU or its firmware change). Before probing, the
+    /// profile's devices and firmware are checked so that the refusal says
+    /// what is missing.
+    fn ensure_profile_probe(
+        &mut self,
+        profile: &DeviceProfile,
+        machine: &MachineType,
+    ) -> Result<(), PublicError> {
+        let missing = self.caps.missing_devices(profile);
+        if !missing.is_empty() {
+            return Err(PublicError::unsupported(format!(
+                "the QEMU binary lacks devices of the hardware profile of this VM: {}",
+                missing.join(", ")
+            )));
+        }
+        if profile.firmware() == FirmwareKind::SeaBios {
+            verified_seabios(&self.caps)?;
+        }
+        let target = profile.probe_target();
+        // A probe that did not complete (timeout, launch error) is not a
+        // verdict on the host: it is retried at the next start.
+        if target != qemu_backend::ProbeTarget::REFERENCE
+            && matches!(
+                self.caps.accelerator_for(target),
+                AcceleratorStatus::Unavailable {
+                    reason: UnavailableReason::ProbeFailed { .. },
+                    ..
+                }
+            )
+        {
+            self.caps
+                .record_accelerator(target, AcceleratorStatus::NotProbed);
+        }
+        let probe_dir = self.setup.private_root.join("probe");
+        std::fs::create_dir_all(&probe_dir).map_err(|e| io_public("probe directory", &e))?;
+        let probe_dir = ManagedPath::verify(probe_dir).map_err(|e| public(&e))?;
+        let status = self.rt.block_on(probe_accelerator_for(
+            &mut self.caps,
+            Accelerator::for_current_host(),
+            profile,
+            machine,
+            &self.cpu,
+            &probe_dir,
+            &self.setup.probe,
+        ));
+        if status.is_available() {
+            Ok(())
+        } else {
+            crate::diag!(
+                "lightvm-service: accelerator with the {} machine and {} firmware: {status}",
+                target.family.label(),
+                target.firmware.label()
+            );
+            Err(public(&BackendError::AcceleratorUnavailable(status)))
+        }
+    }
+
     fn run(&self, vm_id: VmId, run_id: RunId) -> Result<&Arc<QemuRun>, PublicError> {
         match self.runs.get(&vm_id) {
             Some(r) if r.run_id() == run_id => Ok(r),
@@ -810,16 +936,39 @@ impl QemuVmBackend {
         Ok(())
     }
 
+    /// Firmware files of a run for `kind`: OVMF code (UEFI) or the SeaBIOS
+    /// image verified by the probe (SeaBIOS).
+    fn firmware_files(
+        &self,
+        kind: FirmwareKind,
+    ) -> Result<(Option<ManagedPath>, Option<ManagedPath>), PublicError> {
+        match kind {
+            FirmwareKind::Uefi => {
+                let fw = self.caps.firmware.as_ref().ok_or_else(|| {
+                    PublicError::unsupported(
+                        "UEFI firmware (edk2-x86_64-code.fd) not found in the QEMU distribution: reinstall the approved QEMU build",
+                    )
+                })?;
+                let code = ManagedPath::verify(fw.code.clone()).map_err(|e| public(&e))?;
+                Ok((Some(code), None))
+            }
+            FirmwareKind::SeaBios => {
+                let path = verified_seabios(&self.caps)?;
+                Ok((None, Some(path)))
+            }
+        }
+    }
+
     fn prepare(
         &self,
         vm: &VmRecord,
         run_id: RunId,
         media: &[VerifiedMedia],
         current: Option<&StartDisks>,
+        profile: &DeviceProfile,
     ) -> Result<RunPaths, PublicError> {
-        let fw = self.caps.firmware.as_ref().ok_or_else(|| {
-            PublicError::unsupported("UEFI firmware not found in the QEMU distribution")
-        })?;
+        let uefi = profile.firmware().has_vars();
+        let (firmware_code, seabios) = self.firmware_files(profile.firmware())?;
         let run_dir = self
             .setup
             .catalog_root
@@ -847,9 +996,21 @@ impl QemuVmBackend {
         if let Some(d) = current {
             // F3: current state = overlay of a baseline, files verified and
             // guarded by the catalog; the standalone disk is not touched.
-            let vars = d.vars.clone().ok_or_else(|| {
-                PublicError::state_conflict("current state without UEFI variables")
-            })?;
+            // UEFI needs the state's variables; SeaBIOS has none (ADR-0027).
+            let vars = match (uefi, d.vars.clone()) {
+                (true, Some(v)) => Some(ManagedPath::verify(v).map_err(|e| public(&e))?),
+                (true, None) => {
+                    return Err(PublicError::state_conflict(
+                        "current state without UEFI variables",
+                    ));
+                }
+                (false, Some(_)) => {
+                    return Err(PublicError::state_conflict(
+                        "current state with UEFI variables for a legacy BIOS VM",
+                    ));
+                }
+                (false, None) => None,
+            };
             let disk = ManagedPath::verify(d.overlay.clone()).map_err(|e| public(&e))?;
             self.grow(vm, &disk)?;
             let mut readonly = vec![ManagedPath::verify(d.base.clone()).map_err(|e| public(&e))?];
@@ -859,8 +1020,9 @@ impl QemuVmBackend {
             return Ok(RunPaths {
                 run_id,
                 qemu_system: self.caps.qemu_system.clone(),
-                firmware_code: ManagedPath::verify(fw.code.clone()).map_err(|e| public(&e))?,
-                firmware_vars: ManagedPath::verify(vars).map_err(|e| public(&e))?,
+                firmware_code,
+                firmware_vars: vars,
+                seabios,
                 disk,
                 backing: Some(readonly[0].clone()),
                 readonly,
@@ -869,23 +1031,34 @@ impl QemuVmBackend {
                 media: media_paths,
             });
         }
-        // Firmware state of the VM: created from the template on the first
-        // start, then reused (boot entries written by an installer persist).
-        let vars = managed_abs(
-            &self.setup.catalog_root,
-            CatalogLayout::primary_vars(&vm.id).as_str(),
-        );
-        if ensure_vm_vars(&fw.vars_template, &vars)
-            .map_err(|e| io_public("UEFI variables of the VM", &e))?
-        {
-            crate::diag!("lightvm-service: UEFI variables of the VM created from the template");
-        }
+        // Firmware state of a UEFI VM: created from the template on the
+        // first start, then reused (boot entries written by an installer
+        // persist). SeaBIOS keeps no state: nothing is created.
+        let firmware_vars = match (uefi, self.caps.firmware.as_ref()) {
+            (true, Some(fw)) => {
+                let vars = managed_abs(
+                    &self.setup.catalog_root,
+                    CatalogLayout::primary_vars(&vm.id).as_str(),
+                );
+                if ensure_vm_vars(&fw.vars_template, &vars)
+                    .map_err(|e| io_public("UEFI variables of the VM", &e))?
+                {
+                    crate::diag!(
+                        "lightvm-service: UEFI variables of the VM created from the template"
+                    );
+                }
+                Some(ManagedPath::verify(vars).map_err(|e| public(&e))?)
+            }
+            // `firmware_files` already refused a UEFI VM without firmware.
+            _ => None,
+        };
         let disk = self.primary_disk(vm)?;
         Ok(RunPaths {
             run_id,
             qemu_system: self.caps.qemu_system.clone(),
-            firmware_code: ManagedPath::verify(fw.code.clone()).map_err(|e| public(&e))?,
-            firmware_vars: ManagedPath::verify(vars).map_err(|e| public(&e))?,
+            firmware_code,
+            firmware_vars,
+            seabios,
             disk,
             backing: None,
             readonly: Vec::new(),
@@ -912,6 +1085,11 @@ impl VmBackend for QemuVmBackend {
             return Err(PublicError::state_conflict("run already active for the VM"));
         }
         self.ensure_current_probe()?;
+        // ADR-0027: hardware profile of the declared guest and firmware, the
+        // newest machine of its family, accelerator probed for both.
+        let profile = profile_for(&vm.config)?;
+        let machine = machine_for(&self.caps, &profile)?;
+        self.ensure_profile_probe(&profile, &machine)?;
         check_start_space(
             ManagedPath::verify(self.setup.catalog_root.clone())
                 .and_then(|r| prepare::host_resources(&r))
@@ -951,10 +1129,11 @@ impl VmBackend for QemuVmBackend {
             .unwrap_or_default();
         // From here on every error path removes the private directory.
         let private_guard = PrivateDirGuard::new(self.private_dir_for(run_id));
-        let paths = self.prepare(vm, run_id, media, current.as_ref())?;
+        let paths = self.prepare(vm, run_id, media, current.as_ref(), &profile)?;
         let spec = VmLaunchSpec {
             run_id,
-            machine: self.machine.clone(),
+            machine,
+            profile,
             accelerator: Accelerator::for_current_host(),
             cpu: self.cpu.clone(),
             vcpus: vm.config.vcpus,
@@ -1514,6 +1693,92 @@ mod tests {
         assert!(e.message.contains("free space"), "{}", e.message);
         let d = e.details.unwrap();
         assert_eq!(d.get("free_mib").map(String::as_str), Some("300"));
+    }
+
+    /// ADR-0027: the profile follows the declared guest and firmware; a
+    /// combination the guest does not allow is refused before any file is
+    /// prepared.
+    #[test]
+    fn hardware_profile_of_the_vm() {
+        use lightvm_proto::{Firmware, GuestOs};
+        let cfg = |os, fw| {
+            let mut c = sample_config("p");
+            c.guest_os = os;
+            c.firmware = fw;
+            c
+        };
+        for (os, fw, want) in [
+            (
+                GuestOs::UbuntuLtsX86_64,
+                Firmware::Uefi,
+                DeviceProfile::LINUX,
+            ),
+            (
+                GuestOs::Windows10,
+                Firmware::Uefi,
+                DeviceProfile::WINDOWS_UEFI,
+            ),
+            (
+                GuestOs::Windows81,
+                Firmware::Bios,
+                DeviceProfile::WINDOWS_BIOS,
+            ),
+            (
+                GuestOs::Windows7,
+                Firmware::Bios,
+                DeviceProfile::WINDOWS_VISTA_7,
+            ),
+            (
+                GuestOs::WindowsXp,
+                Firmware::Bios,
+                DeviceProfile::WINDOWS_XP,
+            ),
+        ] {
+            assert_eq!(profile_for(&cfg(os, fw)).unwrap(), want, "{os:?} {fw:?}");
+        }
+        assert_eq!(
+            DeviceProfile::WINDOWS_XP.machine_family(),
+            MachineFamily::I440fx
+        );
+        for (os, fw) in [
+            (GuestOs::Windows7, Firmware::Uefi),
+            (GuestOs::OtherLinuxX86_64, Firmware::Bios),
+        ] {
+            let e = profile_for(&cfg(os, fw)).unwrap_err();
+            assert_eq!(e.code, lightvm_proto::ErrorCode::InvalidArgument);
+        }
+    }
+
+    /// A SeaBIOS run has no UEFI code nor variables, a UEFI run no SeaBIOS
+    /// image: the backend refuses the missing file instead of inventing one.
+    #[test]
+    fn run_paths_per_firmware() {
+        let d = crate::test_support::temp_dir("run-paths");
+        let p = |n: &str| ManagedPath::verify(d.join(n)).unwrap();
+        let run_id = RunId::new_v7();
+        let paths = |uefi: bool| RunPaths {
+            run_id,
+            qemu_system: p("qemu.exe"),
+            firmware_code: uefi.then(|| p("code.fd")),
+            firmware_vars: uefi.then(|| p("vars.fd")),
+            seabios: (!uefi).then(|| p("bios-256k.bin")),
+            disk: p("disk.qcow2"),
+            backing: None,
+            readonly: Vec::new(),
+            run_dir: p("run"),
+            private_dir: p("private"),
+            media: BTreeMap::new(),
+        };
+        let bios = paths(false);
+        assert_eq!(bios.firmware_vars(&run_id).unwrap(), None);
+        assert!(bios.firmware_code().is_err());
+        assert_eq!(bios.seabios().unwrap(), p("bios-256k.bin"));
+        let uefi = paths(true);
+        assert_eq!(uefi.firmware_vars(&run_id).unwrap(), Some(p("vars.fd")));
+        assert_eq!(uefi.firmware_code().unwrap(), p("code.fd"));
+        assert!(uefi.seabios().is_err());
+        assert!(uefi.firmware_vars(&RunId::new_v7()).is_err(), "other run");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

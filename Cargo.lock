@@ -1645,6 +1645,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "guest-detect"
+version = "0.0.0"
+dependencies = [
+ "lightvm-proto",
+ "proptest",
+]
+
+[[package]]
 name = "guillotiere"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2094,6 +2102,7 @@ name = "lightvm-service"
 version = "0.0.0"
 dependencies = [
  "getrandom 0.4.3",
+ "guest-detect",
  "interprocess",
  "lightvm-fixture",
  "lightvm-proto",

@@ -61,6 +61,7 @@ Examples: `F0-01-toolchain-eframe.md`, `F0-02-qemu-whpx-qmp.md`, `F1-04-start-st
 | `F5-03-fixture-runs.md` | F5 (fixture ten times with restore; every outcome state) | verified with a scripted client on real QEMU (10/10, 0 infrastructure errors); LLM clients not executed | complete |
 | `F6-01-stabilization.md` | F6 (migrations, re-probe, disk full, host resume, SBOM, licences, artefact scan, regression) | partial: verified in simulation/test; signing, independent review, second host, real suspend/full volume not executed | complete |
 | `F1-05-desktop-egui.md` | F1 (backlog F1-13, F1-16, F1-18, F1-19) | partial: clipboard without text in the UI (headless) but read in egui-winit not blocking; rendering fallback verified; UI + supervisor measurements (wgpu above the memory target); RDP, cold start and manual test not executed | complete |
+| `R2c-01-windows-guest-profiles.md` | R2c (Windows guest hardware profiles, ADR-0027) | partial: SeaBIOS + WHPX with `Skylake-Client-v4` on `pc-q35-11.1` and `pc-i440fx-11.1` verified with the Ubuntu ISO; every Windows guest test not executed (pending list) | complete |
 
 ## Template
 

@@ -201,14 +201,58 @@ Other Ubuntu versions may work but are not tested by the project.
 
 1. On the **Dashboard**, press **New VM**. The wizard opens; move between steps with **Next** and **Back**, or leave with **Cancel**.
 2. **Name**: type a name for the VM, for example `ubuntu`. This is the only text field in LightVM; the name is used only inside LightVM. The wizard says when the name is not valid or already used.
-3. **System**: **Ubuntu LTS (x86-64)** (the reference guest). **Other Linux (x86-64)** is listed but not tested by the project.
-4. **Installation media**: press **Import ISO…** and select `ubuntu-26.04.1-desktop-amd64.iso` in the file picker. LightVM **copies** the image into its catalog and records its SHA-256; the original file is not modified and you can delete it afterwards. Importing a 6 GiB image takes a while. Images imported earlier are listed and can be chosen again for other VMs.
+3. **Installation media**: press **Import ISO…** and select `ubuntu-26.04.1-desktop-amd64.iso` in the file picker. LightVM **copies** the image into its catalog and records its SHA-256; the original file is not modified and you can delete it afterwards. Importing a 6 GiB image takes a while. Images imported earlier are listed and can be chosen again for other VMs.
+4. **System**: LightVM looks inside the image you chose and preselects the system it detects. Check it and change it if it is wrong. If it does not recognize the image, nothing is preselected: choose the system yourself; **Next** stays disabled until you do (*Choose the system to continue*). **Ubuntu LTS (x86-64)** is the reference guest; **Other Linux (x86-64)** is listed but not tested by the project. Windows systems are described in [section 6.1](#61-create-a-windows-vm).
 5. **Data media** (optional): keep **No data media**. (A data ISO, imported with **Import data ISO…**, is attached to the VM as a read-only CD; it is not needed for the installation.)
-6. **Resources**: **Virtual processors**, **Memory** and **Disk**. The defaults (2 vCPUs, 4 GiB, 32 GiB disk) suit Ubuntu Desktop; the wizard does not offer more than the host can give. The disk file grows on the host only as the guest writes data.
+6. **Resources**: **Virtual processors**, **Memory** and **Disk**. The defaults (2 vCPUs, 4 GiB, 32 GiB disk) are the standard template for Ubuntu LTS, shown as *Template: Ubuntu LTS — 2 vCPU, 4 GiB RAM, 32 GiB disk*, and suit Ubuntu Desktop; if you change them, **Reset to template** puts them back. The wizard does not offer more than the host can give. The disk file grows on the host only as the guest writes data.
 7. **Network**: only **Offline: no network adapter** is available in this alpha (NAT and bridged networking are shown as not available).
-8. **Summary**: check the values (the firmware is always **UEFI**) and press **Create**.
+8. **Summary**: check the values (for Ubuntu the firmware is always **UEFI**) and press **Create**.
 
 The new VM appears on the Dashboard as **Stopped**, with system, CPU, memory, virtual disk size and space used on the host.
+
+### 6.1 Create a Windows VM
+
+LightVM can also create VMs for **Windows XP, Vista, 7, 8.1 and 10**, with the same wizard. **This is experimental and not yet tested by the project with any Windows installation image** (`docs/COMPATIBILITY.md`, "Windows guest profiles"). **Windows 11 and Windows 8 are not supported**: Windows 11 needs TPM and Secure Boot, which LightVM does not provide and does not work around; Windows 8 is replaced by 8.1.
+
+What you need:
+
+- **Your own Windows installation image** (ISO) and **a valid licence (product key)**. LightVM does not include Windows, does not provide keys and does not handle activation: that is your responsibility, under the terms of your licence.
+- Enough disk space for the system: the wizard suggests a size for each Windows version and does not accept less than its minimum.
+
+Steps (only what differs from section 6):
+
+1. **Installation media**: import the Windows ISO with **Import ISO…**.
+2. **System**: LightVM reads the image and shows what it found, for example *Detected: Windows 7 (64-bit, build 7601)*. If it shows *Not recognized: choose the system*, nothing is selected and you must pick the system in the list before going on; if the suggestion is wrong, pick the right one. The detection is only a suggestion; your choice is what counts. An image of Windows 8 or Windows 11 is not recognized, and those systems are not in the list.
+3. **Firmware** (Windows 8.1 and 10 only): choose **UEFI** or **Legacy BIOS (SeaBIOS)**. The wizard preselects **UEFI** for 64-bit images and **Legacy BIOS** for 32-bit images; keep the preselection unless you know you need the other one. Windows XP, Vista and 7 always use Legacy BIOS. Choose before installing: a system installed with one firmware does not boot with the other.
+4. **Resources**: when you choose the system, the wizard fills in the standard template for that system and for the architecture of the image (32-bit or 64-bit; see the table below), unless you already changed the values. The step names the template, for example *Template: Windows 7 64-bit — 2 vCPU, 4 GiB RAM, 40 GiB disk*. You can change the values within what the host can give, and **Reset to template** puts them back. For 32-bit Windows the memory stops at 4 GiB, the most a 32-bit Windows can use.
+5. **Network**: **Offline** only, as for every VM. Networking for Windows VMs is planned as separate work.
+6. **Summary**: shows the system, the firmware (*UEFI* or *Legacy BIOS (SeaBIOS)*) and a one-line hardware summary such as *AHCI disk, standard VGA, USB tablet*. Press **Create**.
+
+**Standard templates.** The starting resources the wizard proposes for each system (from `GuestOs::template` in `crates/lightvm-proto`). When the image architecture is not detected, the template is named without it (for example *Template: Windows 7*) and Windows XP uses the 32-bit values, the other systems the 64-bit ones. The wizard never goes below the minimum of the system or above what the host can give.
+
+| System | Architecture | vCPU | Memory | Disk |
+|---|---|---|---|---|
+| Ubuntu LTS | x86-64 | 2 | 4 GiB | 32 GiB |
+| Other Linux | x86-64 | 2 | 2 GiB | 20 GiB |
+| Windows XP | 32-bit | 1 | 1 GiB | 16 GiB |
+| Windows XP | 64-bit | 1 | 2 GiB | 20 GiB |
+| Windows Vista | 32-bit and 64-bit | 2 | 2 GiB | 40 GiB |
+| Windows 7 | 32-bit | 2 | 2 GiB | 32 GiB |
+| Windows 7 | 64-bit | 2 | 4 GiB | 40 GiB |
+| Windows 8.1 | 32-bit | 2 | 2 GiB | 32 GiB |
+| Windows 8.1 | 64-bit | 2 | 4 GiB | 50 GiB |
+| Windows 10 | 32-bit | 2 | 2 GiB | 40 GiB |
+| Windows 10 | 64-bit | 2 | 4 GiB | 64 GiB |
+
+During and after the installation:
+
+- The VM has a standard disk controller, a standard graphics card, a **USB tablet** as the mouse and a **PS/2 keyboard**. Windows has its own drivers for all of them, so **no extra driver disc is needed** and you do not need to install guest tools. The mouse pointer follows your mouse in the console without being "captured".
+- Set the **Guest keyboard layout** in the console toolbar (**US** or **IT**) to the layout you choose in Windows setup, as for Ubuntu (section 7).
+- **No network**: skip the network steps of Windows setup (choose to set it up later, or a local/offline account where setup offers one). Windows Update and online activation are not available inside the VM; enter your product key when setup asks or later, following your licence's activation options.
+- After the installation, remove the installation media as described in section 8, step 2, so the VM boots from its disk.
+- Baselines work as for Ubuntu (section 10). A VM with Legacy BIOS has no firmware settings to save, so its baselines contain only the disk.
+
+**Security note.** Windows XP, Vista, 7 and 8.1 no longer receive security updates, and ordinary support for Windows 10 ended on 14 October 2025. Keeping these VMs offline removes the network as a way in or out, but the systems themselves stay unpatched: only bring in software you trust, through the read-only data disc.
 
 ---
 
@@ -412,7 +456,7 @@ If you used the setup `.exe`, uninstall from **Settings → Apps → Installed a
 - **No clipboard** and **no shared folders** between Windows and the VM. Files go into the VM only through an approved read-only data disc.
 - **Keyboard**: Italian and English (US) layouts are the targets; other layouts and IME input are not verified.
 - **CPU model**: the VM uses a generic CPU model, not the host's (`-cpu host` does not boot on the test PC), so some guest software may run slower or detect fewer CPU features.
-- **One reference guest**: Ubuntu 26.04.1 LTS Desktop. Other guests are not tested.
+- **One reference guest**: Ubuntu 26.04.1 LTS Desktop. Other guests are not tested. Windows XP, Vista, 7, 8.1 and 10 VMs can be created (section 6.1) but have not been tested with a Windows installation image yet; Windows 8 and 11 are not supported.
 - Baselines are taken **with the VM off** only: no snapshot of a running VM, no RAM state (section 10). Baseline labels are generated by LightVM and cannot be renamed. Only one baseline operation at a time across all VMs.
 - Agent sessions (section 11): the MCP adapter `lightvm-mcp.exe` is included, but it has been verified only with a scripted test client: no real AI client (LLM) has been run against it yet, so client setup details may change. One agent session at a time; sessions never survive a restart of LightVM.
 - No console window: diagnostic messages are only in the log files (section 12).

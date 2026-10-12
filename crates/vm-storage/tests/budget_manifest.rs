@@ -41,6 +41,8 @@ fn usage_is_accounted_per_category() {
             approved_at: now_rfc3339(),
             managed_path: CatalogLayout::media_file(&media, "iso")?,
             status: MediaStatus::Approved,
+            detected_guest: None,
+            guest_examined: false,
         })
     })
     .unwrap();

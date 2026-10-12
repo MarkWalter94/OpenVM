@@ -152,6 +152,7 @@ impl CatalogStore for MemStore {
                 size_bytes: 1024,
                 declared_origin: declared_origin.clone(),
                 approved_at: UtcTimestamp::from_unix_millis(T0).unwrap(),
+                detected_guest: None,
             },
             managed_path: ManagedRelPath::parse(format!(
                 "media/{}",
