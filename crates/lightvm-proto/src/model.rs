@@ -132,7 +132,10 @@ impl GuestOs {
             GuestOs::WindowsXp => 8,
             GuestOs::WindowsVista | GuestOs::Windows7 => 20,
             GuestOs::Windows81 | GuestOs::Windows10 => 32,
-            GuestOs::Windows11Arm64 => 64,
+            // Microsoft lists 64 GB; the setup of the Windows 11 ARM64
+            // media passes its requirements check with 32 GB (R2b-01), and
+            // the qcow2 disk only grows with use.
+            GuestOs::Windows11Arm64 => 32,
         }
     }
 

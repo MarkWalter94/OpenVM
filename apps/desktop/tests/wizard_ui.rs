@@ -705,7 +705,7 @@ fn windows_11_arm64_media_prefills_on_apple_silicon() {
     next(&mut h);
     h.get_by_label("Step 5 of 7: Resources");
     h.get_by_label(
-        "Template: Windows 11 ARM64 — 4 vCPU, 6 GiB RAM, 64 GiB disk. Minimum: 4 GiB of memory and 64 GiB of disk.",
+        "Template: Windows 11 ARM64 — 4 vCPU, 6 GiB RAM, 64 GiB disk. Minimum: 4 GiB of memory and 32 GiB of disk.",
     );
     next(&mut h);
     next(&mut h);

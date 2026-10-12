@@ -173,12 +173,12 @@ fn windows_11_arm64_profile_cannot_change_after_creation() {
     let mut n = c10;
     n.guest_os = GuestOs::Windows11Arm64;
     invalid(h.core.update_vm_config(&Caller::User, w10.id, 1, n));
-    // Minimums: 4096 MiB and 64 GiB; BIOS refused at creation.
+    // Minimums: 4096 MiB and 32 GiB; BIOS refused at creation.
     let mut n = windows(&mut h, "w11b", GuestOs::Windows11Arm64, Firmware::Uefi);
     n.memory_mib = 4095;
     invalid(h.core.create_vm(&Caller::User, n));
     let mut n = windows(&mut h, "w11b", GuestOs::Windows11Arm64, Firmware::Uefi);
-    n.disk_gib = 63;
+    n.disk_gib = 31;
     invalid(h.core.create_vm(&Caller::User, n));
     let n = windows(&mut h, "w11b", GuestOs::Windows11Arm64, Firmware::Bios);
     invalid(h.core.create_vm(&Caller::User, n));

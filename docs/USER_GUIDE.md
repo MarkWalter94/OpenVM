@@ -262,7 +262,7 @@ On a Mac with Apple Silicon (M1 and later) the wizard offers only **Windows 11 (
 What you need:
 
 - **Your own Windows 11 ARM64 installation image** (ISO, for example `Win11_25H2_EnglishInternational_Arm64.iso` from Microsoft) and **a valid licence**. LightVM does not include Windows, does not provide keys and does not handle activation; Microsoft names Parallels Desktop and VMware Fusion as the authorised ways to run Windows 11 on Apple Silicon, and LightVM claims no such authorisation. Setup uses *I don't have a product key*; no requirement check is bypassed.
-- At least **4 GiB of memory and 64 GiB of disk** for the VM; the template is 4 vCPU, 6 GiB RAM, 64 GiB disk.
+- At least **4 GiB of memory and 32 GiB of disk** for the VM (Microsoft lists 64 GB; setup accepts 32 GB, R2b-01); the template is 4 vCPU, 6 GiB RAM, 64 GiB disk. The disk file grows only with use.
 
 What the wizard shows: after you import the ISO, the System step reads *Detected: Windows 11, ARM64, build 26200 — …* and preselects **Windows 11 (ARM64)**. The firmware is fixed to **UEFI with Secure Boot**, and the hardware summary is *NVMe disk, ramfb display, USB keyboard and tablet, TPM 2.0, UEFI with Secure Boot*. The system and the firmware cannot be changed after creation.
 

@@ -64,7 +64,7 @@ fn windows_11_arm64_template_and_profile() {
     assert_eq!((t.vcpus, t.memory_mib, t.disk_gib), (4, 6144, 64));
     assert_eq!(os.template(None), t);
     assert_eq!(os.suggested_resources(), (4, 6144, 64));
-    assert_eq!((os.min_memory_mib(), os.min_disk_gib()), (4096, 64));
+    assert_eq!((os.min_memory_mib(), os.min_disk_gib()), (4096, 32));
     assert_eq!(os.max_memory_mib(Some(GuestArch::Aarch64)), None);
     assert!(os.is_windows() && os.is_aarch64() && os.needs_tpm());
     for other in GuestOs::ALL.into_iter().filter(|o| *o != os) {

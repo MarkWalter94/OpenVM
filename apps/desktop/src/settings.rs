@@ -146,6 +146,26 @@ impl UiSettings {
     pub fn effective_catalog(&self) -> Option<PathBuf> {
         self.catalog.clone().or_else(default_catalog)
     }
+
+    /// Effective QEMU folder: the chosen one, else the one found on this
+    /// host (see [`detected_qemu_dir`]).
+    pub fn effective_qemu_dir(&self) -> Option<PathBuf> {
+        self.qemu_dir.clone().or_else(detected_qemu_dir)
+    }
+}
+
+/// QEMU installed by Homebrew on macOS (`/opt/homebrew` on Apple Silicon,
+/// `/usr/local` on Intel), used when no folder is chosen. The supervisor
+/// still verifies the binaries against the approved hashes. Elsewhere
+/// there is no standard location: `None`.
+pub fn detected_qemu_dir() -> Option<PathBuf> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    ["/opt/homebrew", "/usr/local"]
+        .into_iter()
+        .map(PathBuf::from)
+        .find(|d| d.join("bin").join("qemu-system-aarch64").is_file())
 }
 
 /// Actions requested by the Supervisor section; the app executes them (the
@@ -245,15 +265,20 @@ pub fn supervisor_ui(
     theme::row(
         ui,
         "QEMU distribution",
-        Some("Approved qemu-system-x86_64 and qemu-img; the supervisor verifies their hashes."),
+        Some("Approved qemu-system and qemu-img; the supervisor verifies their hashes."),
         |ui| {
             match s.qemu_dir.as_deref() {
                 Some(d) => {
                     theme::path_value(ui, &d.display().to_string());
                 }
-                None => {
-                    theme::status(ui, "not set: VMs cannot be started", Tone::Warning);
-                }
+                None => match detected_qemu_dir() {
+                    Some(d) => {
+                        theme::path_value(ui, &format!("{} (found automatically)", d.display()));
+                    }
+                    None => {
+                        theme::status(ui, "not set: VMs cannot be started", Tone::Warning);
+                    }
+                },
             }
             ui.horizontal(|ui| {
                 let r = ui.add_enabled(state.folder_picker, egui::Button::new("Browse…"));
