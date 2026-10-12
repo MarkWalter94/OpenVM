@@ -647,7 +647,7 @@ impl LightVmApp {
         Ok(ServiceConfig {
             executable,
             catalog,
-            qemu_dir: self.settings.qemu_dir.clone(),
+            qemu_dir: self.settings.effective_qemu_dir(),
             runtime_dir: None,
             audit_log: None,
             policy: self.settings.ui_loss_policy,
@@ -771,7 +771,7 @@ impl LightVmApp {
             None => self
                 .settings
                 .effective_catalog()
-                .map(|c| (c, self.settings.qemu_dir.clone())),
+                .map(|c| (c, self.settings.effective_qemu_dir())),
         };
         let folder_picker = self.folder_picker.is_some();
         let command_line = self

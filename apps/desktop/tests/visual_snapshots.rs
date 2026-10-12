@@ -335,10 +335,20 @@ fn snapshot_dialog_close() {
     h.snapshot("dialog_close");
 }
 
+fn fixed_qemu_settings() -> UiSettings {
+    UiSettings {
+        qemu_dir: Some(std::path::PathBuf::from("/opt/qemu-11.1")),
+        ..UiSettings::default()
+    }
+}
+
 #[test]
 fn snapshot_settings() {
     let _serial = serial();
     let (mut app, _hs) = app(catalog());
+    // A chosen QEMU folder: the page does not depend on what this host has
+    // installed (Homebrew QEMU is found automatically on macOS).
+    app.set_settings(fixed_qemu_settings(), None, None);
     app.set_section(Section::Settings);
     let mut h = harness(app, egui::vec2(1100.0, 2300.0));
     h.snapshot("settings");
@@ -348,6 +358,9 @@ fn snapshot_settings() {
 fn snapshot_settings_light_theme() {
     let _serial = serial();
     let (mut app, _hs) = app(catalog());
+    // A chosen QEMU folder: the page does not depend on what this host has
+    // installed (Homebrew QEMU is found automatically on macOS).
+    app.set_settings(fixed_qemu_settings(), None, None);
     app.set_section(Section::Settings);
     app.set_theme(UiTheme::Light);
     let mut h = harness(app, egui::vec2(1100.0, 700.0));
