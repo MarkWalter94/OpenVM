@@ -53,6 +53,15 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
+Scripts that do the same with the right environment, and the full regression with a summary:
+
+| Host | Build (and run) | Regression |
+| --- | --- | --- |
+| Windows (PowerShell) | `.\scripts\build.ps1 [-Release] [-DevTools] [-Run]` | `.\scripts\regression.ps1 [-Release] [-NoDebugInfo]` |
+| macOS, Linux | `scripts/build.sh [--release] [--dev-tools] [--run [-- args]]` | `scripts/regression.sh [--release] [--no-debuginfo]` |
+
+On macOS (Homebrew): `brew install rustup`, then `rustup toolchain install 1.99.0`; the scripts find the keg-only rustup by themselves. The app, the catalog and the media registry work on macOS; starting VMs does not yet (ADR-0028).
+
 Tests that need a real QEMU are marked `#[ignore]` and enabled through environment variables documented in the corresponding verification file. QEMU, firmware and guest images are not part of the repository.
 
 ## Documents

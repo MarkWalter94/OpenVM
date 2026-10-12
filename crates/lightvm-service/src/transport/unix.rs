@@ -80,7 +80,7 @@ impl Listener {
         // a base that cannot hold the socket falls back to a short private
         // directory instead of refusing the start.
         if base.as_os_str().len() + SOCKET_NAME_LEN > MAX_SOCKET_PATH {
-            let short = crate::display::fallback_root();
+            let short = super::fallback_root();
             crate::diag!(
                 "lightvm-service: path {} too long for the IPC socket, private directory {}",
                 base.display(),
@@ -147,7 +147,8 @@ pub(super) async fn connect(endpoint: &str) -> io::Result<BoxedStream> {
     Ok(Box::new(s))
 }
 
-#[cfg(test)]
+// The test helpers live with the supervisor.
+#[cfg(all(test, feature = "supervisor"))]
 mod tests {
     use super::*;
 
@@ -175,7 +176,7 @@ mod tests {
             .unwrap();
         let l = rt.block_on(async { Listener::bind(&opts) }).unwrap();
         assert!(l.endpoint().len() <= MAX_SOCKET_PATH, "{}", l.endpoint());
-        let root = crate::display::fallback_root();
+        let root = crate::transport::fallback_root();
         assert!(Path::new(l.endpoint()).starts_with(&root));
         drop(l);
         // Only the socket is removed by the listener; the directory is left
