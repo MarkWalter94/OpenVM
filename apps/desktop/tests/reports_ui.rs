@@ -536,7 +536,12 @@ fn export_goes_through_the_save_dialog_and_says_where_it_was_written() {
     assert!(actions(&hs).is_empty());
     assert!(h.state().dialog_open());
 
-    let path = std::path::PathBuf::from(r"C:\Users\me\Documents\session.json");
+    // Save path in the host's own syntax.
+    #[cfg(windows)]
+    let shown = r"C:\Users\me\Documents\session.json";
+    #[cfg(not(windows))]
+    let shown = "/Users/me/Documents/session.json";
+    let path = std::path::PathBuf::from(shown);
     *answer.lock().unwrap() = Some(path.clone());
     click(&mut h, "Choose where to save\u{2026}");
     let export = |overwrite| ServiceCommand::ExportSessionReport {
@@ -575,7 +580,10 @@ fn export_goes_through_the_save_dialog_and_says_where_it_was_written() {
     );
     h.run_steps(4);
     h.get_by_label("Report exported");
-    let written = "Report written to C:\\Users\\me\\Documents\\session.json (18.0 KiB, SHA-256 7777777777777777\u{2026}). 2 screenshots written to the folder session-screenshots next to it.";
+    let written = format!(
+        "Report written to {shown} (18.0 KiB, SHA-256 7777777777777777\u{2026}). 2 screenshots written to the folder session-screenshots next to it."
+    );
+    let written = written.as_str();
     // In the dialog (and on the page behind it).
     assert_eq!(h.query_all_by_label(written).count(), 2);
     click(&mut h, "Done");

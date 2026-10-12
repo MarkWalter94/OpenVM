@@ -749,8 +749,26 @@ async fn import_list_create_and_delete_with_the_sqlite_catalog() {
     std::fs::create_dir_all(src.join("folder.iso")).unwrap();
     let no_sig = iso_file(&src, "zip.iso", b"PK\x03\x04\x00");
     let txt = iso_file(&src, "notes.txt", b"CD001");
-    let cases: Vec<(String, ErrorCode)> = vec![
+    #[cfg_attr(not(windows), allow(unused_mut))]
+    let mut cases: Vec<(String, ErrorCode)> = vec![
         ("relative.iso".into(), ErrorCode::InvalidArgument),
+        (txt.display().to_string(), ErrorCode::InvalidArgument),
+        (
+            src.join("folder.iso").display().to_string(),
+            ErrorCode::InvalidArgument,
+        ),
+        (
+            src.join("missing.iso").display().to_string(),
+            ErrorCode::NotFound,
+        ),
+        (no_sig.display().to_string(), ErrorCode::InvalidArgument),
+        (String::new(), ErrorCode::InvalidArgument),
+    ];
+    // UNC and device namespaces, alternate data streams, reserved names and
+    // backslash traversal exist only on Windows: elsewhere these strings are
+    // ordinary (missing) file names.
+    #[cfg(windows)]
+    cases.extend([
         (r"\\server\share\x.iso".into(), ErrorCode::PermissionDenied),
         (r"\\?\C:\x.iso".into(), ErrorCode::PermissionDenied),
         (r"\\.\PhysicalDrive0".into(), ErrorCode::PermissionDenied),
@@ -767,22 +785,8 @@ async fn import_list_create_and_delete_with_the_sqlite_catalog() {
             format!("{}\\..\\{}", src.display(), "Ubuntu.ISO"),
             ErrorCode::InvalidArgument,
         ),
-        (txt.display().to_string(), ErrorCode::InvalidArgument),
-        (
-            src.join("folder.iso").display().to_string(),
-            ErrorCode::InvalidArgument,
-        ),
-        (
-            src.join("missing.iso").display().to_string(),
-            ErrorCode::NotFound,
-        ),
-        (no_sig.display().to_string(), ErrorCode::InvalidArgument),
-        (String::new(), ErrorCode::InvalidArgument),
-    ];
+    ]);
     for (path, want) in cases {
-        if !cfg!(windows) && path.contains('\\') {
-            continue;
-        }
         let m = req(
             &mut ui,
             Request::ImportMedia {

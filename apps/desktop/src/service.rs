@@ -3099,6 +3099,12 @@ mod tests {
                 OperationId::new_v7()
             ));
             std::fs::create_dir_all(&dir).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                // The endpoint accepts only a private directory.
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
             let opts = EndpointOptions {
                 runtime_dir: Some(dir.clone()),
                 catalog_dir: dir,

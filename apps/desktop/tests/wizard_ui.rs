@@ -82,6 +82,12 @@ fn only_one_text_field_and_only_in_the_wizard() {
     }
 }
 
+/// Path returned by the fake file picker, in the host's own syntax.
+#[cfg(windows)]
+const PICKED_ISO: &str = r"C:\Users\x\Downloads\new-installer.iso";
+#[cfg(not(windows))]
+const PICKED_ISO: &str = "/Users/x/Downloads/new-installer.iso";
+
 #[test]
 fn full_flow_creates_the_vm() {
     let (mut app, hs) = app_with(connected(vec![vm(1, "ubuntu-dev", VmState::Stopped)]));
@@ -89,9 +95,7 @@ fn full_flow_creates_the_vm() {
     let p2 = picked.clone();
     app.set_file_picker(Some(Box::new(move |title: &str| {
         p2.borrow_mut().push(title.to_owned());
-        Some(std::path::PathBuf::from(
-            r"C:\Users\x\Downloads\new-installer.iso",
-        ))
+        Some(std::path::PathBuf::from(PICKED_ISO))
     })));
     let mut h = harness(app);
     h.run_steps(4);
@@ -140,7 +144,7 @@ fn full_flow_creates_the_vm() {
     assert_eq!(
         import,
         ServiceCommand::ImportMedia {
-            path: r"C:\Users\x\Downloads\new-installer.iso".into(),
+            path: PICKED_ISO.into(),
             kind: MediaKind::InstallIso,
             origin: "new-installer.iso".into(),
         }

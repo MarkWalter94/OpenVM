@@ -10,8 +10,7 @@ mod common;
 use std::path::Path;
 
 use vm_storage::{
-    BaselineId, Catalog, IntentState, Lifecycle, PromoteBaseline, RecoveryOutcome, StorageError,
-    VmId,
+    BaselineId, Catalog, Lifecycle, PromoteBaseline, RecoveryOutcome, StorageError, VmId,
 };
 
 fn req(vm: &VmId) -> PromoteBaseline {
@@ -169,6 +168,7 @@ fn interrupted_preparation_then_crash_is_reconciled_at_open() {
 #[test]
 fn unresolvable_intent_is_marked_needs_review_and_retried() {
     use std::os::windows::fs::OpenOptionsExt;
+    use vm_storage::IntentState;
 
     let dir = common::tempdir();
     let (vm, b, temp) = {

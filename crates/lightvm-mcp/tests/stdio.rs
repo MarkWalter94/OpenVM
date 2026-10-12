@@ -209,6 +209,12 @@ async fn pairing_file(u: &mut Client, svc: &Svc) -> PathBuf {
         .to_string(),
     )
     .unwrap();
+    // The app writes the file with mode 0600.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
     p
 }
 

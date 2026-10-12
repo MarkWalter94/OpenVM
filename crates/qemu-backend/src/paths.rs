@@ -144,11 +144,10 @@ pub(crate) mod names {
     pub(crate) const STDERR: &str = "qemu.stderr.log";
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod tests {
     use super::*;
 
-    #[cfg(windows)]
     #[test]
     fn verify_and_join() {
         let p = ManagedPath::verify(r"C:\Windows\Temp\lightvm-test-dir").unwrap();

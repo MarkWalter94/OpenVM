@@ -275,7 +275,18 @@ async fn oversized_frame_is_rejected_before_and_after_handshake() {
     let (mut c, _) = connect_ui(&svc).await;
     let mut big = (8192u32).to_be_bytes().to_vec();
     big.extend(std::iter::repeat_n(b' ', 8192));
-    c.send_raw(&big).await.unwrap();
+    // The service answers after the header and closes without reading the
+    // payload: with a small socket buffer (macOS) the rest of the write can
+    // fail with a broken pipe, and the answer is still there to read.
+    if let Err(e) = c.send_raw(&big).await {
+        assert!(
+            matches!(
+                e.kind(),
+                std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+            ),
+            "{e}"
+        );
+    }
     let m = tokio::time::timeout(T, c.recv()).await.unwrap().unwrap();
     assert_eq!(protocol_err(&m), Some(ProtocolErrorCode::MessageTooLarge));
     expect_closed(&mut c).await;

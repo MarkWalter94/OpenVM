@@ -150,6 +150,49 @@ fn source_that_is_a_directory_or_link_is_refused() {
     assert!(cat.open_intents().unwrap().is_empty());
 }
 
+/// A FIFO (or a link to one) is refused without blocking the open: with no
+/// writer, a blocking open of a FIFO never returns.
+#[cfg(unix)]
+#[test]
+fn source_that_is_a_fifo_is_refused_without_blocking() {
+    let dir = common::tempdir();
+    let src_dir = common::tempdir();
+    let fifo = src_dir.path().join("pipe.iso");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .is_ok_and(|s| s.success());
+    if !made {
+        eprintln!("mkfifo not available: test skipped");
+        return;
+    }
+    let link = src_dir.path().join("link-to-pipe.iso");
+    std::os::unix::fs::symlink(&fifo, &link).unwrap();
+    let root = dir.path().to_path_buf();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut cat = Catalog::open(&root).unwrap();
+        let fifo_err = cat.approve_media(&fifo, MediaKind::Iso, "x").unwrap_err();
+        let link_err = cat.approve_media(&link, MediaKind::Iso, "x").unwrap_err();
+        tx.send((fifo_err, link_err)).unwrap();
+    });
+    let (fifo_err, link_err) = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the open of a FIFO blocked");
+    for err in [fifo_err, link_err] {
+        assert!(
+            matches!(
+                err,
+                StorageError::InvalidPath {
+                    reason: PathRejection::Link,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+    }
+}
+
 #[test]
 fn destination_appearing_before_publication_is_never_overwritten() {
     let dir = common::tempdir();
