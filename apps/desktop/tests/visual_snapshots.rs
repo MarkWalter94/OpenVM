@@ -338,6 +338,7 @@ fn snapshot_dialog_close() {
 fn fixed_qemu_settings() -> UiSettings {
     UiSettings {
         qemu_dir: Some(std::path::PathBuf::from("/opt/qemu-11.1")),
+        catalog: Some(std::path::PathBuf::from("/srv/lightvm/catalog")),
         ..UiSettings::default()
     }
 }
@@ -346,8 +347,9 @@ fn fixed_qemu_settings() -> UiSettings {
 fn snapshot_settings() {
     let _serial = serial();
     let (mut app, _hs) = app(catalog());
-    // A chosen QEMU folder: the page does not depend on what this host has
-    // installed (Homebrew QEMU is found automatically on macOS).
+    // Chosen QEMU and catalog folders: the page does not depend on what this
+    // host has installed (Homebrew QEMU is found automatically on macOS) nor
+    // on the user profile path.
     app.set_settings(fixed_qemu_settings(), None, None);
     app.set_section(Section::Settings);
     let mut h = harness(app, egui::vec2(1100.0, 2300.0));
@@ -358,8 +360,9 @@ fn snapshot_settings() {
 fn snapshot_settings_light_theme() {
     let _serial = serial();
     let (mut app, _hs) = app(catalog());
-    // A chosen QEMU folder: the page does not depend on what this host has
-    // installed (Homebrew QEMU is found automatically on macOS).
+    // Chosen QEMU and catalog folders: the page does not depend on what this
+    // host has installed (Homebrew QEMU is found automatically on macOS) nor
+    // on the user profile path.
     app.set_settings(fixed_qemu_settings(), None, None);
     app.set_section(Section::Settings);
     app.set_theme(UiTheme::Light);
