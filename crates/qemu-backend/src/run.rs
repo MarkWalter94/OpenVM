@@ -23,16 +23,21 @@
 //! OS primitives without going through the QMP queue. [`QemuRun::reconcile`] compares
 //! process and QMP; [`QemuRun::close`] closes the Job Object after the exit.
 
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use lightvm_proto::{
-    BackendObservation, DisplayGeometry, InputEvent, ObservationSource, ObservedState, RunId,
-    UtcTimestamp, VmState,
+    BackendObservation, DisplayGeometry, InputEvent, KeyAction, ObservationSource, ObservedState,
+    QCode, RunId, UtcTimestamp, VmState,
 };
 use tokio::sync::{broadcast, watch};
 
+use crate::boot_prompt::{
+    BOOT_PROMPT_INTERVAL, BOOT_PROMPT_KEY, BOOT_PROMPT_WINDOW, BootKeyEnd, BootKeyReport,
+    press_boot_prompt_key,
+};
 use crate::cmdline::{FirmwareKind, QemuCommand, TpmCommand, VmLaunchSpec};
 use crate::error::{BackendError, Result};
 use crate::input::{PressedInput, validate_events};
@@ -550,7 +555,9 @@ pub fn check_no_nic(info_network: &str, pci_network: &[PciNetworkDevice]) -> Res
 pub struct QemuRun {
     run_id: RunId,
     identity: ProcessIdentity,
-    qmp: QmpClient,
+    /// Shared with the boot prompt presses ([`Self::boot_prompt_keys`]), which
+    /// must not keep the run itself alive.
+    qmp: Arc<QmpClient>,
     state_tx: Arc<watch::Sender<ProcessState>>,
     emergency: EmergencyStop,
     private_dir: ManagedPath,
@@ -560,6 +567,8 @@ pub struct QemuRun {
     accelerator: AcceleratorsInfo,
     cfg: RunConfig,
     guards: StorageGuards,
+    /// When the vCPUs were started (`cont`), if they were.
+    vcpus_started: Option<Instant>,
 }
 
 impl QemuRun {
@@ -673,7 +682,7 @@ impl QemuRun {
         let run = Self {
             run_id: spec.run_id,
             identity,
-            qmp: launched.qmp,
+            qmp: Arc::new(launched.qmp),
             state_tx: launched.state_tx,
             emergency,
             private_dir: command.private_dir.clone(),
@@ -686,6 +695,7 @@ impl QemuRun {
             },
             cfg,
             guards,
+            vcpus_started: None,
         };
         match run.post_start_checks(spec).await {
             Ok(acc) => {
@@ -693,6 +703,7 @@ impl QemuRun {
                 run.accelerator = acc;
                 if !run.cfg.leave_paused {
                     run.qmp.cont().await?;
+                    run.vcpus_started = Some(Instant::now());
                 }
                 run.state_tx.send_if_modified(|s| {
                     if matches!(s, ProcessState::Starting) {
@@ -1062,6 +1073,52 @@ impl QemuRun {
         }
         self.qmp.input_send_event(&events).await?;
         Ok(events.len())
+    }
+
+    /// Presses [`BOOT_PROMPT_KEY`] (down and up) once every
+    /// [`BOOT_PROMPT_INTERVAL`] for [`BOOT_PROMPT_WINDOW`] after the vCPUs
+    /// started, to answer the CD prompt of the Windows UEFI media
+    /// ([`crate::boot_prompt`]). The caller decides whether it applies
+    /// ([`crate::boot_prompt::boot_prompt_key_needed`]) and spawns the
+    /// returned future on its runtime: it holds the QMP client and the state
+    /// observer, never the run, ends early as soon as the run leaves the
+    /// running state and never fails (rejected presses are only counted).
+    /// The presses bypass the console's geometry check (keys only) and the
+    /// pressed-key register (each press is released in the same batch).
+    pub fn boot_prompt_keys(&self) -> impl Future<Output = BootKeyReport> + Send + 'static {
+        let qmp = self.qmp.clone();
+        let state = self.state_tx.subscribe();
+        let started = self.vcpus_started;
+        let events: Option<Vec<InputEvent>> = QCode::parse(BOOT_PROMPT_KEY).ok().map(|qcode| {
+            vec![
+                InputEvent::Key(KeyAction {
+                    qcode: qcode.clone(),
+                    down: true,
+                }),
+                InputEvent::Key(KeyAction { qcode, down: false }),
+            ]
+        });
+        async move {
+            let (Some(started), Some(events)) = (started, events) else {
+                return BootKeyReport {
+                    sent: 0,
+                    failed: 0,
+                    end: BootKeyEnd::Skipped,
+                };
+            };
+            press_boot_prompt_key(
+                started,
+                BOOT_PROMPT_WINDOW,
+                BOOT_PROMPT_INTERVAL,
+                state,
+                || {
+                    let qmp = qmp.clone();
+                    let events = events.clone();
+                    async move { Ok(qmp.input_send_event(&events).await?) }
+                },
+            )
+            .await
+        }
     }
 
     /// Waits for the process exit up to `timeout`.

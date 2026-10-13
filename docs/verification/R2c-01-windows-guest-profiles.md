@@ -97,7 +97,7 @@ Per system:
 | Windows 10 (x86, x64; build below 22000) | as Windows 8.1 | as Windows 8.1 |
 | Windows 8 (6.2) and Windows 11 (build 22000 and later) | none | the media produce no suggestion and the systems are not offered (negative test) |
 
-Also pending: detection of real Windows installation media (the parser's UDF and WIM paths are covered only by synthetic images built in the tests).
+Detection of real Windows installation media: recorded below for Windows Vista and Windows 10 (section "Real Windows installation media"); pending for XP, 7 and 8.1.
 
 ## Product command line with the Ubuntu ISO (2026-10-12)
 
@@ -113,9 +113,33 @@ Parser robustness on synthetic input (`cargo test -p guest-detect`): truncation 
 
 Storage: migration `0007_media_detected_guest.sql` adds the detected guest to the media registry (`detected_guest` JSON, `guest_examined` flag). Media imported before the migration are examined once, the first time the media list is read, and the result is stored.
 
+## Real Windows installation media (2026-10-13)
+
+Host: Windows 11 x86_64, WHPX, QEMU 11.1.0 (`lab/qemu/qemu-11.1.0`), CPU `Skylake-Client-v4`. Media provided by the user, not redistributed: Windows Vista Ultimate SP2 x86 and x64 it-IT (2020-01 images, build 6003), Windows 10 22H2 it-IT x64 and x86 (`lab/media`). The criterion is "Windows Setup shown", not an installation: none of the checks 2–8 above has been run yet.
+
+**Detection** (`cargo test -p guest-detect --test detect real_isos -- --ignored --nocapture`, `LIGHTVM_DETECT_ISO_DIR` on each folder): Vista x64 → `WindowsVista`, `X86_64`, build 6003, *Windows Vista Ultimate*; Vista x86 → `WindowsVista`, `X86`, build 6003; Windows 10 x64 → `Windows10`, `X86_64`, build 19041, *Windows 10 Home*; Windows 10 x86 → `Windows10`, `X86`, build 19041; the Ubuntu reference ISO stays `UbuntuLtsX86_64`. Each read took a few milliseconds.
+
+**Through the service** (`lightvm-service` `windows_real` `e2e_real_windows_iso_reaches_setup`, ignored; `LIGHTVM_E2E_QEMU_DIR=E:\OpenVM\lab\qemu\qemu-11.1.0`, `LIGHTVM_E2E_WINDOWS_ISOS=<the four ISOs>`, `LIGHTVM_WIN_EVIDENCE_DIR=<folder of the frames>`). Each ISO is imported, the VM is created with the detected system, its template and the recommended firmware for the detected architecture, started, and watched on the console until a lit frame with at least 64 distinct colours (the Setup window; a stop error screen or a firmware shell has 2–4 colours) or 10 minutes; then stopped. Outcome: passed, 813 s.
+
+| Medium | VM | Outcome |
+| --- | --- | --- |
+| Vista x64 | Vista, Legacy BIOS | refused by the service at creation (`unsupported`, `field=install_media`, `arch=x86_64`): rule of ADR-0027 for Windows hosts |
+| Vista x86 | Vista, Legacy BIOS, q35, AHCI, UHCI tablet | Setup language page (it-IT), 800×600, after "Windows is loading files"; stop by QMP `quit` after the 20 s ACPI timeout (Setup ignores the power button) |
+| Windows 10 x64 | Windows 10, UEFI, q35, AHCI, xHCI tablet | the backend pressed Enter at the CD prompt (service log: "25 sent, 0 failed, end WindowElapsed"); Setup language page, 1280×800, shown after the 25 s window had ended, on its first page |
+| Windows 10 x86 | Windows 10, Legacy BIOS | Setup language page, 1024×768 |
+
+No QEMU process was left after any VM or at the end.
+
+**Vista x64 under WHPX.** Before the rule, the same VM stopped with `STOP 0x0000005C (0x10B, 3, 0, 0)` (HAL_INITIALIZATION_FAILED) right after "Windows is loading files". Reproduced with QEMU alone (`-bios bios-256k.bin`, the Vista x64 ISO, an empty 40 GiB qcow2, a QMP screendump after 90 s) in twelve variants, all with the same stop: `pc-q35-11.1`; `pc-i440fx-11.1` with IDE; `-cpu Skylake-Client-v4,-x2apic`; `-hypervisor`; both; `Nehalem`; `qemu64`; one vCPU; `hpet=off`. With `-accel whpx,kernel-irqchip=off` (with or without `-hypervisor`, with one or two vCPUs) the HAL initializes and Setup stops later with `STOP 0x0000000A` (IRQL_NOT_LESS_OR_EQUAL). Every in-kernel-irqchip run logs `warning: Ignoring request for interrupt vector 0`. Reading (not verified in the QEMU sources): the 64-bit HAL calibrating its timer gets an interrupt in virtual-wire mode that the WHPX interrupt path drops. Vista x86 boots on the same profile. Decision of the project owner: Vista 64-bit not supported on Windows hosts (ADR-0027).
+
+**Windows 10 x64 before the key.** Without the backend pressing a key, the same VM showed "Guest has not initialized the display (yet)", then the UEFI Interactive Shell with the CD and the disk mapped: the Windows UEFI loader's "Press any key to boot from CD or DVD..." prompt timed out. The criterion of a blank disk and the 25 s window are in ADR-0027. Residual risk: on a host where Setup appears within 25 s of the vCPUs starting, an Enter would press the default button of Setup's first page (Next); on this host Setup appeared after the window.
+
+**Test bug found on the way.** The first version of the test accepted any frame with 1 % lit pixels and took the Vista x64 stop screen for Setup; a second version required that no colour covered 90 % of the frame and rejected the flat purple background of the Windows 10 Setup. The distinct-colour criterion above separates the recorded frames (stop screens 2 colours, UEFI Shell 4, Windows 10 Setup 852).
+
 ## Required actions
 
-- Obtain installation media for the systems above from the user (LightVM does not redistribute Windows images; licences are the user's).
+- Obtain installation media for the systems above from the user (LightVM does not redistribute Windows images; licences are the user's). Vista and Windows 10 media are available; XP, 7 and 8.1 are missing.
+- Install Vista x86 and Windows 10 (UEFI and BIOS) to disk and run checks 2–8.
 - Run the pending tests and record them as dated sections appended to this file or in new `R2c-nn` files.
 
 ## Proposed decisions

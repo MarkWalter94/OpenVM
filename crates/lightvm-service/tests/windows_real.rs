@@ -423,3 +423,235 @@ fn e2e_real_qemu_windows_profiles_boot_and_stop() {
     });
     let _ = std::fs::remove_dir_all(&private_root);
 }
+
+/// Distinct colours in the frame: a stop error screen or a firmware shell
+/// has a handful (text without anti-aliasing), the Windows Setup window
+/// hundreds (icons, anti-aliased text, gradients).
+fn distinct_colours(rgb: &[u8]) -> usize {
+    rgb.as_chunks::<3>()
+        .0
+        .iter()
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+}
+
+/// Waits for a mostly lit frame with at least 64 distinct colours (the
+/// Windows Setup window, unlike the text screens before it and a stop error
+/// screen; the Windows 10 background is one flat colour, so the share of a
+/// single colour does not tell them apart) and saves a PNG every 30 s on
+/// the way.
+async fn wait_lit(
+    s: &Arc<Mutex<Screen>>,
+    permille: u64,
+    limit: Duration,
+    evidence: &Path,
+    name: &str,
+) -> Option<(Duration, usize, usize, u64)> {
+    let t0 = Instant::now();
+    let mut next_png = Duration::ZERO;
+    while t0.elapsed() < limit {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let (w, h, rgb) = snap(s);
+        let lit = non_black_permille(&rgb);
+        if t0.elapsed() >= next_png {
+            save_png(
+                s,
+                &evidence.join(format!("{name}-{:03}s.png", t0.elapsed().as_secs())),
+            );
+            next_png += Duration::from_secs(30);
+        }
+        if w > 0 && lit >= permille && distinct_colours(&rgb) >= 64 {
+            return Some((t0.elapsed(), w, h, lit));
+        }
+        if let Some(e) = &s.lock().unwrap().ended {
+            eprintln!("console ended: {e}");
+            return None;
+        }
+    }
+    None
+}
+
+/// Real Windows installation media through the service, as the wizard uses
+/// them (ADR-0027): each ISO of `LIGHTVM_E2E_WINDOWS_ISOS` (list separated
+/// like `PATH`) is imported and must be detected as a Windows system; a VM
+/// with the detected system, its suggested resources and its recommended
+/// firmware for the detected architecture is refused if this host cannot run
+/// it (Windows Vista 64-bit on Windows hosts); otherwise it starts, reaches
+/// `running` (UEFI media on a blank disk: the backend answers the CD boot
+/// prompt) and
+/// shows Windows Setup (a mostly lit frame) within
+/// `LIGHTVM_E2E_SETUP_MIN` minutes (default 10); then it is stopped and no
+/// QEMU process is left. Frames are saved in `LIGHTVM_WIN_EVIDENCE_DIR`.
+#[test]
+#[ignore = "requires approved QEMU, WHPX and Windows ISOs (LIGHTVM_E2E_QEMU_DIR, LIGHTVM_E2E_WINDOWS_ISOS)"]
+fn e2e_real_windows_iso_reaches_setup() {
+    let isos: Vec<PathBuf> = std::env::split_paths(
+        &std::env::var_os("LIGHTVM_E2E_WINDOWS_ISOS").expect("LIGHTVM_E2E_WINDOWS_ISOS not set"),
+    )
+    .collect();
+    assert!(!isos.is_empty(), "no ISO in LIGHTVM_E2E_WINDOWS_ISOS");
+    let cpu = std::env::var("LIGHTVM_E2E_CPU").unwrap_or_else(|_| "Skylake-Client-v4".into());
+    let setup_limit = Duration::from_secs(
+        60 * std::env::var("LIGHTVM_E2E_SETUP_MIN")
+            .ok()
+            .and_then(|m| m.parse().ok())
+            .unwrap_or(10),
+    );
+    let evidence = std::env::var_os("LIGHTVM_WIN_EVIDENCE_DIR").map_or_else(
+        || std::env::temp_dir().join("lightvm-win-evidence"),
+        PathBuf::from,
+    );
+    std::fs::create_dir_all(&evidence).unwrap();
+    let dir = temp_dir("win-setup");
+    let _cleanup = RemoveCatalog(dir.clone());
+    let private_root = short_dir("lvw");
+    let marker = private_root
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+
+    let store = SqliteStore::open(&dir).unwrap();
+    let mut setup = QemuSetup::new(qemu_dir(), store.root(), private_root.clone());
+    setup.cpu_model = cpu;
+    // Windows Setup ignores the ACPI power button: a short escalation.
+    setup.stop_policy = qemu_backend::ShutdownPolicy {
+        powerdown_timeout: Duration::from_secs(20),
+        quit_timeout: Duration::from_secs(5),
+        kill_timeout: Duration::from_secs(10),
+    };
+    let (host, vm_backend, capacity) = probe(setup).expect("QEMU probe");
+    assert!(
+        capacity.accelerator_available,
+        "reference accelerator probe"
+    );
+    let audit = FileAuditSink::open(&dir.join("audit").join("audit.jsonl")).unwrap();
+    let inspector = ManagedMediaInspector::new(store.root());
+    let engine =
+        CoreEngine::new(store, audit, vm_backend, inspector, core_config(capacity)).unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let mut cfg = ServiceConfig::new(&dir);
+        cfg.runtime_dir = Some(dir.join("run"));
+        cfg.display_dir = Some(short_dir("lvd"));
+        let (handle, ui) = start(cfg, Box::new(engine), Box::new(host)).await.unwrap();
+        let mut c = tokio::time::timeout(T, Client::connect(handle.endpoint()))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            c.hello(&ui).await.unwrap(),
+            ServerMessage::HelloOk { role: Role::Ui, .. }
+        ));
+
+        let mut failures = Vec::new();
+        for (i, iso) in isos.iter().enumerate() {
+            let t = Instant::now();
+            let install = import(&mut c, iso, MediaKind::InstallIso).await;
+            let Some(guest) = install.detected_guest.clone() else {
+                failures.push(format!("{}: not detected", iso.display()));
+                continue;
+            };
+            eprintln!(
+                "{}: imported in {:?}, detected {guest:?}",
+                iso.display(),
+                t.elapsed()
+            );
+            let os = guest.os;
+            if !format!("{os:?}").starts_with("Windows") {
+                failures.push(format!("{}: detected {os:?}", iso.display()));
+                continue;
+            }
+            let arch = guest.arch.map_or_else(|| "x".into(), |a| format!("{a:?}"));
+            let name = format!("win-{i}-{}", arch.to_lowercase().replace('_', "-"));
+            let fw = os.recommended_firmware(guest.arch);
+            let mut vmc = sample_guest_config(&name, os, fw);
+            vmc.install_media = Some(install.id);
+            let created = req(&mut c, Request::CreateVm { config: vmc }).await;
+            // Media this host cannot run (Vista x64 under WHPX, ADR-0027):
+            // the service refuses the VM.
+            if !os.runs_on_this_host_with(guest.arch) {
+                match created {
+                    ServerMessage::Response {
+                        result: ResponseBody::VmCreated { .. },
+                        ..
+                    } => failures.push(format!("{name}: {os:?} {arch} created on this host")),
+                    other => eprintln!("{name}: {os:?} {arch} refused on this host: {other:?}"),
+                }
+                continue;
+            }
+            let vm = match created {
+                ServerMessage::Response {
+                    result: ResponseBody::VmCreated { vm },
+                    ..
+                } => vm.id,
+                other => panic!("{name}: {other:?}"),
+            };
+            eprintln!("{name}: {os:?} {arch} with {fw:?}");
+            let t = Instant::now();
+            let m = submit(&mut c, vm, VmAction::Start).await;
+            if !op_ok(&m) {
+                failures.push(format!("{name}: start refused: {m:?}"));
+                continue;
+            }
+            if !wait_state(&mut c, vm, VmState::Running, T).await {
+                failures.push(format!("{name}: not running"));
+                continue;
+            }
+            eprintln!("{name}: running after {:?}", t.elapsed());
+            let ticket = match req(&mut c, Request::OpenConsole { vm_id: vm }).await {
+                ServerMessage::Response {
+                    result: ResponseBody::Console { ticket },
+                    ..
+                } => ticket,
+                other => panic!("{name}: {other:?}"),
+            };
+            let screen = watch(&ticket);
+            match wait_lit(&screen, 500, setup_limit, &evidence, &name).await {
+                Some((after, w, h, lit)) => {
+                    // The Setup window is drawn shortly after its background.
+                    tokio::time::sleep(Duration::from_secs(15)).await;
+                    let png = evidence.join(format!("{name}-setup.png"));
+                    save_png(&screen, &png);
+                    eprintln!(
+                        "{name}: frame {w}x{h} with {lit}/1000 lit pixels after {after:?}; saved {}",
+                        png.display()
+                    );
+                }
+                None => {
+                    save_png(&screen, &evidence.join(format!("{name}-last.png")));
+                    failures.push(format!("{name}: Windows Setup not shown"));
+                }
+            }
+            let t = Instant::now();
+            let m = submit(&mut c, vm, VmAction::Stop).await;
+            let stopped = op_ok(&m)
+                && wait_state(&mut c, vm, VmState::Stopped, Duration::from_secs(60)).await;
+            if stopped {
+                eprintln!("{name}: stopped in {:?}", t.elapsed());
+            } else {
+                eprintln!("{name}: graceful stop not completed ({m:?}): forced stop");
+                let m = submit(&mut c, vm, VmAction::ForceStop).await;
+                assert!(op_ok(&m), "{name}: force stop: {m:?}");
+                assert!(
+                    wait_state(&mut c, vm, VmState::Stopped, T).await,
+                    "{name}: not stopped"
+                );
+                eprintln!("{name}: force-stopped after {:?}", t.elapsed());
+            }
+            let left = qemu_processes_with(&marker);
+            if !left.is_empty() {
+                failures.push(format!("{name}: QEMU processes left: {left:?}"));
+            }
+        }
+        handle.shutdown().await;
+        let left = qemu_processes_with(&marker);
+        assert!(left.is_empty(), "orphan QEMU processes: {left:?}");
+        assert!(failures.is_empty(), "{failures:#?}");
+    });
+    let _ = std::fs::remove_dir_all(&private_root);
+}

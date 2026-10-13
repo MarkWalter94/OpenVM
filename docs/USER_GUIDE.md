@@ -212,7 +212,7 @@ The new VM appears on the Dashboard as **Stopped**, with system, CPU, memory, vi
 
 ### 6.1 Create a Windows VM
 
-LightVM can also create VMs for **Windows XP, Vista, 7, 8.1 and 10**, with the same wizard. **This is experimental and not yet tested by the project with any Windows installation image** (`docs/COMPATIBILITY.md`, "Windows guest profiles"). **Windows 11 (x86/x64) and Windows 8 are not supported** on Windows and Linux hosts: Windows 11 needs TPM and Secure Boot, which LightVM does not provide there and does not work around; Windows 8 is replaced by 8.1. On a Mac with Apple Silicon only Windows 11 ARM64 is offered (section 6.2).
+LightVM can also create VMs for **Windows XP, Vista, 7, 8.1 and 10**, with the same wizard. **This is experimental: the project has started Windows Setup from Vista 32-bit and Windows 10 images, but has not yet completed a Windows installation** (`docs/COMPATIBILITY.md`, "Windows guest profiles"). **Windows 11 (x86/x64) and Windows 8 are not supported** on Windows and Linux hosts: Windows 11 needs TPM and Secure Boot, which LightVM does not provide there and does not work around; Windows 8 is replaced by 8.1. On a Mac with Apple Silicon only Windows 11 ARM64 is offered (section 6.2).
 
 What you need:
 
@@ -222,7 +222,7 @@ What you need:
 Steps (only what differs from section 6):
 
 1. **Installation media**: import the Windows ISO with **Import ISO…**.
-2. **System**: LightVM reads the image and shows what it found, for example *Detected: Windows 7 (64-bit, build 7601)*. If it shows *Not recognized: choose the system*, nothing is selected and you must pick the system in the list before going on; if the suggestion is wrong, pick the right one. The detection is only a suggestion; your choice is what counts. An image of Windows 8 or of Windows 11 for x86/x64 is not recognized, and those systems are not in the list. An image for another architecture (for example Windows 11 ARM64 on a Windows PC) is shown as *Detected: … — not supported on this host* and nothing is selected.
+2. **System**: LightVM reads the image and shows what it found, for example *Detected: Windows 7 (64-bit, build 7601)*. If it shows *Not recognized: choose the system*, nothing is selected and you must pick the system in the list before going on; if the suggestion is wrong, pick the right one. The detection is only a suggestion; your choice is what counts. An image of Windows 8 or of Windows 11 for x86/x64 is not recognized, and those systems are not in the list. An image for another architecture (for example Windows 11 ARM64 on a Windows PC) is shown as *Detected: … — not supported on this host* and nothing is selected. **Windows Vista 64-bit does not start on a Windows PC** (its setup stops with a blue screen under the Windows hypervisor): its image is shown as *not supported on this host*, the wizard explains why and does not go on with it; use the 32-bit Vista image.
 3. **Firmware** (Windows 8.1 and 10 only): choose **UEFI** or **Legacy BIOS (SeaBIOS)**. The wizard preselects **UEFI** for 64-bit images and **Legacy BIOS** for 32-bit images; keep the preselection unless you know you need the other one. Windows XP, Vista and 7 always use Legacy BIOS. Choose before installing: a system installed with one firmware does not boot with the other.
 4. **Resources**: when you choose the system, the wizard fills in the standard template for that system and for the architecture of the image (32-bit or 64-bit; see the table below), unless you already changed the values. The step names the template, for example *Template: Windows 7 64-bit — 2 vCPU, 4 GiB RAM, 40 GiB disk*. You can change the values within what the host can give, and **Reset to template** puts them back. For 32-bit Windows the memory stops at 4 GiB, the most a 32-bit Windows can use.
 5. **Network**: **Offline** only, as for every VM. Networking for Windows VMs is planned as separate work.
@@ -236,7 +236,7 @@ Steps (only what differs from section 6):
 | Other Linux | x86-64 | 2 | 2 GiB | 20 GiB |
 | Windows XP | 32-bit | 1 | 1 GiB | 16 GiB |
 | Windows XP | 64-bit | 1 | 2 GiB | 20 GiB |
-| Windows Vista | 32-bit and 64-bit | 2 | 2 GiB | 40 GiB |
+| Windows Vista | 32-bit and 64-bit (64-bit not on Windows PCs) | 2 | 2 GiB | 40 GiB |
 | Windows 7 | 32-bit | 2 | 2 GiB | 32 GiB |
 | Windows 7 | 64-bit | 2 | 4 GiB | 40 GiB |
 | Windows 8.1 | 32-bit | 2 | 2 GiB | 32 GiB |
@@ -245,6 +245,8 @@ Steps (only what differs from section 6):
 | Windows 10 | 64-bit | 2 | 4 GiB | 64 GiB |
 
 During and after the installation:
+
+- With **UEFI**, Windows images show *Press any key to boot from CD or DVD…* for a few seconds at start. While the virtual disk is still empty, LightVM presses the key for you during the first seconds, so setup starts even if the console is not open yet. Once Windows is installed it no longer does: if the installation media is still attached, the message times out and the VM boots from its disk.
 
 - The VM has a standard disk controller, a standard graphics card, a **USB tablet** as the mouse and a **PS/2 keyboard**. Windows has its own drivers for all of them, so **no extra driver disc is needed** and you do not need to install guest tools. The mouse pointer follows your mouse in the console without being "captured".
 - Set the **Guest keyboard layout** in the console toolbar (**US** or **IT**) to the layout you choose in Windows setup, as for Ubuntu (section 7).
@@ -471,7 +473,7 @@ If you used the setup `.exe`, uninstall from **Settings → Apps → Installed a
 - **No clipboard** and **no shared folders** between Windows and the VM. Files go into the VM only through an approved read-only data disc.
 - **Keyboard**: Italian and English (US) layouts are the targets; other layouts and IME input are not verified.
 - **CPU model**: the VM uses a generic CPU model, not the host's (`-cpu host` does not boot on the test PC), so some guest software may run slower or detect fewer CPU features.
-- **One reference guest**: Ubuntu 26.04.1 LTS Desktop. Other guests are not tested. Windows XP, Vista, 7, 8.1 and 10 VMs can be created (section 6.1) but have not been tested with a Windows installation image yet; Windows 8 and 11 are not supported.
+- **One reference guest**: Ubuntu 26.04.1 LTS Desktop. Other guests are not tested. Windows XP, Vista, 7, 8.1 and 10 VMs can be created (section 6.1); the project has started Windows Setup from Vista 32-bit and Windows 10 images but has not completed an installation yet; Windows Vista 64-bit does not run on Windows PCs; Windows 8 and 11 are not supported.
 - Baselines are taken **with the VM off** only: no snapshot of a running VM, no RAM state (section 10). Baseline labels are generated by LightVM and cannot be renamed. Only one baseline operation at a time across all VMs.
 - Agent sessions (section 11): the MCP adapter `lightvm-mcp.exe` is included, but it has been verified only with a scripted test client: no real AI client (LLM) has been run against it yet, so client setup details may change. One agent session at a time; sessions never survive a restart of LightVM.
 - No console window: diagnostic messages are only in the log files (section 12).

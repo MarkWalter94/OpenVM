@@ -26,6 +26,9 @@
 //!   escalation and an [`EmergencyStop`] independent of the QMP queue.
 //! - [`storage_guard`]: file exclusion through share mode (F0-05).
 //! - [`screenshot`]: `screendump` PPM → PNG with limits and cleanup.
+//! - [`boot_prompt`]: automatic key at the "Press any key to boot from CD or
+//!   DVD" prompt of the Windows UEFI media, for a disk without an installed
+//!   system only.
 //!
 //! # `unsafe` code
 //!
@@ -53,6 +56,7 @@
 //! ([`input`]), screenshot with the PNG bytes ([`CapturedScreenshot`]), process
 //! states and reports ([`run`]).
 
+pub mod boot_prompt;
 pub mod cmdline;
 pub mod error;
 pub mod image;

@@ -75,6 +75,12 @@
 //!   catalog guard until the run is released: while the run lives the media
 //!   copies cannot be written, renamed or deleted, so QEMU reads the bytes
 //!   that were verified.
+//! - a Windows guest with UEFI firmware that starts from its installation
+//!   media onto a disk without an installed system gets the key of the
+//!   "Press any key to boot from CD or DVD" prompt pressed for it during
+//!   the first seconds of the run (`qemu_backend::boot_prompt`), in a task
+//!   on the backend runtime that ends on its own, stops with the run and
+//!   never fails the start; start and outcome go to the service log.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -94,7 +100,7 @@ use qemu_backend::probe::{
 use qemu_backend::{
     Accelerator, BackendError, CpuModel, CpuPolicy, DeviceProfile, ExitCause, FirmwareKind,
     HostCapabilities, JobLimits, MachineType, ManagedPath, ManagedPaths, ProcessState, QemuRun,
-    RunConfig, ShutdownPolicy, VmLaunchSpec, image, prepare,
+    RunConfig, ShutdownPolicy, VmLaunchSpec, boot_prompt, image, prepare,
 };
 use vm_core::media::VerifiedMedia;
 use vm_core::ports::VmBackend;
@@ -619,6 +625,7 @@ pub fn probe(setup: QemuSetup) -> Result<(QemuHost, QemuVmBackend, HostCapacity)
         exits: Vec::new(),
         image_tool,
         last_shots: BTreeMap::new(),
+        boot_keys: BTreeMap::new(),
     };
     Ok((host, backend, capacity))
 }
@@ -827,6 +834,10 @@ pub struct QemuVmBackend {
     /// Last screenshot of each VM (PNG in memory, at most the byte limit of
     /// the request), taken once by the engine for an agent session (F4).
     last_shots: BTreeMap<VmId, qemu_backend::screenshot::CapturedScreenshot>,
+    /// Presses of the key at the CD prompt of the Windows UEFI media
+    /// (`qemu_backend::boot_prompt`), per VM; aborted when the run is
+    /// released.
+    boot_keys: BTreeMap<VmId, tokio::task::JoinHandle<()>>,
 }
 
 /// Route of a graceful stop task that ended.
@@ -1022,6 +1033,9 @@ impl QemuVmBackend {
     /// private directory.
     fn release(&mut self, vm_id: VmId) {
         lock(&self.registry).remove(&vm_id);
+        if let Some(task) = self.boot_keys.remove(&vm_id) {
+            task.abort();
+        }
         self.last_shots.remove(&vm_id);
         lock(&self.priority_killed).retain(|(vm, _)| *vm != vm_id);
         // A graceful stop still running ends as soon as it sees the exit
@@ -1399,6 +1413,15 @@ impl VmBackend for QemuVmBackend {
             data_media: vm.config.data_media,
             limits: job_limits(&vm.config, logical_cpus()),
         };
+        // Windows UEFI media on a disk without an installed system: the CD
+        // prompt is answered by the backend (read before QEMU opens the disk;
+        // an overlay of a baseline is never blank).
+        let boot_key = boot_prompt::boot_prompt_key_needed(
+            vm.config.guest_os,
+            spec.profile.firmware(),
+            boot_prompt::install_media_boots_first(&spec),
+            boot_prompt::inspect_disk(paths.disk.as_path(), paths.backing.is_some()),
+        );
         let run = self
             .rt
             .block_on(QemuRun::start(
@@ -1408,6 +1431,25 @@ impl VmBackend for QemuVmBackend {
                 self.setup.run_config.clone(),
             ))
             .map_err(|e| public(&e))?;
+        if boot_key {
+            crate::diag!(
+                "lightvm-service: Windows UEFI setup on a blank disk: pressing `{}` at the CD boot prompt every {:?} for {:?}",
+                boot_prompt::BOOT_PROMPT_KEY,
+                boot_prompt::BOOT_PROMPT_INTERVAL,
+                boot_prompt::BOOT_PROMPT_WINDOW
+            );
+            let presses = run.boot_prompt_keys();
+            let task = self.rt.spawn(async move {
+                let r = presses.await;
+                crate::diag!(
+                    "lightvm-service: CD boot prompt key: {} sent, {} failed, end {:?}",
+                    r.sent,
+                    r.failed,
+                    r.end
+                );
+            });
+            self.boot_keys.insert(vm.id, task);
+        }
         lock(&self.registry).insert(vm.id, (run_id, run.emergency_stop_handle()));
         self.runs.insert(vm.id, Arc::new(run));
         self.private_dirs.insert(vm.id, private_guard.disarm());

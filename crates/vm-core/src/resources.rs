@@ -12,7 +12,7 @@
 //! against host memory minus the reserve. The overall storage budget
 //! (overlays, logs, screenshots) is not accounted for here (ADR-0017).
 
-use lightvm_proto::{Firmware, GuestOs, PublicError, ResourceLimits, VmConfig};
+use lightvm_proto::{Firmware, GuestArch, GuestOs, PublicError, ResourceLimits, VmConfig};
 
 /// Minimum allowed guest memory in MiB for the Linux guests (the reference
 /// profile); each guest has its own ([`min_memory_mib`]).
@@ -54,30 +54,69 @@ fn guest_name(os: GuestOs) -> &'static str {
 }
 
 /// Which guests the host can run with hardware acceleration (ADR-0007,
-/// ADR-0028). The production rule is [`GuestOs::runs_on_this_host`]
-/// (Apple Silicon macOS runs only AArch64 guests, every other host only x86
-/// guests); tests and fake backends replace it with
+/// ADR-0028), given the architecture detected in the installation media of
+/// the VM (`None` = no media or not detected). The production rule is
+/// [`GuestOs::runs_on_this_host_with`] (Apple Silicon macOS runs only
+/// AArch64 guests, every other host only x86 guests, Windows hosts not
+/// Windows Vista x64); tests and fake backends replace it with
 /// [`crate::Core::set_guest_support`].
-pub type GuestSupport = fn(GuestOs) -> bool;
+pub type GuestSupport = fn(GuestOs, Option<GuestArch>) -> bool;
 
 /// Every guest is accepted (fake backends, tests).
 #[must_use]
-pub fn any_guest(_: GuestOs) -> bool {
+pub fn any_guest(_: GuestOs, _: Option<GuestArch>) -> bool {
     true
+}
+
+fn arch_name(arch: GuestArch) -> &'static str {
+    match arch {
+        GuestArch::X86 => "32-bit",
+        GuestArch::X86_64 => "64-bit",
+        GuestArch::Aarch64 => "ARM64",
+    }
 }
 
 /// The guest must be one the host can run (`unsupported` otherwise): an
 /// x86 guest on Apple Silicon or Windows 11 ARM64 on an x86 host would only
-/// run under TCG, which ADR-0007 excludes.
-pub fn check_guest_host(os: GuestOs, supported: GuestSupport) -> Result<(), PublicError> {
-    if supported(os) {
-        return Ok(());
+/// run under TCG, which ADR-0007 excludes. `arch` is the architecture
+/// detected in the installation media: a guest may run on a host in one
+/// edition only (Windows Vista x64 stops at boot under WHPX, ADR-0027).
+pub fn check_guest_host(
+    os: GuestOs,
+    arch: Option<GuestArch>,
+    supported: GuestSupport,
+) -> Result<(), PublicError> {
+    if !supported(os, None) {
+        return Err(PublicError::unsupported(format!(
+            "{} cannot run on this host: no hardware acceleration for its architecture",
+            guest_name(os)
+        ))
+        .with_detail("field", "guest_os"));
     }
-    Err(PublicError::unsupported(format!(
-        "{} cannot run on this host: no hardware acceleration for its architecture",
-        guest_name(os)
-    ))
-    .with_detail("field", "guest_os"))
+    match arch {
+        Some(a) if !supported(os, arch) => {
+            let hint = if os == GuestOs::WindowsVista && a == GuestArch::X86_64 {
+                "it stops at boot under the hypervisor of this host; use the 32-bit installation media"
+            } else {
+                "use installation media of another edition"
+            };
+            Err(PublicError::unsupported(format!(
+                "{} {} cannot run on this host: {hint}",
+                guest_name(os),
+                arch_name(a)
+            ))
+            .with_detail("field", "install_media")
+            .with_detail(
+                "arch",
+                match a {
+                    GuestArch::X86 => "x86",
+                    GuestArch::X86_64 => "x86_64",
+                    GuestArch::Aarch64 => "aarch64",
+                },
+            ))
+        }
+        _ => Ok(()),
+    }
 }
 
 fn firmware_name(f: Firmware) -> &'static str {

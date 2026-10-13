@@ -366,7 +366,7 @@ where
             audit_failures: 0,
             input_owners: BTreeMap::new(),
             input_releases: Vec::new(),
-            guest_support: GuestOs::runs_on_this_host,
+            guest_support: GuestOs::runs_on_this_host_with,
         }
     }
 
@@ -408,8 +408,9 @@ where
     }
 
     /// Replaces the rule deciding which guests this host can run (default
-    /// [`GuestOs::runs_on_this_host`]). Creating, modifying or starting a VM
-    /// whose guest the rule refuses fails with `unsupported`. Fake backends
+    /// [`GuestOs::runs_on_this_host_with`]). Creating, modifying or starting
+    /// a VM whose guest, with the architecture detected in its installation
+    /// media, the rule refuses fails with `unsupported`. Fake backends
     /// and tests that exercise guests of another architecture pass
     /// [`crate::resources::any_guest`].
     pub fn set_guest_support(&mut self, supported: GuestSupport) {
@@ -952,6 +953,22 @@ where
             .is_ok()
     }
 
+    /// The host must run the guest of `config` with the architecture
+    /// detected in its installation media ([`check_guest_host`]); a VM
+    /// without installation media, or whose media architecture is unknown,
+    /// is checked on the guest alone.
+    fn check_config_host(&self, config: &VmConfig) -> Result<(), PublicError> {
+        let arch = match config.install_media {
+            Some(id) => self
+                .store
+                .get_media(id)?
+                .and_then(|m| m.record.detected_guest)
+                .and_then(|d| d.arch),
+            None => None,
+        };
+        check_guest_host(config.guest_os, arch, self.guest_support)
+    }
+
     fn check_config_media(&self, config: &VmConfig) -> Result<(), PublicError> {
         for (id, kind) in [
             (config.install_media, MediaKind::InstallIso),
@@ -986,7 +1003,8 @@ where
             let err = PublicError::permission_denied("VM creation not available to agent sessions");
             return Err(self.deny(actor, AuditAction::VmCreate, ev(), err));
         }
-        let checks = check_guest_host(config.guest_os, self.guest_support)
+        let checks = self
+            .check_config_host(&config)
             .and_then(|()| validate_config(&config, &self.effective_limits()))
             .and_then(|()| self.check_config_media(&config));
         if let Err(err) = checks {
@@ -1069,7 +1087,7 @@ where
             ))
         } else {
             crate::resources::check_profile_change(&current.config, &config)
-                .and_then(|()| check_guest_host(config.guest_os, self.guest_support))
+                .and_then(|()| self.check_config_host(&config))
                 .and_then(|()| {
                     validate_config(
                         &config,
@@ -1233,7 +1251,7 @@ where
             .ok_or_else(|| PublicError::not_found("VM does not exist"))?;
         // A catalog moved from another host may hold guests this one cannot
         // run with acceleration.
-        check_guest_host(rt.record.config.guest_os, self.guest_support)?;
+        self.check_config_host(&rt.record.config)?;
         // Per-VM limits recomputed at start: host capacity may have changed
         // after creation (new probe, increased reserve). The disk already
         // exists: free space only matters to create or enlarge it.

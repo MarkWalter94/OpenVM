@@ -24,7 +24,9 @@ Decision of the project owner (2026-10-12): support Windows XP, Vista, 7, 8.1 an
 
 **Scope.** This ADR adds hardware profiles for Windows guests. **ADR-0011 stays in force for Linux guests** (reference guest, UEFI only, profile and CPU) and its text is not changed. This ADR does not change the MVP scope or any exit criterion of the roadmap, and it does not promote any cell of `docs/COMPATIBILITY.md`: the Windows cells stay "not verified" until the evidence listed below exists.
 
-**Supported guest systems:** Windows XP, Windows Vista, Windows 7, Windows 8.1, Windows 10, each in the 32-bit (x86) or 64-bit (x86_64) edition of the user's installation medium. **Not supported:** Windows 8 (6.2) and Windows 11 (build 22000 and later).
+**Supported guest systems:** Windows XP, Windows Vista, Windows 7, Windows 8.1, Windows 10, each in the 32-bit (x86) or 64-bit (x86_64) edition of the user's installation medium. **Not supported:** Windows 8 (6.2) and Windows 11 (build 22000 and later); **Windows Vista 64-bit on Windows hosts** (below).
+
+**Windows Vista 64-bit on Windows hosts (decision of the project owner, 2026-10-13).** Under QEMU 11.1.0 with WHPX the Vista x64 setup stops with `STOP 0x0000005C (0x10B, 3, 0, 0)` (HAL_INITIALIZATION_FAILED) right after "Windows is loading files", while Vista x86 reaches Setup on the same profile. QEMU logs `Ignoring request for interrupt vector 0`; no profile change avoids it (`pc-i440fx` instead of `q35`, other CPU models, without x2APIC, without the hypervisor CPUID bit, one vCPU, `hpet=off`; `kernel-irqchip=off` passes the HAL and stops later with `0x0000000A`). It is a limit of the WHPX accelerator, recorded in `R2c-01`. The rule `GuestOs::runs_on_this_host_with(arch)` refuses the pair (Vista, x86_64 media) on Windows hosts: `vm-core` refuses create, update and start of a VM whose installation media is detected as Vista x64, and the wizard shows why and suggests the 32-bit edition. Other hosts are not affected by this rule.
 
 **Hardware profiles (normative).** The profile is chosen from the guest system and the firmware; `X.Y` is the versioned machine type of the approved QEMU build (`11.1` for QEMU 11.1.0).
 
@@ -42,6 +44,7 @@ Decision of the project owner (2026-10-12): support Windows XP, Vista, 7, 8.1 an
 - **i440fx only for XP.** `pc-i440fx-X.Y` is used only by the XP profile; every other profile stays on `q35`.
 - **CPU:** the same nominal model as the Linux profile (`Skylake-Client-v4` by default); `host` and `max` stay rejected.
 - **Secure Boot** stays off in the UEFI profiles (non-secure OVMF code, as in ADR-0011). No TPM device.
+- **CD boot prompt under UEFI.** The UEFI boot loader of Windows media shows "Press any key to boot from CD or DVD..." for about 5 s; without a key it returns and, on an empty disk, the firmware ends in the UEFI Shell. When a Windows guest with UEFI firmware starts from its installation media onto a disk without an installed system (a QCOW2 file with no backing file and at most 32 MiB long), the backend presses Enter through QMP once per second for the first 25 s of the run (`qemu_backend::boot_prompt`). A disk with a backing file (baseline overlay) or with more data is never treated as blank, so an installed system with the media still attached boots from its disk when the prompt times out. Legacy BIOS media prompt only when a bootable disk exists and get no key.
 
 **SeaBIOS.** The legacy firmware is `share/bios-256k.bin` of the approved QEMU 11.1.0 build (ADR-0010), passed explicitly with `-bios <path>`, with the pinned SHA-256 `ae6f6aa973aaccc143f57aa960fb035fd9de4daee4ad0cd713322f8c259e7650` (recorded in `docs/verification/F0-02-qemu-whpx-qmp.md` §2.3). It is verified against that hash like the other approved files of the distribution; a different file prevents the start of a Legacy BIOS VM. The exclusion of ADR-0011 rests on SeaBIOS with `-cpu host`; with the nominal CPU model the R2c-01 spike reached the boot loader and the kernel on both `q35` and `i440fx` without the exit code 4. That spike used a Linux ISO: it is not evidence for any Windows guest.
 
@@ -76,7 +79,7 @@ Decision of the project owner (2026-10-12): support Windows XP, Vista, 7, 8.1 an
 - The media registry stores the detected guest (storage migration 0007); media imported earlier are examined once when the media list is first read. Linux guests keep the disk floor of 4 GiB accepted by the service, while the wizard proposes at least 8 GiB.
 - Tests: profile command lines and rejected combinations (synthetic); parser malformed-input cases; real install, reboot and baseline/restore per system on this host (below). Until then the Windows matrix cells stay "not verified".
 - R2c also names Ubuntu/KVM hosts: the Linux host cells are not addressed by this ADR and stay "not verified" until R2a/R2c tests on a physical Linux host.
-- If a profile fails on real hardware and no alternative listed here passes, that system is removed from the wizard and this ADR is updated; the roadmap requirements are not relaxed.
+- If a profile fails on real hardware and no alternative listed here passes, that system is removed from the wizard and this ADR is updated; the roadmap requirements are not relaxed. Windows Vista 64-bit on Windows hosts is the first such case.
 
 ## Required evidence
 

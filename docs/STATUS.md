@@ -128,7 +128,9 @@ Started on 2026-10-12 at the owner's request (ADR-0027); it does not change the 
 | --- | --- | --- |
 | Scope: Windows XP, Vista, 7, 8.1, 10 guests through the normal wizard, ISO detection confirmed by the user, offline only; Windows 8 and 11 not supported | ADR-0027 | decided; implementation in progress |
 | SeaBIOS (`bios-256k.bin`, pinned hash) under WHPX with `Skylake-Client-v4` on `pc-q35-11.1` and `pc-i440fx-11.1` | `R2c-01` | verified with the Ubuntu ISO only (boot loader and kernel reached, no `Unexpected VP exit`) |
-| Install, reboot, pointer/keyboard, shutdown, baseline/restore for each Windows system | `R2c-01` (pending) | not verified: no Windows installation image tested |
+| Detection and Windows Setup from real media: Vista x86 (BIOS), Windows 10 x64 (UEFI, CD prompt answered by the backend) and x86 (BIOS) | `R2c-01` | verified up to the first Setup page |
+| Windows Vista x64 on Windows hosts | ADR-0027, `R2c-01` | not supported: `STOP 0x5C` under WHPX; refused by `vm-core` and the wizard |
+| Install, reboot, pointer/keyboard, shutdown, baseline/restore for each Windows system | `R2c-01` (pending) | not verified: no Windows installation completed; XP, 7 and 8.1 media missing |
 | Ubuntu/KVM host for Windows guests (R2c) | — | not verified (no physical Linux host, ADR-0016) |
 
 The Windows cells of `docs/COMPATIBILITY.md` stay "not verified". Windows installation media and licences are provided by the user.

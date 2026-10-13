@@ -9,7 +9,9 @@
 //! hardware profile, and suggests the resources. Only the systems this host
 //! runs are offered (x86 guests on x86 hosts, Windows 11 ARM64 on Apple
 //! Silicon, ADR-0028); a detected system the host cannot run is shown but
-//! not preselected.
+//! not preselected. Media of an edition the host cannot run (Windows Vista
+//! x64 on Windows hosts, ADR-0027) do not create a VM of that system, and
+//! the System step says why.
 //!
 //! The VM name is the **only** text field of the whole interface: it is a
 //! label validated live with [`VmName::parse`] and never reaches QEMU (which
@@ -35,10 +37,26 @@ pub const MIN_DISK_GIB: u64 = 8;
 /// Smallest memory of any guest system, in MiB.
 pub const MIN_MEMORY_MIB: u64 = 256;
 
-/// Which guest systems the host can run (ADR-0007, ADR-0028): the wizard
-/// offers only these. The app uses [`GuestOs::runs_on_this_host`]; tests
-/// replace it to exercise the other host family.
-pub type GuestSupport = fn(GuestOs) -> bool;
+/// Which guest systems the host can run (ADR-0007, ADR-0028), given the
+/// architecture of the installation media (`None` = not known): the wizard
+/// offers only the systems accepted with `None`, and refuses media of an
+/// edition the host cannot run (Windows Vista x64 on Windows hosts,
+/// ADR-0027). The app uses [`GuestOs::runs_on_this_host_with`]; tests
+/// replace it to exercise the other host families.
+pub type GuestSupport = fn(GuestOs, Option<GuestArch>) -> bool;
+
+/// Architectures a [`GuestSupport`] is asked about (`None` = not known).
+const ARCHES: [Option<GuestArch>; 4] = [
+    None,
+    Some(GuestArch::X86),
+    Some(GuestArch::X86_64),
+    Some(GuestArch::Aarch64),
+];
+
+/// `supported` accepts `os` both in general and with media of `arch`.
+fn runs(supported: GuestSupport, os: GuestOs, arch: Option<GuestArch>) -> bool {
+    supported(os, None) && supported(os, arch)
+}
 
 /// System whose suggested resources fill the sliders before any system is
 /// chosen: the first system the host runs (Ubuntu LTS on x86 hosts,
@@ -47,7 +65,7 @@ pub type GuestSupport = fn(GuestOs) -> bool;
 fn initial_resources_os(supported: GuestSupport) -> GuestOs {
     GuestOs::ALL
         .into_iter()
-        .find(|os| supported(*os))
+        .find(|os| supported(*os, None))
         .unwrap_or(GuestOs::UbuntuLtsX86_64)
 }
 
@@ -57,7 +75,11 @@ struct Supported(GuestSupport);
 
 impl PartialEq for Supported {
     fn eq(&self, other: &Self) -> bool {
-        GuestOs::ALL.into_iter().all(|os| self.0(os) == other.0(os))
+        GuestOs::ALL.into_iter().all(|os| {
+            ARCHES
+                .into_iter()
+                .all(|arch| self.0(os, arch) == other.0(os, arch))
+        })
     }
 }
 
@@ -68,6 +90,23 @@ pub const NOT_SUPPORTED_ON_HOST: &str = " — not supported on this host";
 
 /// Hint on the System step while no system is chosen.
 pub const CHOOSE_SYSTEM_HINT: &str = "Choose the system to continue";
+
+/// Why Windows Vista x64 media cannot be used on a Windows host (WHPX,
+/// ADR-0027).
+pub const VISTA_X64_NOT_SUPPORTED: &str =
+    "Windows Vista 64-bit does not start on this computer (Windows host): use the 32-bit edition.";
+
+/// Why installation media of `arch` cannot install `os` on this host.
+pub fn media_not_supported_text(os: GuestOs, arch: GuestArch) -> String {
+    if os == GuestOs::WindowsVista && arch == GuestArch::X86_64 {
+        VISTA_X64_NOT_SUPPORTED.to_owned()
+    } else {
+        format!(
+            "{} does not run on this computer: use installation media of another edition.",
+            template_name(os, Some(arch))
+        )
+    }
+}
 
 /// Steps, in order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -279,9 +318,9 @@ pub struct Wizard {
 
 impl Wizard {
     /// New wizard with defaults fitting the host; it offers the systems
-    /// this host runs ([`GuestOs::runs_on_this_host`]).
+    /// this host runs ([`GuestOs::runs_on_this_host_with`]).
     pub fn new(host: Option<HostCapacity>) -> Self {
-        Self::with_guest_support(host, GuestOs::runs_on_this_host)
+        Self::with_guest_support(host, GuestOs::runs_on_this_host_with)
     }
 
     /// New wizard offering the systems `supported` accepts.
@@ -313,7 +352,30 @@ impl Wizard {
 
     /// The host can run `os`: it is offered in the System step.
     pub fn supports(&self, os: GuestOs) -> bool {
-        self.supported.0(os)
+        self.supported.0(os, None)
+    }
+
+    /// The host can run `os` installed from the chosen installation media
+    /// (its detected architecture): Windows hosts do not run Windows Vista
+    /// x64 (ADR-0027).
+    pub fn runs_with_media(&self, os: GuestOs) -> bool {
+        runs(self.supported.0, os, self.arch())
+    }
+
+    /// The host runs `os`, but not from the chosen installation media (an
+    /// edition it cannot run, such as Windows Vista x64 on Windows hosts).
+    pub fn media_refuses(&self, os: GuestOs) -> bool {
+        self.supports(os) && !self.runs_with_media(os)
+    }
+
+    /// Why the chosen installation media cannot install the chosen system
+    /// (before a choice, the detected one) on this host, if it cannot: the
+    /// system runs here, but not in the edition of the media.
+    pub fn media_not_supported(&self) -> Option<String> {
+        let arch = self.arch()?;
+        let os = self.os.or_else(|| self.detected.as_ref().map(|d| d.os))?;
+        self.media_refuses(os)
+            .then(|| media_not_supported_text(os, arch))
     }
 
     /// Sets the guest system: the firmware becomes the recommended one for
@@ -401,7 +463,7 @@ impl Wizard {
         self.detected = record.detected_guest.clone();
         if !self.os_chosen {
             match self.detected.as_ref().map(|d| d.os) {
-                Some(os) if self.supports(os) => self.set_os(os),
+                Some(os) if self.runs_with_media(os) => self.set_os(os),
                 _ => self.os = None,
             }
         } else if let Some(os) = self.os {
@@ -412,9 +474,10 @@ impl Wizard {
     }
 
     /// Configuration to create, if the name is valid and a system is
-    /// chosen.
+    /// chosen that the chosen installation media can install on this host
+    /// ([`Wizard::media_refuses`]).
     pub fn config(&self) -> Option<VmConfig> {
-        let os = self.os?;
+        let os = self.os.filter(|os| !self.media_refuses(*os))?;
         Some(VmConfig {
             name: VmName::parse(self.name.clone()).ok()?,
             guest_os: os,
@@ -549,8 +612,10 @@ pub fn wizard_ui(ui: &mut egui::Ui, w: &mut Wizard, env: &WizardEnv<'_>) -> Opti
     let can_next = match w.step {
         Step::Name => validation.is_ok(),
         Step::Install => w.install_media.is_some(),
-        Step::System => w.os.is_some(),
-        Step::Resources => w.os.is_some_and(|os| bounds.sufficient_for(os)),
+        Step::System => w.os.is_some_and(|os| !w.media_refuses(os)),
+        Step::Resources => {
+            w.os.is_some_and(|os| !w.media_refuses(os) && bounds.sufficient_for(os))
+        }
         _ => true,
     };
     let creating = w.submitted && env.create.is_pending();
@@ -590,10 +655,10 @@ pub fn wizard_ui(ui: &mut egui::Ui, w: &mut Wizard, env: &WizardEnv<'_>) -> Opti
             }
         } else if ({
             let next = ui.add_enabled(can_next, theme::primary(ui, "Next").min_size(size));
-            if w.step == Step::System && w.os.is_none() {
-                next.on_disabled_hover_text(CHOOSE_SYSTEM_HINT)
-            } else {
-                next
+            match (w.step, w.os, w.media_not_supported()) {
+                (Step::System, None, _) => next.on_disabled_hover_text(CHOOSE_SYSTEM_HINT),
+                (Step::System, Some(_), Some(why)) => next.on_disabled_hover_text(why),
+                _ => next,
             }
         }
         .clicked()
@@ -685,7 +750,7 @@ fn system_step(ui: &mut egui::Ui, w: &mut Wizard, b: Bounds) {
     );
     ui.add_space(4.0);
     match &w.detected {
-        Some(d) if w.supports(d.os) => {
+        Some(d) if runs(w.supported.0, d.os, d.arch) => {
             theme::status(
                 ui,
                 &format!("Detected: {}", detected_label(d)),
@@ -703,6 +768,16 @@ fn system_step(ui: &mut egui::Ui, w: &mut Wizard, b: Bounds) {
             theme::status(ui, "Not recognized: choose the system", Tone::Warning);
         }
     }
+    // The system runs here, but not from this media: say why (ADR-0027).
+    if let Some(why) = w.media_not_supported() {
+        ui.add_space(4.0);
+        let tone = if w.os.is_some() {
+            Tone::Danger
+        } else {
+            Tone::Warning
+        };
+        theme::notice(ui, &why, tone);
+    }
     ui.add_space(6.0);
     // Two columns, Linux then Windows, with only the systems this host
     // runs (an empty column is not shown): the reading (and Tab) order
@@ -714,7 +789,7 @@ fn system_step(ui: &mut egui::Ui, w: &mut Wizard, b: Bounds) {
         .map(|(caption, windows)| {
             let list = GuestOs::ALL
                 .into_iter()
-                .filter(|o| o.is_windows() == windows && supported(*o))
+                .filter(|o| o.is_windows() == windows && supported(*o, None))
                 .collect::<Vec<_>>();
             (caption, list)
         })
@@ -917,7 +992,7 @@ fn media_step(
         if install && let Some(d) = &m.detected_guest {
             detail.push_str(" · ");
             detail.push_str(&detected_label(d));
-            if !supported(d.os) {
+            if !runs(supported, d.os, d.arch) {
                 detail.push_str(NOT_SUPPORTED_ON_HOST);
             }
         }
@@ -1187,12 +1262,12 @@ mod tests {
     use super::*;
 
     /// An x86 host (every build but Apple Silicon macOS).
-    fn x86_host(os: GuestOs) -> bool {
+    fn x86_host(os: GuestOs, _: Option<GuestArch>) -> bool {
         !os.is_aarch64()
     }
 
     /// An Apple Silicon host (ADR-0028).
-    fn arm_host(os: GuestOs) -> bool {
+    fn arm_host(os: GuestOs, _: Option<GuestArch>) -> bool {
         os.is_aarch64()
     }
 
@@ -1626,5 +1701,71 @@ mod tests {
         for os in GuestOs::ALL {
             assert_eq!(w.supports(os), os.runs_on_this_host(), "{os:?}");
         }
+    }
+
+    /// A Windows host (WHPX): x86 guests, but not Windows Vista x64.
+    fn windows_host(os: GuestOs, arch: Option<GuestArch>) -> bool {
+        !os.is_aarch64() && !(os == GuestOs::WindowsVista && arch == Some(GuestArch::X86_64))
+    }
+
+    #[test]
+    fn vista_x64_media_cannot_create_a_vm_where_the_host_refuses_it() {
+        let x64 = record(9, detected(GuestOs::WindowsVista, Some(GuestArch::X86_64)));
+        let x86 = record(10, detected(GuestOs::WindowsVista, Some(GuestArch::X86)));
+        let mut w = Wizard::with_guest_support(None, windows_host);
+        w.name = "vista".into();
+        w.install_media = Some(x64.id);
+        w.apply_detection([&x64]);
+        // Detected but not preselected: Vista stays offered (32-bit runs).
+        assert_eq!(w.os, None);
+        assert!(w.supports(GuestOs::WindowsVista));
+        assert!(!w.runs_with_media(GuestOs::WindowsVista));
+        assert_eq!(
+            w.media_not_supported().as_deref(),
+            Some(VISTA_X64_NOT_SUPPORTED)
+        );
+        // Choosing Vista by hand with this media creates nothing.
+        w.os_chosen = true;
+        w.set_os(GuestOs::WindowsVista);
+        assert!(w.config().is_none());
+        assert!(w.media_not_supported().is_some());
+        // Another system for the same media is the user's correction.
+        w.set_os(GuestOs::Windows7);
+        assert!(w.config().is_some());
+        assert_eq!(w.media_not_supported(), None);
+        // The 32-bit media is fine.
+        w.set_os(GuestOs::WindowsVista);
+        w.install_media = Some(x86.id);
+        w.apply_detection([&x86]);
+        assert_eq!(w.media_not_supported(), None);
+        assert_eq!(w.config().unwrap().guest_os, GuestOs::WindowsVista);
+        // Without the rule (other hosts) the 64-bit media is preselected.
+        let w = with_media(&x64);
+        assert_eq!(w.os, Some(GuestOs::WindowsVista));
+        assert!(w.config().is_some());
+    }
+
+    #[test]
+    fn media_not_supported_texts() {
+        assert_eq!(
+            media_not_supported_text(GuestOs::WindowsVista, GuestArch::X86_64),
+            "Windows Vista 64-bit does not start on this computer (Windows host): use the 32-bit edition."
+        );
+        assert_eq!(
+            media_not_supported_text(GuestOs::Windows7, GuestArch::X86),
+            "Windows 7 32-bit does not run on this computer: use installation media of another edition."
+        );
+    }
+
+    #[test]
+    fn default_rule_is_the_build_host_with_media() {
+        let x64 = record(11, detected(GuestOs::WindowsVista, Some(GuestArch::X86_64)));
+        let mut w = Wizard::new(None);
+        w.install_media = Some(x64.id);
+        w.apply_detection([&x64]);
+        assert_eq!(
+            w.runs_with_media(GuestOs::WindowsVista),
+            GuestOs::WindowsVista.runs_on_this_host_with(Some(GuestArch::X86_64))
+        );
     }
 }

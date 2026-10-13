@@ -46,7 +46,7 @@ Notes:
 - The TCG row stays outside the AI profile in any case (ADR-0007).
 - The Ubuntu row stays "not verified" if F0 closes with the outcome "verified on Windows only" (section 10 F0; ADR-0016). WSL2, nested VMs and runners without verifiable acceleration do not update it.
 - The "experimental" status of the Windows row reflects F0 feasibility tests passed with known limits; it cannot be advertised as supported and does not imply any mode of the following matrix.
-- The Windows guest row (R2c) stays "not verified": ADR-0027 sets the hardware profiles for Windows XP, Vista, 7, 8.1 and 10, but no Windows guest has been tested. The only recorded test is the SeaBIOS + WHPX spike with the Ubuntu ISO (`R2c-01`), which updates the SeaBIOS component row below and no matrix cell. The per-system status is in "Windows guest profiles".
+- The Windows guest row (R2c) stays "not verified": ADR-0027 sets the hardware profiles for Windows XP, Vista, 7, 8.1 and 10, but no Windows guest has been installed. Recorded so far (`R2c-01`): the SeaBIOS + WHPX spike with the Ubuntu ISO, which updates the SeaBIOS component row below, and the Windows Setup reached from real Vista x86 and Windows 10 (x86 BIOS, x64 UEFI) media; neither updates a matrix cell. The per-system status is in "Windows guest profiles".
 
 ## Windows guest profiles (ADR-0027)
 
@@ -55,10 +55,11 @@ Host for every row: Windows 11 x86_64 with WHPX, QEMU 11.1.0, CPU `Skylake-Clien
 | Guest system | Machine type | Firmware | Disk / CDs | Display / USB | Status | Last test passed | Evidence |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Windows XP (x86, x64) | `pc-i440fx-11.1` | SeaBIOS | `ide-hd` `ide.0` unit 0 / `ide-cd` `ide.1` units 0, 1 | `VGA` / `piix3-usb-uhci` | not verified | none | `R2c-01` (pending) |
-| Windows Vista (x86, x64) | `pc-q35-11.1` | SeaBIOS | `ide-hd` `ide.2` (AHCI) / `ide.0`, `ide.1` | `VGA` / `piix3-usb-uhci` | not verified | none | `R2c-01` (pending) |
+| Windows Vista x86 | `pc-q35-11.1` | SeaBIOS | `ide-hd` `ide.2` (AHCI) / `ide.0`, `ide.1` | `VGA` / `piix3-usb-uhci` | not verified (Setup reached, not installed) | none | `R2c-01` |
+| Windows Vista x64 | — | — | — | — | not supported on this host (WHPX: `STOP 0x5C` at boot; ADR-0027) | none | `R2c-01` |
 | Windows 7 (x86, x64) | `pc-q35-11.1` | SeaBIOS | `ide-hd` `ide.2` (AHCI) / `ide.0`, `ide.1` | `VGA` / `piix3-usb-uhci` | not verified | none | `R2c-01` (pending) |
 | Windows 8.1 (x86, x64) | `pc-q35-11.1` | OVMF (UEFI, Secure Boot off) or SeaBIOS | `ide-hd` `ide.2` (AHCI) / `ide.0`, `ide.1` | `VGA` / `qemu-xhci` | not verified | none | `R2c-01` (pending) |
-| Windows 10 (x86, x64; build below 22000) | `pc-q35-11.1` | OVMF (UEFI, Secure Boot off) or SeaBIOS | `ide-hd` `ide.2` (AHCI) / `ide.0`, `ide.1` | `VGA` / `qemu-xhci` | not verified | none | `R2c-01` (pending) |
+| Windows 10 (x86, x64; build below 22000) | `pc-q35-11.1` | OVMF (UEFI, Secure Boot off) or SeaBIOS | `ide-hd` `ide.2` (AHCI) / `ide.0`, `ide.1` | `VGA` / `qemu-xhci` | not verified (Setup reached: x64 UEFI, x86 BIOS; not installed) | none | `R2c-01` |
 
 The modes of these systems (manual, baseline, AI offline) are all "not verified"; filtered Internet and guest agent stay "not verified" as for every combination (R1, R4), and the Windows guests are offline only.
 

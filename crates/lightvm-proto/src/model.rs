@@ -78,6 +78,20 @@ impl GuestOs {
         }
     }
 
+    /// [`GuestOs::runs_on_this_host`] for a guest installed from media of
+    /// architecture `arch` (`None` = no media or unknown architecture).
+    /// Windows hosts also refuse Windows Vista x64 (ADR-0027): under QEMU
+    /// with WHPX its kernel stops with STOP 0x5C (HAL_INITIALIZATION_FAILED)
+    /// right after loading its files, with every machine and CPU model; the
+    /// 32-bit edition runs.
+    #[must_use]
+    pub const fn runs_on_this_host_with(self, arch: Option<GuestArch>) -> bool {
+        let whpx_vista_x64 = cfg!(windows)
+            && matches!(self, GuestOs::WindowsVista)
+            && matches!(arch, Some(GuestArch::X86_64));
+        self.runs_on_this_host() && !whpx_vista_x64
+    }
+
     /// Whether the guest is a Windows release.
     #[must_use]
     pub const fn is_windows(self) -> bool {

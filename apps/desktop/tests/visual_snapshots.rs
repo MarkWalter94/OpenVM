@@ -85,7 +85,7 @@ fn app(state: ServiceState) -> (LightVmApp, common::Handles) {
     app.rendering = glow_info();
     // The reference snapshots show an x86 host (the wizard lists the x86
     // systems), whatever the build host.
-    app.set_guest_support(|os| !os.is_aarch64());
+    app.set_guest_support(|os, _| !os.is_aarch64());
     // Fixed path: the default one depends on the user's profile.
     app.set_settings(
         UiSettings {
@@ -304,6 +304,41 @@ fn snapshot_wizard_windows() {
     }
     h.get_by_label("Step 7 of 7: Summary");
     h.snapshot("wizard_summary_windows");
+}
+
+/// ADR-0027: Windows Vista x64 media on a Windows host, Vista chosen by
+/// hand: the System step says why the VM cannot be created.
+#[test]
+fn snapshot_wizard_vista_x64() {
+    let _serial = serial();
+    let mut state = catalog();
+    state.media.records.push(common::detected_media(
+        9,
+        "vista_x64.iso",
+        lightvm_proto::GuestOs::WindowsVista,
+        Some(lightvm_proto::GuestArch::X86_64),
+        Some(6003),
+        None,
+    ));
+    let (mut app, _hs) = app(state);
+    app.set_guest_support(|os, arch| {
+        !os.is_aarch64()
+            && !(os == lightvm_proto::GuestOs::WindowsVista
+                && arch == Some(lightvm_proto::GuestArch::X86_64))
+    });
+    let mut h = harness(app, egui::vec2(1100.0, 820.0));
+    open_wizard(&mut h);
+    h.get_by_role(Role::TextInput).type_text("vista");
+    h.run();
+    next(&mut h);
+    h.get_by_label("vista_x64.iso").click();
+    h.run();
+    next(&mut h);
+    h.get_by_role_and_label(Role::RadioButton, "Windows Vista")
+        .click();
+    h.run();
+    h.get_by_label(lightvm_desktop::wizard::VISTA_X64_NOT_SUPPORTED);
+    h.snapshot("wizard_system_vista_x64");
 }
 
 #[test]

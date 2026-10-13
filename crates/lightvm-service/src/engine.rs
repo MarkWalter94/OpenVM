@@ -676,9 +676,9 @@ pub trait BackendPort: VmBackend + Send + 'static {
     fn drain_observations(&mut self) -> Vec<(VmId, BackendObservation)>;
     /// Guests this backend can run on this host (ADR-0007, ADR-0028): by
     /// default the ones the host accelerates
-    /// ([`lightvm_proto::GuestOs::runs_on_this_host`]).
+    /// ([`lightvm_proto::GuestOs::runs_on_this_host_with`]).
     fn guest_support(&self) -> vm_core::resources::GuestSupport {
-        lightvm_proto::GuestOs::runs_on_this_host
+        lightvm_proto::GuestOs::runs_on_this_host_with
     }
     /// Display socket of the run (QEMU `vnc.sock`), if the backend has one.
     fn display_socket(&self, _vm_id: VmId, _run_id: RunId) -> Option<PathBuf> {

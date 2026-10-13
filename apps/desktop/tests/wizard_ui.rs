@@ -14,12 +14,12 @@ use lightvm_desktop::{LightVmApp, Section};
 use lightvm_proto::{Firmware, GuestArch, GuestOs, MediaKind, NetworkProfile, VmState};
 
 /// An x86 host (every build but Apple Silicon macOS): the x86 systems.
-fn x86_host(os: GuestOs) -> bool {
+fn x86_host(os: GuestOs, _: Option<GuestArch>) -> bool {
     !os.is_aarch64()
 }
 
 /// An Apple Silicon host (ADR-0028): Windows 11 ARM64 only.
-fn arm_host(os: GuestOs) -> bool {
+fn arm_host(os: GuestOs, _: Option<GuestArch>) -> bool {
     os.is_aarch64()
 }
 
@@ -794,4 +794,93 @@ fn default_offer_follows_the_build_host() {
         offered(&h, "Windows 10"),
         GuestOs::Windows10.runs_on_this_host()
     );
+}
+
+/// A Windows host (WHPX): x86 systems, but not Windows Vista x64 (ADR-0027).
+fn windows_host(os: GuestOs, arch: Option<GuestArch>) -> bool {
+    !os.is_aarch64() && !(os == GuestOs::WindowsVista && arch == Some(GuestArch::X86_64))
+}
+
+fn vista_state() -> lightvm_desktop::service::ServiceState {
+    let mut s = win_state();
+    s.media.records.extend([
+        common::detected_media(
+            9,
+            "vista_x64.iso",
+            GuestOs::WindowsVista,
+            Some(GuestArch::X86_64),
+            Some(6003),
+            None,
+        ),
+        common::detected_media(
+            10,
+            "vista_x86.iso",
+            GuestOs::WindowsVista,
+            Some(GuestArch::X86),
+            Some(6003),
+            None,
+        ),
+    ]);
+    s
+}
+
+/// ADR-0027: on a Windows host Windows Vista x64 media are marked, not
+/// preselected, and cannot create a Vista VM even when the user picks
+/// Vista; the System step says why. The 32-bit media create it.
+#[test]
+fn vista_x64_media_is_refused_on_windows_hosts() {
+    let (app, hs) = app_on(vista_state(), windows_host);
+    let mut h = harness(app);
+    h.run_steps(4);
+    h.get_by_role_and_label(Role::Button, "New VM").click();
+    h.run_steps(4);
+    h.get_by_role(Role::TextInput).type_text("vista");
+    h.run_steps(4);
+    next(&mut h);
+    let x64 = " · Windows Vista, 64-bit, build 6003 — not supported on this host";
+    assert!(
+        h.query_by(|n| n.label().or(n.value()).is_some_and(|l| l.ends_with(x64)))
+            .is_some()
+    );
+    h.get_by_label("vista_x64.iso").click();
+    h.run_steps(4);
+    next(&mut h);
+
+    h.get_by_label("Step 3 of 7: System");
+    h.get_by_label("Detected: Windows Vista, 64-bit, build 6003 — not supported on this host");
+    h.get_by_label(lightvm_desktop::wizard::VISTA_X64_NOT_SUPPORTED);
+    assert_eq!(h.state().wizard().unwrap().os, None);
+    // Vista stays offered (its 32-bit edition runs), but not from this media.
+    h.get_by_role_and_label(Role::RadioButton, "Windows Vista")
+        .click();
+    h.run_steps(4);
+    assert!(toggled(&h, "Windows Vista"));
+    h.get_by_label(lightvm_desktop::wizard::VISTA_X64_NOT_SUPPORTED);
+    assert!(!enabled(&h, "Next"));
+
+    // The 32-bit media: the choice stays, nothing to say.
+    h.get_by_role_and_label(Role::Button, "Back").click();
+    h.run_steps(4);
+    h.get_by_label("vista_x86.iso").click();
+    h.run_steps(4);
+    next(&mut h);
+    h.get_by_label("Detected: Windows Vista, 32-bit, build 6003");
+    assert!(
+        h.query_by_label(lightvm_desktop::wizard::VISTA_X64_NOT_SUPPORTED)
+            .is_none()
+    );
+    assert!(enabled(&h, "Next"));
+    for _ in 0..4 {
+        next(&mut h);
+    }
+    h.get_by_label("Step 7 of 7: Summary");
+    hs.clear();
+    h.get_by_role_and_label(Role::Button, "Create").click();
+    h.run_steps(4);
+    let sent = hs.actions();
+    let [ServiceCommand::Create(c)] = sent.as_slice() else {
+        panic!("expected one Create: {sent:?}");
+    };
+    assert_eq!(c.guest_os, GuestOs::WindowsVista);
+    assert_eq!(c.install_media, Some(common::media_id(10)));
 }

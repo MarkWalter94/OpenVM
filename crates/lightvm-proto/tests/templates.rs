@@ -77,3 +77,29 @@ fn windows_11_arm64_template_and_profile() {
         cfg!(all(target_os = "macos", target_arch = "aarch64"))
     );
 }
+
+#[test]
+fn windows_hosts_refuse_vista_x64_media() {
+    for os in GuestOs::ALL {
+        for arch in ARCHES {
+            let vista_x64 = os == GuestOs::WindowsVista && arch == Some(GuestArch::X86_64);
+            assert_eq!(
+                os.runs_on_this_host_with(arch),
+                os.runs_on_this_host() && !(vista_x64 && cfg!(windows)),
+                "{os:?} {arch:?}"
+            );
+        }
+    }
+    // Vista 32-bit, and Vista media of unknown architecture, keep the
+    // per-host rule.
+    for arch in [None, Some(GuestArch::X86)] {
+        assert_eq!(
+            GuestOs::WindowsVista.runs_on_this_host_with(arch),
+            GuestOs::WindowsVista.runs_on_this_host()
+        );
+    }
+    assert_eq!(
+        GuestOs::WindowsVista.runs_on_this_host_with(Some(GuestArch::X86_64)),
+        GuestOs::WindowsVista.runs_on_this_host() && !cfg!(windows)
+    );
+}

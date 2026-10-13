@@ -520,7 +520,7 @@ impl LightVmApp {
             cli_config: None,
             restart: None,
             vm_edit: None,
-            guest_support: lightvm_proto::GuestOs::runs_on_this_host,
+            guest_support: lightvm_proto::GuestOs::runs_on_this_host_with,
             wizard: None,
             dialog: None,
             baselines_vm: None,
@@ -599,7 +599,7 @@ impl LightVmApp {
     }
 
     /// Systems the New VM wizard offers: by default those this host runs
-    /// ([`lightvm_proto::GuestOs::runs_on_this_host`]); tests pass another
+    /// ([`lightvm_proto::GuestOs::runs_on_this_host_with`]); tests pass another
     /// rule to exercise the other host family.
     pub fn set_guest_support(&mut self, s: wizard::GuestSupport) {
         self.guest_support = s;
