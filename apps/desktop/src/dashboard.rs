@@ -13,6 +13,45 @@ use crate::theme::{self, Tone};
 /// Description under the Dashboard title.
 pub const DESCRIPTION: &str = "Virtual machines of the local catalog.";
 
+/// QEMU of the running supervisor, as far as the app knows it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SupervisorQemu {
+    /// A QEMU folder was given to the supervisor, or the app does not know
+    /// its configuration (a stand-in supervisor): nothing to report.
+    #[default]
+    Given,
+    /// Started by the app with no QEMU folder chosen in Settings or found on
+    /// the host.
+    MissingFromSettings,
+    /// Started from the command line (`--catalog`) without `--qemu-dir`.
+    MissingFromCommandLine,
+}
+
+impl SupervisorQemu {
+    /// Why VMs cannot start, if they cannot.
+    pub fn missing_reason(self) -> Option<&'static str> {
+        match self {
+            Self::Given => None,
+            Self::MissingFromSettings => Some(NO_QEMU),
+            Self::MissingFromCommandLine => Some(NO_QEMU_COMMAND_LINE),
+        }
+    }
+}
+
+/// Notice and Start hover text when the app started the supervisor without
+/// a QEMU folder.
+pub const NO_QEMU: &str = "QEMU was not found: VMs cannot start. Choose the QEMU folder in Settings → QEMU distribution, then restart the supervisor.";
+
+/// Notice and Start hover text when the supervisor was started from the
+/// command line without `--qemu-dir`.
+pub const NO_QEMU_COMMAND_LINE: &str = "The supervisor was started from the command line without --qemu-dir: VMs cannot start. Start LightVM again adding --qemu-dir with the QEMU folder.";
+
+/// Outcome line shown instead of "capability not available on this host"
+/// when a start was refused and the supervisor has no QEMU.
+pub fn start_refused_outcome(reason: &str) -> String {
+    format!("Last action: start refused. {reason}")
+}
+
 /// Actions that ask for a confirmation before being sent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Confirm {
@@ -50,6 +89,8 @@ pub enum DashboardAction {
     Baselines(VmId),
     /// Ask a confirmation.
     Confirm(Confirm),
+    /// Open Settings, where the QEMU folder is chosen.
+    QemuSettings,
 }
 
 /// Text and tone of the state of a VM.
@@ -185,6 +226,7 @@ fn vm_row(
     v: &VmSummary,
     active: bool,
     baselines: (Option<&BaselineList>, bool),
+    no_qemu: Option<&str>,
     choice: &mut Option<DashboardAction>,
 ) {
     let p = theme::Palette::of(ui);
@@ -259,11 +301,15 @@ fn vm_row(
                     } else if busy.is_some() {
                         busy_hover
                     } else {
-                        "Start the VM"
+                        // Without QEMU the supervisor refuses every start.
+                        no_qemu.unwrap_or("Start the VM")
                     };
                     if action_button(
                         ui,
-                        active && v.state == VmState::Stopped && busy.is_none(),
+                        active
+                            && v.state == VmState::Stopped
+                            && busy.is_none()
+                            && no_qemu.is_none(),
                         theme::primary(ui, "Start"),
                         &format!("Start {name}"),
                         hover,
@@ -379,13 +425,27 @@ fn vm_row(
 }
 
 /// Dashboard with the supervisor: connection state, catalog VMs with their
-/// actions, Emergency Stop and "New VM".
+/// actions, Emergency Stop and "New VM". The QEMU of the supervisor is not
+/// known here: see [`dashboard_with_qemu_ui`].
 pub fn dashboard_ui(
     ui: &mut egui::Ui,
     state: &ServiceState,
     pid: u32,
     alive: bool,
 ) -> Option<DashboardAction> {
+    dashboard_with_qemu_ui(ui, state, pid, alive, SupervisorQemu::Given)
+}
+
+/// [`dashboard_ui`] knowing whether the supervisor has a QEMU folder: without
+/// one, a notice explains why VMs cannot start and Start is disabled.
+pub fn dashboard_with_qemu_ui(
+    ui: &mut egui::Ui,
+    state: &ServiceState,
+    pid: u32,
+    alive: bool,
+    qemu: SupervisorQemu,
+) -> Option<DashboardAction> {
+    let no_qemu = qemu.missing_reason();
     let p = theme::Palette::of(ui);
     let mut choice = None;
     let active = alive && state.connected;
@@ -446,13 +506,29 @@ pub fn dashboard_ui(
         ui.add_space(8.0);
         theme::notice(ui, &state.connection, Tone::Danger);
     }
+    if let Some(reason) = no_qemu {
+        ui.add_space(8.0);
+        theme::notice(ui, reason, Tone::Warning);
+        if qemu == SupervisorQemu::MissingFromSettings {
+            ui.add_space(4.0);
+            let r = ui.button("Open Settings");
+            theme::accessible_name(&r, WidgetType::Button, "Open the QEMU settings");
+            if r.clicked() {
+                choice = Some(DashboardAction::QemuSettings);
+            }
+        }
+    }
     if let Some(e) = &state.last_outcome {
+        // Without QEMU, a refused start says why instead of "capability not
+        // available on this host".
+        let text = match no_qemu {
+            Some(reason) if state.start_unavailable_outcome.as_ref() == Some(e) => {
+                start_refused_outcome(reason)
+            }
+            _ => format!("Last action: {e}"),
+        };
         ui.add_space(6.0);
-        ui.label(
-            egui::RichText::new(format!("Last action: {e}"))
-                .small()
-                .color(p.text_weak),
-        );
+        ui.label(egui::RichText::new(text).small().color(p.text_weak));
     }
 
     ui.add_space(18.0);
@@ -471,7 +547,9 @@ pub fn dashboard_ui(
                 theme::divider(ui);
             }
             let baselines = (state.baselines.get(&v.vm_id), baselines_available(state));
-            ui.push_id(v.vm_id, |ui| vm_row(ui, v, active, baselines, &mut choice));
+            ui.push_id(v.vm_id, |ui| {
+                vm_row(ui, v, active, baselines, no_qemu, &mut choice)
+            });
         }
     });
     choice

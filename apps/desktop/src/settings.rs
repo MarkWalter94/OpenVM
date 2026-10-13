@@ -154,18 +154,130 @@ impl UiSettings {
     }
 }
 
-/// QEMU installed by Homebrew on macOS (`/opt/homebrew` on Apple Silicon,
-/// `/usr/local` on Intel), used when no folder is chosen. The supervisor
-/// still verifies the binaries against the approved hashes. Elsewhere
-/// there is no standard location: `None`.
+/// QEMU found on this host, used when no folder is chosen (the Settings page
+/// shows it as "(found automatically)"). The supervisor still verifies the
+/// binaries against the approved hashes, so a QEMU found here that is not the
+/// approved distribution is refused when the supervisor starts.
+///
+/// - macOS: Homebrew (`/opt/homebrew` on Apple Silicon, `/usr/local` on
+///   Intel), the folder whose `bin` holds `qemu-system-aarch64`.
+/// - Windows: the first folder holding [`WINDOWS_QEMU_EXE`] among
+///   [`windows_qemu_candidates`].
+/// - Linux: `None`. No physical Linux host has been verified, so there is no
+///   location to trust.
 pub fn detected_qemu_dir() -> Option<PathBuf> {
-    if !cfg!(target_os = "macos") {
-        return None;
+    if cfg!(target_os = "macos") {
+        return ["/opt/homebrew", "/usr/local"]
+            .into_iter()
+            .map(PathBuf::from)
+            .find(|d| d.join("bin").join("qemu-system-aarch64").is_file());
     }
-    ["/opt/homebrew", "/usr/local"]
+    if cfg!(windows) {
+        return find_windows_qemu(&WindowsQemuEnv::from_host(), |d| {
+            d.join(WINDOWS_QEMU_EXE).is_file()
+        });
+    }
+    None
+}
+
+/// QEMU executable that marks a QEMU folder on Windows.
+pub const WINDOWS_QEMU_EXE: &str = "qemu-system-x86_64.exe";
+
+/// Folder of the verified per-user extraction (user guide, option A), under
+/// `%LOCALAPPDATA%\Programs`; also the folder of the project's lab QEMU.
+pub const WINDOWS_USER_QEMU_DIR: &str = "qemu-11.1.0";
+
+/// Ancestors of the executable examined when looking for the cargo `target`
+/// directory of a development build.
+pub const DEV_BUILD_MAX_DEPTH: usize = 6;
+
+/// Host values the Windows search reads, kept apart so the search can be
+/// tested without touching the real host.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WindowsQemuEnv {
+    /// `%LOCALAPPDATA%`.
+    pub local_app_data: Option<PathBuf>,
+    /// `%ProgramFiles%`.
+    pub program_files: Option<PathBuf>,
+    /// `PATH` as is (`;`-separated, entries possibly quoted).
+    pub path: Option<String>,
+    /// Running executable ([`std::env::current_exe`]).
+    pub current_exe: Option<PathBuf>,
+}
+
+impl WindowsQemuEnv {
+    /// Values of the running process.
+    pub fn from_host() -> Self {
+        Self {
+            local_app_data: std::env::var_os("LOCALAPPDATA").map(PathBuf::from),
+            program_files: std::env::var_os("ProgramFiles").map(PathBuf::from),
+            path: std::env::var_os("PATH").map(|p| p.to_string_lossy().into_owned()),
+            current_exe: std::env::current_exe().ok(),
+        }
+    }
+}
+
+/// Folders where QEMU is looked for on Windows, in order:
+/// 1. `%LOCALAPPDATA%\Programs\qemu-11.1.0` (user guide, option A);
+/// 2. `%ProgramFiles%\qemu` (installer and winget, options B and C);
+/// 3. each directory of `PATH`;
+/// 4. development builds only: the project's lab QEMU, see
+///    [`dev_lab_qemu_dir`].
+pub fn windows_qemu_candidates(env: &WindowsQemuEnv) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(d) = &env.local_app_data {
+        out.push(d.join("Programs").join(WINDOWS_USER_QEMU_DIR));
+    }
+    if let Some(d) = &env.program_files {
+        out.push(d.join("qemu"));
+    }
+    if let Some(p) = &env.path {
+        out.extend(split_windows_path(p));
+    }
+    if let Some(d) = env.current_exe.as_deref().and_then(dev_lab_qemu_dir) {
+        out.push(d);
+    }
+    out
+}
+
+/// First of [`windows_qemu_candidates`] for which `has_qemu` is true (on the
+/// real host: the folder holds [`WINDOWS_QEMU_EXE`]).
+pub fn find_windows_qemu(
+    env: &WindowsQemuEnv,
+    has_qemu: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    windows_qemu_candidates(env)
         .into_iter()
+        .find(|d| has_qemu(d))
+}
+
+/// Directories of a Windows `PATH`: `;`-separated, quotes removed, empty
+/// entries skipped.
+pub fn split_windows_path(path: &str) -> Vec<PathBuf> {
+    path.split(';')
+        .map(|e| e.trim().replace('"', ""))
+        .filter(|e| !e.is_empty())
         .map(PathBuf::from)
-        .find(|d| d.join("bin").join("qemu-system-aarch64").is_file())
+        .collect()
+}
+
+/// Development convenience: when `exe` lies inside a cargo `target`
+/// directory (looked for among its nearest [`DEV_BUILD_MAX_DEPTH`]
+/// ancestors), the project's lab QEMU,
+/// `<folder containing target>\lab\qemu\qemu-11.1.0`. An installed LightVM is
+/// not inside a `target` directory and gets `None`. The caller checks that
+/// the folder holds QEMU.
+pub fn dev_lab_qemu_dir(exe: &Path) -> Option<PathBuf> {
+    exe.ancestors()
+        .skip(1)
+        .take(DEV_BUILD_MAX_DEPTH)
+        .find(|a| {
+            a.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.eq_ignore_ascii_case("target"))
+        })
+        .and_then(Path::parent)
+        .map(|root| root.join("lab").join("qemu").join(WINDOWS_USER_QEMU_DIR))
 }
 
 /// Actions requested by the Supervisor section; the app executes them (the
@@ -688,6 +800,122 @@ mod tests {
                 .map_or(0, |d| d.as_nanos())
         ));
         d.join(FILE)
+    }
+
+    /// Paths built with `join`, so the tests hold on every host.
+    fn p(parts: &[&str]) -> PathBuf {
+        parts.iter().collect()
+    }
+
+    fn windows_env() -> WindowsQemuEnv {
+        WindowsQemuEnv {
+            local_app_data: Some(p(&["C:", "Users", "u", "AppData", "Local"])),
+            program_files: Some(p(&["C:", "Program Files"])),
+            path: Some(r#"C:\Windows;;"D:\tools\qemu bin" ; E:\bin;"#.to_owned()),
+            current_exe: Some(p(&["E:", "proj", "target", "release", "lightvm.exe"])),
+        }
+    }
+
+    #[test]
+    fn windows_candidates_are_in_order() {
+        assert_eq!(
+            windows_qemu_candidates(&windows_env()),
+            vec![
+                p(&[
+                    "C:",
+                    "Users",
+                    "u",
+                    "AppData",
+                    "Local",
+                    "Programs",
+                    "qemu-11.1.0"
+                ]),
+                p(&["C:", "Program Files", "qemu"]),
+                PathBuf::from(r"C:\Windows"),
+                PathBuf::from(r"D:\tools\qemu bin"),
+                PathBuf::from(r"E:\bin"),
+                p(&["E:", "proj", "lab", "qemu", "qemu-11.1.0"]),
+            ]
+        );
+        assert!(windows_qemu_candidates(&WindowsQemuEnv::default()).is_empty());
+    }
+
+    #[test]
+    fn first_folder_with_qemu_wins() {
+        let env = windows_env();
+        let all = windows_qemu_candidates(&env);
+        // Every candidate holds QEMU: the per-user extraction wins.
+        assert_eq!(find_windows_qemu(&env, |_| true), Some(all[0].clone()));
+        // Only Program Files and a PATH entry: Program Files wins.
+        let found = find_windows_qemu(&env, |d| {
+            d == p(&["C:", "Program Files", "qemu"]) || d == Path::new(r"E:\bin")
+        });
+        assert_eq!(found, Some(p(&["C:", "Program Files", "qemu"])));
+        // Only a PATH entry.
+        let found = find_windows_qemu(&env, |d| d == Path::new(r"D:\tools\qemu bin"));
+        assert_eq!(found, Some(PathBuf::from(r"D:\tools\qemu bin")));
+        // Only the lab QEMU of the development build.
+        let lab = p(&["E:", "proj", "lab", "qemu", "qemu-11.1.0"]);
+        assert_eq!(find_windows_qemu(&env, |d| d == lab), Some(lab.clone()));
+    }
+
+    #[test]
+    fn nothing_found_gives_none() {
+        assert_eq!(find_windows_qemu(&windows_env(), |_| false), None);
+        assert_eq!(
+            find_windows_qemu(&WindowsQemuEnv::default(), |_| true),
+            None
+        );
+    }
+
+    #[test]
+    fn path_is_split_on_semicolons() {
+        assert_eq!(
+            split_windows_path(r#" C:\a ;"C:\Program Files\b";;C:\c;"#),
+            vec![
+                PathBuf::from(r"C:\a"),
+                PathBuf::from(r"C:\Program Files\b"),
+                PathBuf::from(r"C:\c"),
+            ]
+        );
+        assert!(split_windows_path("").is_empty());
+        assert!(split_windows_path(";;").is_empty());
+    }
+
+    #[test]
+    fn lab_qemu_only_for_development_builds() {
+        let lab = p(&["E:", "OpenVM", "lab", "qemu", "qemu-11.1.0"]);
+        // Release build and a custom CARGO_TARGET_DIR under target.
+        assert_eq!(
+            dev_lab_qemu_dir(&p(&["E:", "OpenVM", "target", "release", "lightvm.exe"])),
+            Some(lab.clone())
+        );
+        assert_eq!(
+            dev_lab_qemu_dir(&p(&[
+                "E:",
+                "OpenVM",
+                "target",
+                "regression-build",
+                "debug",
+                "deps",
+                "t.exe"
+            ])),
+            Some(lab)
+        );
+        // Installed copy: no target directory.
+        assert_eq!(
+            dev_lab_qemu_dir(&p(&["C:", "Program Files", "LightVM", "lightvm.exe"])),
+            None
+        );
+        // The walk is bounded: a target directory too far up is ignored.
+        let mut deep = p(&["E:", "x", "target"]);
+        for _ in 0..DEV_BUILD_MAX_DEPTH {
+            deep.push("d");
+        }
+        deep.push("lightvm.exe");
+        assert_eq!(dev_lab_qemu_dir(&deep), None);
+        // The executable itself named target does not count.
+        assert_eq!(dev_lab_qemu_dir(&p(&["E:", "x", "target"])), None);
     }
 
     #[test]

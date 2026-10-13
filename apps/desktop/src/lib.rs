@@ -66,7 +66,7 @@ use service::{
 };
 use settings::{SupervisorAction, SupervisorUiState, UiSettings};
 
-pub use dashboard::dashboard_ui;
+pub use dashboard::{SupervisorQemu, dashboard_ui, dashboard_with_qemu_ui};
 
 /// Folder picker: receives the title, returns the chosen folder.
 pub type FolderPicker = Box<dyn FnMut(&str) -> Option<std::path::PathBuf>>;
@@ -576,15 +576,38 @@ impl LightVmApp {
     /// Connects the supervisor started by the UI (F1-11) with the
     /// configuration used.
     pub fn set_service(&mut self, service: Service, cfg: &ServiceConfig) {
-        self.set_supervisor(Box::new(service));
+        self.set_supervisor_with_config(Box::new(service), cfg);
+    }
+
+    /// Connects a supervisor started with `cfg` (the child process, or a
+    /// stand-in in tests): the app knows its catalog and QEMU folder.
+    pub fn set_supervisor_with_config(&mut self, s: Box<dyn Supervisor>, cfg: &ServiceConfig) {
+        self.set_supervisor(s);
         self.applied_service = Some((cfg.catalog.clone(), cfg.qemu_dir.clone()));
     }
 
-    /// Connects a supervisor: the child process, or a stand-in in tests.
+    /// Connects a supervisor whose configuration the app does not know: the
+    /// child process, or a stand-in in tests.
     pub fn set_supervisor(&mut self, s: Box<dyn Supervisor>) {
         self.service = Some(s);
         self.service_error = None;
         self.section = Section::Dashboard;
+        self.applied_service = None;
+    }
+
+    /// QEMU of the running supervisor, as far as the app knows it: missing
+    /// only when the app started it with no QEMU folder.
+    pub fn supervisor_qemu(&self) -> SupervisorQemu {
+        match &self.applied_service {
+            Some((_, None)) if self.service.is_some() => {
+                if self.cli_config.is_some() {
+                    SupervisorQemu::MissingFromCommandLine
+                } else {
+                    SupervisorQemu::MissingFromSettings
+                }
+            }
+            _ => SupervisorQemu::Given,
+        }
     }
 
     /// Supervisor executable (`--service-exe`); without it, the one next to
@@ -2080,8 +2103,10 @@ impl LightVmApp {
             return;
         }
 
-        match dashboard_ui(ui, &state, pid, alive) {
+        let qemu = self.supervisor_qemu();
+        match dashboard_with_qemu_ui(ui, &state, pid, alive, qemu) {
             Some(DashboardAction::Command(c)) => self.send(c),
+            Some(DashboardAction::QemuSettings) => self.section = Section::Settings,
             Some(DashboardAction::NewVm) => {
                 self.vm_edit = None;
                 self.wizard = Some(wizard::Wizard::with_guest_support(

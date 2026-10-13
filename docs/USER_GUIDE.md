@@ -121,6 +121,14 @@ Get-FileHash "$q\qemu-system-x86_64.exe", "$q\qemu-img.exe", "$q\share\edk2-x86_
 
 Compare with the table above. LightVM repeats this check at every supervisor start (**Settings** → **QEMU distribution**).
 
+LightVM finds QEMU by itself when no folder is chosen in **Settings**: it uses the first of these folders that contains `qemu-system-x86_64.exe`:
+
+1. `%LOCALAPPDATA%\Programs\qemu-11.1.0` (option A);
+2. `C:\Program Files\qemu` (options B and C);
+3. any folder listed in the `PATH` environment variable.
+
+**Settings** → **QEMU distribution** then shows the folder followed by *(found automatically)*. A folder found this way gets the same hash check as a chosen one: a QEMU that is not the approved 11.1.0 is refused when the supervisor starts.
+
 ---
 
 ## 3. Install LightVM
@@ -163,9 +171,9 @@ If a `LightVM-<version>-windows-x64-setup.exe` (Inno Setup, per user) is publish
 1. Start **LightVM** from the Start Menu.
    - On the first run, Windows SmartScreen may show *Windows protected your PC* because the app is not signed. If, and only if, you verified the checksum in section 3, choose **More info** → **Run anyway**.
    - LightVM opens without a console window. Its diagnostic messages go to log files in `%LOCALAPPDATA%\LightVM\logs` (see [Troubleshooting](#14-troubleshooting)).
-2. LightVM opens on the **Dashboard**. Without QEMU it cannot start VMs yet.
+2. LightVM opens on the **Dashboard**. If you installed QEMU with option A, B or C of section 2, LightVM has already found it (section 2.3). Otherwise the Dashboard shows the notice *QEMU was not found: VMs cannot start. Choose the QEMU folder in Settings → QEMU distribution, then restart the supervisor.*, every VM's **Start** button is disabled with the same reason, and **Open Settings** under the notice leads to step 3.
 3. Open **Settings** (left navigation). In the **Supervisor** section:
-   - **QEMU distribution** → **Browse…** → select the QEMU folder from section 2 (the one that contains `qemu-system-x86_64.exe`).
+   - **QEMU distribution** shows the folder in use. *(found automatically)* after it means LightVM found it by itself: nothing to do. *not set: VMs cannot be started* means it found none: **Browse…** → select the QEMU folder from section 2 (the one that contains `qemu-system-x86_64.exe`). A folder chosen here takes precedence over the one found automatically.
    - **VM catalog** shows where VMs are stored (default `%LOCALAPPDATA%\LightVM\catalog`). Leave the default unless you need another drive.
    - Press **Apply and restart the supervisor** (or **Start the supervisor** if it is not running).
 4. Back on the **Dashboard**, the supervisor card at the top (**Supervisor · PID …**) shows the connection state, **Backend**, **Acceleration** and **If the UI closes**. **Acceleration** must read `whpx`; *not detected* means VMs cannot use the hardware accelerator. **Settings** → **Host capacity** → **Hardware acceleration** says the same. If it does not work, see [Troubleshooting](#14-troubleshooting).
@@ -441,6 +449,7 @@ On the report page:
 | Program files | `%LOCALAPPDATA%\Programs\LightVM` (or the `-Prefix` you chose) |
 | VM catalog: database, VM disks, UEFI variables, baselines, imported images | `%LOCALAPPDATA%\LightVM\catalog` (or the folder chosen in **Settings** → **VM catalog**) |
 | App settings | `%LOCALAPPDATA%\LightVM\ui-settings.json` |
+| QEMU used by the supervisor | The folder chosen in **Settings** → **QEMU distribution**; if none is chosen, the one LightVM finds by itself (`%LOCALAPPDATA%\Programs\qemu-11.1.0`, `C:\Program Files\qemu` or a folder in `PATH`, shown as *(found automatically)*, section 2.3) |
 | Audit log of the supervisor | `%LOCALAPPDATA%\LightVM\audit.jsonl` |
 | Pairing file for an agent client (only after **Pair a client…**, removed when agent access is turned off, after an Emergency Stop and when LightVM closes) | `%LOCALAPPDATA%\LightVM\pairing\pairing.json` |
 | Diagnostic logs | `%LOCALAPPDATA%\LightVM\logs\lightvm-desktop.log` (the app) and `lightvm-service.log` (the supervisor); each is rotated at 1 MiB, keeping three older copies (`*.1.log` … `*.3.log`) |
@@ -485,7 +494,8 @@ If you used the setup `.exe`, uninstall from **Settings → Apps → Installed a
 
 | Symptom | Cause and fix |
 | --- | --- |
-| **QEMU distribution** shows *not set: VMs cannot be started* | Select the QEMU folder in **Settings** and restart the supervisor (section 4). |
+| **QEMU distribution** shows *not set: VMs cannot be started* | LightVM found no QEMU in the usual folders (section 2.3). Select the QEMU folder in **Settings** and restart the supervisor (section 4). |
+| Dashboard notice *QEMU was not found: VMs cannot start* and **Start** disabled | The supervisor was started without a QEMU folder. **Open Settings** → **QEMU distribution** → **Browse…**, then restart the supervisor. If LightVM was started from the command line with `--catalog` but without `--qemu-dir`, the notice says so instead: start LightVM again adding `--qemu-dir` with the QEMU folder. |
 | Supervisor error about the QEMU hash or version | The folder does not contain the approved QEMU 11.1.0 files. Verify with section 2.3; reinstall from the verified installer. |
 | **Acceleration** reports WHPX not available / VM does not start with an accelerator error | Virtualization disabled in the firmware, or Windows Hypervisor Platform off (section 1). Restart Windows after enabling it. LightVM never uses software emulation instead. |
 | *Windows protected your PC* | Unsigned app (expected). Verify the zip checksum, then **More info** → **Run anyway**. |

@@ -171,6 +171,15 @@ impl Failure {
         self
     }
 
+    /// The supervisor refused a start because this host lacks the capability
+    /// of starting VMs (`unsupported` with capability `vm.start`): what
+    /// happens when it runs without a QEMU distribution.
+    pub fn start_unavailable(&self) -> bool {
+        self.unsupported
+            && self.details.get("capability").map(String::as_str)
+                == Some(lightvm_proto::Capability::VmStart.as_str())
+    }
+
     /// Value of the `reason` detail, if any.
     pub fn reason(&self) -> Option<&str> {
         self.details.get("reason").map(String::as_str)
@@ -708,6 +717,11 @@ pub struct ServiceState {
     pub vms: Vec<VmSummary>,
     /// Outcome of the last requested action, readable.
     pub last_outcome: Option<String>,
+    /// Text put in [`Self::last_outcome`] by the last start refused because
+    /// the host cannot start VMs ([`Failure::start_unavailable`]): while the
+    /// two are equal, the Dashboard can name the cause when the supervisor
+    /// has no QEMU.
+    pub start_unavailable_outcome: Option<String>,
     /// UI loss policy reported by the service.
     pub policy: Option<ParentLossPolicy>,
     /// Approved media of the registry.
@@ -1468,7 +1482,14 @@ fn mark_failed(s: &mut ServiceState, c: &ServiceCommand, f: Failure) {
                     status: RequestStatus::Failed(f),
                 });
             }
-            None => s.last_outcome = Some(f.message),
+            None => {
+                if matches!(c, ServiceCommand::Start(_) | ServiceCommand::OpenVm { .. })
+                    && f.start_unavailable()
+                {
+                    s.start_unavailable_outcome = Some(f.message.clone());
+                }
+                s.last_outcome = Some(f.message);
+            }
         },
     }
 }
@@ -3066,6 +3087,35 @@ mod tests {
             Failure::new("x"),
         );
         assert_eq!(s.delete, RequestStatus::Failed(Failure::new("x")));
+    }
+
+    /// A start refused because the host cannot start VMs (no QEMU) is
+    /// recognised, so the Dashboard can name the cause; other refusals are
+    /// not.
+    #[test]
+    fn start_refused_for_missing_capability_is_recognised() {
+        let vm = VmId::new_v7();
+        let refused = Failure::coded(
+            ErrorCode::Unsupported,
+            "start: unsupported: capability not available on this host",
+        )
+        .with_detail("capability", "vm.start");
+        assert!(refused.start_unavailable());
+        let mut s = ServiceState::default();
+        mark_failed(&mut s, &ServiceCommand::Start(vm), refused.clone());
+        assert_eq!(s.last_outcome.as_deref(), Some(refused.message.as_str()));
+        assert_eq!(s.start_unavailable_outcome, s.last_outcome);
+
+        // Other capability, other code, other command: not recognised.
+        let other =
+            Failure::coded(ErrorCode::Unsupported, "x").with_detail("capability", "vm.stop");
+        assert!(!other.start_unavailable());
+        let denied =
+            Failure::coded(ErrorCode::PermissionDenied, "y").with_detail("capability", "vm.start");
+        assert!(!denied.start_unavailable());
+        let mut s = ServiceState::default();
+        mark_failed(&mut s, &ServiceCommand::Stop(vm), refused);
+        assert_eq!(s.start_unavailable_outcome, None);
     }
 
     /// In-process IPC server speaking the real framing on the real local
