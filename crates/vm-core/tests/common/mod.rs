@@ -443,6 +443,7 @@ impl Harness {
             data_media: None,
             firmware: Firmware::Uefi,
             limits: Default::default(),
+            imported: None,
         }
     }
 

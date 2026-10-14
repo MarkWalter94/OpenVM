@@ -1061,6 +1061,17 @@ where
     /// without installation media, or whose media architecture is unknown,
     /// is checked on the guest alone.
     fn check_config_host(&self, config: &VmConfig) -> Result<(), PublicError> {
+        if let Some(hw) = &config.imported {
+            // An imported guest is already installed: its architecture is
+            // the VMware guest type's (ADR-0030).
+            if !(self.guest_support)(config.guest_os, Some(hw.arch)) {
+                return Err(PublicError::unsupported(
+                    "this guest system and edition cannot run on this host (for example Windows Vista 64-bit stops at boot under the Windows hypervisor, ADR-0027): the VM cannot be imported",
+                )
+                .with_detail("field", "guest_os"));
+            }
+            return check_guest_host(config.guest_os, None, self.guest_support);
+        }
         let arch = match config.install_media {
             Some(id) => self
                 .store
@@ -1133,6 +1144,105 @@ where
             },
         );
         Ok(record)
+    }
+
+    // ----- import of VMware VMs (ADR-0030) -----------------------------------
+
+    /// Effective resource limits a new VM must fit (host capacity and
+    /// global limits), for the mapping of an imported VM.
+    #[must_use]
+    pub fn creation_limits(&self) -> ResourceLimits {
+        self.effective_limits()
+    }
+
+    /// Checks of a VM about to be imported, before anything is written:
+    /// user only (`permission_denied` for agent sessions), the same
+    /// configuration checks as a creation (host support, limits, imported
+    /// hardware), a name no other VM has. A refusal is audited
+    /// (`vm_import`, denied). Returns the identifier reserved for the VM.
+    pub fn begin_import(&mut self, caller: &Caller, config: &VmConfig) -> Result<VmId, PublicError> {
+        let actor = caller.actor();
+        let ev = Ev {
+            session_id: agent_session(caller),
+            ..Ev::default()
+        };
+        if matches!(caller, Caller::Agent { .. }) {
+            let err = PublicError::permission_denied("VM import not available to agent sessions");
+            return Err(self.deny(actor, AuditAction::VmImport, ev, err));
+        }
+        let name_taken = self.vms.values().any(|rt| {
+            rt.record
+                .config
+                .name
+                .as_str()
+                .eq_ignore_ascii_case(config.name.as_str())
+        });
+        let checks = if config.imported.is_none() {
+            Err(PublicError::invalid_argument(
+                "an imported configuration needs its imported hardware",
+            ))
+        } else if name_taken {
+            Err(PublicError::state_conflict("a VM with this name already exists")
+                .with_detail("field", "name"))
+        } else {
+            self.check_config_host(config)
+                .and_then(|()| validate_config(config, &self.effective_limits()))
+                .and_then(|()| self.check_config_media(config))
+        };
+        if let Err(err) = checks {
+            return Err(self.deny(actor, AuditAction::VmImport, ev, err));
+        }
+        Ok(self.ids.vm_id())
+    }
+
+    /// Records a VM whose import completed: its row and converted disk are
+    /// already in the catalog (written by the storage in one journaled
+    /// commit). Audited `vm_import` succeeded.
+    pub fn finish_import(&mut self, caller: &Caller, vm_id: VmId, config: VmConfig) -> VmRecord {
+        let record = VmRecord {
+            id: vm_id,
+            config,
+            config_revision: 1,
+            persisted_state: VmState::Stopped,
+            created_at: self.clock.now(),
+        };
+        self.vms
+            .insert(record.id, VmRuntime::new(record.clone(), VmState::Stopped));
+        self.emit_after(
+            caller.actor(),
+            AuditAction::VmImport,
+            AuditOutcome::Succeeded,
+            Ev {
+                vm_id: Some(vm_id),
+                ..Ev::default()
+            },
+        );
+        record
+    }
+
+    /// Records an import that failed or was cancelled after its checks
+    /// (conversion, budget, cancellation): audited `vm_import` failed with
+    /// the error code; nothing exists in the catalog.
+    pub fn record_import_failure(&mut self, caller: &Caller, error: &PublicError) {
+        self.emit_after(
+            caller.actor(),
+            AuditAction::VmImport,
+            AuditOutcome::Failed,
+            Ev {
+                error: Some(error.code),
+                ..Ev::default()
+            },
+        );
+    }
+
+    /// Records an import refused before its configuration was known (the
+    /// `.vmx` or its disks): audited `vm_import` denied.
+    pub fn record_import_denied(&mut self, caller: &Caller, error: &PublicError) {
+        let ev = Ev {
+            session_id: agent_session(caller),
+            ..Ev::default()
+        };
+        let _ = self.deny(caller.actor(), AuditAction::VmImport, ev, error.clone());
     }
 
     /// Modifies the configuration of a stopped VM (resources and limits,
