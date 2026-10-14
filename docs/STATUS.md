@@ -143,6 +143,23 @@ Owner decision of 2026-10-14: a selected ISO is no longer copied into the catalo
 | Catalog move with a medium used in place (not copied, reference kept) | `vm-storage` `catalog_move` | verified in simulation/test |
 | Real Ubuntu/Windows ISO used in place through the app with real QEMU | — | not verified |
 
+## R6 work: import of VMware VMs (ADR-0030)
+
+Started on 2026-10-14 at the owner's request (ROADMAP 12, R6, in parallel; not a v1.0 requirement). **Dashboard → Import VMware VM** examines a powered-off VMware Workstation/Player VM (`.vmx` chosen with the picker, UI role only) and converts the current state of its main disk (snapshot chain flattened) into a new QCOW2 disk of the catalog; the VMware files are only read. The new crate `vmware-import` reads the `.vmx` and the VMDK descriptors as untrusted input; `qemu-backend` gained the `pvscsi` and `mptsas1068` controllers (`scsi-hd`), `vmware-svga` and an explicit `-smp` topology for imported VMs only (`DeviceProfile::for_imported`; the existing profiles' command lines are unchanged); `vm-storage` the journaled `import_vm` intent (schema 9, `0009_import_vm.sql`); `vm-core` the import checks (`vm_import` audit, name reserved during the import, imported hardware fixed afterwards); the service the preview/import/cancel requests with progress events. Evidence: `docs/verification/R6-01-vmware-import.md`.
+
+| Item | Evidence | Declared outcome |
+| --- | --- | --- |
+| Parser: every VMDK create type of `qemu-img` (monolithicSparse, monolithicFlat, twoGbMaxExtentSparse, twoGbMaxExtentFlat, streamOptimized) and snapshot chains, cross-checked with `qemu-img info` | `vmware-import` `tests/fixtures.rs` (fixtures made at test time with the bundled `qemu-img`) | verified in simulation/test |
+| Hostile `.vmx` and descriptors: traversal, absolute paths outside the folder, UNC and device paths, junctions and links, oversized files, encrypted, suspended, locked, unclean shutdown, unknown guest, looping/overlong/inconsistent chains, raw device mappings; parsers fuzzed | `vmware-import` `tests/hostile.rs`, `tests/fuzz.rs`, unit tests | verified in simulation/test |
+| Mapping (guest, vCPU topology, RAM within the host limits, firmware, controllers, display, not imported, warnings) | `vmware-import` `plan` tests; `vm-core` `tests/vm_import.rs` | verified in simulation/test |
+| Command lines of the imported controllers and display; existing profiles unchanged | `qemu-backend` `cmdline` tests (`imported_hardware_argv`, `profile_rows_exact_argv`) | verified in simulation/test |
+| Conversion with the real `qemu-img` (chain with data in every level: same content as the source, source files unchanged), progress, cancellation | `qemu-backend` `tests/vmdk_convert.rs`; `lightvm-service` `tests/vmware_import.rs` | verified in simulation/test |
+| Journal: interrupted conversion and crash after publishing rolled back at the next open, cancellation, name conflict at the commit; migration 8 → 9 | `vm-storage` `tests/vm_import.rs`, `tests/migrations.rs` | verified in simulation/test |
+| Through the IPC: preview, import, progress events, refusals (locked VM, storage budget, path), cancel by the user, by the Emergency Stop and by the shutdown with nothing left; agent sessions refused | `lightvm-service` `tests/vmware_import.rs`, `tests/f4.rs` (role matrix) | verified in simulation/test |
+| UI: entry, picker, preview with warnings, name, display choice, progress, cancel, errors | `lightvm-desktop` `tests/vmware_import_ui.rs`, snapshots | verified in simulation/test |
+| LSI Logic Windows guests: automatic offline enablement of the storage driver | ADR-0030 (spike pending) | not implemented: warning and manual preparation (`USER_GUIDE.md` §6.3) |
+| Real VMware VMs (Windows with PVSCSI, LSI Logic and SATA; Linux) imported and started to the desktop | — | not verified |
+
 ## R2c work: Windows guests
 
 Started on 2026-10-12 at the owner's request (ADR-0027); it does not change the MVP scope or any exit criterion, and R2c is not closed by it.

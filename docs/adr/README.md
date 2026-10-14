@@ -83,5 +83,5 @@ When a Proposed ADR is closed, the following are updated: the ADR's status and D
 | [0027](0027-windows-guest-hardware-profiles.md) | Windows guest hardware profiles (XP, Vista, 7, 8.1, 10; SeaBIOS; offline) | Accepted (2026-10-12): direction set; evidence pending | 4, 5, 12 (R2c) |
 | [0028](0028-macos-hvf-windows11-arm64.md) | macOS Apple Silicon host and Windows 11 ARM64 guest (HVF, swtpm, project-built Secure Boot firmware, offline) | Accepted (2026-10-12): direction set; evidence partial | 5, 7.2, 12 (R2b) |
 | [0029](0029-media-used-in-place.md) | Installation and data ISOs used in place, without a managed copy (owner decision; amends ADR-0008) | Accepted (2026-10-14) | 6.3, 7.4 |
-| [0030](0030-vmware-vm-import.md) | Import of VMware virtual machines by conversion (owner decision) | Accepted (2026-10-14): direction set; evidence pending | 7.4, 8, 12 (R6) |
+| [0030](0030-vmware-vm-import.md) | Import of VMware virtual machines by conversion (owner decision) | Accepted (2026-10-14): implemented and verified in test (R6-01); real VMware VMs and the LSI Logic driver enablement pending | 7.4, 8, 12 (R6) |
 | [0031](0031-host-guest-integration-manual-use.md) | Host/guest integration in manual use: shared folders, clipboard, file drag and drop, USB (owner decision) | Accepted (2026-10-14): direction set; spikes pending | 4, 7.2, 7.4, 12 (R6) |
