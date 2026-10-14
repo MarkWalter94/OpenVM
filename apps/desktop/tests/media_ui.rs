@@ -26,7 +26,7 @@ fn harness(state: ServiceState) -> (Harness<'static, LightVmApp>, common::Handle
     app.set_supervisor(fake);
     app.set_section(Section::Settings);
     let mut h = Harness::builder()
-        .with_size(egui::vec2(1100.0, 2400.0))
+        .with_size(egui::vec2(1100.0, 2600.0))
         .build_ui_state(|ui, app: &mut LightVmApp| app.ui(ui), app);
     h.run_steps(4);
     (h, hs)

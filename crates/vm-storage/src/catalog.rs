@@ -142,6 +142,21 @@ impl Catalog {
         Ok(cat)
     }
 
+    /// Writes the whole WAL into the database file and closes the
+    /// connection, keeping the single-instance lock: the database file is
+    /// then complete on its own and nobody else can open the catalog
+    /// (catalog move, [`crate::move_catalog`]).
+    pub(crate) fn close_keep_lock(self) -> Result<CatalogLock> {
+        self.conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .db()?;
+        let Self { conn, _lock, .. } = self;
+        conn.close().map_err(|(_, e)| StorageError::Sqlite(e))?;
+        Ok(_lock)
+    }
+
     /// Outcome of opening.
     pub fn open_report(&self) -> Option<&OpenReport> {
         self.report.as_ref()
@@ -1050,7 +1065,7 @@ fn remove_baseline_leftovers(layout: &CatalogLayout, disk_rel: &ManagedPath) -> 
 }
 
 #[allow(clippy::permissions_set_readonly_false)]
-fn force_remove_file(p: &Path, meta: std::fs::Metadata) -> Result<()> {
+pub(crate) fn force_remove_file(p: &Path, meta: std::fs::Metadata) -> Result<()> {
     // Bases and media are made read-only (mitigation F0-02 §8.4): the
     // attribute must be cleared before removing an orphaned managed file.
     let mut perm = meta.permissions();
@@ -1061,7 +1076,7 @@ fn force_remove_file(p: &Path, meta: std::fs::Metadata) -> Result<()> {
     std::fs::remove_file(p).map_err(|e| StorageError::io(p, e))
 }
 
-fn remove_dir_no_links(dir: &Path) -> Result<()> {
+pub(crate) fn remove_dir_no_links(dir: &Path) -> Result<()> {
     for entry in std::fs::read_dir(dir).map_err(|e| StorageError::io(dir, e))? {
         let entry = entry.map_err(|e| StorageError::io(dir, e))?;
         let p = entry.path();

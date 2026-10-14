@@ -28,6 +28,7 @@ macro_rules! diag {
     }};
 }
 
+pub mod catalog_move;
 pub mod client;
 pub mod credential;
 pub mod frame;

@@ -24,6 +24,9 @@
 //!   ([`Catalog::guard_run`], ADR-0025); the service opens the guard on its
 //!   supervisor thread ([`Catalog::open_current_state`]) and hashes through
 //!   the same handles on a worker ([`RunGuard::verify_baseline`]).
+//! - The whole catalog moves to another folder only with every VM stopped:
+//!   copied, verified (size and SHA-256 of every file) and opened at the
+//!   destination before the source is removed ([`move_catalog`]).
 //! - Storage does not start processes and does not interpret configurations as
 //!   host options: disks are produced by the caller (`qemu-backend`).
 //!
@@ -34,6 +37,7 @@
 mod baseline;
 mod budget;
 mod catalog;
+mod catalog_move;
 mod enums;
 mod error;
 mod fsx;
@@ -60,6 +64,10 @@ pub use budget::{
     RunBudgetRequest, RunUsage, StorageUsage, VmBudget,
 };
 pub use catalog::{Catalog, Intent, IntentSpec, OpenReport};
+pub use catalog_move::{
+    MOVE_CANCELLED, MOVE_FREE_MARGIN, MoveFault, MoveMethod, MovePhase, MoveProgress, MoveReport,
+    MoveRequest, is_move_cancelled, move_catalog,
+};
 pub use enums::{
     ArtifactKind, AuditOutcome, DiskRole, DiskStatus, FirmwareScope, IntentKind, IntentState,
     Lifecycle, MediaKind, MediaSlot, MediaStatus, OperationState, RunState, SessionState,

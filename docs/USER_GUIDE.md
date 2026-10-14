@@ -174,7 +174,7 @@ If a `LightVM-<version>-windows-x64-setup.exe` (Inno Setup, per user) is publish
 2. LightVM opens on the **Dashboard**. If you installed QEMU with option A, B or C of section 2, LightVM has already found it (section 2.3). Otherwise the Dashboard shows the notice *QEMU was not found: VMs cannot start. Choose the QEMU folder in Settings → QEMU distribution, then restart the supervisor.*, every VM's **Start** button is disabled with the same reason, and **Open Settings** under the notice leads to step 3.
 3. Open **Settings** (left navigation). In the **Supervisor** section:
    - **QEMU distribution** shows the folder in use. *(found automatically)* after it means LightVM found it by itself: nothing to do. *not set: VMs cannot be started* means it found none: **Browse…** → select the QEMU folder from section 2 (the one that contains `qemu-system-x86_64.exe`). A folder chosen here takes precedence over the one found automatically.
-   - **VM catalog** shows where VMs are stored (default `%LOCALAPPDATA%\LightVM\catalog`). Leave the default unless you need another drive.
+   - **VM catalog** shows where VMs are stored (default `%LOCALAPPDATA%\LightVM\catalog`). Leave the default unless you need another drive. **Browse…** and **Default** only switch LightVM to another catalog folder: VMs already created stay in the old one. To take them along use **Move catalog…** (section 12.1).
    - Press **Apply and restart the supervisor** (or **Start the supervisor** if it is not running).
 4. Back on the **Dashboard**, the supervisor card at the top (**Supervisor · PID …**) shows the connection state, **Backend**, **Acceleration** and **If the UI closes**. **Acceleration** must read `whpx`; *not detected* means VMs cannot use the hardware accelerator. **Settings** → **Host capacity** → **Hardware acceleration** says the same. If it does not work, see [Troubleshooting](#14-troubleshooting).
 
@@ -463,6 +463,22 @@ On the report page:
 | Diagnostic logs | `%LOCALAPPDATA%\LightVM\logs\lightvm-desktop.log` (the app) and `lightvm-service.log` (the supervisor); each is rotated at 1 MiB, keeping three older copies (`*.1.log` … `*.3.log`) |
 
 `%LOCALAPPDATA%` is usually `C:\Users\<you>\AppData\Local`. Do not edit or move files in the catalog by hand while LightVM is running; LightVM keeps a journal to recover from interruptions, but manual changes are not supported. To back up VMs, close LightVM and copy the whole catalog folder.
+
+The catalog folder holds everything about your VMs: `catalog.sqlite3` (the database), `media\` (imported installation images), `vms\<VM id>\` (disk `primary.qcow2`, baselines in `base\`, overlays in `overlays\`, UEFI variables in `firmware\`, TPM state in `tpm\`), `runs\`, `sessions\` (agent session reports) and `tmp\`.
+
+### 12.1 Move the VMs to another folder or drive
+
+**Settings** → **Supervisor** → **VM catalog** → **Move catalog…** moves the whole catalog, with every VM, disk, baseline, imported image and session report, and makes LightVM use the new folder.
+
+1. Stop every VM. The button is disabled while a VM runs (hover over it for the reason), while the supervisor is restarting, when a changed catalog folder has not been applied yet, and when LightVM was started from the command line with `--catalog`.
+2. Choose the destination folder. An empty (or new) folder receives the catalog directly; a folder that already contains files gets a `catalog` subfolder, so nothing of yours is mixed with it.
+3. Read the confirmation and press **Move catalog**. Tick **Keep the original folder** to leave a full copy in the old place (you delete it yourself later).
+4. LightVM stops the supervisor and moves the catalog, showing the progress. On the same drive the folder is simply renamed. On another drive every file is copied, read back and checked (size and SHA-256), and the new catalog is opened, before the old folder is deleted. **Cancel** stops the move.
+5. LightVM saves the new folder in its settings, starts the supervisor again and shows the outcome.
+
+If the move fails or you cancel it, the partial copy is removed and the catalog stays, unchanged, where it was. The move is refused when the destination is inside the catalog (or contains it), is not empty, or lacks free space for the catalog plus 1 GiB, and when the catalog has an operation still to be resolved. The new folder gets the permissions of the folder that contains it: choose a place only your user account can read (on Windows, inside your user profile or a folder whose permissions you restricted).
+
+Without the app (for example with LightVM started with `--catalog`), close LightVM and run `lightvm-service.exe --move-catalog --catalog <current folder> --to <new folder>` (add `--keep-source` to keep the original); then start LightVM with the new folder.
 
 ---
 

@@ -40,6 +40,7 @@ use std::time::{Duration, Instant};
 
 pub mod agents;
 pub mod baselines;
+pub mod catalog_move;
 pub mod clipboard;
 pub mod console;
 pub mod dashboard;
@@ -438,6 +439,10 @@ pub struct LightVmApp {
     cli_config: Option<ServiceConfig>,
     /// Restart or stop of the supervisor in progress outside the UI thread.
     restart: Option<std::sync::mpsc::Receiver<RestartOutcome>>,
+    /// Move of the catalog (Settings), from confirmation to outcome.
+    catalog_move: Option<catalog_move::MoveFlow>,
+    /// Runner of the catalog move (the supervisor executable; fake in tests).
+    move_runner: Option<catalog_move::MoveRunner>,
     vm_edit: Option<vm_settings::VmEdit>,
     wizard: Option<wizard::Wizard>,
     /// Systems the New VM wizard offers (the host's, fake in tests).
@@ -522,6 +527,8 @@ impl LightVmApp {
             report_picker: None,
             cli_config: None,
             restart: None,
+            catalog_move: None,
+            move_runner: None,
             vm_edit: None,
             guest_support: lightvm_proto::GuestOs::runs_on_this_host_with,
             wizard: None,
@@ -645,6 +652,12 @@ impl LightVmApp {
     /// Save dialog of the report export (native in the app, fake in tests).
     pub fn set_report_picker(&mut self, s: Option<ReportPicker>) {
         self.report_picker = s;
+    }
+
+    /// Runner of the catalog move: by default `lightvm-service
+    /// --move-catalog`; tests pass a fake.
+    pub fn set_move_runner(&mut self, r: Option<catalog_move::MoveRunner>) {
+        self.move_runner = r;
     }
 
     /// Supervisor configuration given on the command line: it stays in use
@@ -794,6 +807,12 @@ impl LightVmApp {
     }
 
     fn supervisor_ui_state(&mut self) -> SupervisorUiState {
+        let mut s = self.supervisor_ui_state_base();
+        s.move_catalog = self.move_availability(s.running_vms).map(|_| ());
+        s
+    }
+
+    fn supervisor_ui_state_base(&mut self) -> SupervisorUiState {
         let current = match &self.cli_config {
             Some(c) => Some((c.catalog.clone(), c.qemu_dir.clone())),
             None => self
@@ -816,6 +835,7 @@ impl LightVmApp {
                 pending_changes: false,
                 folder_picker,
                 command_line,
+                move_catalog: Ok(()),
             };
         }
         match &mut self.service {
@@ -832,6 +852,7 @@ impl LightVmApp {
                     pending_changes: current != self.applied_service,
                     folder_picker,
                     command_line,
+                    move_catalog: Ok(()),
                 }
             }
             None => SupervisorUiState {
@@ -850,6 +871,7 @@ impl LightVmApp {
                 pending_changes: false,
                 folder_picker,
                 command_line,
+                move_catalog: Ok(()),
             },
         }
     }
@@ -877,6 +899,7 @@ impl LightVmApp {
                 self.settings.qemu_dir = None;
                 self.save_settings();
             }
+            SupervisorAction::MoveCatalog => self.begin_catalog_move(),
             SupervisorAction::Restart => self.restart_in_background(ctx, true),
             SupervisorAction::Stop => self.restart_in_background(ctx, false),
         }
@@ -1021,6 +1044,7 @@ impl LightVmApp {
             || self.revoke_dialog.is_some()
             || self.pairing_dialog.is_some()
             || self.report_dialog.is_some()
+            || self.catalog_move.is_some()
     }
 
     /// Report screenshot shown on the session page, if any.
@@ -1205,6 +1229,7 @@ impl LightVmApp {
         self.pairing_dialog_ui(ui);
         self.report_dialog_ui(ui);
         self.close_dialog_ui(ui, &ctx);
+        self.catalog_move_ui(ui, &ctx);
         self.emergency_stop_over_dialogs(&ctx);
         // Second defence: no widget writes the host clipboard.
         clipboard::strip_clipboard_output(&ctx);
@@ -1301,6 +1326,9 @@ impl LightVmApp {
     fn supervisor_summary(&mut self) -> (String, theme::Tone) {
         if self.restart.is_some() {
             return ("Supervisor restarting".into(), theme::Tone::Warning);
+        }
+        if self.catalog_move_running() {
+            return ("Moving the catalog".into(), theme::Tone::Warning);
         }
         let Some(s) = &mut self.service else {
             let tone = if self.service_error.is_some() {
@@ -2605,6 +2633,11 @@ impl LightVmApp {
     /// the close dialog opens.
     fn handle_close_request(&mut self, ctx: &egui::Context) {
         if !ctx.input(|i| i.viewport().close_requested()) || self.allow_close {
+            return;
+        }
+        // A catalog move is cancelled from its dialog, not by closing.
+        if self.catalog_move_running() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             return;
         }
         let running = self.reachable_active_vms().len();

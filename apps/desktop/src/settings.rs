@@ -288,6 +288,8 @@ pub enum SupervisorAction {
     ChooseCatalog,
     /// Go back to the default catalog.
     DefaultCatalog,
+    /// Move the whole catalog, VMs included, to another folder.
+    MoveCatalog,
     /// Choose the QEMU distribution folder.
     ChooseQemu,
     /// No QEMU distribution.
@@ -318,6 +320,8 @@ pub struct SupervisorUiState {
     /// Catalog and QEMU given on the command line (`--catalog`), in use
     /// instead of the ones chosen here.
     pub command_line: Option<(PathBuf, Option<PathBuf>)>,
+    /// "Move catalog…" is available, or why not (shown on hover).
+    pub move_catalog: Result<(), String>,
 }
 
 fn display_path(p: Option<&Path>, empty: &str) -> String {
@@ -370,7 +374,33 @@ pub fn supervisor_ui(
                 if r.clicked() {
                     action = Some(SupervisorAction::DefaultCatalog);
                 }
+                let r = ui.add_enabled(
+                    state.move_catalog.is_ok() && !state.in_progress,
+                    egui::Button::new("Move catalog…"),
+                );
+                theme::accessible_name(
+                    &r,
+                    WidgetType::Button,
+                    "Move the catalog and its VMs to another folder",
+                );
+                let r = match &state.move_catalog {
+                    Err(why) => r.on_disabled_hover_text(why.as_str()),
+                    Ok(()) => r,
+                };
+                if r.clicked() {
+                    action = Some(SupervisorAction::MoveCatalog);
+                }
             });
+            ui.add_space(2.0);
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(
+                        "Browse… and Default only change the folder LightVM uses: the VMs already in the catalog are not moved and stay in the old folder. Move catalog… takes them along.",
+                    )
+                    .color(theme::Palette::of(ui).text_weak),
+                )
+                .wrap(),
+            );
         },
     );
     theme::divider(ui);

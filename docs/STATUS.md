@@ -121,6 +121,17 @@ Started on 2026-10-11 at the owner's request; not usable for the exit criteria u
 - F5: two real LLM clients with a successful path each (Claude Code: `claude auth login`, then the F5 real-client test; a second client with native MCP stdio support to be chosen).
 - F6: code signing and independent review (ADR-0020, not available), tests on at least two physical hosts (Intel/AMD if both declared), Linux (R2a).
 
+## Catalog move (Settings)
+
+**Settings → Supervisor → Move catalog…** moves the whole catalog (database, media, VM disks, baselines, overlays, firmware and TPM state, runs, session reports) to another folder; **Browse…** keeps only switching LightVM to another catalog and now says that existing VMs are not moved. The move runs in `lightvm-service --move-catalog` with the supervisor stopped (the UI does not open catalog files, ADR-0024) and is `vm_storage::move_catalog`: every VM stopped and no open journal intent, destination empty and outside the catalog, free space checked, rename on the same volume, otherwise copy with SHA-256 read-back of every file, then the destination opened and checked (`quick_check`, same VMs, media, baselines) before the source is removed; any failure or cancellation removes the partial destination and leaves the source unchanged.
+
+| Item | Evidence | Declared outcome |
+| --- | --- | --- |
+| Move rules, failure in the middle, altered copy, cancel, lack of space, non-empty destination, destination inside the source, links, running VM | `crates/vm-storage/tests/catalog_move.rs` | verified in simulation/test |
+| Child-process contract (JSON progress, exit codes) and real executable end to end | `crates/lightvm-service/src/catalog_move.rs` tests; `apps/desktop/tests/service_child.rs` | verified in simulation/test |
+| Settings flow: availability, confirmation, progress with Cancel, settings updated only after success, supervisor restarted | `apps/desktop/tests/catalog_move_ui.rs` | verified in simulation/test |
+| Move of a real catalog with installed VMs between two physical drives | — | not verified |
+
 ## R2c work: Windows guests
 
 Started on 2026-10-12 at the owner's request (ADR-0027); it does not change the MVP scope or any exit criterion, and R2c is not closed by it.

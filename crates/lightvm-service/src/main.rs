@@ -38,6 +38,12 @@
 //! is frozen: no credential, no UI, no supervisor thread involved. Exit
 //! codes: 0 completed (end of every process observed), 5 not completed,
 //! 6 no running service reachable for the catalog.
+//!
+//! Catalog move (Settings → Move catalog…):
+//! `lightvm-service --move-catalog --catalog <dir> --to <new dir>
+//! [--keep-source]` moves the whole catalog with no supervisor running;
+//! JSON progress lines on stdout, `shutdown` on stdin cancels (contract and
+//! exit codes in `lightvm_service::catalog_move`).
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -58,7 +64,8 @@ use lightvm_service::{ServiceConfig, start};
 const USAGE: &str = "usage: lightvm-service --catalog <dir> [--qemu-dir <dir>] \
 [--firmware-dir <dir>] [--swtpm <file>] [--approved-hashes <file>] [--audit-log <file>] [--runtime-dir <dir>] [--parent-watch stdin|none] \
 [--parent-loss-policy kill-vms|shutdown-vms|keep-vms] [--parent-loss-powerdown-s N]
-       lightvm-service --emergency-stop --catalog <dir>";
+       lightvm-service --emergency-stop --catalog <dir>
+       lightvm-service --move-catalog --catalog <dir> --to <new dir> [--keep-source]";
 
 /// Message for a catalog already in use (same text as the service lock).
 const ALREADY_RUNNING: &str = "another instance of lightvm-service is already using this catalog";
@@ -75,6 +82,9 @@ struct Args {
     parent_watch: bool,
     parent_loss_policy: ParentLossPolicy,
     emergency_stop: bool,
+    /// `--move-catalog --to <dir>`: new root of the catalog.
+    move_to: Option<PathBuf>,
+    keep_source: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -90,6 +100,9 @@ fn parse_args() -> Result<Args, String> {
     let mut parent_loss: Option<String> = None;
     let mut powerdown_s: u32 = 10;
     let mut emergency_stop = false;
+    let mut move_catalog = false;
+    let mut move_to = None;
+    let mut keep_source = false;
     while let Some(a) = it.next() {
         let a = a
             .into_string()
@@ -124,6 +137,9 @@ fn parse_args() -> Result<Args, String> {
                     .ok_or("--parent-loss-powerdown-s: expected a number of seconds")?;
             }
             "--emergency-stop" => emergency_stop = true,
+            "--move-catalog" => move_catalog = true,
+            "--to" => move_to = Some(PathBuf::from(value()?)),
+            "--keep-source" => keep_source = true,
             "--version" => {
                 println!("lightvm-service {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
@@ -136,6 +152,11 @@ fn parse_args() -> Result<Args, String> {
         }
     }
     let catalog = catalog.ok_or("--catalog is required")?;
+    if move_catalog != move_to.is_some() || (keep_source && !move_catalog) {
+        return Err(
+            "--move-catalog requires --to (and --to, --keep-source only go with it)".into(),
+        );
+    }
     let parent_loss_policy = match parent_loss.as_deref() {
         None | Some("kill-vms") => ParentLossPolicy::KillVms,
         Some("shutdown-vms") => ParentLossPolicy::ShutdownVms { powerdown_s },
@@ -157,6 +178,8 @@ fn parse_args() -> Result<Args, String> {
         parent_watch,
         parent_loss_policy,
         emergency_stop,
+        move_to,
+        keep_source,
     })
 }
 
@@ -203,6 +226,27 @@ fn emergency_command(catalog: &std::path::Path) -> ExitCode {
             ExitCode::from(6)
         }
     }
+}
+
+/// `--move-catalog`: moves the catalog (no supervisor started); stdin
+/// `shutdown` or EOF cancels (contract in `lightvm_service::catalog_move`).
+fn move_command(from: &std::path::Path, to: &std::path::Path, keep_source: bool) -> ExitCode {
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = cancel.clone();
+    if let Err(e) = parent::watch_stdin(move |_| {
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    }) {
+        lightvm_service::diag!("lightvm-service: stdin watch not started: {e}");
+        return ExitCode::from(lightvm_service::catalog_move::EXIT_FAILED);
+    }
+    let code = lightvm_service::catalog_move::run(
+        from,
+        to,
+        keep_source,
+        &mut std::io::stdout().lock(),
+        &cancel,
+    );
+    ExitCode::from(code)
 }
 
 /// Engine and host composed from the real adapters, and the root of the
@@ -342,6 +386,9 @@ fn main() -> ExitCode {
     };
     if args.emergency_stop {
         return emergency_command(&args.catalog);
+    }
+    if let Some(to) = &args.move_to {
+        return move_command(&args.catalog, to, args.keep_source);
     }
     let (engine, host, display_dir) = match compose(&args) {
         Ok(x) => x,
