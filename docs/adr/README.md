@@ -82,4 +82,4 @@ When a Proposed ADR is closed, the following are updated: the ADR's status and D
 | [0026](0026-authentication-authorization-codes.md) | Public codes for authentication and authorization | Accepted (2026-10-10) | 6.3, 7.3, 7.4, 9 |
 | [0027](0027-windows-guest-hardware-profiles.md) | Windows guest hardware profiles (XP, Vista, 7, 8.1, 10; SeaBIOS; offline) | Accepted (2026-10-12): direction set; evidence pending | 4, 5, 12 (R2c) |
 | [0028](0028-macos-hvf-windows11-arm64.md) | macOS Apple Silicon host and Windows 11 ARM64 guest (HVF, swtpm, project-built Secure Boot firmware, offline) | Accepted (2026-10-12): direction set; evidence partial | 5, 7.2, 12 (R2b) |
-| [0029](0029-media-used-in-place.md) | Installation and data ISOs used in place, without a managed copy (owner decision; amends ADR-0008, deviation from ROADMAP 6.3) | Accepted (2026-10-14) | 6.3, 7.4 |
+| [0029](0029-media-used-in-place.md) | Installation and data ISOs used in place, without a managed copy (owner decision; amends ADR-0008) | Accepted (2026-10-14) | 6.3, 7.4 |

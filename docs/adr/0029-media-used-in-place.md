@@ -6,9 +6,9 @@
 
 ## Context
 
-ADR-0008 (and ROADMAP 6.3) keep a **managed read-only copy** of every approved ISO in the catalog (`media/<media_id>.iso`), so that a path selected by the user cannot later authorize a different file. In practice every ISO takes its disk space twice (a Windows or Ubuntu ISO is 5–7 GB), and importing it means copying it.
+ADR-0008 kept a **managed read-only copy** of every approved ISO in the catalog (`media/<media_id>.iso`), so that a path selected by the user cannot later authorize a different file. In practice every ISO takes its disk space twice (a Windows or Ubuntu ISO is 5–7 GB), and importing it means copying it.
 
-The project owner decided: *"when I select an ISO, do not copy it — we waste disk space for nothing. Use the file the user linked, do not copy it out."* This decision takes precedence over the copy rule of ADR-0008 and is a **declared deviation** from the corresponding sentence of ROADMAP 6.3 ("the approved media registry keeps a managed read-only copy of the ISO"); the roadmap text is frozen (`docs/ROADMAP.sha256`) and is not edited. The other requirements of that sentence are kept: identity and hash, a selected path does not authorize whatever replaces the file, protection against symlinks, junctions and substitutions between check and use.
+The project owner decided: *"when I select an ISO, do not copy it — we waste disk space for nothing. Use the file the user linked, do not copy it out."* This decision takes precedence over the copy rule of ADR-0008; ROADMAP 6.3 states it (the registry uses the ISO at the path chosen by the user, re-verified before every start), with `docs/ROADMAP.sha256` pinned to that text. The other requirements of that rule are kept: identity and hash, a selected path does not authorize whatever replaces the file, protection against symlinks, junctions and substitutions between check and use.
 
 ## Decision
 
