@@ -57,6 +57,7 @@ async fn start_svc(name: &str) -> Svc {
             convert_delay: Duration::ZERO,
             calls: calls.clone(),
             disk_full: Arc::default(),
+            ..FakeImageTool::default()
         })),
         ..FakeVmBackend::default()
     };

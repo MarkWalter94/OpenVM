@@ -95,6 +95,7 @@ fn supervisor(engine: Box<dyn VmEngine>) -> (SupervisorThread, mpsc::Receiver<Co
             crate::resume::DEFAULT_RESUME_GAP,
         ),
         reports: ReportStore::default(),
+        vmware: Default::default(),
     };
     (sup, rx)
 }

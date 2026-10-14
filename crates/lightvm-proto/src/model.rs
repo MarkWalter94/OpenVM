@@ -495,7 +495,7 @@ impl ImportedHardware {
             ));
         }
         if let Some(c) = self.cores_per_socket
-            && (c == 0 || c > MAX_CORES_PER_SOCKET || vcpus % c != 0)
+            && (c == 0 || c > MAX_CORES_PER_SOCKET || !vcpus.is_multiple_of(c))
         {
             return Err(invalid(
                 "cores per socket must divide the number of vCPUs",

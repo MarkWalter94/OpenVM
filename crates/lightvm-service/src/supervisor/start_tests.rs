@@ -110,6 +110,7 @@ fn fixture() -> Fx {
             crate::resume::DEFAULT_RESUME_GAP,
         ),
         reports: ReportStore::default(),
+        vmware: Default::default(),
     };
     sup.engine.offload_start_checks(true);
     Fx {

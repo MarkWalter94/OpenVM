@@ -1393,6 +1393,63 @@ struct SqliteHashed {
 /// (the public error travels in [`SqliteHashed::rejected`]).
 const SOURCE_REFUSED: &str = "media source refused by the service checks";
 
+/// ADR-0030: journaled import of a VMware VM (`import_vm` intent): the
+/// converted disk is written into the intent's temporary and published as
+/// `vms/<vm_id>/primary.qcow2` together with the VM row (stored under the
+/// core's identifier, like new VMs, see `insert_vm`).
+impl crate::engine::VmImportPort for SqliteStore {
+    fn catalog_root(&self) -> Option<PathBuf> {
+        Some(self.root())
+    }
+
+    fn begin_vm_import(&mut self, vm: VmId) -> Result<crate::engine::VmImportSlot, PublicError> {
+        let imp = self
+            .cat
+            .borrow_mut()
+            .begin_vm_import(&vm, None)
+            .map_err(|e| storage_error(&e))?;
+        Ok(crate::engine::VmImportSlot {
+            vm_id: vm,
+            temp_path: imp.temp_path().to_path_buf(),
+            inner: Box::new(imp),
+        })
+    }
+
+    fn finish_vm_import(
+        &mut self,
+        slot: crate::engine::VmImportSlot,
+        vm: &VmRecord,
+    ) -> Result<(), PublicError> {
+        let imp = slot
+            .inner
+            .downcast::<st::VmImport>()
+            .map_err(|_| infra("import of another catalog"))?;
+        let config = serde_json::to_value(StoredConfig { core: vm.clone() })
+            .map_err(|_| infra("configuration not serializable"))?;
+        let new = st::NewVm {
+            name: vm.config.name.as_str().to_owned(),
+            guest_os: snake(&vm.config.guest_os)?,
+            config_version: CONFIG_VERSION,
+            config,
+        };
+        self.cat
+            .borrow_mut()
+            .finish_vm_import(*imp, &new, lifecycle(vm.persisted_state))
+            .map_err(|e| storage_error(&e))?;
+        self.ids.insert(vm.id, vm.id);
+        Ok(())
+    }
+
+    fn abort_vm_import(&mut self, slot: crate::engine::VmImportSlot) {
+        if let Ok(imp) = slot.inner.downcast::<st::VmImport>()
+            && let Err(e) = self.cat.borrow_mut().abort_vm_import(*imp)
+        {
+            // Reconciliation finishes it at the next open.
+            crate::diag!("lightvm-service: VMware import not rolled back: {e}");
+        }
+    }
+}
+
 impl crate::engine::MediaImportPort for SqliteStore {
     /// Reserves the import only: the source is opened, checked
     /// ([`check_import_handle`], [`reference_path`]) and hashed by the

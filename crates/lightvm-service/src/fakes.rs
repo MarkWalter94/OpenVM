@@ -107,6 +107,7 @@ pub fn sample_config(name: &str) -> VmConfig {
         data_media: None,
         firmware: lightvm_proto::Firmware::Uefi,
         limits: Default::default(),
+        imported: None,
     }
 }
 
@@ -222,6 +223,9 @@ impl CatalogStore for MemoryStore {
 /// baseline tests use the SQLite catalog with [`FakeImageTool`]).
 impl BaselinePort for MemoryStore {}
 
+/// No VMware imports in memory (the import tests use the SQLite catalog).
+impl crate::engine::VmImportPort for MemoryStore {}
+
 /// Image tool without `qemu-img` for the baseline tests (F3): files with a
 /// minimal QCOW2 v3 header (4 KiB) followed by the "guest data". `convert`
 /// writes the guest-visible content of the source (an overlay without data
@@ -237,6 +241,17 @@ pub struct FakeImageTool {
     /// F6 disk-full injection: while set, `convert` writes part of the
     /// output and fails as `qemu-img` does on a full volume (ENOSPC).
     pub disk_full: Arc<std::sync::atomic::AtomicBool>,
+    /// VMware import tests (ADR-0030): the real `qemu-img` of the approved
+    /// build and a private directory for its outputs; the VMware operations
+    /// (`info`, `convert -p`) and the `check`/`virtual_size` of their
+    /// results then run on real images. `None` = VMware import unsupported.
+    pub vmdk_tool: Option<Arc<crate::adapters::backend::QemuImageTool>>,
+    /// Delay before each VMware conversion, polled for cancellation every
+    /// 10 ms (cancellation and crash tests).
+    pub vmdk_delay: std::time::Duration,
+    /// Free bytes reported for the catalog volume (budget tests); `None` =
+    /// the real free space when `vmdk_tool` is set.
+    pub free_bytes: Option<u64>,
 }
 
 /// Minimal QCOW2 v3 header with an optional backing reference (format
@@ -259,6 +274,16 @@ pub fn fake_qcow2(backing: Option<&str>, payload: &[u8]) -> Vec<u8> {
     }
     h.extend_from_slice(payload);
     h
+}
+
+/// `true` for a QCOW2 file written by the real `qemu-img` (a fake image is
+/// a bare 4 KiB header followed by its payload, without a cluster size).
+fn is_real_qcow2(p: &Path) -> bool {
+    use std::io::Read as _;
+    let mut h = [0u8; 24];
+    std::fs::File::open(p)
+        .and_then(|mut f| f.read_exact(&mut h))
+        .is_ok_and(|()| h[..4] == [0x51, 0x46, 0x49, 0xfb] && h[20..24] != [0, 0, 0, 0])
 }
 
 /// Guest-visible content of a fake image (see [`FakeImageTool`]).
@@ -314,12 +339,49 @@ impl ImageTool for FakeImageTool {
         push(&self.calls, "compare");
         Ok(fake_content(a)? == fake_content(b)?)
     }
-    fn check(&self, _p: &Path, _cancel: &dyn Fn() -> bool) -> Result<(), PublicError> {
+    fn check(&self, p: &Path, cancel: &dyn Fn() -> bool) -> Result<(), PublicError> {
         push(&self.calls, "check");
-        Ok(())
+        match &self.vmdk_tool {
+            Some(t) if is_real_qcow2(p) => t.check(p, cancel),
+            _ => Ok(()),
+        }
     }
-    fn virtual_size(&self, _p: &Path) -> Result<u64, PublicError> {
-        Ok(32 << 30)
+    fn virtual_size(&self, p: &Path) -> Result<u64, PublicError> {
+        match &self.vmdk_tool {
+            Some(t) if is_real_qcow2(p) => t.virtual_size(p),
+            _ => Ok(32 << 30),
+        }
+    }
+    fn vmdk_chain_info(&self, top: &Path, cancel: &dyn Fn() -> bool) -> Result<String, PublicError> {
+        push(&self.calls, "vmdk_info");
+        match &self.vmdk_tool {
+            Some(t) => t.vmdk_chain_info(top, cancel),
+            None => Err(PublicError::unsupported("no qemu-img in this test")),
+        }
+    }
+    fn convert_vmdk(
+        &self,
+        src: &Path,
+        dst: &Path,
+        cancel: &dyn Fn() -> bool,
+        progress: &mut dyn FnMut(u8),
+    ) -> Result<(), PublicError> {
+        push(&self.calls, "convert_vmdk");
+        let t0 = std::time::Instant::now();
+        while t0.elapsed() < self.vmdk_delay {
+            if cancel() {
+                return Err(PublicError::state_conflict("operation cancelled"));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        match &self.vmdk_tool {
+            Some(t) => t.convert_vmdk(src, dst, cancel, progress),
+            None => Err(PublicError::unsupported("no qemu-img in this test")),
+        }
+    }
+    fn free_bytes(&self, dir: &Path) -> Option<u64> {
+        self.free_bytes
+            .or_else(|| self.vmdk_tool.as_ref().and_then(|t| t.free_bytes(dir)))
     }
     fn create_overlay(&self, backing_ref: &str, _size: u64, dst: &Path) -> Result<(), PublicError> {
         push(&self.calls, "create_overlay");

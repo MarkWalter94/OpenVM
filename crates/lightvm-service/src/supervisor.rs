@@ -51,11 +51,12 @@ use std::time::Instant;
 
 use lightvm_proto::ipc::{
     Capabilities, ConsoleTicket, ResponseBody, SUPPORTED_PROTOCOL_VERSIONS, ServiceEvent,
-    ServiceState, StopReason,
+    ServiceState, StopReason, VmwareImportPhase,
 };
 use lightvm_proto::{
-    Actor, Admission, BaselineId, Caller, Label, MediaId, MediaKind, OperationStatus, PublicError,
-    ReplyError, RunId, TerminationCause, VmConfig, VmId, VmRequest,
+    Actor, Admission, BaselineId, Caller, DisplayAdapter, Label, MediaId, MediaKind,
+    OperationStatus, PublicError, ReplyError, RunId, TerminationCause, VmConfig, VmId, VmName,
+    VmRequest,
 };
 use tokio::sync::{OwnedSemaphorePermit, broadcast, oneshot, watch};
 
@@ -66,7 +67,7 @@ use crate::agents::AgentRegistry;
 use crate::display::DisplayRegistry;
 use crate::engine::{
     BaselineOutcome, BaselineRequest, CancelCheck, ImportCopied, NewSession, StartDone, StartJob,
-    StorageDone, VmEngine,
+    StorageDone, VmEngine, VmImportSlot,
 };
 use crate::reports::{CallRecord, OpenReport, ReportStore};
 use lightvm_proto::report::{ReportFormat, SessionVerifier};
@@ -184,7 +185,30 @@ pub(crate) enum SupervisorRequest {
     Agent(Box<AgentCall>),
     /// Session reports (UI, F5).
     Report(Box<ReportRequest>),
+    /// Examination of a VMware VM (UI, ADR-0030).
+    PreviewVmware { vmx_path: String },
+    /// Import of a VMware VM by conversion (UI, ADR-0030).
+    ImportVmware {
+        vmx_path: String,
+        name: VmName,
+        display: DisplayAdapter,
+    },
+    /// Cancellation of the VMware import in progress (UI).
+    CancelVmwareImport,
 }
+
+/// VMware imports (ADR-0030): at most one import at a time, a few
+/// previews.
+#[derive(Debug, Default)]
+pub(crate) struct VmwareState {
+    /// Cancellation flag of the import in progress, if any.
+    pub(crate) import: Option<Arc<AtomicBool>>,
+    /// Previews examining a VM on a worker thread.
+    pub(crate) previews: Arc<AtomicUsize>,
+}
+
+/// VMware previews running at the same time.
+pub const MAX_CONCURRENT_VMWARE_PREVIEWS: usize = 2;
 
 /// Requests of the UI on the session reports (F5).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -238,6 +262,7 @@ impl SupervisorRequest {
                 | Self::DeleteBaseline { .. }
                 | Self::CreateSession(_)
                 | Self::SetInputOwner { .. }
+                | Self::ImportVmware { .. }
         ) || matches!(self, Self::Agent(call) if call.is_mutation())
     }
 
@@ -392,6 +417,23 @@ pub(crate) enum Command {
     /// the connection right before the reply, so it is recorded before any
     /// later request of the same agent.
     AgentCallDone(Box<CallRecord>),
+    /// Examination of a VMware VM to import finished on its worker
+    /// (ADR-0030): checks, storage intent, then the conversion.
+    VmwareAnalyzed(Box<VmwareStep<Result<crate::vmware::Analysis, PublicError>>>),
+    /// Conversion of a VMware import finished on its worker: publication
+    /// or rollback.
+    VmwareConverted(Box<VmwareStep<(VmImportSlot, VmConfig, Result<(), PublicError>)>>),
+}
+
+/// A step of a VMware import coming back from a worker.
+pub(crate) struct VmwareStep<T> {
+    caller: Caller,
+    display: DisplayAdapter,
+    outcome: T,
+    reply: Reply,
+    revoked: watch::Receiver<bool>,
+    epoch: u64,
+    cancel: CancelCheck,
 }
 
 impl std::fmt::Debug for Command {
@@ -415,6 +457,8 @@ impl std::fmt::Debug for Command {
                 write!(f, "EndSessions({}, {cause:?})", ids.len())
             }
             Self::AgentCallDone(c) => write!(f, "AgentCallDone({})", c.call),
+            Self::VmwareAnalyzed(_) => write!(f, "VmwareAnalyzed"),
+            Self::VmwareConverted(_) => write!(f, "VmwareConverted"),
         }
     }
 }
@@ -458,6 +502,8 @@ pub(crate) struct SupervisorThread {
     pub(crate) resume: crate::resume::ResumeDetector,
     /// Session reports (F5).
     pub(crate) reports: ReportStore,
+    /// VMware imports and previews (ADR-0030).
+    pub(crate) vmware: VmwareState,
 }
 
 /// Maximum interval between two observations of the process exits (shutdown
@@ -652,6 +698,30 @@ impl SupervisorThread {
                         );
                     }
                     return Served::Continue;
+                } else if let SupervisorRequest::PreviewVmware { vmx_path } = req {
+                    // The reply is sent by the worker that examines the VM.
+                    if let Some(reply) = slot.take() {
+                        self.start_vmware_preview(caller, vmx_path, reply);
+                    }
+                    return Served::Continue;
+                } else if let SupervisorRequest::ImportVmware {
+                    vmx_path,
+                    name,
+                    display,
+                } = req
+                {
+                    // The reply is sent when the VM exists (or the import
+                    // ended otherwise).
+                    if let Some(reply) = slot.take() {
+                        self.start_vmware_import(
+                            caller,
+                            vmx_path,
+                            name,
+                            display,
+                            (reply, revoked, epoch),
+                        );
+                    }
+                    return Served::Continue;
                 } else {
                     self.handle(req, caller.as_ref(), connection_id)
                 };
@@ -806,6 +876,14 @@ impl SupervisorThread {
                 }
             }
             Command::AgentCallDone(rec) => self.record_call(&rec),
+            Command::VmwareAnalyzed(step) => {
+                self.storage_jobs = self.storage_jobs.saturating_sub(1);
+                self.vmware_analyzed(*step);
+            }
+            Command::VmwareConverted(step) => {
+                self.storage_jobs = self.storage_jobs.saturating_sub(1);
+                self.vmware_converted(*step);
+            }
             Command::ParentLost { policy, done } => {
                 // ROADMAP 7.3: UI lost → the agent sessions end and their VMs
                 // are stopped through the emergency path.
@@ -928,8 +1006,297 @@ impl SupervisorThread {
                     }
                 }
                 Command::AgentCallDone(rec) => self.record_call(&rec),
+                Command::VmwareAnalyzed(step) => {
+                    // Nothing was recorded yet: the import just ends.
+                    self.storage_jobs = self.storage_jobs.saturating_sub(1);
+                    self.vmware.import = None;
+                    let e = PublicError::state_conflict("service shutting down");
+                    self.engine.vmware_denied(&step.caller, &e);
+                    let _ = step.reply.send(Err(ReplyError::Operational(e)));
+                }
+                Command::VmwareConverted(step) => {
+                    self.storage_jobs = self.storage_jobs.saturating_sub(1);
+                    self.vmware.import = None;
+                    let (slot, _, _) = step.outcome;
+                    let e = self.engine.vmware_abort(
+                        &step.caller,
+                        slot,
+                        PublicError::state_conflict("service shutting down"),
+                    );
+                    let _ = step.reply.send(Err(ReplyError::Operational(e)));
+                }
             }
         }
+    }
+
+    /// Reason to stop a VMware import step: cancellation by the user,
+    /// revocation or closing of the requesting connection, Emergency Stop,
+    /// shutdown.
+    fn vmware_stop_reason(
+        &self,
+        revoked: &watch::Receiver<bool>,
+        epoch: u64,
+        cancel: &CancelCheck,
+    ) -> Option<PublicError> {
+        if is_revoked(revoked) {
+            Some(PublicError::unauthenticated(
+                "connection revoked: import cancelled",
+            ))
+        } else if epoch != self.emergency_epoch.load(Ordering::SeqCst) {
+            Some(PublicError::state_conflict(
+                "import cancelled by the Emergency Stop",
+            ))
+        } else if self.storage_cancel.load(Ordering::SeqCst) {
+            Some(PublicError::state_conflict("service shutting down"))
+        } else if cancel() {
+            Some(PublicError::state_conflict("VMware import cancelled"))
+        } else {
+            None
+        }
+    }
+
+    /// Examination of a VMware VM for the UI (ADR-0030), on a worker
+    /// thread: nothing is written, the reply carries the preview.
+    fn start_vmware_preview(&mut self, caller: Option<Caller>, vmx: String, reply: Reply) {
+        let Some(caller) = caller else {
+            let _ = reply.send(Err(ReplyError::Operational(
+                PublicError::permission_denied("no VM permissions for this role"),
+            )));
+            return;
+        };
+        let previews = self.vmware.previews.clone();
+        if previews.load(Ordering::SeqCst) >= MAX_CONCURRENT_VMWARE_PREVIEWS {
+            let _ = reply.send(Err(ReplyError::Operational(PublicError::resource_limit(
+                "too many VMware examinations in progress",
+            ))));
+            return;
+        }
+        let ctx = match self.engine.vmware_context(&caller) {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = reply.send(Err(ReplyError::Operational(e)));
+                return;
+            }
+        };
+        let shutdown = self.storage_cancel.clone();
+        previews.fetch_add(1, Ordering::SeqCst);
+        let counter = previews.clone();
+        let spawned = std::thread::Builder::new()
+            .name("lightvm-vmware-preview".into())
+            .spawn(move || {
+                let cancel = move || shutdown.load(Ordering::SeqCst);
+                let r = crate::vmware::analyze(&ctx, &vmx, None, &cancel)
+                    .map(|a| ResponseBody::VmwareImportPreview {
+                        preview: Box::new(a.preview()),
+                    })
+                    .map_err(ReplyError::Operational);
+                counter.fetch_sub(1, Ordering::SeqCst);
+                let _ = reply.send(r);
+            });
+        if let Err(e) = spawned {
+            previews.fetch_sub(1, Ordering::SeqCst);
+            crate::diag!("lightvm-service: VMware preview thread not started: {e}");
+        }
+    }
+
+    /// First step of a VMware import (ADR-0030): the examination runs on a
+    /// worker thread and comes back as [`Command::VmwareAnalyzed`].
+    fn start_vmware_import(
+        &mut self,
+        caller: Option<Caller>,
+        vmx: String,
+        name: VmName,
+        display: DisplayAdapter,
+        (reply, revoked, epoch): (Reply, watch::Receiver<bool>, u64),
+    ) {
+        let Some(caller) = caller else {
+            let _ = reply.send(Err(ReplyError::Operational(
+                PublicError::permission_denied("no VM permissions for this role"),
+            )));
+            return;
+        };
+        if self.vmware.import.is_some() {
+            let _ = reply.send(Err(ReplyError::Operational(PublicError::vm_busy(
+                "another VMware import is in progress",
+            ))));
+            return;
+        }
+        let ctx = match self.engine.vmware_context(&caller) {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = reply.send(Err(ReplyError::Operational(e)));
+                return;
+            }
+        };
+        let flag = Arc::new(AtomicBool::new(false));
+        self.vmware.import = Some(flag.clone());
+        let cancel: CancelCheck = {
+            let current = self.emergency_epoch.clone();
+            let shutdown = self.storage_cancel.clone();
+            let rv = revoked.clone();
+            Arc::new(move || {
+                flag.load(Ordering::SeqCst)
+                    || shutdown.load(Ordering::SeqCst)
+                    || current.load(Ordering::SeqCst) != epoch
+                    || is_revoked(&rv)
+            })
+        };
+        let _ = self.events.send(ServiceEvent::VmwareImportProgress {
+            phase: VmwareImportPhase::Checking,
+            percent: 0,
+        });
+        let tx = self.self_tx.clone();
+        let c2 = cancel.clone();
+        let spawned = std::thread::Builder::new()
+            .name("lightvm-vmware-check".into())
+            .spawn(move || {
+                let outcome = crate::vmware::analyze(&ctx, &vmx, Some(name), &|| c2());
+                let _ = tx.send(Command::VmwareAnalyzed(Box::new(VmwareStep {
+                    caller,
+                    display,
+                    outcome,
+                    reply,
+                    revoked,
+                    epoch,
+                    cancel,
+                })));
+            });
+        match spawned {
+            Ok(_) => self.storage_jobs += 1,
+            Err(e) => {
+                self.vmware.import = None;
+                crate::diag!("lightvm-service: VMware import thread not started: {e}");
+            }
+        }
+    }
+
+    /// Examination done: checks of the configuration and the budget, the
+    /// journal intent, then the conversion on a worker thread.
+    fn vmware_analyzed(&mut self, step: VmwareStep<Result<crate::vmware::Analysis, PublicError>>) {
+        let VmwareStep {
+            caller,
+            display,
+            outcome,
+            reply,
+            revoked,
+            epoch,
+            cancel,
+        } = step;
+        let fail = |this: &mut Self, e: PublicError, reply: Reply| {
+            this.vmware.import = None;
+            this.engine.vmware_denied(&caller, &e);
+            let _ = reply.send(Err(ReplyError::Operational(e)));
+        };
+        let stop = self.vmware_stop_reason(&revoked, epoch, &cancel);
+        let analysis = match (stop, outcome) {
+            (Some(e), _) | (None, Err(e)) => return fail(self, e, reply),
+            (None, Ok(a)) => a,
+        };
+        let config = match analysis.config(display) {
+            Ok(c) => c,
+            Err(e) => return fail(self, e, reply),
+        };
+        // Core checks (audited when refused) and the journal intent.
+        let slot = match self.engine.vmware_begin(
+            &caller,
+            &config,
+            analysis.required_bytes,
+            analysis.free_bytes,
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                self.vmware.import = None;
+                let _ = reply.send(Err(ReplyError::Operational(e)));
+                return;
+            }
+        };
+        let _ = self.events.send(ServiceEvent::VmwareImportProgress {
+            phase: VmwareImportPhase::Converting,
+            percent: 0,
+        });
+        let tx = self.self_tx.clone();
+        let events = self.events.clone();
+        let dst = slot.temp_path.clone();
+        let c2 = cancel.clone();
+        let who = caller.clone();
+        // The worker owns the slot and the reply; if it cannot start they
+        // come back here and the import is rolled back.
+        let (job_tx, job_rx) = mpsc::channel::<(VmImportSlot, Reply)>();
+        let spawned = std::thread::Builder::new()
+            .name("lightvm-vmware-convert".into())
+            .spawn(move || {
+                let Ok((slot, reply)) = job_rx.recv() else {
+                    return;
+                };
+                let mut progress = |p: u8| {
+                    let _ = events.send(ServiceEvent::VmwareImportProgress {
+                        phase: VmwareImportPhase::Converting,
+                        percent: p.min(100),
+                    });
+                };
+                let r = crate::vmware::convert(analysis, &dst, &|| c2(), &mut progress);
+                let _ = tx.send(Command::VmwareConverted(Box::new(VmwareStep {
+                    caller: who,
+                    display,
+                    outcome: (slot, config, r),
+                    reply,
+                    revoked,
+                    epoch,
+                    cancel,
+                })));
+            });
+        let lost = match spawned {
+            Ok(_) => match job_tx.send((slot, reply)) {
+                Ok(()) => {
+                    self.storage_jobs += 1;
+                    return;
+                }
+                Err(mpsc::SendError(back)) => back,
+            },
+            Err(e) => {
+                crate::diag!("lightvm-service: VMware conversion thread not started: {e}");
+                (slot, reply)
+            }
+        };
+        self.vmware.import = None;
+        let (slot, reply) = lost;
+        let e = self.engine.vmware_abort(
+            &caller,
+            slot,
+            PublicError::infrastructure("worker thread not available"),
+        );
+        let _ = reply.send(Err(ReplyError::Operational(e)));
+    }
+
+    /// Conversion done: publication of the disk with the VM row, or
+    /// rollback.
+    fn vmware_converted(
+        &mut self,
+        step: VmwareStep<(VmImportSlot, VmConfig, Result<(), PublicError>)>,
+    ) {
+        self.vmware.import = None;
+        let stop = self.vmware_stop_reason(&step.revoked, step.epoch, &step.cancel);
+        let VmwareStep {
+            caller,
+            outcome: (slot, config, r),
+            reply,
+            ..
+        } = step;
+        let res = match (stop, r) {
+            (Some(e), _) | (None, Err(e)) => Err(self.engine.vmware_abort(&caller, slot, e)),
+            (None, Ok(())) => {
+                let _ = self.events.send(ServiceEvent::VmwareImportProgress {
+                    phase: VmwareImportPhase::Finishing,
+                    percent: 100,
+                });
+                self.engine.vmware_finish(&caller, slot, config)
+            }
+        };
+        self.publish_state_changes();
+        let _ = reply.send(
+            res.map(|vm| ResponseBody::VmwareImported { vm })
+                .map_err(ReplyError::Operational),
+        );
     }
 
     /// Records an agent call in its session report; a successful screenshot
@@ -1656,6 +2023,18 @@ impl SupervisorThread {
             // Served by `start_import` (reply after the hash).
             SupervisorRequest::ImportMedia { .. } => {
                 Err(PublicError::infrastructure("media import not dispatched"))
+            }
+            // Served by `start_vmware_preview` / `start_vmware_import`.
+            SupervisorRequest::PreviewVmware { .. } | SupervisorRequest::ImportVmware { .. } => {
+                Err(PublicError::infrastructure("VMware import not dispatched"))
+            }
+            SupervisorRequest::CancelVmwareImport => {
+                who()?;
+                let cancelled = self.vmware.import.as_ref().is_some_and(|flag| {
+                    flag.store(true, Ordering::SeqCst);
+                    true
+                });
+                Ok(ResponseBody::VmwareImportCancel { cancelled })
             }
             SupervisorRequest::ListBaselines(vm_id) => self
                 .engine

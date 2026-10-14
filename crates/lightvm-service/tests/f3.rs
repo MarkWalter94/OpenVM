@@ -66,6 +66,7 @@ async fn start_svc(name: &str, convert_delay: Duration) -> Svc {
             convert_delay,
             calls: calls.clone(),
             disk_full: disk_full.clone(),
+            ..FakeImageTool::default()
         })),
         ..FakeVmBackend::default()
     };

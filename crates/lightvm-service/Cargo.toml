@@ -28,7 +28,7 @@ path = "src/bin/lightvm-ipc-probe.rs"
 # `qemu-backend` stays in the supervisor only (ADR-0024).
 [features]
 default = ["supervisor"]
-supervisor = ["dep:guest-detect", "dep:lightvm-fixture", "dep:png", "dep:qemu-backend", "dep:sha2", "dep:socket2", "dep:vm-core", "dep:vm-storage"]
+supervisor = ["dep:guest-detect", "dep:lightvm-fixture", "dep:png", "dep:qemu-backend", "dep:sha2", "dep:socket2", "dep:vm-core", "dep:vm-storage", "dep:vmware-import"]
 
 # Exact versions and lockfile (ROADMAP 6.3); no git dependencies.
 [dependencies]
@@ -53,6 +53,9 @@ socket2 = { version = "=0.6.5", features = ["all"], optional = true }
 tokio = { version = "=1.53.2", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 vm-core = { path = "../vm-core", optional = true }
 vm-storage = { path = "../vm-storage", optional = true }
+# Import of VMware VMs (ADR-0030): bounded readers of the .vmx and VMDK
+# descriptors, run on the files the user chose.
+vmware-import = { path = "../vmware-import", optional = true }
 
 # Named pipe with a security descriptor through safe APIs (no `unsafe` in the
 # crate): `interprocess` wraps CreateNamedPipeW and the SDDL conversion;
@@ -121,4 +124,8 @@ required-features = ["supervisor"]
 
 [[test]]
 name = "windows_real"
+required-features = ["supervisor"]
+
+[[test]]
+name = "vmware_import"
 required-features = ["supervisor"]

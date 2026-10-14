@@ -1485,7 +1485,10 @@ async fn request_role_matrix() {
             | Request::SetSessionVerdict { .. }
             | Request::VerifySession { .. }
             | Request::ExportSessionReport { .. }
-            | Request::DeleteSessionReport { .. } => Who::Ui,
+            | Request::DeleteSessionReport { .. }
+            | Request::PreviewVmwareImport { .. }
+            | Request::ImportVmware { .. }
+            | Request::CancelVmwareImport => Who::Ui,
         }
     }
     let svc = start_svc("f4-roles", Opts::default()).await;
@@ -1617,6 +1620,17 @@ async fn request_role_matrix() {
             include_screenshots: false,
         },
         Request::DeleteSessionReport { session_id: sid },
+        // ADR-0030: a VMware VM is examined and imported for the user only;
+        // an agent never names a host file.
+        Request::PreviewVmwareImport {
+            vmx_path: "C:/vm/x.vmx".into(),
+        },
+        Request::ImportVmware {
+            vmx_path: "C:/vm/x.vmx".into(),
+            name: lightvm_proto::VmName::parse("x").unwrap(),
+            display: lightvm_proto::DisplayAdapter::Standard,
+        },
+        Request::CancelVmwareImport,
     ];
     let mut a = agent_client(&svc, &mut u).await;
     let mut checked = 0;
