@@ -61,7 +61,11 @@ impl Catalog {
     /// First step of an import: intent `import_vm` for VM `vm` (which must
     /// not exist), final path `vms/<vm>/primary.qcow2` (which must not
     /// exist either).
-    pub fn begin_vm_import(&mut self, vm: &VmId, operation: Option<OperationId>) -> Result<VmImport> {
+    pub fn begin_vm_import(
+        &mut self,
+        vm: &VmId,
+        operation: Option<OperationId>,
+    ) -> Result<VmImport> {
         let intent = self.begin_intent(IntentSpec {
             kind: IntentKind::ImportVm,
             vm_id: Some(*vm),
@@ -71,10 +75,7 @@ impl Catalog {
             final_path: Some(CatalogLayout::primary_disk(vm)),
             read_only: false,
         })?;
-        Ok(VmImport {
-            intent,
-            vm_id: *vm,
-        })
+        Ok(VmImport { intent, vm_id: *vm })
     }
 
     /// Last step: the converted disk (a regular file at

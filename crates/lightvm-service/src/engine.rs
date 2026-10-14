@@ -471,7 +471,11 @@ pub trait ImageTool: Send + Sync + std::fmt::Debug + 'static {
     }
     /// `qemu-img info --backing-chain --output=json -f vmdk` of a VMware
     /// disk whose chain was validated (ADR-0030).
-    fn vmdk_chain_info(&self, _top: &Path, _cancel: &dyn Fn() -> bool) -> Result<String, PublicError> {
+    fn vmdk_chain_info(
+        &self,
+        _top: &Path,
+        _cancel: &dyn Fn() -> bool,
+    ) -> Result<String, PublicError> {
         Err(PublicError::unsupported(
             "VMware import not available on this backend",
         ))
@@ -511,11 +515,7 @@ pub trait VmImportPort {
         ))
     }
     /// Publishes the converted disk of `slot` and writes the VM row.
-    fn finish_vm_import(
-        &mut self,
-        _slot: VmImportSlot,
-        _vm: &VmRecord,
-    ) -> Result<(), PublicError> {
+    fn finish_vm_import(&mut self, _slot: VmImportSlot, _vm: &VmRecord) -> Result<(), PublicError> {
         Err(PublicError::unsupported(
             "VMware import not available on this catalog",
         ))
@@ -2380,15 +2380,12 @@ where
             self.core.record_import_denied(caller, &e);
             return Err(e);
         }
-        let tool = self
-            .backend
-            .image_tool()
-            .ok_or_else(|| PublicError::unsupported("VMware import needs qemu-img: configure the QEMU folder"))?;
-        let catalog_root = self
-            .core
-            .store()
-            .catalog_root()
-            .ok_or_else(|| PublicError::unsupported("VMware import not available on this catalog"))?;
+        let tool = self.backend.image_tool().ok_or_else(|| {
+            PublicError::unsupported("VMware import needs qemu-img: configure the QEMU folder")
+        })?;
+        let catalog_root = self.core.store().catalog_root().ok_or_else(|| {
+            PublicError::unsupported("VMware import not available on this catalog")
+        })?;
         let l = self.core.creation_limits();
         Ok(crate::vmware::VmwareContext {
             tool,

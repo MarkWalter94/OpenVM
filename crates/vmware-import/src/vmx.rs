@@ -51,7 +51,8 @@ impl Vmx {
     /// `true` if the key is `TRUE` (any case).
     #[must_use]
     pub fn is_true(&self, key: &str) -> bool {
-        self.get(key).is_some_and(|v| v.eq_ignore_ascii_case("true"))
+        self.get(key)
+            .is_some_and(|v| v.eq_ignore_ascii_case("true"))
     }
 
     /// Unsigned number of a key; `None` if absent or not a number.
@@ -363,7 +364,13 @@ impl Vmx {
                 mode: p("mode").map(|s| s.to_ascii_lowercase()),
             });
         }
-        out.sort_by_key(|d| (Bus::ALL.iter().position(|b| *b == d.bus), d.controller, d.unit));
+        out.sort_by_key(|d| {
+            (
+                Bus::ALL.iter().position(|b| *b == d.bus),
+                d.controller,
+                d.unit,
+            )
+        });
         out
     }
 
@@ -424,7 +431,10 @@ mod tests {
         assert!(parse_vmx(b"guestOS = \"win\0vista\"").is_err());
         assert!(parse_vmx(&[0xff, 0xfe, b'a']).is_err());
         assert!(parse_vmx(b"displayName = \"|zz\"").is_err());
-        assert!(parse_vmx(b"displayName = \"a|0Ab\"").is_err(), "newline escape");
+        assert!(
+            parse_vmx(b"displayName = \"a|0Ab\"").is_err(),
+            "newline escape"
+        );
         let long = format!("displayName = \"{}\"", "x".repeat(MAX_VALUE_CHARS + 1));
         assert!(parse_vmx(long.as_bytes()).is_err());
         // Unknown keys with odd shapes are ignored, not errors.

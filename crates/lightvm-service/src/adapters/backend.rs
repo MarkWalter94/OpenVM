@@ -428,12 +428,14 @@ fn check_start_space(free_bytes: Option<u64>) -> Result<(), PublicError> {
 /// firmware, with the disk controller and display of a VM imported from
 /// VMware (ADR-0030).
 fn profile_for(config: &lightvm_proto::VmConfig) -> Result<DeviceProfile, PublicError> {
-    DeviceProfile::for_config(config.guest_os, config.firmware, config.imported.as_ref()).map_err(|e| {
-        crate::diag!("lightvm-service: hardware profile: {e}");
-        PublicError::invalid_argument(
-            "the firmware of the VM is not supported by its operating system",
-        )
-    })
+    DeviceProfile::for_config(config.guest_os, config.firmware, config.imported.as_ref()).map_err(
+        |e| {
+            crate::diag!("lightvm-service: hardware profile: {e}");
+            PublicError::invalid_argument(
+                "the firmware of the VM is not supported by its operating system",
+            )
+        },
+    )
 }
 
 /// CPU model of a run with `profile`: `host` for the AArch64 profile under
@@ -703,8 +705,13 @@ impl ImageTool for QemuImageTool {
     fn firmware_vars_template(&self) -> Option<PathBuf> {
         self.vars_template.clone()
     }
-    fn vmdk_chain_info(&self, top: &Path, cancel: &dyn Fn() -> bool) -> Result<String, PublicError> {
-        image::vmdk_chain_info(&self.cmd(false), &verified(top)?, cancel).map_err(|e| image_error(&e))
+    fn vmdk_chain_info(
+        &self,
+        top: &Path,
+        cancel: &dyn Fn() -> bool,
+    ) -> Result<String, PublicError> {
+        image::vmdk_chain_info(&self.cmd(false), &verified(top)?, cancel)
+            .map_err(|e| image_error(&e))
     }
     fn convert_vmdk(
         &self,
@@ -713,12 +720,20 @@ impl ImageTool for QemuImageTool {
         cancel: &dyn Fn() -> bool,
         progress: &mut dyn FnMut(u8),
     ) -> Result<(), PublicError> {
-        image::convert_vmdk(&self.cmd(true), &verified(src)?, &verified(dst)?, cancel, progress)
-            .map_err(|e| image_error(&e))
+        image::convert_vmdk(
+            &self.cmd(true),
+            &verified(src)?,
+            &verified(dst)?,
+            cancel,
+            progress,
+        )
+        .map_err(|e| image_error(&e))
     }
     fn free_bytes(&self, dir: &Path) -> Option<u64> {
         let dir = ManagedPath::verify(dir).ok()?;
-        prepare::host_resources(&dir).ok().map(|r| r.free_disk_bytes)
+        prepare::host_resources(&dir)
+            .ok()
+            .map(|r| r.free_disk_bytes)
     }
 }
 

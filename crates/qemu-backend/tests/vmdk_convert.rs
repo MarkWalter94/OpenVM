@@ -41,7 +41,11 @@ fn run(dir: &Path, prog: &Path, args: &[&str]) {
         .args(args)
         .output()
         .unwrap();
-    assert!(o.status.success(), "{args:?}: {}", String::from_utf8_lossy(&o.stderr));
+    assert!(
+        o.status.success(),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&o.stderr)
+    );
 }
 
 fn sha(p: &Path) -> Vec<u8> {
@@ -58,12 +62,48 @@ fn snapshot_chain_converted_flattened_and_source_unchanged() {
     let img = q.join(exe("qemu-img"));
     let io = q.join(exe("qemu-io"));
     let dir = tmp("chain");
-    run(&dir, &img, &["create", "-q", "-f", "vmdk", "base.vmdk", "64M"]);
-    run(&dir, &io, &["-f", "vmdk", "-c", "write -P 0x11 0 1M", "base.vmdk"]);
-    run(&dir, &img, &["create", "-q", "-f", "vmdk", "-b", "base.vmdk", "-F", "vmdk", "s1.vmdk"]);
-    run(&dir, &io, &["-f", "vmdk", "-c", "write -P 0x22 1M 1M", "s1.vmdk"]);
-    run(&dir, &img, &["create", "-q", "-f", "vmdk", "-b", "s1.vmdk", "-F", "vmdk", "s2.vmdk"]);
-    run(&dir, &io, &["-f", "vmdk", "-c", "write -P 0x33 0 512k", "s2.vmdk"]);
+    run(
+        &dir,
+        &img,
+        &["create", "-q", "-f", "vmdk", "base.vmdk", "64M"],
+    );
+    run(
+        &dir,
+        &io,
+        &["-f", "vmdk", "-c", "write -P 0x11 0 1M", "base.vmdk"],
+    );
+    run(
+        &dir,
+        &img,
+        &[
+            "create",
+            "-q",
+            "-f",
+            "vmdk",
+            "-b",
+            "base.vmdk",
+            "-F",
+            "vmdk",
+            "s1.vmdk",
+        ],
+    );
+    run(
+        &dir,
+        &io,
+        &["-f", "vmdk", "-c", "write -P 0x22 1M 1M", "s1.vmdk"],
+    );
+    run(
+        &dir,
+        &img,
+        &[
+            "create", "-q", "-f", "vmdk", "-b", "s1.vmdk", "-F", "vmdk", "s2.vmdk",
+        ],
+    );
+    run(
+        &dir,
+        &io,
+        &["-f", "vmdk", "-c", "write -P 0x33 0 512k", "s2.vmdk"],
+    );
     let before: Vec<_> = ["base.vmdk", "s1.vmdk", "s2.vmdk"]
         .iter()
         .map(|f| sha(&dir.join(f)))
@@ -85,7 +125,20 @@ fn snapshot_chain_converted_flattened_and_source_unchanged() {
     image::convert_vmdk(&cmd, &top, &out, &|| false, &mut |p| seen.push(p)).unwrap();
     assert_eq!(seen.last(), Some(&100));
     // Same guest-visible content, no backing file, consistent image.
-    run(&dir, &img, &["compare", "-q", "-f", "vmdk", "-F", "qcow2", "s2.vmdk", "out.qcow2"]);
+    run(
+        &dir,
+        &img,
+        &[
+            "compare",
+            "-q",
+            "-f",
+            "vmdk",
+            "-F",
+            "qcow2",
+            "s2.vmdk",
+            "out.qcow2",
+        ],
+    );
     image::check_image(&cmd, &out, &|| false).unwrap();
     assert_eq!(image::virtual_size(&cmd, &out).unwrap(), 64 << 20);
     let info: serde_json::Value = serde_json::from_str(&{

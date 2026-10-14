@@ -144,8 +144,8 @@ pub fn analyze(
         return Err(cancelled());
     }
     let json = ctx.tool.vmdk_chain_info(&inspection.disk.top, cancel)?;
-    let facts = vmware_import::check_chain_info(&json, &inspection.disk)
-        .map_err(|e| e.to_public())?;
+    let facts =
+        vmware_import::check_chain_info(&json, &inspection.disk).map_err(|e| e.to_public())?;
     let name = name.unwrap_or_else(|| {
         let stem = Path::new(&inspection.vmx_file)
             .file_stem()
@@ -153,8 +153,8 @@ pub fn analyze(
             .unwrap_or_default();
         vmware_import::plan::suggested_name(inspection.vmx.get("displayname"), &stem)
     });
-    let plan = vmware_import::plan(&inspection, &facts, &ctx.limits, name)
-        .map_err(|e| e.to_public())?;
+    let plan =
+        vmware_import::plan(&inspection, &facts, &ctx.limits, name).map_err(|e| e.to_public())?;
     let required_bytes = vmware_import::plan::required_bytes(&facts);
     let free_bytes = ctx.tool.free_bytes(&ctx.catalog_root);
     Ok(Analysis {
@@ -193,7 +193,6 @@ pub fn check_space(required: u64, free: Option<u64>, reserve: u64) -> Result<(),
 /// exist yet), then checks the result. The guard of the analysis is held
 /// until the end; `progress` receives the percentage.
 pub fn convert(
-
     a: Analysis,
     dst: &Path,
     cancel: &dyn Fn() -> bool,
@@ -215,5 +214,45 @@ pub fn convert(
         ));
     }
     drop(a.guard);
+    if let Some(hw) = &a.plan.config.imported {
+        let outcome = prepare_storage_driver(dst, hw);
+        if outcome == DriverPreparation::ManualPreparationNeeded {
+            crate::diag!(
+                "lightvm-service: VMware import: the guest needs its storage driver enabled for boot (manual preparation, ADR-0030)"
+            );
+        }
+    }
     Ok(())
+}
+
+/// Outcome of [`prepare_storage_driver`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DriverPreparation {
+    /// The guest keeps a controller it has a boot driver for.
+    NotNeeded,
+    /// Windows was on a controller QEMU does not emulate (VMware
+    /// `lsilogic`/`buslogic`): the driver of the new controller must be
+    /// enabled for boot; the user prepares the guest in VMware
+    /// (`docs/USER_GUIDE.md`, "LSI Logic disks").
+    ManualPreparationNeeded,
+}
+
+/// Hook of the offline storage driver enablement (ADR-0030): it will edit
+/// the guest `SYSTEM` hive of the **converted copy** (`converted`, a
+/// journal temporary, never the VMware files) so that the inbox driver of
+/// [`ImportedHardware::disk_controller`] starts at boot. The method (hive
+/// editing on the image, the host privileges it needs, the Windows
+/// versions it covers) is decided by a separate spike: until then nothing
+/// is changed and the outcome says whether the manual preparation applies.
+#[must_use]
+pub fn prepare_storage_driver(
+    converted: &Path,
+    hw: &lightvm_proto::ImportedHardware,
+) -> DriverPreparation {
+    let _ = converted;
+    if hw.storage_driver_preparation {
+        DriverPreparation::ManualPreparationNeeded
+    } else {
+        DriverPreparation::NotNeeded
+    }
 }

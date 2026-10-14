@@ -1198,8 +1198,10 @@ where
                 "an imported configuration needs its imported hardware",
             ))
         } else if name_taken {
-            Err(PublicError::state_conflict("a VM with this name already exists")
-                .with_detail("field", "name"))
+            Err(
+                PublicError::state_conflict("a VM with this name already exists")
+                    .with_detail("field", "name"),
+            )
         } else {
             self.check_config_host(config)
                 .and_then(|()| validate_config(config, &self.effective_limits()))

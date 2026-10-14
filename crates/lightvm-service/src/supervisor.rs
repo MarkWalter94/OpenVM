@@ -186,7 +186,9 @@ pub(crate) enum SupervisorRequest {
     /// Session reports (UI, F5).
     Report(Box<ReportRequest>),
     /// Examination of a VMware VM (UI, ADR-0030).
-    PreviewVmware { vmx_path: String },
+    PreviewVmware {
+        vmx_path: String,
+    },
     /// Import of a VMware VM by conversion (UI, ADR-0030).
     ImportVmware {
         vmx_path: String,
@@ -422,8 +424,12 @@ pub(crate) enum Command {
     VmwareAnalyzed(Box<VmwareStep<Result<crate::vmware::Analysis, PublicError>>>),
     /// Conversion of a VMware import finished on its worker: publication
     /// or rollback.
-    VmwareConverted(Box<VmwareStep<(VmImportSlot, VmConfig, Result<(), PublicError>)>>),
+    VmwareConverted(Box<VmwareStep<Converted>>),
 }
+
+/// Outcome of the conversion of a VMware import: the catalog slot, the
+/// configuration to create and the result of `qemu-img`.
+pub(crate) type Converted = (VmImportSlot, VmConfig, Result<(), PublicError>);
 
 /// A step of a VMware import coming back from a worker.
 pub(crate) struct VmwareStep<T> {
@@ -1272,7 +1278,7 @@ impl SupervisorThread {
     /// rollback.
     fn vmware_converted(
         &mut self,
-        step: VmwareStep<(VmImportSlot, VmConfig, Result<(), PublicError>)>,
+        step: VmwareStep<Converted>,
     ) {
         self.vmware.import = None;
         let stop = self.vmware_stop_reason(&step.revoked, step.epoch, &step.cancel);

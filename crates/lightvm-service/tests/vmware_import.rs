@@ -86,8 +86,14 @@ async fn start_svc(name: &str, q: &Path, o: Opts) -> Svc {
         ..FakeVmBackend::default()
     };
     let inspector = ManagedMediaInspector::new(store.root());
-    let engine =
-        CoreEngine::new(store, audit, backend, inspector, core_config(host_capacity())).unwrap();
+    let engine = CoreEngine::new(
+        store,
+        audit,
+        backend,
+        inspector,
+        core_config(host_capacity()),
+    )
+    .unwrap();
     let mut cfg = ServiceConfig::new(&dir);
     cfg.runtime_dir = Some(dir.join("run"));
     let (handle, ui) = start(cfg, Box::new(engine), Box::new(FakeHost { calls }))
@@ -177,14 +183,68 @@ impl VmwareVm {
                 .args(args)
                 .output()
                 .unwrap();
-            assert!(o.status.success(), "{args:?}: {}", String::from_utf8_lossy(&o.stderr));
+            assert!(
+                o.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&o.stderr)
+            );
         };
-        run("qemu-img", &["create", "-q", "-f", "vmdk", "Win7.vmdk", "64M"]);
-        run("qemu-io", &["-f", "vmdk", "-c", "write -P 0x11 0 2M", "Win7.vmdk"]);
-        run("qemu-img", &["create", "-q", "-f", "vmdk", "-b", "Win7.vmdk", "-F", "vmdk", "Win7-000001.vmdk"]);
-        run("qemu-io", &["-f", "vmdk", "-c", "write -P 0x22 1M 2M", "Win7-000001.vmdk"]);
-        run("qemu-img", &["create", "-q", "-f", "vmdk", "-b", "Win7-000001.vmdk", "-F", "vmdk", "Win7-000002.vmdk"]);
-        run("qemu-io", &["-f", "vmdk", "-c", "write -P 0x33 0 512k", "Win7-000002.vmdk"]);
+        run(
+            "qemu-img",
+            &["create", "-q", "-f", "vmdk", "Win7.vmdk", "64M"],
+        );
+        run(
+            "qemu-io",
+            &["-f", "vmdk", "-c", "write -P 0x11 0 2M", "Win7.vmdk"],
+        );
+        run(
+            "qemu-img",
+            &[
+                "create",
+                "-q",
+                "-f",
+                "vmdk",
+                "-b",
+                "Win7.vmdk",
+                "-F",
+                "vmdk",
+                "Win7-000001.vmdk",
+            ],
+        );
+        run(
+            "qemu-io",
+            &[
+                "-f",
+                "vmdk",
+                "-c",
+                "write -P 0x22 1M 2M",
+                "Win7-000001.vmdk",
+            ],
+        );
+        run(
+            "qemu-img",
+            &[
+                "create",
+                "-q",
+                "-f",
+                "vmdk",
+                "-b",
+                "Win7-000001.vmdk",
+                "-F",
+                "vmdk",
+                "Win7-000002.vmdk",
+            ],
+        );
+        run(
+            "qemu-io",
+            &[
+                "-f",
+                "vmdk",
+                "-c",
+                "write -P 0x33 0 512k",
+                "Win7-000002.vmdk",
+            ],
+        );
         let vmx = folder.join("Win7.vmx");
         std::fs::write(
             &vmx,
@@ -227,7 +287,10 @@ impl Drop for VmwareVm {
     }
 }
 
-async fn preview(c: &mut Client, vmx: &str) -> Result<VmwareImportPreview, lightvm_proto::PublicError> {
+async fn preview(
+    c: &mut Client,
+    vmx: &str,
+) -> Result<VmwareImportPreview, lightvm_proto::PublicError> {
     let m = req(
         c,
         Request::PreviewVmwareImport {
@@ -272,13 +335,19 @@ async fn preview_and_import_of_a_snapshot_chain() {
     let before = vm.hashes();
     let svc = start_svc("vmw-ok", &q, plenty()).await;
     let mut c = connect(&svc).await;
-    assert!(matches!(req(&mut c, Request::Subscribe).await, ServerMessage::Response { .. }));
+    assert!(matches!(
+        req(&mut c, Request::Subscribe).await,
+        ServerMessage::Response { .. }
+    ));
     let p = preview(&mut c, &vm.vmx_str()).await.expect("preview");
     assert_eq!(p.vmx_file, "Win7.vmx");
     assert_eq!(p.display_name.as_deref(), Some("Win7 VS2010"));
     assert_eq!(p.config.name.as_str(), "Win7 VS2010");
     assert_eq!(p.config.guest_os, GuestOs::Windows7);
-    assert_eq!((p.config.vcpus, p.config.memory_mib, p.config.disk_gib), (4, 3072, 1));
+    assert_eq!(
+        (p.config.vcpus, p.config.memory_mib, p.config.disk_gib),
+        (4, 3072, 1)
+    );
     let hw = p.config.imported.expect("imported hardware");
     assert_eq!(hw.disk_controller, DiskController::Pvscsi);
     assert_eq!(hw.cores_per_socket, Some(2));
@@ -287,13 +356,22 @@ async fn preview_and_import_of_a_snapshot_chain() {
     assert_eq!(p.disk.virtual_size_bytes, 64 << 20);
     assert!(p.vmware_svga_offered);
     let items: Vec<_> = p.not_imported.iter().map(|n| n.item).collect();
-    for want in [NotImportedItem::Network, NotImportedItem::Sound, NotImportedItem::Usb, NotImportedItem::Snapshots] {
+    for want in [
+        NotImportedItem::Network,
+        NotImportedItem::Sound,
+        NotImportedItem::Usb,
+        NotImportedItem::Snapshots,
+    ] {
         assert!(items.contains(&want), "{want:?}: {items:?}");
     }
     // The preview never writes into the catalog.
     nothing_left(&svc.dir);
 
-    let r = req(&mut c, import_req(&vm.vmx_str(), "Win7 imported", DisplayAdapter::VmwareSvga)).await;
+    let r = req(
+        &mut c,
+        import_req(&vm.vmx_str(), "Win7 imported", DisplayAdapter::VmwareSvga),
+    )
+    .await;
     let rec = imported(&r);
     let hw = rec.config.imported.unwrap();
     assert_eq!(hw.display, DisplayAdapter::VmwareSvga);
@@ -308,7 +386,11 @@ async fn preview_and_import_of_a_snapshot_chain() {
         }
         other => panic!("{other:?}"),
     }
-    let disk = svc.dir.join("vms").join(rec.id.to_string()).join("primary.qcow2");
+    let disk = svc
+        .dir
+        .join("vms")
+        .join(rec.id.to_string())
+        .join("primary.qcow2");
     assert!(disk.is_file());
     let o = std::process::Command::new(q.join(exe("qemu-img")))
         .args(["compare", "-q", "-f", "vmdk", "-F", "qcow2"])
@@ -316,7 +398,11 @@ async fn preview_and_import_of_a_snapshot_chain() {
         .arg(&disk)
         .output()
         .unwrap();
-    assert!(o.status.success(), "converted content differs: {}", String::from_utf8_lossy(&o.stderr));
+    assert!(
+        o.status.success(),
+        "converted content differs: {}",
+        String::from_utf8_lossy(&o.stderr)
+    );
     // The VMware files are untouched.
     assert_eq!(vm.hashes(), before);
     // Nothing left in tmp/.
@@ -331,11 +417,24 @@ async fn preview_and_import_of_a_snapshot_chain() {
             phases.push((phase, percent));
         }
     }
-    assert!(phases.contains(&(VmwareImportPhase::Checking, 0)), "{phases:?}");
-    assert!(phases.contains(&(VmwareImportPhase::Converting, 100)), "{phases:?}");
-    assert!(phases.contains(&(VmwareImportPhase::Finishing, 100)), "{phases:?}");
+    assert!(
+        phases.contains(&(VmwareImportPhase::Checking, 0)),
+        "{phases:?}"
+    );
+    assert!(
+        phases.contains(&(VmwareImportPhase::Converting, 100)),
+        "{phases:?}"
+    );
+    assert!(
+        phases.contains(&(VmwareImportPhase::Finishing, 100)),
+        "{phases:?}"
+    );
     // The same name again: refused before any conversion.
-    let r = req(&mut c, import_req(&vm.vmx_str(), "WIN7 IMPORTED", DisplayAdapter::Standard)).await;
+    let r = req(
+        &mut c,
+        import_req(&vm.vmx_str(), "WIN7 IMPORTED", DisplayAdapter::Standard),
+    )
+    .await;
     assert_eq!(error(&r).unwrap().code, ErrorCode::StateConflict);
     svc.handle.shutdown().await;
 }
@@ -363,16 +462,37 @@ async fn refusals_leave_nothing_and_are_audited() {
     let mut c = connect(&svc).await;
     let e = preview(&mut c, &locked.vmx_str()).await.unwrap_err();
     assert_eq!(e.code, ErrorCode::StateConflict);
-    let r = req(&mut c, import_req(&locked.vmx_str(), "locked", DisplayAdapter::Standard)).await;
+    let r = req(
+        &mut c,
+        import_req(&locked.vmx_str(), "locked", DisplayAdapter::Standard),
+    )
+    .await;
     let e = error(&r).unwrap();
     assert_eq!(e.code, ErrorCode::StateConflict);
-    assert_eq!(e.details.as_ref().and_then(|d| d.get("reason")).map(String::as_str), Some("locked"));
-    assert!(!e.message.contains(&*locked.folder.to_string_lossy()), "no folder in messages");
+    assert_eq!(
+        e.details
+            .as_ref()
+            .and_then(|d| d.get("reason"))
+            .map(String::as_str),
+        Some("locked")
+    );
+    assert!(
+        !e.message.contains(&*locked.folder.to_string_lossy()),
+        "no folder in messages"
+    );
     let p = preview(&mut c, &lsi.vmx_str()).await.unwrap();
-    assert!(p.warnings.iter().any(|w| w.kind == ImportWarningKind::StorageDriverPreparation));
+    assert!(
+        p.warnings
+            .iter()
+            .any(|w| w.kind == ImportWarningKind::StorageDriverPreparation)
+    );
     assert!(p.config.imported.unwrap().storage_driver_preparation);
     // 1 MiB free: the storage budget refuses the conversion.
-    let r = req(&mut c, import_req(&lsi.vmx_str(), "lsi", DisplayAdapter::Standard)).await;
+    let r = req(
+        &mut c,
+        import_req(&lsi.vmx_str(), "lsi", DisplayAdapter::Standard),
+    )
+    .await;
     assert_eq!(error(&r).unwrap().code, ErrorCode::ResourceLimit);
     // A path that is not a .vmx, a relative path.
     for bad in ["relative.vmx", "C:/x/disk.vmdk"] {
@@ -380,7 +500,11 @@ async fn refusals_leave_nothing_and_are_audited() {
         assert_eq!(error(&r).unwrap().code, ErrorCode::InvalidArgument, "{bad}");
     }
     nothing_left(&svc.dir);
-    assert!(imports(&svc.dir, AuditOutcome::Denied) >= 3, "{:?}", read_audit(&svc.dir));
+    assert!(
+        imports(&svc.dir, AuditOutcome::Denied) >= 3,
+        "{:?}",
+        read_audit(&svc.dir)
+    );
     assert_eq!(imports(&svc.dir, AuditOutcome::Succeeded), 0);
     svc.handle.shutdown().await;
 }
@@ -388,7 +512,9 @@ async fn refusals_leave_nothing_and_are_audited() {
 /// Waits for the conversion phase of the import in progress.
 async fn wait_converting(c: &mut Client) {
     loop {
-        let ev = tokio::time::timeout(T, c.next_event()).await.expect("event");
+        let ev = tokio::time::timeout(T, c.next_event())
+            .await
+            .expect("event");
         if let Ok(Ok(ServiceEvent::VmwareImportProgress {
             phase: VmwareImportPhase::Converting,
             ..
@@ -421,12 +547,20 @@ async fn cancellation_by_the_user_and_by_the_emergency_stop() {
     let mut c = connect(&svc).await;
     let vmx = vm.vmx_str();
     let task = tokio::spawn(async move {
-        let r = req(&mut c, import_req(&vmx, "cancelled", DisplayAdapter::Standard)).await;
+        let r = req(
+            &mut c,
+            import_req(&vmx, "cancelled", DisplayAdapter::Standard),
+        )
+        .await;
         (c, r)
     });
     wait_converting(&mut watcher).await;
     // Only one import at a time.
-    let r = req(&mut watcher, import_req(&vm.vmx_str(), "second", DisplayAdapter::Standard)).await;
+    let r = req(
+        &mut watcher,
+        import_req(&vm.vmx_str(), "second", DisplayAdapter::Standard),
+    )
+    .await;
     assert_eq!(error(&r).unwrap().code, ErrorCode::VmBusy);
     match req(&mut watcher, Request::CancelVmwareImport).await {
         ServerMessage::Response {
@@ -451,7 +585,11 @@ async fn cancellation_by_the_user_and_by_the_emergency_stop() {
     let mut c = connect(&svc).await;
     let vmx = vm.vmx_str();
     let task = tokio::spawn(async move {
-        let r = req(&mut c, import_req(&vmx, "stopped", DisplayAdapter::Standard)).await;
+        let r = req(
+            &mut c,
+            import_req(&vmx, "stopped", DisplayAdapter::Standard),
+        )
+        .await;
         (c, r)
     });
     wait_converting(&mut watcher).await;
@@ -464,7 +602,9 @@ async fn cancellation_by_the_user_and_by_the_emergency_stop() {
     let mut c = connect(&svc).await;
     let vmx = vm.vmx_str();
     let task = tokio::spawn(async move {
-        let _ = c.request(import_req(&vmx, "shutdown", DisplayAdapter::Standard)).await;
+        let _ = c
+            .request(import_req(&vmx, "shutdown", DisplayAdapter::Standard))
+            .await;
     });
     wait_converting(&mut watcher).await;
     let dir = svc.dir.clone();

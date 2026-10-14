@@ -61,7 +61,10 @@ fn imported_hardware_roundtrip_and_checks() {
     let back: VmConfig = serde_json::from_value(serde_json::to_value(&c).unwrap()).unwrap();
     assert_eq!(back, c);
     assert!(hw.validate(GuestOs::OtherLinuxX86_64, 4).is_ok());
-    assert!(hw.validate(GuestOs::OtherLinuxX86_64, 3).is_err(), "2 does not divide 3");
+    assert!(
+        hw.validate(GuestOs::OtherLinuxX86_64, 3).is_err(),
+        "2 does not divide 3"
+    );
     let svga = ImportedHardware {
         display: DisplayAdapter::VmwareSvga,
         ..hw

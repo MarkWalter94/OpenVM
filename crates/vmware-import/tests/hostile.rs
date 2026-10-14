@@ -35,7 +35,10 @@ fn baseline_flat_vm_is_accepted() {
     assert_eq!(i.vmx_file, "Test VM.vmx");
     assert_eq!(i.disk.chain.len(), 1);
     assert_eq!(i.disk.files.len(), 2, "descriptor and flat extent");
-    assert_eq!(i.disk.controller, lightvm_proto::ipc::VmwareController::Pvscsi);
+    assert_eq!(
+        i.disk.controller,
+        lightvm_proto::ipc::VmwareController::Pvscsi
+    );
     assert_eq!(i.guest.os, lightvm_proto::GuestOs::WindowsVista);
     // The guard opens every file and keeps them open.
     let g = vmware_import::open_guard(&i.disk).unwrap();
@@ -76,7 +79,12 @@ fn disk_paths_outside_the_folder_are_refused() {
                 "{what}: {e:?}"
             );
         }
-        assert!(!e.to_public().message.contains(&*elsewhere.to_string_lossy()), "no paths in messages");
+        assert!(
+            !e.to_public()
+                .message
+                .contains(&*elsewhere.to_string_lossy()),
+            "no paths in messages"
+        );
     }
     let _ = common::remove_tree(&elsewhere);
 }
@@ -138,19 +146,26 @@ fn links_and_junctions_are_refused() {
         return;
     }
     vm.write_vmx("windows7-64", "sata0:0", r"sub\j.vmdk", "");
-    assert!(matches!(err(&vm), ImportError::Link(_)), "junction on the way");
+    assert!(
+        matches!(err(&vm), ImportError::Link(_)),
+        "junction on the way"
+    );
     // The .vmx itself reached through a junction: not where the user saw it.
     let vm2 = ok_vm("vmxjunction");
     vm2.write_vmx("windows7-64", "sata0:0", "disk.vmdk", "");
     let link = vm2.root.join("via");
     assert!(junction(&link, &vm2.folder));
     let through = link.join("Test VM.vmx").to_string_lossy().into_owned();
-    assert!(matches!(inspect(&through), Err(ImportError::NotLocal)), "vmx via junction");
+    assert!(
+        matches!(inspect(&through), Err(ImportError::NotLocal)),
+        "vmx via junction"
+    );
     // Symbolic link to a file (needs the privilege or developer mode).
     #[cfg(windows)]
     {
         let vm3 = ok_vm("symlink");
-        if std::os::windows::fs::symlink_file(elsewhere.join("j.vmdk"), vm3.path("l.vmdk")).is_ok() {
+        if std::os::windows::fs::symlink_file(elsewhere.join("j.vmdk"), vm3.path("l.vmdk")).is_ok()
+        {
             vm3.write_vmx("windows7-64", "sata0:0", "l.vmdk", "");
             assert!(matches!(err(&vm3), ImportError::Link(_)));
         } else {
@@ -197,7 +212,8 @@ fn oversized_files_are_refused() {
 
 #[test]
 fn vm_state_refusals() {
-    let cases: [(&str, fn(&VmDir), fn(&ImportError) -> bool); 7] = [
+    type Case = (&'static str, fn(&VmDir), fn(&ImportError) -> bool);
+    let cases: [Case; 7] = [
         (
             "encrypted",
             |vm| {
@@ -280,8 +296,16 @@ fn chain_loops_depth_and_consistency() {
     };
     // a → b → a.
     let vm = VmDir::new("loop");
-    std::fs::write(vm.path("a.vmdk"), delta("0000000a", "0000000b", "b.vmdk", "a-f.vmdk")).unwrap();
-    std::fs::write(vm.path("b.vmdk"), delta("0000000b", "0000000a", "a.vmdk", "b-f.vmdk")).unwrap();
+    std::fs::write(
+        vm.path("a.vmdk"),
+        delta("0000000a", "0000000b", "b.vmdk", "a-f.vmdk"),
+    )
+    .unwrap();
+    std::fs::write(
+        vm.path("b.vmdk"),
+        delta("0000000b", "0000000a", "a.vmdk", "b-f.vmdk"),
+    )
+    .unwrap();
     extent(&vm, "a-f.vmdk");
     extent(&vm, "b-f.vmdk");
     vm.write_vmx("windows7-64", "sata0:0", "a.vmdk", "");
@@ -298,7 +322,12 @@ fn chain_loops_depth_and_consistency() {
                 i + 1
             )
         } else {
-            delta(&format!("{:08x}", i + 1), &format!("{:08x}", i + 2), &format!("d{}.vmdk", i + 1), &own)
+            delta(
+                &format!("{:08x}", i + 1),
+                &format!("{:08x}", i + 2),
+                &format!("d{}.vmdk", i + 1),
+                &own,
+            )
         };
         std::fs::write(vm.path(&format!("d{i}.vmdk")), text).unwrap();
     }
@@ -307,14 +336,22 @@ fn chain_loops_depth_and_consistency() {
     // Parent CID that does not match the parent: inconsistent snapshot.
     let vm = VmDir::new("cid");
     write_flat_disk(&vm.folder, "base.vmdk", MIB_SECTORS);
-    std::fs::write(vm.path("child.vmdk"), delta("00000002", "12345678", "base.vmdk", "c-f.vmdk")).unwrap();
+    std::fs::write(
+        vm.path("child.vmdk"),
+        delta("00000002", "12345678", "base.vmdk", "c-f.vmdk"),
+    )
+    .unwrap();
     extent(&vm, "c-f.vmdk");
     vm.write_vmx("windows7-64", "sata0:0", "child.vmdk", "");
     assert!(matches!(err(&vm), ImportError::InvalidDescriptor(..)));
     // An extent that is a disk of the chain.
     let vm = VmDir::new("selfref");
     write_flat_disk(&vm.folder, "base.vmdk", MIB_SECTORS);
-    std::fs::write(vm.path("child.vmdk"), delta("00000002", "fd32bc87", "base.vmdk", "child.vmdk")).unwrap();
+    std::fs::write(
+        vm.path("child.vmdk"),
+        delta("00000002", "fd32bc87", "base.vmdk", "child.vmdk"),
+    )
+    .unwrap();
     vm.write_vmx("windows7-64", "sata0:0", "child.vmdk", "");
     assert!(matches!(err(&vm), ImportError::InvalidDescriptor(..)));
 }
@@ -335,7 +372,13 @@ fn raw_device_and_unknown_formats_are_refused() {
         std::fs::write(vm.path("disk.vmdk"), desc).unwrap();
         vm.write_vmx("windows7-64", "sata0:0", "disk.vmdk", "");
         let e = err(&vm);
-        assert!(matches!(e, ImportError::UnsupportedDisk(..) | ImportError::OutsideFolder(_)), "{what}: {e:?}");
+        assert!(
+            matches!(
+                e,
+                ImportError::UnsupportedDisk(..) | ImportError::OutsideFolder(_)
+            ),
+            "{what}: {e:?}"
+        );
     }
     let vm = VmDir::new("cowd");
     let mut h = vec![0u8; 512];
@@ -347,8 +390,14 @@ fn raw_device_and_unknown_formats_are_refused() {
 
 #[test]
 fn vmx_path_refusals() {
-    assert!(matches!(inspect("relative\\x.vmx"), Err(ImportError::InvalidPath(_))));
-    assert!(matches!(inspect(r"\\server\share\x.vmx"), Err(ImportError::InvalidPath(_))));
+    assert!(matches!(
+        inspect("relative\\x.vmx"),
+        Err(ImportError::InvalidPath(_))
+    ));
+    assert!(matches!(
+        inspect(r"\\server\share\x.vmx"),
+        Err(ImportError::InvalidPath(_))
+    ));
     let vm = ok_vm("ext");
     vm.write_vmx("windows7-64", "sata0:0", "disk.vmdk", "");
     let other = vm.path("disk.vmdk").to_string_lossy().into_owned();

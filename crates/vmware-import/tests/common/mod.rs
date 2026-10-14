@@ -45,8 +45,12 @@ impl VmDir {
     /// `disk` on `slot` and the `extra` lines.
     pub fn write_vmx(&self, guest: &str, slot: &str, disk: &str, extra: &str) {
         let (ctl, _) = slot.split_once(':').unwrap();
-        let mut s = String::from(".encoding = \"UTF-8\"\nconfig.version = \"8\"\nvirtualHW.version = \"19\"\n");
-        s.push_str(&format!("displayName = \"Test VM\"\nguestOS = \"{guest}\"\n"));
+        let mut s = String::from(
+            ".encoding = \"UTF-8\"\nconfig.version = \"8\"\nvirtualHW.version = \"19\"\n",
+        );
+        s.push_str(&format!(
+            "displayName = \"Test VM\"\nguestOS = \"{guest}\"\n"
+        ));
         s.push_str("numvcpus = \"2\"\nmemsize = \"2048\"\ncleanShutdown = \"TRUE\"\n");
         if !ctl.starts_with("ide") {
             s.push_str(&format!("{ctl}.present = \"TRUE\"\n"));
@@ -111,7 +115,11 @@ pub fn write_flat_disk(dir: &Path, name: &str, sectors: u64) {
 /// `qemu-img` of the approved QEMU build (`LIGHTVM_QEMU_DIR`), if set.
 pub fn qemu_img() -> Option<PathBuf> {
     let dir = PathBuf::from(std::env::var_os("LIGHTVM_QEMU_DIR")?);
-    let exe = dir.join(if cfg!(windows) { "qemu-img.exe" } else { "qemu-img" });
+    let exe = dir.join(if cfg!(windows) {
+        "qemu-img.exe"
+    } else {
+        "qemu-img"
+    });
     exe.is_file().then_some(exe)
 }
 

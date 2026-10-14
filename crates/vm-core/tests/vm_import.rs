@@ -54,7 +54,13 @@ fn finish(h: &mut Harness, id: VmId, c: &VmConfig) -> VmRecord {
 #[test]
 fn import_registers_the_vm_and_audits() {
     let mut h = Harness::new();
-    let c = imported(&h, "Win7", GuestOs::Windows7, Firmware::Bios, GuestArch::X86_64);
+    let c = imported(
+        &h,
+        "Win7",
+        GuestOs::Windows7,
+        Firmware::Bios,
+        GuestArch::X86_64,
+    );
     let id = begin(&mut h, &c).expect("checks pass");
     let rec = finish(&mut h, id, &c);
     assert_eq!(rec.id, id);
@@ -71,11 +77,14 @@ fn agents_cannot_import() {
     let mut h = Harness::new();
     let vm = h.create_vm("a");
     let (_sid, agent) = h.session(&[vm], &ALL_CAPS, 1);
-    let c = imported(&h, "x", GuestOs::Windows7, Firmware::Bios, GuestArch::X86_64);
-    let e = h
-        .core
-        .begin_import(&agent, &c, |_, _| Ok(()))
-        .unwrap_err();
+    let c = imported(
+        &h,
+        "x",
+        GuestOs::Windows7,
+        Firmware::Bios,
+        GuestArch::X86_64,
+    );
+    let e = h.core.begin_import(&agent, &c, |_, _| Ok(())).unwrap_err();
     assert_eq!(e.code, ErrorCode::PermissionDenied);
     let ev = last_import(&h);
     assert_eq!(ev.outcome, AuditOutcome::Denied);
@@ -87,18 +96,48 @@ fn import_checks() {
     let mut h = Harness::new();
     h.create_vm("Taken");
     // Same name, any case.
-    let c = imported(&h, "taken", GuestOs::Windows7, Firmware::Bios, GuestArch::X86_64);
-    assert_eq!(begin(&mut h, &c).unwrap_err().code, ErrorCode::StateConflict);
+    let c = imported(
+        &h,
+        "taken",
+        GuestOs::Windows7,
+        Firmware::Bios,
+        GuestArch::X86_64,
+    );
+    assert_eq!(
+        begin(&mut h, &c).unwrap_err().code,
+        ErrorCode::StateConflict
+    );
     // Without the imported hardware.
-    let mut c = imported(&h, "plain", GuestOs::Windows7, Firmware::Bios, GuestArch::X86_64);
+    let mut c = imported(
+        &h,
+        "plain",
+        GuestOs::Windows7,
+        Firmware::Bios,
+        GuestArch::X86_64,
+    );
     c.imported = None;
     assert!(begin(&mut h, &c).is_err());
     // Topology that does not divide the vCPUs.
-    let mut c = imported(&h, "topo", GuestOs::Windows7, Firmware::Bios, GuestArch::X86_64);
+    let mut c = imported(
+        &h,
+        "topo",
+        GuestOs::Windows7,
+        Firmware::Bios,
+        GuestArch::X86_64,
+    );
     c.vcpus = 3;
-    assert_eq!(begin(&mut h, &c).unwrap_err().code, ErrorCode::InvalidArgument);
+    assert_eq!(
+        begin(&mut h, &c).unwrap_err().code,
+        ErrorCode::InvalidArgument
+    );
     // VMware SVGA on Linux: refused.
-    let mut c = imported(&h, "svga", GuestOs::OtherLinuxX86_64, Firmware::Bios, GuestArch::X86_64);
+    let mut c = imported(
+        &h,
+        "svga",
+        GuestOs::OtherLinuxX86_64,
+        Firmware::Bios,
+        GuestArch::X86_64,
+    );
     assert!(begin(&mut h, &c).is_err());
     if let Some(hw) = c.imported.as_mut() {
         hw.display = DisplayAdapter::Standard;
@@ -109,11 +148,26 @@ fn import_checks() {
     created.firmware = Firmware::Bios;
     assert!(h.core.create_vm(&Caller::User, created).is_err());
     // Over the host limits.
-    let mut c = imported(&h, "huge", GuestOs::Windows10, Firmware::Uefi, GuestArch::X86_64);
+    let mut c = imported(
+        &h,
+        "huge",
+        GuestOs::Windows10,
+        Firmware::Uefi,
+        GuestArch::X86_64,
+    );
     c.disk_gib = 100_000;
-    assert_eq!(begin(&mut h, &c).unwrap_err().code, ErrorCode::ResourceLimit);
+    assert_eq!(
+        begin(&mut h, &c).unwrap_err().code,
+        ErrorCode::ResourceLimit
+    );
     // EFI Windows 7 stays refused.
-    let c = imported(&h, "w7efi", GuestOs::Windows7, Firmware::Uefi, GuestArch::X86_64);
+    let c = imported(
+        &h,
+        "w7efi",
+        GuestOs::Windows7,
+        Firmware::Uefi,
+        GuestArch::X86_64,
+    );
     assert!(begin(&mut h, &c).is_err());
     // Nothing was registered by the refusals.
     assert_eq!(h.core.list_vms(&Caller::User).unwrap().len(), 1);
@@ -122,14 +176,32 @@ fn import_checks() {
 #[test]
 fn name_is_reserved_while_importing_and_released_on_abort() {
     let mut h = Harness::new();
-    let c = imported(&h, "Busy", GuestOs::Windows10, Firmware::Uefi, GuestArch::X86_64);
+    let c = imported(
+        &h,
+        "Busy",
+        GuestOs::Windows10,
+        Firmware::Uefi,
+        GuestArch::X86_64,
+    );
     let id = begin(&mut h, &c).unwrap();
     // Another import or a creation with the same name is refused meanwhile.
-    let again = imported(&h, "busy", GuestOs::Windows10, Firmware::Uefi, GuestArch::X86_64);
-    assert_eq!(begin(&mut h, &again).unwrap_err().code, ErrorCode::StateConflict);
+    let again = imported(
+        &h,
+        "busy",
+        GuestOs::Windows10,
+        Firmware::Uefi,
+        GuestArch::X86_64,
+    );
+    assert_eq!(
+        begin(&mut h, &again).unwrap_err().code,
+        ErrorCode::StateConflict
+    );
     let created = h.vm_config("BUSY", None);
     assert_eq!(
-        h.core.create_vm(&Caller::User, created.clone()).unwrap_err().code,
+        h.core
+            .create_vm(&Caller::User, created.clone())
+            .unwrap_err()
+            .code,
         ErrorCode::StateConflict
     );
     let mut rolled_back = false;
@@ -142,15 +214,26 @@ fn name_is_reserved_while_importing_and_released_on_abort() {
     assert!(rolled_back);
     assert_eq!(e.code, ErrorCode::StateConflict);
     let ev = last_import(&h);
-    assert_eq!((ev.outcome, ev.error), (AuditOutcome::Failed, Some(ErrorCode::StateConflict)));
+    assert_eq!(
+        (ev.outcome, ev.error),
+        (AuditOutcome::Failed, Some(ErrorCode::StateConflict))
+    );
     // Free again.
-    h.core.create_vm(&Caller::User, created).expect("name released");
+    h.core
+        .create_vm(&Caller::User, created)
+        .expect("name released");
 }
 
 #[test]
 fn storage_failures_are_audited_and_register_nothing() {
     let mut h = Harness::new();
-    let c = imported(&h, "nospace", GuestOs::Windows10, Firmware::Uefi, GuestArch::X86_64);
+    let c = imported(
+        &h,
+        "nospace",
+        GuestOs::Windows10,
+        Firmware::Uefi,
+        GuestArch::X86_64,
+    );
     let e = h
         .core
         .begin_import(&Caller::User, &c, |_, _| {
@@ -175,7 +258,13 @@ fn storage_failures_are_audited_and_register_nothing() {
 fn vista_x64_import_follows_the_host_rule() {
     let mut h = Harness::new();
     h.core.set_guest_support(GuestOs::runs_on_this_host_with);
-    let x64 = imported(&h, "v64", GuestOs::WindowsVista, Firmware::Bios, GuestArch::X86_64);
+    let x64 = imported(
+        &h,
+        "v64",
+        GuestOs::WindowsVista,
+        Firmware::Bios,
+        GuestArch::X86_64,
+    );
     let r = begin(&mut h, &x64);
     if cfg!(windows) {
         let e = r.unwrap_err();
@@ -184,14 +273,26 @@ fn vista_x64_import_follows_the_host_rule() {
     } else {
         r.unwrap();
     }
-    let x86 = imported(&h, "v32", GuestOs::WindowsVista, Firmware::Bios, GuestArch::X86);
+    let x86 = imported(
+        &h,
+        "v32",
+        GuestOs::WindowsVista,
+        Firmware::Bios,
+        GuestArch::X86,
+    );
     begin(&mut h, &x86).expect("Vista x86");
 }
 
 #[test]
 fn imported_hardware_is_fixed_after_the_import() {
     let mut h = Harness::new();
-    let c = imported(&h, "fixed", GuestOs::Windows10, Firmware::Uefi, GuestArch::X86_64);
+    let c = imported(
+        &h,
+        "fixed",
+        GuestOs::Windows10,
+        Firmware::Uefi,
+        GuestArch::X86_64,
+    );
     let id = begin(&mut h, &c).unwrap();
     let rec = finish(&mut h, id, &c);
     // Memory can change; the imported hardware cannot.
@@ -233,5 +334,8 @@ fn refusals_before_the_configuration_are_audited() {
     h.core
         .record_import_denied(&Caller::User, &PublicError::state_conflict("locked"));
     let ev = last_import(&h);
-    assert_eq!((ev.outcome, ev.error), (AuditOutcome::Denied, Some(ErrorCode::StateConflict)));
+    assert_eq!(
+        (ev.outcome, ev.error),
+        (AuditOutcome::Denied, Some(ErrorCode::StateConflict))
+    );
 }

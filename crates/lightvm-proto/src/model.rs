@@ -119,7 +119,9 @@ impl GuestOs {
     #[must_use]
     pub const fn import_firmware(self) -> &'static [Firmware] {
         match self {
-            GuestOs::UbuntuLtsX86_64 | GuestOs::OtherLinuxX86_64 => &[Firmware::Uefi, Firmware::Bios],
+            GuestOs::UbuntuLtsX86_64 | GuestOs::OtherLinuxX86_64 => {
+                &[Firmware::Uefi, Firmware::Bios]
+            }
             other => other.allowed_firmware(),
         }
     }
@@ -497,9 +499,7 @@ impl ImportedHardware {
         if let Some(c) = self.cores_per_socket
             && (c == 0 || c > MAX_CORES_PER_SOCKET || !vcpus.is_multiple_of(c))
         {
-            return Err(invalid(
-                "cores per socket must divide the number of vCPUs",
-            ));
+            return Err(invalid("cores per socket must divide the number of vCPUs"));
         }
         Ok(())
     }

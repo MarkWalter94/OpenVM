@@ -316,9 +316,7 @@ fn parse_extent(line: &str, name: &str) -> Result<Option<Extent>, ImportError> {
         let end = inner.find('"').ok_or_else(|| bad("extent file"))?;
         let file = &inner[..end];
         let after = inner[end + 1..].trim();
-        if !(after.is_empty()
-            || (after.len() <= 20 && after.bytes().all(|b| b.is_ascii_digit())))
-        {
+        if !(after.is_empty() || (after.len() <= 20 && after.bytes().all(|b| b.is_ascii_digit()))) {
             return Err(bad("extent offset"));
         }
         check_name(file, name)?;
@@ -399,7 +397,10 @@ mod tests {
             (with("RW 6291456", "RW 0"), "empty extent"),
             (with("RW 6291456", "RW 99999999999999999999999"), "size"),
             (with("# Disk DescriptorFile", "# Something"), "header"),
-            (with("parentCID=ffffffff", "parentCID=12345678"), "parent cid"),
+            (
+                with("parentCID=ffffffff", "parentCID=12345678"),
+                "parent cid",
+            ),
             (
                 with("createType", "parentFileNameHint=\"p.vmdk\"\ncreateType"),
                 "hint without parent cid",

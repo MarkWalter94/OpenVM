@@ -92,9 +92,7 @@ pub fn last_progress(out: &str) -> Option<u8> {
     let i = out.rfind("/100%)")?;
     let start = out[..i].rfind('(')? + 1;
     let v: f64 = out[start..i].trim().parse().ok()?;
-    (0.0..=100.0)
-        .contains(&v)
-        .then(|| v.floor() as u8)
+    (0.0..=100.0).contains(&v).then(|| v.floor() as u8)
 }
 
 fn read_limited(p: &ManagedPath, max: usize) -> String {

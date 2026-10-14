@@ -54,7 +54,9 @@ pub fn is_link(meta: &std::fs::Metadata) -> bool {
 /// access).
 pub fn check_vmx_path(raw: &str) -> Result<PathBuf, ImportError> {
     if raw.is_empty() || raw.len() > MAX_PATH_BYTES || raw.chars().any(char::is_control) {
-        return Err(ImportError::InvalidPath("empty, too long or control characters"));
+        return Err(ImportError::InvalidPath(
+            "empty, too long or control characters",
+        ));
     }
     let p = check_text(raw).map_err(ImportError::InvalidPath)?;
     if !p.is_absolute() {
@@ -83,8 +85,12 @@ fn check_text(raw: &str) -> Result<PathBuf, &'static str> {
             return Err("device paths are not allowed");
         }
         // A `:` only as the drive letter of an absolute path.
-        let colon_ok = |i: usize| i == 1 && b[0].is_ascii_alphabetic() && b.get(2).is_some_and(|c| sep(*c));
-        if b.iter().enumerate().any(|(i, c)| *c == b':' && !colon_ok(i)) {
+        let colon_ok =
+            |i: usize| i == 1 && b[0].is_ascii_alphabetic() && b.get(2).is_some_and(|c| sep(*c));
+        if b.iter()
+            .enumerate()
+            .any(|(i, c)| *c == b':' && !colon_ok(i))
+        {
             return Err("alternate data streams and drive-relative paths are not allowed");
         }
     }
@@ -161,7 +167,11 @@ pub fn below(p: &Path, dir: &Path) -> Option<Vec<std::ffi::OsString>> {
 /// Resolves `raw` (from a `.vmx` or a descriptor in `base_dir`) to a regular
 /// file inside `folder` (see the module rules). `base_dir` must itself be
 /// `folder` or below it.
-pub fn resolve_in_folder(folder: &Path, base_dir: &Path, raw: &str) -> Result<PathBuf, ImportError> {
+pub fn resolve_in_folder(
+    folder: &Path,
+    base_dir: &Path,
+    raw: &str,
+) -> Result<PathBuf, ImportError> {
     // Messages name the file only, never the folders the text names.
     let last = raw
         .rsplit(['/', '\\'])
@@ -242,7 +252,11 @@ mod tests {
 
     #[test]
     fn below_folder() {
-        let f = Path::new(if cfg!(windows) { r"D:\VMs\Win" } else { "/vms/win" });
+        let f = Path::new(if cfg!(windows) {
+            r"D:\VMs\Win"
+        } else {
+            "/vms/win"
+        });
         let inside = f.join("sub").join("a.vmdk");
         assert_eq!(below(&inside, f).map(|v| v.len()), Some(2));
         assert!(below(f, f).is_none());

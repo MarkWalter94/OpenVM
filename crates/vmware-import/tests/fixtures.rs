@@ -102,7 +102,14 @@ fn snapshot_chain_is_followed_and_cross_checked() {
     let s2 = vm.path("Test VM-000002.vmdk");
     run_qemu_img(
         &q,
-        &["create", "-q", "-f", "vmdk", &base.to_string_lossy(), "128M"],
+        &[
+            "create",
+            "-q",
+            "-f",
+            "vmdk",
+            &base.to_string_lossy(),
+            "128M",
+        ],
     );
     // Children name their parent by file name, as VMware writes them.
     std::fs::create_dir_all(vm.path("x")).unwrap();
@@ -113,7 +120,11 @@ fn snapshot_chain_is_followed_and_cross_checked() {
             .arg(child.file_name().unwrap())
             .output()
             .unwrap();
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
     vm.write_vmx(
         "winvista",
@@ -168,16 +179,24 @@ fn parent_changed_after_snapshot_is_refused() {
     };
     let vm = VmDir::new("cidx");
     let base = vm.path("b.vmdk");
-    run_qemu_img(&q, &["create", "-q", "-f", "vmdk", &base.to_string_lossy(), "64M"]);
+    run_qemu_img(
+        &q,
+        &["create", "-q", "-f", "vmdk", &base.to_string_lossy(), "64M"],
+    );
     let out = std::process::Command::new(&q)
         .current_dir(&vm.folder)
-        .args(["create", "-q", "-f", "vmdk", "-b", "b.vmdk", "-F", "vmdk", "c.vmdk"])
+        .args([
+            "create", "-q", "-f", "vmdk", "-b", "b.vmdk", "-F", "vmdk", "c.vmdk",
+        ])
         .output()
         .unwrap();
     assert!(out.status.success());
     // Recreate the parent: new CID, the child's parentCID no longer matches.
     std::fs::remove_file(&base).unwrap();
-    run_qemu_img(&q, &["create", "-q", "-f", "vmdk", &base.to_string_lossy(), "64M"]);
+    run_qemu_img(
+        &q,
+        &["create", "-q", "-f", "vmdk", &base.to_string_lossy(), "64M"],
+    );
     vm.write_vmx("windows7-64", "sata0:0", "c.vmdk", "");
     assert!(matches!(
         inspect(&vm.vmx_str()),

@@ -159,7 +159,9 @@ pub fn inspect(vmx_raw: &str) -> Result<Inspection, ImportError> {
     let folder = vmx_path
         .parent()
         .filter(|p| p.parent().is_some())
-        .ok_or(ImportError::InvalidPath("the .vmx cannot be at the root of a drive"))?
+        .ok_or(ImportError::InvalidPath(
+            "the .vmx cannot be at the root of a drive",
+        ))?
         .to_path_buf();
     let vmx_file = file_name(&vmx_path);
     check_folder(&folder)?;

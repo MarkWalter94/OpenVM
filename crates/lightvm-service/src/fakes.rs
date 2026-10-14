@@ -352,7 +352,11 @@ impl ImageTool for FakeImageTool {
             _ => Ok(32 << 30),
         }
     }
-    fn vmdk_chain_info(&self, top: &Path, cancel: &dyn Fn() -> bool) -> Result<String, PublicError> {
+    fn vmdk_chain_info(
+        &self,
+        top: &Path,
+        cancel: &dyn Fn() -> bool,
+    ) -> Result<String, PublicError> {
         push(&self.calls, "vmdk_info");
         match &self.vmdk_tool {
             Some(t) => t.vmdk_chain_info(top, cancel),

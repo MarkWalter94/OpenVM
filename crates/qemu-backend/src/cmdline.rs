@@ -537,7 +537,11 @@ impl DeviceProfile {
 
     /// Profile of a VM configuration: [`Self::for_imported`] for a VM
     /// imported from VMware, [`Self::for_guest`] otherwise.
-    pub fn for_config(os: GuestOs, firmware: Firmware, imported: Option<&ImportedHardware>) -> Result<Self> {
+    pub fn for_config(
+        os: GuestOs,
+        firmware: Firmware,
+        imported: Option<&ImportedHardware>,
+    ) -> Result<Self> {
         match imported {
             Some(hw) => Self::for_imported(os, firmware, hw),
             None => Self::for_guest(os, firmware),
@@ -645,9 +649,13 @@ impl DeviceProfile {
         };
         match self.disk_bus {
             DiskBus::Virtio => vec![format!("virtio-blk-pci,drive=disk0,bootindex={bootindex}")],
-            DiskBus::Ahci => vec![format!("ide-hd,drive=disk0,bus=ide.2,bootindex={bootindex}")],
+            DiskBus::Ahci => vec![format!(
+                "ide-hd,drive=disk0,bus=ide.2,bootindex={bootindex}"
+            )],
             DiskBus::PiixIde => {
-                vec![format!("ide-hd,drive=disk0,bus=ide.0,unit=0,bootindex={bootindex}")]
+                vec![format!(
+                    "ide-hd,drive=disk0,bus=ide.0,unit=0,bootindex={bootindex}"
+                )]
             }
             DiskBus::Nvme => vec![format!("nvme,drive=disk0,serial=lv0,bootindex={bootindex}")],
             DiskBus::Pvscsi => scsi("pvscsi"),
@@ -2113,7 +2121,10 @@ pub(crate) mod tests {
                 DiskController::Pvscsi,
                 VmwareSvga,
                 MachineFamily::Q35,
-                vec!["pvscsi,id=scsi0", "scsi-hd,drive=disk0,bus=scsi0.0,bootindex=1"],
+                vec![
+                    "pvscsi,id=scsi0",
+                    "scsi-hd,drive=disk0,bus=scsi0.0,bootindex=1",
+                ],
                 "vmware-svga",
             ),
             (
@@ -2122,7 +2133,10 @@ pub(crate) mod tests {
                 DiskController::LsiSas1068,
                 Standard,
                 MachineFamily::Q35,
-                vec!["mptsas1068,id=scsi0", "scsi-hd,drive=disk0,bus=scsi0.0,bootindex=1"],
+                vec![
+                    "mptsas1068,id=scsi0",
+                    "scsi-hd,drive=disk0,bus=scsi0.0,bootindex=1",
+                ],
                 "VGA",
             ),
             (
@@ -2140,7 +2154,10 @@ pub(crate) mod tests {
                 DiskController::Pvscsi,
                 Standard,
                 MachineFamily::I440fx,
-                vec!["pvscsi,id=scsi0", "scsi-hd,drive=disk0,bus=scsi0.0,bootindex=1"],
+                vec![
+                    "pvscsi,id=scsi0",
+                    "scsi-hd,drive=disk0,bus=scsi0.0,bootindex=1",
+                ],
                 "VGA",
             ),
             (
@@ -2176,7 +2193,10 @@ pub(crate) mod tests {
             let profile = DeviceProfile::for_imported(os, fw, &hw).unwrap();
             assert_eq!(profile.machine_family(), family, "{os:?} {c:?}");
             assert_eq!(profile.firmware(), FirmwareKind::from_proto(fw));
-            assert_eq!(DeviceProfile::for_config(os, fw, Some(&hw)).unwrap(), profile);
+            assert_eq!(
+                DeviceProfile::for_config(os, fw, Some(&hw)).unwrap(),
+                profile
+            );
             let mut s = spec_for(profile);
             s.vcpus = 4;
             s.cores_per_socket = Some(2);
@@ -2208,11 +2228,36 @@ pub(crate) mod tests {
         }
         // Refused combinations.
         let bad = [
-            (GuestOs::Windows10, Firmware::Uefi, DiskController::Virtio, Standard),
-            (GuestOs::WindowsXp, Firmware::Bios, DiskController::Ahci, Standard),
-            (GuestOs::OtherLinuxX86_64, Firmware::Uefi, DiskController::Ahci, VmwareSvga),
-            (GuestOs::Windows7, Firmware::Uefi, DiskController::Ahci, Standard),
-            (GuestOs::Windows11Arm64, Firmware::Uefi, DiskController::Nvme, Standard),
+            (
+                GuestOs::Windows10,
+                Firmware::Uefi,
+                DiskController::Virtio,
+                Standard,
+            ),
+            (
+                GuestOs::WindowsXp,
+                Firmware::Bios,
+                DiskController::Ahci,
+                Standard,
+            ),
+            (
+                GuestOs::OtherLinuxX86_64,
+                Firmware::Uefi,
+                DiskController::Ahci,
+                VmwareSvga,
+            ),
+            (
+                GuestOs::Windows7,
+                Firmware::Uefi,
+                DiskController::Ahci,
+                Standard,
+            ),
+            (
+                GuestOs::Windows11Arm64,
+                Firmware::Uefi,
+                DiskController::Nvme,
+                Standard,
+            ),
         ];
         for (os, fw, c, d) in bad {
             assert!(

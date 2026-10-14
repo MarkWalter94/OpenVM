@@ -17,8 +17,8 @@ use lightvm_proto::ipc::{
     VmwareDiskPreview, VmwareImportPreview,
 };
 use lightvm_proto::{
-    DiskController, DisplayAdapter, Firmware, GuestArch, GuestOs, ImportSource,
-    ImportedHardware, NetworkProfile, VmConfig, VmLimits, VmName,
+    DiskController, DisplayAdapter, Firmware, GuestArch, GuestOs, ImportSource, ImportedHardware,
+    NetworkProfile, VmConfig, VmLimits, VmName,
 };
 
 use crate::qemu_info::ChainFacts;
@@ -77,7 +77,11 @@ pub fn guest_from_vmware(raw: &str) -> Result<VmwareGuest, ImportError> {
         Some(s) => (s, true),
         None => (g.as_str(), false),
     };
-    let arch = if x64 { GuestArch::X86_64 } else { GuestArch::X86 };
+    let arch = if x64 {
+        GuestArch::X86_64
+    } else {
+        GuestArch::X86
+    };
     let win = |os| {
         Ok(VmwareGuest {
             raw: shown.clone(),
@@ -224,8 +228,7 @@ pub fn plan(
         .unwrap_or(1);
     let cores_per_socket = if cores <= 1 {
         None
-    } else if cores <= vcpus && vcpus % cores == 0 && cores <= lightvm_proto::MAX_CORES_PER_SOCKET
-    {
+    } else if cores <= vcpus && vcpus % cores == 0 && cores <= lightvm_proto::MAX_CORES_PER_SOCKET {
         Some(cores)
     } else {
         warn(
@@ -238,10 +241,9 @@ pub fn plan(
     // Memory.
     let wanted_mem = vmx.number("memsize").unwrap_or(DEFAULT_MEMSIZE);
     let min = g.os.min_memory_mib();
-    let max = g
-        .os
-        .max_memory_mib(Some(g.arch))
-        .map_or(limits.max_memory_mib, |m| m.min(limits.max_memory_mib));
+    let max =
+        g.os.max_memory_mib(Some(g.arch))
+            .map_or(limits.max_memory_mib, |m| m.min(limits.max_memory_mib));
     let memory_mib = if wanted_mem < min {
         warn(
             &mut warnings,
@@ -273,13 +275,19 @@ pub fn plan(
         warn(
             &mut warnings,
             ImportWarningKind::StorageDriverPreparation,
-            Some(format!("{:?} → {:?}", insp.disk.controller, disk_controller)),
+            Some(format!(
+                "{:?} → {:?}",
+                insp.disk.controller, disk_controller
+            )),
         );
     } else if replaced {
         warn(
             &mut warnings,
             ImportWarningKind::ControllerReplaced,
-            Some(format!("{:?} → {:?}", insp.disk.controller, disk_controller)),
+            Some(format!(
+                "{:?} → {:?}",
+                insp.disk.controller, disk_controller
+            )),
         );
     }
     if insp.firmware == Firmware::Uefi {
@@ -453,16 +461,35 @@ mod tests {
     #[test]
     fn guest_types() {
         let g = |s| guest_from_vmware(s).map(|g| (g.os, g.arch));
-        assert_eq!(g("winvista").unwrap(), (GuestOs::WindowsVista, GuestArch::X86));
-        assert_eq!(g("winVista-64").unwrap(), (GuestOs::WindowsVista, GuestArch::X86_64));
+        assert_eq!(
+            g("winvista").unwrap(),
+            (GuestOs::WindowsVista, GuestArch::X86)
+        );
+        assert_eq!(
+            g("winVista-64").unwrap(),
+            (GuestOs::WindowsVista, GuestArch::X86_64)
+        );
         assert_eq!(g("winXPPro").unwrap(), (GuestOs::WindowsXp, GuestArch::X86));
-        assert_eq!(g("windows7-64").unwrap(), (GuestOs::Windows7, GuestArch::X86_64));
+        assert_eq!(
+            g("windows7-64").unwrap(),
+            (GuestOs::Windows7, GuestArch::X86_64)
+        );
         assert_eq!(g("windows8-64").unwrap().0, GuestOs::Windows81);
         assert!(guest_from_vmware("windows8").unwrap().windows8_or_81);
         assert_eq!(g("windows9-64").unwrap().0, GuestOs::Windows10);
-        assert_eq!(g("ubuntu-64").unwrap(), (GuestOs::OtherLinuxX86_64, GuestArch::X86_64));
+        assert_eq!(
+            g("ubuntu-64").unwrap(),
+            (GuestOs::OtherLinuxX86_64, GuestArch::X86_64)
+        );
         assert_eq!(g("other5xlinux-64").unwrap().0, GuestOs::OtherLinuxX86_64);
-        for bad in ["ubuntu", "windows11-64", "darwin-64", "freebsd-64", "", "winNetStandard"] {
+        for bad in [
+            "ubuntu",
+            "windows11-64",
+            "darwin-64",
+            "freebsd-64",
+            "",
+            "winNetStandard",
+        ] {
             assert!(guest_from_vmware(bad).is_err(), "{bad}");
         }
     }
@@ -481,19 +508,46 @@ mod tests {
     #[test]
     fn controllers() {
         use VmwareController as V;
-        assert_eq!(controller_for(V::Pvscsi, GuestOs::Windows7), (DiskController::Pvscsi, false));
-        assert_eq!(controller_for(V::LsiLogic, GuestOs::WindowsVista), (DiskController::Ahci, true));
-        assert_eq!(controller_for(V::LsiLogic, GuestOs::WindowsXp), (DiskController::Ide, true));
-        assert_eq!(controller_for(V::BusLogic, GuestOs::OtherLinuxX86_64), (DiskController::Virtio, true));
-        assert_eq!(controller_for(V::Sata, GuestOs::WindowsXp), (DiskController::Ide, true));
-        assert_eq!(controller_for(V::Ide, GuestOs::Windows7), (DiskController::Ide, false));
-        assert_eq!(controller_for(V::LsiSas1068, GuestOs::Windows10), (DiskController::LsiSas1068, false));
+        assert_eq!(
+            controller_for(V::Pvscsi, GuestOs::Windows7),
+            (DiskController::Pvscsi, false)
+        );
+        assert_eq!(
+            controller_for(V::LsiLogic, GuestOs::WindowsVista),
+            (DiskController::Ahci, true)
+        );
+        assert_eq!(
+            controller_for(V::LsiLogic, GuestOs::WindowsXp),
+            (DiskController::Ide, true)
+        );
+        assert_eq!(
+            controller_for(V::BusLogic, GuestOs::OtherLinuxX86_64),
+            (DiskController::Virtio, true)
+        );
+        assert_eq!(
+            controller_for(V::Sata, GuestOs::WindowsXp),
+            (DiskController::Ide, true)
+        );
+        assert_eq!(
+            controller_for(V::Ide, GuestOs::Windows7),
+            (DiskController::Ide, false)
+        );
+        assert_eq!(
+            controller_for(V::LsiSas1068, GuestOs::Windows10),
+            (DiskController::LsiSas1068, false)
+        );
     }
 
     #[test]
     fn names() {
-        assert_eq!(suggested_name(Some("Windows Vista-VS2010"), "x").as_str(), "Windows Vista-VS2010");
-        assert_eq!(suggested_name(Some("Ünïcode/VM*"), "x").as_str(), "-n-code-VM-".trim_start_matches('-'));
+        assert_eq!(
+            suggested_name(Some("Windows Vista-VS2010"), "x").as_str(),
+            "Windows Vista-VS2010"
+        );
+        assert_eq!(
+            suggested_name(Some("Ünïcode/VM*"), "x").as_str(),
+            "-n-code-VM-".trim_start_matches('-')
+        );
         assert_eq!(suggested_name(Some("..."), "Win7.vmx").as_str(), "Win7.vmx");
         assert_eq!(suggested_name(None, "///").as_str(), "Imported VM");
     }

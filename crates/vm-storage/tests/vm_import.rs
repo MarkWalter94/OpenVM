@@ -24,7 +24,11 @@ fn vm_dir(root: &Path, vm: &VmId) -> std::path::PathBuf {
 
 fn assert_nothing_left(root: &Path, cat: &mut Catalog, vm: &VmId) {
     assert!(cat.open_intents().unwrap().is_empty(), "no open intents");
-    assert_eq!(std::fs::read_dir(root.join("tmp")).unwrap().count(), 0, "tmp/ empty");
+    assert_eq!(
+        std::fs::read_dir(root.join("tmp")).unwrap().count(),
+        0,
+        "tmp/ empty"
+    );
     assert!(!vm_dir(root, vm).exists(), "no VM directory");
     assert!(cat.read(|tx| tx.vm_ids()).unwrap().is_empty(), "no VM row");
 }
@@ -47,7 +51,10 @@ fn import_publishes_the_disk_and_the_row_together() {
     assert_eq!(row.name, "Vista");
     assert_eq!(row.lifecycle, Lifecycle::Stopped);
     assert!(cat.open_intents().unwrap().is_empty());
-    assert_eq!(std::fs::read_dir(dir.path().join("tmp")).unwrap().count(), 0);
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("tmp")).unwrap().count(),
+        0
+    );
 }
 
 #[test]
@@ -112,7 +119,10 @@ fn name_conflict_at_the_commit_rolls_back() {
             .is_err()
     );
     assert!(cat.open_intents().unwrap().is_empty());
-    assert_eq!(std::fs::read_dir(dir.path().join("tmp")).unwrap().count(), 0);
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("tmp")).unwrap().count(),
+        0
+    );
     assert!(!vm_dir(dir.path(), &vm).exists());
     assert_eq!(cat.read(|tx| tx.vm_ids()).unwrap().len(), 1);
 }
