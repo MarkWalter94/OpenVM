@@ -630,6 +630,21 @@ impl Tx<'_> {
         rows.collect::<rusqlite::Result<Vec<_>>>().db()
     }
 
+    /// Names of the VMs a media is attached to, in name order.
+    pub fn media_users(&self, media: &MediaId) -> Result<Vec<String>> {
+        let mut st = self
+            .inner
+            .prepare(
+                "SELECT DISTINCT v.name FROM vm_media m JOIN vms v ON v.vm_id = m.vm_id
+                 WHERE m.media_id = ?1 ORDER BY v.name",
+            )
+            .db()?;
+        let rows = st
+            .query_map(params![media.sql()], |r| r.get::<_, String>(0))
+            .db()?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().db()
+    }
+
     /// Deletes the row of an unreferenced media.
     pub fn delete_media(&self, id: &MediaId) -> Result<()> {
         self.inner

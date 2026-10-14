@@ -200,6 +200,13 @@ impl CatalogStore for MemoryStore {
     fn list_media(&self) -> Result<Vec<MediaRecord>, PublicError> {
         Ok(self.0.media.values().map(|e| e.record.clone()).collect())
     }
+    fn remove_media(&mut self, id: MediaId) -> Result<(), PublicError> {
+        self.0
+            .media
+            .remove(&id)
+            .map(|_| ())
+            .ok_or_else(|| PublicError::not_found("medium not found"))
+    }
     fn remove_vm(&mut self, id: VmId) -> Result<(), PublicError> {
         self.0.vms.remove(&id);
         self.0.runs.retain(|_, r| r.vm_id != id);

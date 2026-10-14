@@ -2228,6 +2228,24 @@
           ]
         },
         {
+          "description": "Response to `delete_media`.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "media_deleted"
+            },
+            "media_id": {
+              "description": "Deleted medium.",
+              "$ref": "#/$defs/MediaId"
+            }
+          },
+          "required": [
+            "kind",
+            "media_id"
+          ]
+        },
+        {
           "description": "Response to `delete_vm`.",
           "type": "object",
           "properties": {

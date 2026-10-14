@@ -47,6 +47,7 @@ pub mod diag;
 pub mod dialogs;
 pub mod keymap;
 pub mod libraries;
+pub mod media_library;
 pub mod pairing;
 pub mod render;
 pub mod reports;
@@ -445,6 +446,8 @@ pub struct LightVmApp {
     /// VM whose Baselines page is open (F3).
     baselines_vm: Option<VmId>,
     baseline_dialog: Option<BaselineDialog>,
+    /// Deletion of an imported medium to confirm (Settings).
+    media_dialog: Option<media_library::DeleteDialog>,
     /// Creation or restore sent by this UI: VM and instant (elapsed time).
     baseline_sent: Option<(VmId, Instant)>,
     /// Agent session whose page is open (F4).
@@ -525,6 +528,7 @@ impl LightVmApp {
             dialog: None,
             baselines_vm: None,
             baseline_dialog: None,
+            media_dialog: None,
             baseline_sent: None,
             agent_session: None,
             approve_form: None,
@@ -728,6 +732,7 @@ impl LightVmApp {
         self.dialog = None;
         self.baselines_vm = None;
         self.baseline_dialog = None;
+        self.media_dialog = None;
         self.agent_session = None;
         self.approve_form = None;
         self.revoke_dialog = None;
@@ -1012,6 +1017,7 @@ impl LightVmApp {
     pub fn dialog_open(&self) -> bool {
         self.dialog.is_some()
             || self.baseline_dialog.is_some()
+            || self.media_dialog.is_some()
             || self.revoke_dialog.is_some()
             || self.pairing_dialog.is_some()
             || self.report_dialog.is_some()
@@ -1194,6 +1200,7 @@ impl LightVmApp {
 
         self.confirm_dialog_ui(ui);
         self.baseline_dialog_ui(ui);
+        self.media_dialog_ui(ui);
         self.revoke_dialog_ui(ui);
         self.pairing_dialog_ui(ui);
         self.report_dialog_ui(ui);
@@ -3149,6 +3156,8 @@ impl LightVmApp {
             self.save_settings();
         }
 
+        self.media_section(ui);
+
         if self.simulated_console {
             ui.add_space(14.0);
             theme::group_title(ui, "Diagnostics");
@@ -3160,6 +3169,38 @@ impl LightVmApp {
                     |ui| ui.checkbox(&mut self.animate, "Update the simulated framebuffer"),
                 );
             });
+        }
+    }
+
+    /// Settings → Installation media: imported ISOs and their deletion.
+    fn media_section(&mut self, ui: &mut egui::Ui) {
+        let Some(st) = self.state() else { return };
+        ui.add_space(14.0);
+        theme::group_title(ui, "Installation media");
+        let deleting = st.delete_media.is_pending();
+        let chosen = theme::card(ui, |ui| {
+            media_library::media_ui(ui, &st.media, &st.vms, st.connected, deleting)
+        });
+        if let Some(id) = chosen
+            && let Some(m) = st.media.records.iter().find(|m| m.id == id)
+        {
+            self.media_dialog = Some(media_library::DeleteDialog::new(m));
+        }
+    }
+
+    /// Confirmation of a media deletion; stays open with the reason if the
+    /// supervisor refuses it.
+    fn media_dialog_ui(&mut self, ui: &egui::Ui) {
+        let Some(d) = &mut self.media_dialog else {
+            return;
+        };
+        let state = self.service.as_ref().map(|s| s.state()).unwrap_or_default();
+        match media_library::dialog_ui(ui, d, &state) {
+            media_library::DialogOutcome::Keep => {}
+            media_library::DialogOutcome::Close => self.media_dialog = None,
+            media_library::DialogOutcome::Delete(id) => {
+                self.send(ServiceCommand::DeleteMedia(id));
+            }
         }
     }
 

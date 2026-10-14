@@ -42,10 +42,10 @@ use lightvm_proto::report::{
     ReportEvent, ReportFormat, SessionReport, SessionReportSummary, SessionVerifier,
 };
 use lightvm_proto::{
-    BaselineId, ErrorCode, HostCapacity, InputBatch, InputEvent, KeyAction, Label, MediaKind,
-    MediaRecord, MouseButton, OperationId, OperationStatus, PointerButton, ReplyError, RunId,
-    SessionId, SessionState, Sha256Digest, TerminationCause, TestOutcome, UtcTimestamp, VmAction,
-    VmConfig, VmId, VmRequest,
+    BaselineId, ErrorCode, HostCapacity, InputBatch, InputEvent, KeyAction, Label, MediaId,
+    MediaKind, MediaRecord, MouseButton, OperationId, OperationStatus, PointerButton, ReplyError,
+    RunId, SessionId, SessionState, Sha256Digest, TerminationCause, TestOutcome, UtcTimestamp,
+    VmAction, VmConfig, VmId, VmRequest,
 };
 use lightvm_service::client::Client;
 use lightvm_service::credential::Credential;
@@ -728,6 +728,8 @@ pub struct ServiceState {
     pub media: MediaState,
     /// Last ISO import.
     pub import: RequestStatus<MediaRecord>,
+    /// Last media deletion.
+    pub delete_media: RequestStatus<MediaId>,
     /// Last VM creation.
     pub create: RequestStatus<VmId>,
     /// Last VM deletion.
@@ -821,6 +823,8 @@ pub enum ServiceCommand {
         /// Origin declared to the registry (text, never interpreted).
         origin: String,
     },
+    /// Deletes an imported medium no VM uses (asks for confirmation first).
+    DeleteMedia(MediaId),
     /// Requests a per-run console ticket.
     OpenConsole(VmId),
     /// Keyboard and mouse towards the guest.
@@ -1340,6 +1344,7 @@ pub fn mark_pending(
     match c {
         ServiceCommand::Create(_) => s.create = RequestStatus::Pending,
         ServiceCommand::ImportMedia { .. } => s.import = RequestStatus::Pending,
+        ServiceCommand::DeleteMedia(_) => s.delete_media = RequestStatus::Pending,
         ServiceCommand::Delete { .. } => s.delete = RequestStatus::Pending,
         ServiceCommand::OpenConsole(vm_id) => {
             *lock(ticket) = None;
@@ -1390,6 +1395,7 @@ fn fail_pending(s: &mut ServiceState, why: &str) {
         }
     }
     fail(&mut s.import, why);
+    fail(&mut s.delete_media, why);
     fail(&mut s.create, why);
     fail(&mut s.delete, why);
     if let Some(r) = &mut s.console {
@@ -1418,6 +1424,7 @@ fn mark_failed(s: &mut ServiceState, c: &ServiceCommand, f: Failure) {
     match c {
         ServiceCommand::Create(_) => s.create = RequestStatus::Failed(f),
         ServiceCommand::ImportMedia { .. } => s.import = RequestStatus::Failed(f),
+        ServiceCommand::DeleteMedia(_) => s.delete_media = RequestStatus::Failed(f),
         ServiceCommand::Delete { .. } => s.delete = RequestStatus::Failed(f),
         ServiceCommand::OpenConsole(vm_id) => {
             s.console = Some(ConsoleRequest {
@@ -2081,6 +2088,24 @@ async fn execute(c: &mut Client, lanes: &Lanes, command: ServiceCommand) -> Resu
                     Ok(())
                 }
                 m => Err(context("import", failure(&m))),
+            }
+        }
+        ServiceCommand::DeleteMedia(media_id) => {
+            match request(c, Request::DeleteMedia { media_id }).await? {
+                ServerMessage::Response {
+                    result: ResponseBody::MediaDeleted { media_id },
+                    ..
+                } => {
+                    {
+                        let mut s = lock(state);
+                        s.media.records.retain(|m| m.id != media_id);
+                        s.delete_media = RequestStatus::Done(media_id);
+                        s.last_outcome = Some("medium deleted".into());
+                    }
+                    lanes.queue(ServiceCommand::ListMedia);
+                    Ok(())
+                }
+                m => Err(context("media deletion", failure(&m))),
             }
         }
         ServiceCommand::Create(config) => {

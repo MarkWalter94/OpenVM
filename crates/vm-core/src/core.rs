@@ -28,11 +28,11 @@ use lightvm_proto::ipc::InputOwner;
 use lightvm_proto::{
     Actor, Admission, AuditAction, AuditEvent, AuditOutcome, BackendObservation, Caller,
     Capability, DisplayGeometry, EffectivePolicy, ErrorCode, FileIdentity, Grant, GuestOs,
-    HostCapacity, InputEvent, Label, Lease, ManagedRelPath, MediaEntry, MediaKind, MediaRecord,
-    OperationId, OperationKind, OperationRecord, OperationStatus, PolicyLayer, PolicyRevision,
-    PublicError, ResourceLimits, RevocationReport, RunEndReason, RunId, RunRecord, Screenshot,
-    SessionId, SessionState, SessionToken, Sha256Digest, TerminationCause, UtcTimestamp, VmAction,
-    VmConfig, VmId, VmRecord, VmRequest, VmState,
+    HostCapacity, InputEvent, Label, Lease, ManagedRelPath, MediaEntry, MediaId, MediaKind,
+    MediaRecord, OperationId, OperationKind, OperationRecord, OperationStatus, PolicyLayer,
+    PolicyRevision, PublicError, ResourceLimits, RevocationReport, RunEndReason, RunId, RunRecord,
+    Screenshot, SessionId, SessionState, SessionToken, Sha256Digest, TerminationCause,
+    UtcTimestamp, VmAction, VmConfig, VmId, VmRecord, VmRequest, VmState,
 };
 
 use crate::media::{check_media_kind, verify_media};
@@ -300,6 +300,28 @@ fn audit_action_for(kind: OperationKind) -> AuditAction {
         OperationKind::Restore => AuditAction::BaselineRestore,
         OperationKind::EmergencyStop => AuditAction::EmergencyStop,
     }
+}
+
+/// Refusal of a media deletion while VMs use it: their number and names (at
+/// most five, then how many more), detail `reason` = `media_in_use`.
+fn media_in_use(users: &[&str]) -> PublicError {
+    const SHOWN: usize = 5;
+    let mut names: Vec<String> = users
+        .iter()
+        .take(SHOWN)
+        .map(|n| format!("\u{201c}{n}\u{201d}"))
+        .collect();
+    if users.len() > SHOWN {
+        names.push(format!("{} more", users.len() - SHOWN));
+    }
+    let n = users.len();
+    PublicError::state_conflict(format!(
+        "the medium is used by {n} VM{}: {}; remove it from their settings or delete them first",
+        if n == 1 { "" } else { "s" },
+        names.join(", ")
+    ))
+    .with_detail("reason", "media_in_use")
+    .with_detail("vms", n.to_string())
 }
 
 /// Draft audit event (the core assigns `seq` and `at`).
@@ -807,6 +829,54 @@ where
                 Err(err)
             }
         }
+    }
+
+    /// Deletes an imported medium with its managed copy: user only; refused
+    /// (`state_conflict`, the VMs named in the message) while the
+    /// configuration of a VM uses it as installation or data media, so no
+    /// run can hold it. The catalog removes row and file through its
+    /// journal. Audited (`media_delete`).
+    pub fn delete_media(&mut self, caller: &Caller, media_id: MediaId) -> Result<(), PublicError> {
+        let actor = caller.actor();
+        if matches!(caller, Caller::Agent { .. }) {
+            let err =
+                PublicError::permission_denied("media deletion not available to agent sessions");
+            return Err(self.deny(actor, AuditAction::MediaDelete, Ev::default(), err));
+        }
+        let mut users: Vec<&str> = self
+            .vms
+            .values()
+            .filter(|rt| {
+                let c = &rt.record.config;
+                c.install_media == Some(media_id) || c.data_media == Some(media_id)
+            })
+            .map(|rt| rt.record.config.name.as_str())
+            .collect();
+        users.sort_unstable();
+        let check = match self.store.get_media(media_id) {
+            Err(e) => Err(e),
+            Ok(None) => Err(PublicError::not_found("medium not found in the registry")),
+            Ok(Some(_)) if !users.is_empty() => Err(media_in_use(&users)),
+            Ok(Some(_)) => Ok(()),
+        };
+        if let Err(err) = check {
+            return Err(self.deny(actor, AuditAction::MediaDelete, Ev::default(), err));
+        }
+        let r = self.store.remove_media(media_id);
+        let (outcome, error) = match &r {
+            Ok(()) => (AuditOutcome::Succeeded, None),
+            Err(e) => (AuditOutcome::Failed, Some(e.code)),
+        };
+        self.emit_after(
+            actor,
+            AuditAction::MediaDelete,
+            outcome,
+            Ev {
+                error,
+                ..Ev::default()
+            },
+        );
+        r
     }
 
     /// Deletes a VM: user only, VM `stopped` with no queued or forwarded

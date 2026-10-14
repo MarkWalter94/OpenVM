@@ -921,6 +921,116 @@ async fn import_list_create_and_delete_with_the_sqlite_catalog() {
     svc.handle.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn imported_media_are_deleted_only_when_no_vm_uses_them() {
+    let dir = temp_dir("f2-media-delete");
+    let src = temp_dir("f2-media-delete-sources");
+    let svc = start_sqlite(&dir).await;
+    let (mut ui, _) = connect_ui(&svc).await;
+    let iso = iso_file(&src, "install.iso", b"CD001");
+    let media = match req(
+        &mut ui,
+        Request::ImportMedia {
+            source_path: iso.to_str().unwrap().into(),
+            media_kind: MediaKind::InstallIso,
+            declared_origin: "ubuntu.com".into(),
+        },
+    )
+    .await
+    {
+        ServerMessage::Response {
+            result: ResponseBody::MediaImported { media },
+            ..
+        } => media,
+        other => panic!("{other:?}"),
+    };
+    let copy = dir.join("media").join(format!("{}.iso", media.id));
+    let delete = Request::DeleteMedia { media_id: media.id };
+
+    let mut cfg = sample_config("media-user");
+    cfg.install_media = Some(media.id);
+    let vm = match req(&mut ui, Request::CreateVm { config: cfg }).await {
+        ServerMessage::Response {
+            result: ResponseBody::VmCreated { vm },
+            ..
+        } => vm,
+        other => panic!("{other:?}"),
+    };
+    // Running (the copy is held by the run) and then stopped: refused, the
+    // VM is named.
+    start_vm(&mut ui, vm.id).await;
+    for running in [true, false] {
+        match req(&mut ui, delete.clone()).await {
+            ServerMessage::Error {
+                error: ReplyError::Operational(e),
+                ..
+            } => {
+                assert_eq!(e.code, ErrorCode::StateConflict);
+                assert!(
+                    e.message
+                        .contains("used by 1 VM: \u{201c}media-user\u{201d}"),
+                    "{}",
+                    e.message
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(std::fs::metadata(&copy).unwrap().permissions().readonly());
+        if running {
+            succeeded(&submit(&mut ui, vm.id, None, VmAction::Stop).await);
+        }
+    }
+    match req(
+        &mut ui,
+        Request::DeleteVm {
+            vm_id: vm.id,
+            expected_revision: 1,
+        },
+    )
+    .await
+    {
+        ServerMessage::Response {
+            result: ResponseBody::VmDeleted { .. },
+            ..
+        } => {}
+        other => panic!("{other:?}"),
+    }
+    match req(&mut ui, delete.clone()).await {
+        ServerMessage::Response {
+            result: ResponseBody::MediaDeleted { media_id },
+            ..
+        } => assert_eq!(media_id, media.id),
+        other => panic!("{other:?}"),
+    }
+    assert!(!copy.exists());
+    match req(&mut ui, Request::ListMedia).await {
+        ServerMessage::Response {
+            result: ResponseBody::MediaList { media: list },
+            ..
+        } => assert!(list.is_empty(), "{list:?}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(code(&req(&mut ui, delete).await), Some(ErrorCode::NotFound));
+    svc.handle.shutdown().await;
+
+    let events = read_audit(&dir);
+    let has = |a, o| events.iter().any(|e| e.action == a && e.outcome == o);
+    assert!(has(AuditAction::MediaDelete, AuditOutcome::Denied));
+    assert!(has(AuditAction::MediaDelete, AuditOutcome::Succeeded));
+
+    // After a restart the medium is still gone.
+    let svc = start_sqlite(&dir).await;
+    let (mut ui, _) = connect_ui(&svc).await;
+    match req(&mut ui, Request::ListMedia).await {
+        ServerMessage::Response {
+            result: ResponseBody::MediaList { media: list },
+            ..
+        } => assert!(list.is_empty()),
+        other => panic!("{other:?}"),
+    }
+    svc.handle.shutdown().await;
+}
+
 // ----- real QEMU -------------------------------------------------------------
 
 /// Display seen by the RFB client through the ticket proxy.

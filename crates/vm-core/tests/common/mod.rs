@@ -53,7 +53,8 @@ pub struct MemStoreInner {
     pub runs: BTreeMap<RunId, RunRecord>,
     /// Sequence of persisted states, to check the transitions.
     pub state_log: Vec<(VmId, VmState)>,
-    /// Makes `remove_vm` and `import_media` fail (catalog error).
+    /// Makes `remove_vm`, `remove_media` and `import_media` fail (catalog
+    /// error).
     pub fail_files: bool,
 }
 
@@ -163,6 +164,17 @@ impl CatalogStore for MemStore {
         };
         self.insert_media(&entry)?;
         Ok(entry)
+    }
+    fn remove_media(&mut self, id: MediaId) -> Result<(), PublicError> {
+        let mut inner = self.0.borrow_mut();
+        if inner.fail_files {
+            return Err(PublicError::infrastructure("catalog error"));
+        }
+        inner
+            .media
+            .remove(&id)
+            .map(|_| ())
+            .ok_or_else(|| PublicError::not_found("medium not found"))
     }
     fn remove_vm(&mut self, id: VmId) -> Result<(), PublicError> {
         let mut inner = self.0.borrow_mut();

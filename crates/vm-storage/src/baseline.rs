@@ -65,7 +65,8 @@ pub enum FaultPoint {
     RestoreBeforeCommit,
     /// Deletion: first file of the baseline moved away.
     DeleteAfterFirstMove,
-    /// Deletion: all files moved, transaction not committed.
+    /// Deletion (baseline or medium): all files moved, transaction not
+    /// committed.
     DeleteBeforeCommit,
     /// Any journaled operation: transaction committed, temporaries of the
     /// discarded or deleted files not yet removed.

@@ -54,7 +54,7 @@ use lightvm_proto::ipc::{
     ServiceState, StopReason,
 };
 use lightvm_proto::{
-    Actor, Admission, BaselineId, Caller, Label, MediaKind, OperationStatus, PublicError,
+    Actor, Admission, BaselineId, Caller, Label, MediaId, MediaKind, OperationStatus, PublicError,
     ReplyError, RunId, TerminationCause, VmConfig, VmId, VmRequest,
 };
 use tokio::sync::{OwnedSemaphorePermit, broadcast, oneshot, watch};
@@ -142,6 +142,7 @@ pub(crate) enum SupervisorRequest {
         media_kind: MediaKind,
         declared_origin: String,
     },
+    DeleteMedia(MediaId),
     DeleteVm {
         vm_id: VmId,
         expected_revision: u64,
@@ -229,6 +230,7 @@ impl SupervisorRequest {
                 | Self::UpdateVm { .. }
                 | Self::SubmitVm(_)
                 | Self::ImportMedia { .. }
+                | Self::DeleteMedia(_)
                 | Self::DeleteVm { .. }
                 | Self::OpenConsole(_)
                 | Self::CreateBaseline { .. }
@@ -1635,6 +1637,10 @@ impl SupervisorThread {
                 .engine
                 .list_media(who()?)
                 .map(|media| ResponseBody::MediaList { media }),
+            SupervisorRequest::DeleteMedia(media_id) => self
+                .engine
+                .delete_media(who()?, media_id)
+                .map(|()| ResponseBody::MediaDeleted { media_id }),
             SupervisorRequest::DeleteVm {
                 vm_id,
                 expected_revision,

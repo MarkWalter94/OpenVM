@@ -19,6 +19,13 @@
 //! 4. publication without overwrite (hard link) and read-only attribute;
 //!    the `media` row and the intent confirmation in the same transaction.
 //!
+//! [`Catalog::delete_media`] removes a medium the user no longer wants: one
+//! `delete_file` intent (target [`TargetKind::Media`]) moves the copy into
+//! `tmp/`, the row is deleted with the intent commit, then the temporary is
+//! removed (read-only attribute cleared first). Reconciliation rolls a
+//! moved copy forward (row deleted) or back (file restored, if a VM was
+//! attached meanwhile) like any other `delete_file` intent.
+//!
 //! Limits: the file's OS identity (volume serial number and file index,
 //! `FileIdentity` from `lightvm-proto`) cannot be read with the stable `std`
 //! APIs on Windows without `unsafe` code: it is not recorded. The read-only
@@ -506,6 +513,95 @@ impl Catalog {
             readonly_restored,
         })
     }
+
+    /// Deletes a medium of the registry (approved or `missing`) with its
+    /// managed copy, through the journal (see the module documentation).
+    ///
+    /// Refused with [`StorageError::StateConflict`] (naming the VMs) while
+    /// a VM has it attached, and with [`StorageError::VmBusy`] while another
+    /// intent on it is unfinished or a handle holds the copy open without
+    /// sharing deletion (the [`MediaGuard`] of a run: on Windows the move
+    /// into `tmp/` then fails with a sharing violation). The read-only
+    /// attribute of the copy is cleared just before the file is removed.
+    /// A copy already missing only removes the row.
+    pub fn delete_media(&mut self, id: &MediaId) -> Result<()> {
+        let id_s = id.to_string();
+        let (record, users, busy) = self.read(|tx| {
+            let busy: bool = tx
+                .conn()
+                .query_row(
+                    "SELECT EXISTS (SELECT 1 FROM journal WHERE target_kind = ?1
+                       AND target_id = ?2 AND state IN ('pending','applied','needs_review'))",
+                    rusqlite::params![TargetKind::Media, id_s],
+                    |r| r.get(0),
+                )
+                .map_err(crate::error::map_sqlite)?;
+            Ok((tx.media(id)?, tx.media_users(id)?, busy))
+        })?;
+        if !users.is_empty() {
+            return Err(StorageError::StateConflict(in_use_message(&users)));
+        }
+        if busy {
+            return Err(StorageError::VmBusy(format!(
+                "another operation on media {id} is unfinished"
+            )));
+        }
+        let abs = self.layout.resolve(&record.managed_path)?;
+        if !crate::catalog::exists_no_follow(&abs)? {
+            return self.with_tx(|tx| tx.delete_media(id));
+        }
+        let intent = self.begin_intent(IntentSpec {
+            kind: IntentKind::DeleteFile,
+            vm_id: None,
+            operation_id: None,
+            target_kind: TargetKind::Media,
+            target_id: Some(id_s),
+            final_path: Some(record.managed_path.clone()),
+            read_only: false,
+        })?;
+        let result = (|| -> Result<()> {
+            self.mark_applied(&intent).map_err(|e| match e {
+                StorageError::Io { source, .. } if fsx::is_sharing_violation(&source) => {
+                    StorageError::VmBusy(format!("media {id} is held open by a running VM"))
+                }
+                e => e,
+            })?;
+            self.fault_at(crate::FaultPoint::DeleteBeforeCommit)?;
+            // `commit` removes the moved copy from `tmp/`, clearing its
+            // read-only attribute first.
+            self.commit(&intent, |tx| tx.delete_media(id))
+        })();
+        match result {
+            Ok(()) => Ok(()),
+            Err(e @ StorageError::InjectedCrash(_)) => Err(e),
+            Err(e) => {
+                // A failed abort leaves the intent open: reconciliation
+                // resolves it at the next startup.
+                let _ = self.abort(&intent);
+                Err(e)
+            }
+        }
+    }
+}
+
+/// Refusal of a deletion while VMs use a medium: their number and names (at
+/// most five, then how many more).
+pub(crate) fn in_use_message(users: &[String]) -> String {
+    const SHOWN: usize = 5;
+    let mut names: Vec<String> = users
+        .iter()
+        .take(SHOWN)
+        .map(|n| format!("\u{201c}{n}\u{201d}"))
+        .collect();
+    if users.len() > SHOWN {
+        names.push(format!("{} more", users.len() - SHOWN));
+    }
+    let n = users.len();
+    format!(
+        "the medium is used by {n} VM{}: {}",
+        if n == 1 { "" } else { "s" },
+        names.join(", ")
+    )
 }
 
 /// Managed media copy held open for a VM start (ADR-0008, ADR-0025).

@@ -515,6 +515,25 @@ impl CatalogStore for SqliteStore {
         self.finish_import(copied)
     }
 
+    /// Deletion through the storage journal (row and read-only managed
+    /// copy). The storage refusals keep a readable message without paths.
+    fn remove_media(&mut self, id: MediaId) -> Result<(), PublicError> {
+        self.cat.borrow_mut().delete_media(&id).map_err(|e| {
+            crate::diag!("lightvm-service: media deletion: {e}");
+            match e {
+                st::StorageError::VmBusy(_) => {
+                    PublicError::vm_busy("the medium is open by a running VM or another operation")
+                }
+                st::StorageError::StateConflict(m) if m.starts_with("the medium is used by") => {
+                    PublicError::state_conflict(m).with_detail("reason", "media_in_use")
+                }
+                e => storage_error(&e),
+            }
+        })?;
+        crate::diag!("lightvm-service: media {id} deleted");
+        Ok(())
+    }
+
     /// Deletion through the storage journal: rows of the VM, `vms/<id>`
     /// under both identifiers (storage and core) and `runs/<run_id>` of
     /// every run of the VM.

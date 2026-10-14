@@ -321,11 +321,19 @@ What the wizard shows: after you import the ISO, the System step reads *Detected
 | **More** → **Force stop…** | Terminates the VM at once, like pulling the plug. Unsaved data in the guest is lost; the guest's file system may need a check at the next boot. | Only when the guest does not respond to **Stop**. |
 | **More** → **Reset…** | Restarts the guest at once, like a PC's reset button. | Guest frozen. |
 | **Emergency Stop** | Button at the top right of the Dashboard. Immediately terminates **all** VMs and revokes the agent sessions. | Anything looks wrong and you want everything to stop now. |
-| **More** → **Delete…** | Removes the VM and its disk after a confirmation. Only possible while the VM is stopped (otherwise: *Stop the VM to delete it*). **Cannot be undone.** Imported installation images stay in the catalog. | VM no longer needed. |
+| **More** → **Delete…** | Removes the VM and its disk after a confirmation. Only possible while the VM is stopped (otherwise: *Stop the VM to delete it*). **Cannot be undone.** Imported installation images stay in the catalog (to remove them see section 9.1). | VM no longer needed. |
 
 Resources and execution limits (**Virtual processors**, **Memory (RAM)**, **Disk**, **Maximum CPU**, **Memory margin**, **Storage budget**) are changed with **Edit** → **Save settings**, only while the VM is **Stopped**; the disk can only grow.
 
 Closing LightVM while VMs are running opens a dialog: **Stop them and quit** shuts the VMs down in an orderly way (terminating those that do not stop within the timeout) and then closes LightVM; **Cancel** keeps everything running. VMs are not left running in the background. If the VMs stop by themselves while the dialog is open, LightVM closes without asking further. If the supervisor has already stopped or lost its connection, LightVM closes at once: the VMs it was running follow the **If LightVM closes unexpectedly** setting.
+
+### 9.1 Delete imported ISOs
+
+Every ISO imported in the wizard (installation and data media) is a read-only copy in the catalog, so it takes as much disk space as the original. **Settings** → **Installation media** lists them: name, **Installation** or **Data**, size, the system LightVM detected in it, when it was imported and which VMs use it (*used by "web-test"* or *not used by any VM*).
+
+To free the space, press **Delete…** next to an image and confirm with **Delete medium**. LightVM removes its copy from the catalog; the original file you imported it from is not touched, and you can import it again later. **Cannot be undone.**
+
+An image that a VM uses as installation or data media cannot be deleted: **Delete…** is disabled and its tooltip names the VMs. Remove it first with **Edit** → **Installation media** (or **Data media**) → **Remove** → **Save settings**, or with **Remove installation media…** on the Dashboard, or delete the VM. If the supervisor still refuses (for example a VM started using it from another window meanwhile), the dialog stays open and says why: *The medium was not deleted: it is used by 1 VM: "…"*, or *a running VM or another operation holds it open*. Agent sessions can never delete media. If LightVM is interrupted during a deletion, it finishes or undoes it the next time it starts.
 
 ---
 

@@ -124,6 +124,11 @@ pub trait CatalogStore {
     ) -> Result<MediaEntry, PublicError> {
         Err(PublicError::unsupported("media import not available"))
     }
+    /// Removes an imported medium with its managed copy (journaled by the
+    /// storage). The core has checked that no VM configuration uses it.
+    fn remove_media(&mut self, _id: MediaId) -> Result<(), PublicError> {
+        Err(PublicError::unsupported("media deletion not available"))
+    }
     /// Removes a VM without a process with its rows and files (journaled
     /// by the storage).
     fn remove_vm(&mut self, _id: VmId) -> Result<(), PublicError> {

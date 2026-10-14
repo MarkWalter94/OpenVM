@@ -328,6 +328,11 @@
           "description": "Deletion of a session report and its screenshots (F5).",
           "type": "string",
           "const": "report_delete"
+        },
+        {
+          "description": "Deletion of an imported medium with its managed copy (user only).",
+          "type": "string",
+          "const": "media_delete"
         }
       ]
     },

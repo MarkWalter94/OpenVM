@@ -1461,6 +1461,7 @@ async fn request_role_matrix() {
             | Request::Shutdown
             | Request::ListMedia
             | Request::ImportMedia { .. }
+            | Request::DeleteMedia { .. }
             | Request::DeleteVm { .. }
             | Request::OpenConsole { .. }
             | Request::ListBaselines { .. }
@@ -1532,6 +1533,10 @@ async fn request_role_matrix() {
             source_path: "x".into(),
             media_kind: lightvm_proto::MediaKind::InstallIso,
             declared_origin: "x".into(),
+        },
+        // Deleting a medium is the user's decision, never an agent's.
+        Request::DeleteMedia {
+            media_id: lightvm_proto::MediaId::from_unix_millis(1_760_000_000_000, [3; 10]),
         },
         Request::DeleteVm {
             vm_id: vm,

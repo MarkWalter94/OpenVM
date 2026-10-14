@@ -470,3 +470,215 @@ fn detected_guest_is_recorded_with_the_copy_and_can_be_updated() {
     let r = cat.read(|tx| tx.media(&d.media_id)).unwrap();
     assert!(r.detected_guest.is_none() && r.guest_examined);
 }
+
+/// Medium with its managed copy, for the deletion tests.
+fn approved(cat: &mut Catalog, src_dir: &std::path::Path, name: &str) -> vm_storage::MediaRecord {
+    let src = src_dir.join(name);
+    std::fs::write(&src, format!("CD001 fake medium {name}").repeat(200)).unwrap();
+    cat.approve_media(&src, MediaKind::Iso, name).unwrap()
+}
+
+fn tmp_entries(dir: &std::path::Path) -> usize {
+    std::fs::read_dir(dir.join("tmp")).map_or(0, Iterator::count)
+}
+
+#[test]
+fn deleting_a_medium_removes_the_readonly_copy_and_the_row() {
+    let dir = common::tempdir();
+    let src_dir = common::tempdir();
+    let mut cat = Catalog::open(dir.path()).unwrap();
+    let m = approved(&mut cat, src_dir.path(), "a.iso");
+    let keep = approved(&mut cat, src_dir.path(), "b.iso");
+    let copy = cat.layout().resolve(&m.managed_path).unwrap();
+    assert!(std::fs::metadata(&copy).unwrap().permissions().readonly());
+
+    cat.delete_media(&m.media_id).unwrap();
+    assert!(!copy.exists());
+    assert!(matches!(
+        cat.read(|tx| tx.media(&m.media_id)),
+        Err(StorageError::NotFound { .. })
+    ));
+    assert!(cat.open_intents().unwrap().is_empty());
+    assert_eq!(tmp_entries(dir.path()), 0, "no leftover temporary");
+    // The other medium is untouched.
+    assert_eq!(cat.read(|tx| tx.media_ids()).unwrap(), [keep.media_id]);
+    cat.verify_media(&keep.media_id).unwrap();
+    // A second deletion finds nothing.
+    assert!(matches!(
+        cat.delete_media(&m.media_id),
+        Err(StorageError::NotFound { .. })
+    ));
+}
+
+#[test]
+fn an_attached_medium_is_not_deleted_and_the_refusal_names_the_vms() {
+    let dir = common::tempdir();
+    let src_dir = common::tempdir();
+    let mut cat = Catalog::open(dir.path()).unwrap();
+    let m = approved(&mut cat, src_dir.path(), "a.iso");
+    let one = common::new_vm(&mut cat, "web-test");
+    let two = common::new_vm(&mut cat, "api-test");
+    cat.with_tx(|tx| {
+        tx.attach_media(&one, MediaSlot::Install, &m.media_id)?;
+        tx.attach_media(&two, MediaSlot::Data, &m.media_id)
+    })
+    .unwrap();
+    let err = cat.delete_media(&m.media_id).unwrap_err();
+    let StorageError::StateConflict(msg) = &err else {
+        panic!("{err:?}")
+    };
+    assert_eq!(
+        msg,
+        "the medium is used by 2 VMs: \u{201c}api-test\u{201d}, \u{201c}web-test\u{201d}"
+    );
+    let copy = cat.layout().resolve(&m.managed_path).unwrap();
+    assert!(std::fs::metadata(&copy).unwrap().permissions().readonly());
+    assert!(cat.open_intents().unwrap().is_empty());
+    cat.verify_media(&m.media_id).unwrap();
+
+    cat.with_tx(|tx| tx.detach_media(&two, MediaSlot::Data))
+        .unwrap();
+    let err = cat.delete_media(&m.media_id).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("used by 1 VM: \u{201c}web-test\u{201d}"),
+        "{err}"
+    );
+    cat.with_tx(|tx| tx.detach_media(&one, MediaSlot::Install))
+        .unwrap();
+    cat.delete_media(&m.media_id).unwrap();
+    assert!(!copy.exists());
+}
+
+/// The guard of a run opens the copy with `FILE_SHARE_READ` only: the
+/// deletion is refused and nothing changes (Windows share modes).
+#[cfg(windows)]
+#[test]
+fn a_medium_held_by_a_run_is_not_deleted() {
+    let dir = common::tempdir();
+    let src_dir = common::tempdir();
+    let mut cat = Catalog::open(dir.path()).unwrap();
+    let m = approved(&mut cat, src_dir.path(), "a.iso");
+    let copy = cat.layout().resolve(&m.managed_path).unwrap();
+    let guard = vm_storage::MediaGuard::open(dir.path(), &m.managed_path).unwrap();
+    let err = cat.delete_media(&m.media_id).unwrap_err();
+    assert!(
+        matches!(&err, StorageError::VmBusy(msg) if msg.contains("held open by a running VM")),
+        "{err:?}"
+    );
+    // Nothing changed: copy in place and read-only, row present, intent
+    // aborted.
+    assert!(std::fs::metadata(&copy).unwrap().permissions().readonly());
+    assert!(cat.read(|tx| tx.media(&m.media_id)).is_ok());
+    assert!(cat.open_intents().unwrap().is_empty());
+    assert_eq!(tmp_entries(dir.path()), 0);
+    drop(guard);
+    cat.delete_media(&m.media_id).unwrap();
+    assert!(!copy.exists());
+}
+
+#[test]
+fn a_medium_whose_copy_is_missing_loses_only_its_row() {
+    let dir = common::tempdir();
+    let src_dir = common::tempdir();
+    let mut cat = Catalog::open(dir.path()).unwrap();
+    let m = approved(&mut cat, src_dir.path(), "a.iso");
+    let copy = cat.layout().resolve(&m.managed_path).unwrap();
+    #[allow(clippy::permissions_set_readonly_false)]
+    {
+        let mut p = std::fs::metadata(&copy).unwrap().permissions();
+        p.set_readonly(false);
+        std::fs::set_permissions(&copy, p).unwrap();
+    }
+    std::fs::remove_file(&copy).unwrap();
+    assert!(cat.verify_media(&m.media_id).is_err());
+    assert_eq!(
+        cat.read(|tx| tx.media(&m.media_id)).unwrap().status,
+        MediaStatus::Missing
+    );
+    cat.delete_media(&m.media_id).unwrap();
+    assert!(cat.read(|tx| tx.media_ids()).unwrap().is_empty());
+}
+
+/// Deletion stopped at `point` as if the process had died; `meanwhile` runs
+/// on the catalog before it is dropped and reopened (reconciliation).
+fn crash_during_deletion(
+    point: vm_storage::FaultPoint,
+    meanwhile: impl FnOnce(&mut Catalog, &vm_storage::MediaRecord),
+) -> (tempfile::TempDir, Catalog, vm_storage::MediaRecord) {
+    let dir = common::tempdir();
+    let src_dir = common::tempdir();
+    let mut cat = Catalog::open(dir.path()).unwrap();
+    let m = approved(&mut cat, src_dir.path(), "a.iso");
+    cat.inject_fault(point, vm_storage::FaultAction::Crash);
+    let err = cat.delete_media(&m.media_id).unwrap_err();
+    assert!(
+        matches!(err, StorageError::InjectedCrash(p) if p == point),
+        "{err:?}"
+    );
+    meanwhile(&mut cat, &m);
+    drop(cat);
+    let cat = Catalog::open(dir.path()).unwrap();
+    (dir, cat, m)
+}
+
+#[test]
+fn a_deletion_interrupted_after_the_move_is_completed_at_the_next_start() {
+    let (dir, mut cat, m) =
+        crash_during_deletion(vm_storage::FaultPoint::DeleteBeforeCommit, |cat, m| {
+            // Interrupted with the copy moved into `tmp/` and the row still
+            // there.
+            let copy = cat.layout().resolve(&m.managed_path).unwrap();
+            assert!(!copy.exists());
+            assert_eq!(cat.open_intents().unwrap().len(), 1);
+            assert!(cat.read(|tx| tx.media(&m.media_id)).is_ok());
+        });
+    let report = cat.open_report().unwrap().clone();
+    assert!(
+        report
+            .recovery
+            .intents
+            .iter()
+            .any(|i| i.kind == IntentKind::DeleteFile
+                && i.outcome == vm_storage::RecoveryOutcome::RolledForward),
+        "{report:?}"
+    );
+    assert!(matches!(
+        cat.read(|tx| tx.media(&m.media_id)),
+        Err(StorageError::NotFound { .. })
+    ));
+    assert!(!cat.layout().resolve(&m.managed_path).unwrap().exists());
+    assert!(cat.open_intents().unwrap().is_empty());
+    assert_eq!(tmp_entries(dir.path()), 0, "read-only temporary removed");
+}
+
+#[test]
+fn a_deletion_interrupted_when_a_vm_was_attached_meanwhile_restores_the_copy() {
+    let (dir, mut cat, m) =
+        crash_during_deletion(vm_storage::FaultPoint::DeleteBeforeCommit, |cat, m| {
+            let vm = common::new_vm(cat, "late");
+            cat.with_tx(|tx| tx.attach_media(&vm, MediaSlot::Install, &m.media_id))
+                .unwrap();
+        });
+    let copy = cat.layout().resolve(&m.managed_path).unwrap();
+    assert!(copy.exists(), "copy moved back in place");
+    assert!(std::fs::metadata(&copy).unwrap().permissions().readonly());
+    assert_eq!(
+        cat.read(|tx| tx.media(&m.media_id)).unwrap().status,
+        MediaStatus::Approved
+    );
+    cat.verify_media(&m.media_id).unwrap();
+    assert!(cat.open_intents().unwrap().is_empty());
+    assert_eq!(tmp_entries(dir.path()), 0);
+}
+
+#[test]
+fn a_deletion_interrupted_after_the_commit_leaves_no_temporary() {
+    let (dir, mut cat, m) = crash_during_deletion(vm_storage::FaultPoint::AfterCommit, |_, _| {});
+    assert!(matches!(
+        cat.read(|tx| tx.media(&m.media_id)),
+        Err(StorageError::NotFound { .. })
+    ));
+    assert!(cat.open_intents().unwrap().is_empty());
+    assert_eq!(tmp_entries(dir.path()), 0, "read-only temporary removed");
+}

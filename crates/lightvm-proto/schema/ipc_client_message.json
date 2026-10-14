@@ -1215,6 +1215,24 @@
           ]
         },
         {
+          "description": "Deletion of an imported medium (UI only, never from agent sessions;\nthe UI asks for confirmation): registry row and read-only managed\ncopy removed through the catalog journal. Refused (`state_conflict`)\nwhile the configuration of a VM uses it as installation or data\nmedia, and (`vm_busy`) while a run holds the copy open.",
+          "type": "object",
+          "properties": {
+            "media_id": {
+              "description": "Medium of the registry.",
+              "$ref": "#/$defs/MediaId"
+            },
+            "op": {
+              "type": "string",
+              "const": "delete_media"
+            }
+          },
+          "required": [
+            "op",
+            "media_id"
+          ]
+        },
+        {
           "description": "Deletion of a stopped VM with its disk and run files (UI only).",
           "type": "object",
           "properties": {

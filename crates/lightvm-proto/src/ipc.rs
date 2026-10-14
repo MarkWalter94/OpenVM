@@ -169,6 +169,15 @@ pub enum Request {
         /// Origin declared by the user (free text, never interpreted).
         declared_origin: String,
     },
+    /// Deletion of an imported medium (UI only, never from agent sessions;
+    /// the UI asks for confirmation): registry row and read-only managed
+    /// copy removed through the catalog journal. Refused (`state_conflict`)
+    /// while the configuration of a VM uses it as installation or data
+    /// media, and (`vm_busy`) while a run holds the copy open.
+    DeleteMedia {
+        /// Medium of the registry.
+        media_id: crate::MediaId,
+    },
     /// Deletion of a stopped VM with its disk and run files (UI only).
     DeleteVm {
         /// VM.
@@ -400,6 +409,7 @@ impl Request {
             Self::Shutdown => "shutdown",
             Self::ListMedia => "list_media",
             Self::ImportMedia { .. } => "import_media",
+            Self::DeleteMedia { .. } => "delete_media",
             Self::DeleteVm { .. } => "delete_vm",
             Self::OpenConsole { .. } => "open_console",
             Self::ListBaselines { .. } => "list_baselines",
@@ -1131,6 +1141,11 @@ pub enum ResponseBody {
     MediaImported {
         /// New registry entry.
         media: MediaRecord,
+    },
+    /// Response to `delete_media`.
+    MediaDeleted {
+        /// Deleted medium.
+        media_id: crate::MediaId,
     },
     /// Response to `delete_vm`.
     VmDeleted {

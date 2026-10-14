@@ -1419,6 +1419,7 @@ async fn dispatch(
             media_kind,
             declared_origin,
         },
+        Request::DeleteMedia { media_id } => SupervisorRequest::DeleteMedia(media_id),
         Request::DeleteVm {
             vm_id,
             expected_revision,

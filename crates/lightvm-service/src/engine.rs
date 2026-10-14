@@ -50,7 +50,7 @@ use lightvm_proto::ipc::{
 use lightvm_proto::{
     Actor, Admission, AuditAction, AuditOutcome, BackendObservation, BaselineId, Caller,
     Capability, DisplayGeometry, ErrorCode, Grant, HostCapacity, InputEvent, Label, Lease,
-    MediaEntry, MediaKind, MediaRecord, OperationId, OperationKind, OperationRecord,
+    MediaEntry, MediaId, MediaKind, MediaRecord, OperationId, OperationKind, OperationRecord,
     OperationStatus, PolicyLayer, PublicError, ResourceLimits, RevocationReport, RunId, Screenshot,
     SessionId, SessionState, SessionToken, TerminationCause, VmAction, VmConfig, VmId, VmRecord,
     VmRequest, VmState,
@@ -131,6 +131,11 @@ pub trait VmEngine: Send + 'static {
         copied: ImportCopied,
         reason: PublicError,
     ) -> PublicError;
+    /// Deletion of an imported medium no VM configuration uses, with its
+    /// managed copy.
+    fn delete_media(&mut self, _caller: &Caller, _media_id: MediaId) -> Result<(), PublicError> {
+        Err(PublicError::unsupported("media deletion not available"))
+    }
     /// Deletion of a stopped VM with its files.
     fn delete_vm(
         &mut self,
@@ -1648,6 +1653,13 @@ where
             Err(e) => e,
             Ok(_) => PublicError::infrastructure("import cancelled"),
         }
+    }
+
+    fn delete_media(&mut self, caller: &Caller, media_id: MediaId) -> Result<(), PublicError> {
+        // Configurations are current: a VM created or changed just before
+        // is seen by the core's check.
+        self.apply_observations();
+        self.core.delete_media(caller, media_id)
     }
 
     fn delete_vm(

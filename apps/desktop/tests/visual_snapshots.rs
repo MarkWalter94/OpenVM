@@ -387,7 +387,8 @@ fn snapshot_settings() {
     // on the user profile path.
     app.set_settings(fixed_qemu_settings(), None, None);
     app.set_section(Section::Settings);
-    let mut h = harness(app, egui::vec2(1100.0, 2300.0));
+    // Tall enough for the whole page, Installation media included.
+    let mut h = harness(app, egui::vec2(1100.0, 2560.0));
     h.snapshot("settings");
 }
 
