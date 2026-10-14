@@ -1276,10 +1276,7 @@ impl SupervisorThread {
 
     /// Conversion done: publication of the disk with the VM row, or
     /// rollback.
-    fn vmware_converted(
-        &mut self,
-        step: VmwareStep<Converted>,
-    ) {
+    fn vmware_converted(&mut self, step: VmwareStep<Converted>) {
         self.vmware.import = None;
         let stop = self.vmware_stop_reason(&step.revoked, step.epoch, &step.cancel);
         let VmwareStep {
