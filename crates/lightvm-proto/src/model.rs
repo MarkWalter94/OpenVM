@@ -111,6 +111,21 @@ impl GuestOs {
         }
     }
 
+    /// Firmware a VM **imported** from VMware may keep (ADR-0030): the
+    /// guest is already installed, so its firmware cannot change. As
+    /// [`Self::allowed_firmware`], plus legacy BIOS for Linux (most VMware
+    /// Linux VMs are BIOS VMs). Vista and 7 stay BIOS only: under OVMF they
+    /// depend on a legacy video path the firmware does not provide.
+    #[must_use]
+    pub const fn import_firmware(self) -> &'static [Firmware] {
+        match self {
+            GuestOs::UbuntuLtsX86_64 | GuestOs::OtherLinuxX86_64 => {
+                &[Firmware::Uefi, Firmware::Bios]
+            }
+            other => other.allowed_firmware(),
+        }
+    }
+
     /// Recommended firmware for the guest and the architecture of its
     /// installation media (`None` = unknown).
     #[must_use]
@@ -339,6 +354,155 @@ pub struct VmConfig {
     /// (ADR-0017); missing in older catalogs → default values.
     #[serde(default)]
     pub limits: VmLimits,
+    /// Hardware of a VM imported from VMware (ADR-0030), fixed at import:
+    /// disk controller, display adapter and CPU topology of the source VM.
+    /// `None` for every VM created in LightVM (the profile of ADR-0027
+    /// applies unchanged).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imported: Option<ImportedHardware>,
+}
+
+/// Where an imported VM came from (ADR-0030).
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportSource {
+    /// VMware Workstation or Player (`.vmx` + VMDK), converted to QCOW2.
+    Vmware,
+}
+
+/// Main disk controller of an imported VM (ADR-0030): the controller the
+/// guest was installed on, so that its boot driver finds the disk.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum DiskController {
+    /// `virtio-blk-pci` (Linux guests only).
+    Virtio,
+    /// SATA AHCI (q35 ICH9 controller).
+    Ahci,
+    /// Parallel IDE (PIIX controller of the i440fx board).
+    Ide,
+    /// NVMe.
+    Nvme,
+    /// VMware paravirtual SCSI (`pvscsi`).
+    Pvscsi,
+    /// LSI Logic SAS 1068 (`mptsas1068`, VMware `lsisas1068`).
+    LsiSas1068,
+}
+
+impl DiskController {
+    /// Every controller, in display order.
+    pub const ALL: [DiskController; 6] = [
+        DiskController::Ahci,
+        DiskController::Ide,
+        DiskController::Nvme,
+        DiskController::Pvscsi,
+        DiskController::LsiSas1068,
+        DiskController::Virtio,
+    ];
+
+    /// Whether `os` has a driver for the controller in a standard
+    /// installation (Windows has no inbox virtio driver; XP has no AHCI
+    /// driver).
+    #[must_use]
+    pub const fn usable_by(self, os: GuestOs) -> bool {
+        match self {
+            DiskController::Virtio => !os.is_windows(),
+            DiskController::Ahci => !matches!(os, GuestOs::WindowsXp),
+            DiskController::Ide
+            | DiskController::Nvme
+            | DiskController::Pvscsi
+            | DiskController::LsiSas1068 => true,
+        }
+    }
+}
+
+/// Display adapter of an imported VM (ADR-0030).
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum DisplayAdapter {
+    /// The adapter of the guest profile (ADR-0027: `VGA` for Windows,
+    /// `virtio-vga` for Linux).
+    #[default]
+    Standard,
+    /// VMware SVGA II (`vmware-svga`), for a Windows guest that has the
+    /// VMware Tools display driver.
+    VmwareSvga,
+}
+
+/// Largest number of vCPUs per socket accepted for an imported topology.
+pub const MAX_CORES_PER_SOCKET: u32 = 64;
+
+/// Hardware of a VM imported from VMware (ADR-0030), in
+/// [`VmConfig::imported`]. Fixed at import: a configuration change cannot
+/// alter it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ImportedHardware {
+    /// Origin of the VM.
+    pub source: ImportSource,
+    /// Architecture of the guest, from the VMware guest type.
+    pub arch: GuestArch,
+    /// Controller of the main disk.
+    pub disk_controller: DiskController,
+    /// Display adapter.
+    #[serde(default)]
+    pub display: DisplayAdapter,
+    /// vCPUs per socket of the source VM (`cpuid.coresPerSocket`): client
+    /// editions of Windows use at most one or two sockets. `None` = one
+    /// socket per vCPU, as for VMs created in LightVM.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cores_per_socket: Option<u32>,
+    /// The source disk was on a controller QEMU does not emulate (VMware
+    /// `lsilogic`) and the guest is Windows: the storage driver of
+    /// [`Self::disk_controller`] must be enabled for boot in the guest
+    /// before it can start from this disk (ADR-0030). The automatic offline
+    /// preparation is not available yet; the user prepares the guest in
+    /// VMware (`docs/USER_GUIDE.md`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub storage_driver_preparation: bool,
+}
+
+impl ImportedHardware {
+    /// Structural checks against the guest and the vCPU count.
+    pub fn validate(&self, os: GuestOs, vcpus: u32) -> Result<(), crate::PublicError> {
+        let invalid = crate::PublicError::invalid_argument;
+        if os.is_aarch64() || self.arch == GuestArch::Aarch64 {
+            return Err(invalid("imported VMs are x86 guests only"));
+        }
+        if !self.disk_controller.usable_by(os) {
+            return Err(invalid(
+                "the disk controller is not usable by the guest system",
+            ));
+        }
+        if self.display == DisplayAdapter::VmwareSvga && !os.is_windows() {
+            return Err(invalid(
+                "the VMware SVGA display is offered to Windows guests only",
+            ));
+        }
+        if let Some(c) = self.cores_per_socket
+            && (c == 0 || c > MAX_CORES_PER_SOCKET || !vcpus.is_multiple_of(c))
+        {
+            return Err(invalid("cores per socket must divide the number of vCPUs"));
+        }
+        Ok(())
+    }
 }
 
 /// Maximum size of an installation ISO in the media registry (16 GiB;

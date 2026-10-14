@@ -1,4 +1,6 @@
-//! Disk image operations for baselines (F3; ROADMAP 8, ADR-0005, ADR-0025):
+//! Disk image operations for baselines (F3; ROADMAP 8, ADR-0005, ADR-0025)
+//! and for the import of VMware disks (ADR-0030: [`vmdk_chain_info`],
+//! [`convert_vmdk`] with the progress of `-p`):
 //! standalone copy of a disk (`qemu-img convert`, the backing chain is
 //! flattened), content comparison (`qemu-img compare`), consistency check
 //! (`qemu-img check`) and creation of an overlay with a fixed relative
@@ -65,6 +67,34 @@ fn run_identity() -> RunId {
     RunId::from_unix_millis(ms, rand)
 }
 
+/// Interval between two looks at the output of a running command.
+const OBSERVE_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Last `max` bytes of an output file (lossy text).
+fn read_tail(p: &ManagedPath, max: u64) -> String {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let Ok(mut f) = std::fs::File::open(p.as_path()) else {
+        return String::new();
+    };
+    let len = f.metadata().map_or(0, |m| m.len());
+    if f.seek(SeekFrom::Start(len.saturating_sub(max))).is_err() {
+        return String::new();
+    }
+    let mut buf = Vec::new();
+    let _ = f.take(max).read_to_end(&mut buf);
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+/// Last percentage printed by `qemu-img -p` (`    (12.34/100%)` lines
+/// separated by `\r`), rounded down.
+#[must_use]
+pub fn last_progress(out: &str) -> Option<u8> {
+    let i = out.rfind("/100%)")?;
+    let start = out[..i].rfind('(')? + 1;
+    let v: f64 = out[start..i].trim().parse().ok()?;
+    (0.0..=100.0).contains(&v).then(|| v.floor() as u8)
+}
+
 fn read_limited(p: &ManagedPath, max: usize) -> String {
     let bytes = std::fs::read(p.as_path()).unwrap_or_default();
     let end = bytes.len().min(max);
@@ -76,6 +106,23 @@ impl ImageCommand<'_> {
     /// returns `true` the Job Object is terminated and the result is
     /// [`BackendError::StateConflict`] ("cancelled").
     pub fn run(&self, args: &[&str], cancel: &dyn Fn() -> bool) -> Result<ImageOutput> {
+        self.run_observed(args, cancel, &mut |_| {})
+    }
+
+    /// [`Self::run`] that also hands the standard output written so far to
+    /// `observe` about twice per second while the command runs (progress
+    /// of `qemu-img convert -p`).
+    pub fn run_observed(
+        &self,
+        args: &[&str],
+        cancel: &dyn Fn() -> bool,
+        observe: &mut dyn FnMut(&str),
+    ) -> Result<ImageOutput> {
+        if cancel() {
+            return Err(BackendError::StateConflict(
+                "image operation cancelled".into(),
+            ));
+        }
         let container = crate::process::new_container(&JobLimits::default())?;
         let id = run_identity();
         let stdout = self.log_dir.join_file(&format!("img-{id}.out"))?;
@@ -100,7 +147,12 @@ impl ImageCommand<'_> {
             }
         };
         let deadline = Instant::now() + self.timeout;
+        let mut next_look = Instant::now() + OBSERVE_INTERVAL;
         let code = loop {
+            if Instant::now() >= next_look {
+                next_look = Instant::now() + OBSERVE_INTERVAL;
+                observe(&read_tail(&stdout, 4096));
+            }
             match child.wait(Some(Duration::from_millis(100))) {
                 Ok(Some(code)) => break Some(code),
                 Ok(None) => {}
@@ -305,6 +357,74 @@ pub fn create_overlay_ref(
     Ok(())
 }
 
+/// `qemu-img info --backing-chain --output=json -f vmdk <top>` of a VMware
+/// disk (ADR-0030): raw JSON for the caller to cross-check against the
+/// files it validated (`vmware_import::check_chain_info`). Run only after
+/// every file of the chain was checked (no file outside the VM folder is
+/// ever named to `qemu-img`).
+pub fn vmdk_chain_info(
+    cmd: &ImageCommand<'_>,
+    top: &ManagedPath,
+    cancel: &dyn Fn() -> bool,
+) -> Result<String> {
+    let o = cmd.run(
+        &[
+            "info",
+            "--backing-chain",
+            "--output=json",
+            "-f",
+            "vmdk",
+            top.qemu_value(),
+        ],
+        cancel,
+    )?;
+    if o.code != Some(0) {
+        return Err(failed("info", &o));
+    }
+    Ok(o.stdout)
+}
+
+/// Conversion of a VMware disk (its snapshot chain flattened) into the new
+/// standalone QCOW2 file `dst` (ADR-0030): `qemu-img convert -p -f vmdk -O
+/// qcow2`. `src` is opened read-only by `qemu-img` and never written; `dst`
+/// must not exist. `progress` receives the percentage printed by `-p`.
+pub fn convert_vmdk(
+    cmd: &ImageCommand<'_>,
+    src: &ManagedPath,
+    dst: &ManagedPath,
+    cancel: &dyn Fn() -> bool,
+    progress: &mut dyn FnMut(u8),
+) -> Result<()> {
+    refuse_existing(dst)?;
+    let mut last = None;
+    let o = cmd.run_observed(
+        &[
+            "convert",
+            "-p",
+            "-f",
+            "vmdk",
+            "-O",
+            "qcow2",
+            src.qemu_value(),
+            dst.qemu_value(),
+        ],
+        cancel,
+        &mut |out| {
+            if let Some(p) = last_progress(out)
+                && last != Some(p)
+            {
+                last = Some(p);
+                progress(p);
+            }
+        },
+    )?;
+    if o.code != Some(0) {
+        return Err(failed("convert", &o));
+    }
+    progress(100);
+    Ok(())
+}
+
 /// Virtual size of a QCOW2 image (`qemu-img info --output=json`).
 pub fn virtual_size(cmd: &ImageCommand<'_>, p: &ManagedPath) -> Result<u64> {
     let o = cmd.run(
@@ -352,6 +472,20 @@ mod tests {
             stderr: "qemu-img: Image is corrupt".into(),
         };
         assert!(matches!(failed("check", &o), BackendError::Io(_)));
+    }
+
+    #[test]
+    fn progress_of_qemu_img() {
+        assert_eq!(last_progress(""), None);
+        assert_eq!(last_progress("    (0.00/100%)\r"), Some(0));
+        assert_eq!(
+            last_progress("    (0.00/100%)\r    (1.01/100%)\r    (57.89/100%)\r"),
+            Some(57)
+        );
+        assert_eq!(last_progress("    (100.00/100%)\n"), Some(100));
+        assert_eq!(last_progress("(x/100%)"), None);
+        assert_eq!(last_progress("(250/100%)"), None);
+        assert_eq!(last_progress("/100%)"), None);
     }
 
     #[test]

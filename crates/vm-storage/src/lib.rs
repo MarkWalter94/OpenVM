@@ -57,6 +57,7 @@ mod records;
 mod recover;
 mod time;
 mod vm_delete;
+mod vm_import;
 
 pub use baseline::{
     BaselineInfo, BaselineJob, BaselineJobDone, BaselineOverview, CreateBaseline,
@@ -103,6 +104,7 @@ pub use records::{
 pub use recover::{IntegrityIssue, IntentRecovery, RecoveryOutcome, RecoveryReport};
 pub use time::{UtcMillis, now_rfc3339};
 pub use vm_delete::VmDeletionReport;
+pub use vm_import::VmImport;
 
 /// Lowercase hexadecimal.
 pub(crate) fn hex(bytes: &[u8]) -> String {

@@ -97,6 +97,11 @@ pub enum AuditAction {
     /// `failed` (QMP refused), `denied` with `resource_limit` (too many in a
     /// short time: the guest is left stopped for the user). Actor `system`.
     VmAutoReset,
+    /// Import of a VMware VM by conversion (user only, ADR-0030): denied
+    /// (checks of the `.vmx` and its disks, limits), failed (conversion,
+    /// cancellation) or succeeded (VM created with its converted disk).
+    /// Never the path of the source files.
+    VmImport,
 }
 
 /// Recorded outcome.

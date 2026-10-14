@@ -56,6 +56,7 @@ pub mod service;
 pub mod settings;
 pub mod theme;
 pub mod vm_settings;
+pub mod vmware_import;
 pub mod wizard;
 
 use console::{ConsoleAction, LiveConsole};
@@ -128,6 +129,23 @@ pub fn native_file_picker() -> Option<FilePicker> {
             rfd::FileDialog::new()
                 .set_title(title)
                 .add_filter("ISO image", &["iso"])
+                .pick_file()
+        }))
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        None
+    }
+}
+
+/// Native picker of the `.vmx` file of a VMware VM (Windows and macOS).
+pub fn native_vmx_picker() -> Option<FilePicker> {
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        Some(Box::new(|title: &str| {
+            rfd::FileDialog::new()
+                .set_title(title)
+                .add_filter("VMware VM configuration", &["vmx"])
                 .pick_file()
         }))
     }
@@ -432,6 +450,10 @@ pub struct LightVmApp {
     applied_service: Option<(std::path::PathBuf, Option<std::path::PathBuf>)>,
     folder_picker: Option<FolderPicker>,
     file_picker: Option<FilePicker>,
+    /// Picker of the `.vmx` of a VMware VM (ADR-0030).
+    vmx_picker: Option<FilePicker>,
+    /// "Import VMware VM" page, from the choice of the `.vmx` to the outcome.
+    vmware_import: Option<vmware_import::ImportFlow>,
     save_picker: Option<SavePicker>,
     report_picker: Option<ReportPicker>,
     /// Supervisor configuration given on the command line (`--catalog`):
@@ -523,6 +545,8 @@ impl LightVmApp {
             applied_service: None,
             folder_picker: None,
             file_picker: None,
+            vmx_picker: None,
+            vmware_import: None,
             save_picker: None,
             report_picker: None,
             cli_config: None,
@@ -642,6 +666,17 @@ impl LightVmApp {
     /// ISO picker of the wizard (native in the app, fake in tests).
     pub fn set_file_picker(&mut self, s: Option<FilePicker>) {
         self.file_picker = s;
+    }
+
+    /// Picker of the `.vmx` of "Import VMware VM" (native in the app, fake
+    /// in tests).
+    pub fn set_vmx_picker(&mut self, s: Option<FilePicker>) {
+        self.vmx_picker = s;
+    }
+
+    /// The "Import VMware VM" page, if open.
+    pub fn vmware_import(&self) -> Option<&vmware_import::ImportFlow> {
+        self.vmware_import.as_ref()
     }
 
     /// Save dialog of the console screenshot (native in the app, fake in tests).
@@ -2133,6 +2168,10 @@ impl LightVmApp {
             self.wizard_page(ui, &state, active);
             return;
         }
+        if self.vmware_import.is_some() {
+            self.vmware_import_page(ui, &state, active);
+            return;
+        }
         if let Some(vm_id) = self.baselines_vm {
             self.baselines_page(ui, &state, vm_id, active);
             return;
@@ -2149,6 +2188,10 @@ impl LightVmApp {
                     self.guest_support,
                 ));
                 self.send(ServiceCommand::ListMedia);
+            }
+            Some(DashboardAction::ImportVmware) => {
+                self.vm_edit = None;
+                self.choose_vmx(true);
             }
             Some(DashboardAction::Console(id)) => self.open_console(id),
             Some(DashboardAction::Baselines(id)) => {
@@ -2500,6 +2543,74 @@ impl LightVmApp {
                     w.importing = Some((kind, file));
                 }
                 self.send(ServiceCommand::ImportMedia { path, kind, origin });
+            }
+            None => {}
+        }
+    }
+
+    /// Native picker of the `.vmx`, then the preview request. With `open`
+    /// the page opens even when nothing is chosen (it then says why no
+    /// picker is available, or offers to choose again).
+    fn choose_vmx(&mut self, open: bool) {
+        let path = self
+            .vmx_picker
+            .as_mut()
+            .and_then(|f| f("Choose the .vmx file of the VMware VM"));
+        match path {
+            Some(path) => {
+                self.vmware_import = Some(vmware_import::ImportFlow::new(path.clone()));
+                self.send(ServiceCommand::PreviewVmwareImport(path));
+            }
+            None if open && self.vmx_picker.is_none() => {
+                // No picker on this platform: the page explains it.
+                self.vmware_import =
+                    Some(vmware_import::ImportFlow::new(std::path::PathBuf::new()));
+            }
+            None => {}
+        }
+    }
+
+    fn vmware_import_page(&mut self, ui: &mut egui::Ui, state: &ServiceState, active: bool) {
+        let Some(flow) = &mut self.vmware_import else {
+            return;
+        };
+        let names: Vec<String> = state
+            .vms
+            .iter()
+            .map(|v| v.name.as_str().to_owned())
+            .collect();
+        // A flow without a file (no picker): show the page without the
+        // state of an earlier preview.
+        let idle = service::VmwareImportState::default();
+        let vmware = if flow.path.as_os_str().is_empty() {
+            &idle
+        } else {
+            &state.vmware
+        };
+        let env = vmware_import::ImportEnv {
+            state: vmware,
+            existing_names: &names,
+            active,
+            file_picker: self.vmx_picker.is_some(),
+        };
+        match vmware_import::import_ui(ui, flow, &env) {
+            Some(vmware_import::ImportAction::Close) => self.vmware_import = None,
+            Some(vmware_import::ImportAction::ChooseOther) => self.choose_vmx(false),
+            Some(vmware_import::ImportAction::Retry) => {
+                let path = flow.path.clone();
+                self.send(ServiceCommand::PreviewVmwareImport(path));
+            }
+            Some(vmware_import::ImportAction::Import {
+                path,
+                name,
+                display,
+            }) => self.send(ServiceCommand::ImportVmware {
+                path,
+                name,
+                display,
+            }),
+            Some(vmware_import::ImportAction::CancelImport) => {
+                self.send(ServiceCommand::CancelVmwareImport);
             }
             None => {}
         }

@@ -424,14 +424,18 @@ fn check_start_space(free_bytes: Option<u64>) -> Result<(), PublicError> {
     }
 }
 
-/// Hardware profile of a VM (ADR-0027): from its declared guest and firmware.
+/// Hardware profile of a VM (ADR-0027): from its declared guest and
+/// firmware, with the disk controller and display of a VM imported from
+/// VMware (ADR-0030).
 fn profile_for(config: &lightvm_proto::VmConfig) -> Result<DeviceProfile, PublicError> {
-    DeviceProfile::for_guest(config.guest_os, config.firmware).map_err(|e| {
-        crate::diag!("lightvm-service: hardware profile: {e}");
-        PublicError::invalid_argument(
-            "the firmware of the VM is not supported by its operating system",
-        )
-    })
+    DeviceProfile::for_config(config.guest_os, config.firmware, config.imported.as_ref()).map_err(
+        |e| {
+            crate::diag!("lightvm-service: hardware profile: {e}");
+            PublicError::invalid_argument(
+                "the firmware of the VM is not supported by its operating system",
+            )
+        },
+    )
 }
 
 /// CPU model of a run with `profile`: `host` for the AArch64 profile under
@@ -700,6 +704,49 @@ impl ImageTool for QemuImageTool {
     }
     fn firmware_vars_template(&self) -> Option<PathBuf> {
         self.vars_template.clone()
+    }
+    fn vmdk_chain_info(
+        &self,
+        top: &Path,
+        cancel: &dyn Fn() -> bool,
+    ) -> Result<String, PublicError> {
+        image::vmdk_chain_info(&self.cmd(false), &verified(top)?, cancel)
+            .map_err(|e| image_error(&e))
+    }
+    fn convert_vmdk(
+        &self,
+        src: &Path,
+        dst: &Path,
+        cancel: &dyn Fn() -> bool,
+        progress: &mut dyn FnMut(u8),
+    ) -> Result<(), PublicError> {
+        image::convert_vmdk(
+            &self.cmd(true),
+            &verified(src)?,
+            &verified(dst)?,
+            cancel,
+            progress,
+        )
+        .map_err(|e| image_error(&e))
+    }
+    fn free_bytes(&self, dir: &Path) -> Option<u64> {
+        let dir = ManagedPath::verify(dir).ok()?;
+        prepare::host_resources(&dir)
+            .ok()
+            .map(|r| r.free_disk_bytes)
+    }
+}
+
+impl QemuImageTool {
+    /// Image tool over an approved `qemu-img` with a private directory for
+    /// its outputs (tests and tools; the service builds it in [`probe`]).
+    #[must_use]
+    pub fn new(qemu_img: ManagedPath, log_dir: ManagedPath) -> Self {
+        Self {
+            qemu_img,
+            log_dir,
+            vars_template: None,
+        }
     }
 }
 
@@ -1421,6 +1468,8 @@ impl VmBackend for QemuVmBackend {
             accelerator: Accelerator::for_current_host(),
             cpu: cpu_for(&profile, self.cpu.as_ref())?,
             vcpus: vm.config.vcpus,
+            // Imported VMs keep the CPU topology of the source (ADR-0030).
+            cores_per_socket: vm.config.imported.and_then(|h| h.cores_per_socket),
             memory_mib: u32::try_from(vm.config.memory_mib)
                 .map_err(|_| PublicError::resource_limit("memory out of range"))?,
             disk: Some(DiskSpec {

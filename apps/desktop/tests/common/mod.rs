@@ -142,6 +142,7 @@ pub(crate) fn vm(n: u8, name: &str, state: VmState) -> VmSummary {
             data_media: None,
             firmware: lightvm_proto::Firmware::Uefi,
             limits: Default::default(),
+            imported: None,
         },
         config_revision: 3,
         disk_used_bytes: Some(5_637_144_576),
@@ -522,4 +523,117 @@ pub(crate) fn shot_image() -> lightvm_desktop::service::ShotImage {
         size: [4, 3],
         rgba: Arc::new([200u8, 40, 40, 255].repeat(12)),
     }
+}
+
+/// Preview of a VMware Windows 7 x64 VM on an LSI Logic disk with two
+/// snapshot levels (ADR-0030): storage driver warning, SVGA offered.
+pub(crate) fn vmware_preview_lsilogic() -> lightvm_proto::ipc::VmwareImportPreview {
+    use lightvm_proto::ipc::{
+        ImportWarning, ImportWarningKind, NotImported, NotImportedItem, VmwareController,
+        VmwareDiskPreview, VmwareImportPreview,
+    };
+    use lightvm_proto::{
+        DiskController, DisplayAdapter, Firmware, GuestArch, GuestOs, ImportSource,
+        ImportedHardware, NetworkProfile, VmConfig,
+    };
+    let not = |item, detail: Option<&str>| NotImported {
+        item,
+        detail: detail.map(str::to_owned),
+    };
+    VmwareImportPreview {
+        vmx_file: "Windows 7 x64.vmx".into(),
+        display_name: Some("Windows 7 x64 - VS2010".into()),
+        vmware_guest_os: "windows7-64".into(),
+        config: VmConfig {
+            name: VmName::parse("Windows 7 x64 - VS2010").unwrap(),
+            guest_os: GuestOs::Windows7,
+            vcpus: 2,
+            memory_mib: 4096,
+            disk_gib: 60,
+            network: NetworkProfile::Offline,
+            install_media: None,
+            data_media: None,
+            firmware: Firmware::Bios,
+            limits: Default::default(),
+            imported: Some(ImportedHardware {
+                source: ImportSource::Vmware,
+                arch: GuestArch::X86_64,
+                disk_controller: DiskController::Ahci,
+                display: DisplayAdapter::Standard,
+                cores_per_socket: Some(2),
+                storage_driver_preparation: true,
+            }),
+        },
+        disk: VmwareDiskPreview {
+            file_name: "Windows 7 x64-000002.vmdk".into(),
+            slot: "scsi0:0".into(),
+            vmware_controller: VmwareController::LsiLogic,
+            create_type: "monolithicSparse".into(),
+            virtual_size_bytes: 60 << 30,
+            allocated_bytes: 23_622_320_128,
+            snapshot_levels: 2,
+        },
+        required_bytes: 23_622_320_128,
+        free_bytes: Some(180 << 30),
+        not_imported: vec![
+            not(NotImportedItem::Network, Some("ethernet0")),
+            not(NotImportedItem::SharedFolders, None),
+            not(NotImportedItem::Usb, None),
+            not(NotImportedItem::Sound, None),
+            not(NotImportedItem::Snapshots, Some("2")),
+            not(NotImportedItem::CdRom, Some("en_visual_studio_2010.iso")),
+            not(NotImportedItem::VmwareToolsFeatures, None),
+        ],
+        warnings: vec![ImportWarning {
+            kind: ImportWarningKind::StorageDriverPreparation,
+            detail: None,
+        }],
+        vmware_svga_offered: true,
+        vmware_tools_hint: true,
+    }
+}
+
+/// Preview of a VMware Linux VM on PVSCSI, UEFI, no snapshot (ADR-0030).
+pub(crate) fn vmware_preview_linux() -> lightvm_proto::ipc::VmwareImportPreview {
+    use lightvm_proto::ipc::{
+        ImportWarning, ImportWarningKind, NotImported, NotImportedItem, VmwareController,
+        VmwareDiskPreview,
+    };
+    use lightvm_proto::{DiskController, Firmware, GuestOs, ImportedHardware};
+    let mut p = vmware_preview_lsilogic();
+    p.vmx_file = "debian12.vmx".into();
+    p.display_name = Some("debian12".into());
+    p.vmware_guest_os = "debian12-64".into();
+    p.config.name = VmName::parse("debian12").unwrap();
+    p.config.guest_os = GuestOs::OtherLinuxX86_64;
+    p.config.memory_mib = 2048;
+    p.config.disk_gib = 20;
+    p.config.firmware = Firmware::Uefi;
+    p.config.imported = p.config.imported.map(|h| ImportedHardware {
+        disk_controller: DiskController::Pvscsi,
+        cores_per_socket: None,
+        storage_driver_preparation: false,
+        ..h
+    });
+    p.disk = VmwareDiskPreview {
+        file_name: "debian12.vmdk".into(),
+        slot: "scsi0:0".into(),
+        vmware_controller: VmwareController::Pvscsi,
+        create_type: "twoGbMaxExtentSparse".into(),
+        virtual_size_bytes: 20 << 30,
+        allocated_bytes: 3_489_660_928,
+        snapshot_levels: 0,
+    };
+    p.required_bytes = 3_489_660_928;
+    p.not_imported = vec![NotImported {
+        item: NotImportedItem::Network,
+        detail: Some("ethernet0".into()),
+    }];
+    p.warnings = vec![ImportWarning {
+        kind: ImportWarningKind::NewUefiVariables,
+        detail: None,
+    }];
+    p.vmware_svga_offered = false;
+    p.vmware_tools_hint = false;
+    p
 }

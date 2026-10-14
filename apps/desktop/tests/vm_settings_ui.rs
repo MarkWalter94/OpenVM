@@ -30,6 +30,7 @@ fn config() -> VmConfig {
         data_media: None,
         firmware: Firmware::Uefi,
         limits: VmLimits::default(),
+        imported: None,
     }
 }
 

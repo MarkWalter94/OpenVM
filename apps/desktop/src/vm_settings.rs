@@ -124,6 +124,7 @@ pub fn default_config(name: &str) -> Result<VmConfig, String> {
         data_media: None,
         firmware: lightvm_proto::Firmware::Uefi,
         limits: VmLimits::default(),
+        imported: None,
     })
 }
 
@@ -276,6 +277,31 @@ pub fn vm_settings_ui(
                     |v| format!("{v} GiB"),
                 )
             });
+            if let Some(h) = c.imported {
+                // ADR-0030: fixed at import, shown read-only and sent back
+                // unchanged.
+                theme::divider(ui);
+                group_caption(ui, "Imported from VMware");
+                let p = theme::Palette::of(ui);
+                let mut text = format!(
+                    "Disk controller: {} · display: {}",
+                    crate::vmware_import::controller_label(h.disk_controller),
+                    crate::vmware_import::display_label(h.display, c.guest_os)
+                );
+                if let Some(k) = h.cores_per_socket.filter(|k| *k > 1) {
+                    text.push_str(&format!(
+                        " · {k} cores per socket (the vCPUs stay a multiple of {k})"
+                    ));
+                }
+                ui.add(egui::Label::new(egui::RichText::new(text).color(p.text_weak)).wrap());
+                if h.storage_driver_preparation {
+                    theme::notice(
+                        ui,
+                        crate::vmware_import::STORAGE_DRIVER_WARNING,
+                        Tone::Warning,
+                    );
+                }
+            }
             theme::divider(ui);
             group_caption(ui, "Media");
             media_row(
@@ -401,6 +427,7 @@ mod tests {
             data_media: None,
             firmware: lightvm_proto::Firmware::Uefi,
             limits: VmLimits::default(),
+            imported: None,
         }
     }
 

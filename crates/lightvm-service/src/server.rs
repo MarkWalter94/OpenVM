@@ -587,6 +587,7 @@ pub async fn start(
         reports: crate::reports::ReportStore::new(Some(
             cfg.catalog_dir.join(crate::reports::SESSIONS_DIR),
         )),
+        vmware: Default::default(),
     };
     // Published before any possible subscription: no client receives it late,
     // after later events (race with `subscribe`).
@@ -1087,6 +1088,8 @@ async fn handle_connection(shared: Arc<Shared>, stream: BoxedStream, peer: PeerI
                     } else if matches!(
                         body,
                         Request::ImportMedia { .. }
+                            | Request::PreviewVmwareImport { .. }
+                            | Request::ImportVmware { .. }
                             | Request::CreateBaseline { .. }
                             | Request::RestoreBaseline { .. }
                             | Request::AwaitSession { .. }
@@ -1669,6 +1672,19 @@ async fn dispatch(
         Request::DeleteSessionReport { session_id } => {
             SupervisorRequest::Report(Box::new(ReportRequest::Delete(session_id)))
         }
+        // ADR-0030: the `.vmx` chosen with the picker of the UI (UI role
+        // only, checked above); read as untrusted input by the service.
+        Request::PreviewVmwareImport { vmx_path } => SupervisorRequest::PreviewVmware { vmx_path },
+        Request::ImportVmware {
+            vmx_path,
+            name,
+            display,
+        } => SupervisorRequest::ImportVmware {
+            vmx_path,
+            name,
+            display,
+        },
+        Request::CancelVmwareImport => SupervisorRequest::CancelVmwareImport,
     };
     let reply_rx = match enqueue(
         shared,

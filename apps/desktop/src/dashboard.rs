@@ -81,6 +81,8 @@ pub enum DashboardAction {
     Command(ServiceCommand),
     /// Open the "New VM" wizard.
     NewVm,
+    /// Choose a `.vmx` and open the "Import VMware VM" page (ADR-0030).
+    ImportVmware,
     /// Open the console of a running VM.
     Console(VmId),
     /// Open the settings panel of a VM.
@@ -526,6 +528,15 @@ pub fn dashboard_with_qemu_ui(
             .clicked()
         {
             choice = Some(DashboardAction::NewVm);
+        }
+        if ui
+            .add_enabled(active, egui::Button::new(crate::vmware_import::TITLE))
+            .on_hover_text(
+                "Convert a VMware Workstation or Player VM (.vmx) into a new VM; the VMware files are not modified",
+            )
+            .clicked()
+        {
+            choice = Some(DashboardAction::ImportVmware);
         }
     });
 

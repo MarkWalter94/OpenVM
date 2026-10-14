@@ -484,6 +484,56 @@
         }
       ]
     },
+    "DiskController": {
+      "description": "Main disk controller of an imported VM (ADR-0030): the controller the\nguest was installed on, so that its boot driver finds the disk.",
+      "oneOf": [
+        {
+          "description": "`virtio-blk-pci` (Linux guests only).",
+          "type": "string",
+          "const": "virtio"
+        },
+        {
+          "description": "SATA AHCI (q35 ICH9 controller).",
+          "type": "string",
+          "const": "ahci"
+        },
+        {
+          "description": "Parallel IDE (PIIX controller of the i440fx board).",
+          "type": "string",
+          "const": "ide"
+        },
+        {
+          "description": "NVMe.",
+          "type": "string",
+          "const": "nvme"
+        },
+        {
+          "description": "VMware paravirtual SCSI (`pvscsi`).",
+          "type": "string",
+          "const": "pvscsi"
+        },
+        {
+          "description": "LSI Logic SAS 1068 (`mptsas1068`, VMware `lsisas1068`).",
+          "type": "string",
+          "const": "lsi_sas1068"
+        }
+      ]
+    },
+    "DisplayAdapter": {
+      "description": "Display adapter of an imported VM (ADR-0030).",
+      "oneOf": [
+        {
+          "description": "The adapter of the guest profile (ADR-0027: `VGA` for Windows,\n`virtio-vga` for Linux).",
+          "type": "string",
+          "const": "standard"
+        },
+        {
+          "description": "VMware SVGA II (`vmware-svga`), for a Windows guest that has the\nVMware Tools display driver.",
+          "type": "string",
+          "const": "vmware_svga"
+        }
+      ]
+    },
     "DisplayGeometry": {
       "description": "Guest display geometry in pixels.",
       "type": "object",
@@ -538,6 +588,26 @@
         }
       ]
     },
+    "GuestArch": {
+      "description": "Architecture of an installation medium, as detected from its contents.",
+      "oneOf": [
+        {
+          "description": "32-bit x86.",
+          "type": "string",
+          "const": "x86"
+        },
+        {
+          "description": "x86_64.",
+          "type": "string",
+          "const": "x86_64"
+        },
+        {
+          "description": "ARM64 (AArch64).",
+          "type": "string",
+          "const": "aarch64"
+        }
+      ]
+    },
     "GuestOs": {
       "description": "Declared guest operating system. In the MVP the reference is Ubuntu LTS\nx86_64 with the version and checksum pinned in F0 (ROADMAP 4). The\nWindows variants (ADR-0027, ROADMAP R2c) select a hardware profile with\ndevices the guest has inbox drivers for; they are manual, offline guests\nand their compatibility cells stay \"not verified\" until real evidence.",
       "oneOf": [
@@ -581,6 +651,58 @@
           "type": "string",
           "const": "windows11_arm64"
         }
+      ]
+    },
+    "ImportSource": {
+      "description": "Where an imported VM came from (ADR-0030).",
+      "oneOf": [
+        {
+          "description": "VMware Workstation or Player (`.vmx` + VMDK), converted to QCOW2.",
+          "type": "string",
+          "const": "vmware"
+        }
+      ]
+    },
+    "ImportedHardware": {
+      "description": "Hardware of a VM imported from VMware (ADR-0030), in\n[`VmConfig::imported`]. Fixed at import: a configuration change cannot\nalter it.",
+      "type": "object",
+      "properties": {
+        "arch": {
+          "description": "Architecture of the guest, from the VMware guest type.",
+          "$ref": "#/$defs/GuestArch"
+        },
+        "cores_per_socket": {
+          "description": "vCPUs per socket of the source VM (`cpuid.coresPerSocket`): client\neditions of Windows use at most one or two sockets. `None` = one\nsocket per vCPU, as for VMs created in LightVM.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "disk_controller": {
+          "description": "Controller of the main disk.",
+          "$ref": "#/$defs/DiskController"
+        },
+        "display": {
+          "description": "Display adapter.",
+          "$ref": "#/$defs/DisplayAdapter",
+          "default": "standard"
+        },
+        "source": {
+          "description": "Origin of the VM.",
+          "$ref": "#/$defs/ImportSource"
+        },
+        "storage_driver_preparation": {
+          "description": "The source disk was on a controller QEMU does not emulate (VMware\n`lsilogic`) and the guest is Windows: the storage driver of\n[`Self::disk_controller`] must be enabled for boot in the guest\nbefore it can start from this disk (ADR-0030). The automatic offline\npreparation is not available yet; the user prepares the guest in\nVMware (`docs/USER_GUIDE.md`).",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "arch",
+        "disk_controller"
       ]
     },
     "InputBatch": {
@@ -1830,6 +1952,65 @@
             "op",
             "session_id"
           ]
+        },
+        {
+          "description": "Examination of a VMware VM before its import (UI only, never from\nagent sessions; ADR-0030): `vmx_path` is the `.vmx` file the user\nchose with the native picker. The `.vmx` and the VMDK descriptors\nare read as untrusted input, the disk chain is checked with\n`qemu-img info`; nothing is written. The reply says what would be\nimported, what not, and the warnings.",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "preview_vmware_import"
+            },
+            "vmx_path": {
+              "description": "`.vmx` file chosen by the user.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "vmx_path"
+          ]
+        },
+        {
+          "description": "Import of a VMware VM by conversion (UI only, never from agent\nsessions; ADR-0030). The `.vmx` and its disks are examined again (the\npreview is not trusted), the storage budget is checked, then the\ncurrent state of the disk (snapshot chain flattened) is converted\ninto a new QCOW2 disk of the catalog; the VMware files are opened\nread-only and never modified. Long: progress is published as\n[`ServiceEvent::VmwareImportProgress`] and the reply arrives when the\nVM exists. One import at a time; cancelled by\n[`Request::CancelVmwareImport`], the Emergency Stop, the revocation or\nclosing of the connection and the service shutdown (nothing is\nleft behind).",
+          "type": "object",
+          "properties": {
+            "display": {
+              "description": "Display adapter (VMware SVGA only for Windows guests).",
+              "$ref": "#/$defs/DisplayAdapter",
+              "default": "standard"
+            },
+            "name": {
+              "description": "Name of the new VM.",
+              "$ref": "#/$defs/VmName"
+            },
+            "op": {
+              "type": "string",
+              "const": "import_vmware"
+            },
+            "vmx_path": {
+              "description": "`.vmx` file chosen by the user.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "vmx_path",
+            "name"
+          ]
+        },
+        {
+          "description": "Cancels the VMware import in progress (UI only).",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "cancel_vmware_import"
+            }
+          },
+          "required": [
+            "op"
+          ]
         }
       ]
     },
@@ -2096,6 +2277,17 @@
         "guest_os": {
           "description": "Declared guest operating system.",
           "$ref": "#/$defs/GuestOs"
+        },
+        "imported": {
+          "description": "Hardware of a VM imported from VMware (ADR-0030), fixed at import:\ndisk controller, display adapter and CPU topology of the source VM.\n`None` for every VM created in LightVM (the profile of ADR-0027\napplies unchanged).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ImportedHardware"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "install_media": {
           "description": "Installation media from the media registry (kind `install_iso`).",

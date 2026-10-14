@@ -26,6 +26,7 @@ What works today on the first host (Windows 11 + WHPX, Ubuntu 26.04.1 LTS guest)
 | `apps/desktop` | Native desktop UI (`lightvm-desktop`), console texture fed by the RFB client |
 | `crates/lightvm-proto` | Identifiers, states, public errors, IPC envelope, generated JSON Schemas |
 | `crates/guest-detect` | Guest system detection from installation ISOs (ISO 9660, UDF, WIM metadata), bounded parser (ADR-0027) |
+| `crates/vmware-import` | Examination of VMware VMs for import by conversion: bounded `.vmx` and VMDK descriptor readers, path checks, mapping to a LightVM configuration (ADR-0030) |
 | `crates/vm-core` | VM model, state machine, resource limits, agent sessions, audit |
 | `crates/vm-storage` | SQLite catalog, migrations, journal, media registry, disk guards |
 | `crates/qemu-backend` | QEMU process control, QMP client, Job Object, screenshots, input |

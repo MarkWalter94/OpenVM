@@ -493,6 +493,7 @@ impl Wizard {
                 os.recommended_firmware(None)
             },
             limits: VmLimits::default(),
+            imported: None,
         })
     }
 }

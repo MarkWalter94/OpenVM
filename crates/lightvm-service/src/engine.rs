@@ -312,6 +312,51 @@ pub trait VmEngine: Send + 'static {
         None
     }
 
+    // ----- VMware import (ADR-0030) ---------------------------------------
+
+    /// First step of a VMware preview or import (supervisor thread): user
+    /// only (a refusal is audited `vm_import` denied); the context for the
+    /// examination on a worker.
+    fn vmware_context(
+        &mut self,
+        _caller: &Caller,
+    ) -> Result<crate::vmware::VmwareContext, PublicError> {
+        Err(PublicError::unsupported("VMware import not available"))
+    }
+    /// An import refused by the examination of the VMware files (audited
+    /// `vm_import` denied).
+    fn vmware_denied(&mut self, _caller: &Caller, _error: &PublicError) {}
+    /// Core checks of the configuration, storage budget, then the journal
+    /// intent of the import; returns where to write the converted disk.
+    fn vmware_begin(
+        &mut self,
+        _caller: &Caller,
+        _config: &VmConfig,
+        _required_bytes: u64,
+        _free_bytes: Option<u64>,
+    ) -> Result<VmImportSlot, PublicError> {
+        Err(PublicError::unsupported("VMware import not available"))
+    }
+    /// Publishes the converted disk with the VM row and registers the VM.
+    fn vmware_finish(
+        &mut self,
+        _caller: &Caller,
+        _slot: VmImportSlot,
+        _config: VmConfig,
+    ) -> Result<VmRecord, PublicError> {
+        Err(PublicError::unsupported("VMware import not available"))
+    }
+    /// Rolls an import back (cancellation, failure); audited `failed`;
+    /// returns `reason`.
+    fn vmware_abort(
+        &mut self,
+        _caller: &Caller,
+        _slot: VmImportSlot,
+        reason: PublicError,
+    ) -> PublicError {
+        reason
+    }
+
     fn record_event(
         &mut self,
         _actor: Actor,
@@ -423,6 +468,76 @@ pub trait ImageTool: Send + Sync + std::fmt::Debug + 'static {
     /// always carries its firmware state, ROADMAP 8).
     fn firmware_vars_template(&self) -> Option<PathBuf> {
         None
+    }
+    /// `qemu-img info --backing-chain --output=json -f vmdk` of a VMware
+    /// disk whose chain was validated (ADR-0030).
+    fn vmdk_chain_info(
+        &self,
+        _top: &Path,
+        _cancel: &dyn Fn() -> bool,
+    ) -> Result<String, PublicError> {
+        Err(PublicError::unsupported(
+            "VMware import not available on this backend",
+        ))
+    }
+    /// Conversion of a VMware disk (chain flattened) into the new QCOW2
+    /// file `dst`, with the percentage of progress (ADR-0030).
+    fn convert_vmdk(
+        &self,
+        _src: &Path,
+        _dst: &Path,
+        _cancel: &dyn Fn() -> bool,
+        _progress: &mut dyn FnMut(u8),
+    ) -> Result<(), PublicError> {
+        Err(PublicError::unsupported(
+            "VMware import not available on this backend",
+        ))
+    }
+    /// Free bytes of the volume holding `dir`, if measurable.
+    fn free_bytes(&self, _dir: &Path) -> Option<u64> {
+        None
+    }
+}
+
+/// Catalog side of a VMware import (ADR-0030): journal intent `import_vm`,
+/// then the converted disk and the VM row published together. The default
+/// is a catalog without imports.
+pub trait VmImportPort {
+    /// Catalog root (the converted disk lands below it).
+    fn catalog_root(&self) -> Option<PathBuf> {
+        None
+    }
+    /// Records the import of VM `vm` and returns where the converted disk
+    /// is written.
+    fn begin_vm_import(&mut self, _vm: VmId) -> Result<VmImportSlot, PublicError> {
+        Err(PublicError::unsupported(
+            "VMware import not available on this catalog",
+        ))
+    }
+    /// Publishes the converted disk of `slot` and writes the VM row.
+    fn finish_vm_import(&mut self, _slot: VmImportSlot, _vm: &VmRecord) -> Result<(), PublicError> {
+        Err(PublicError::unsupported(
+            "VMware import not available on this catalog",
+        ))
+    }
+    /// Rolls the import back (temporary and VM directory removed).
+    fn abort_vm_import(&mut self, _slot: VmImportSlot) {}
+}
+
+/// A VMware import recorded in the catalog, between
+/// [`VmImportPort::begin_vm_import`] and its end.
+pub struct VmImportSlot {
+    /// VM being created.
+    pub vm_id: VmId,
+    /// Where the converted disk is written (journal temporary).
+    pub temp_path: PathBuf,
+    /// Catalog-specific state.
+    pub inner: Box<dyn Any + Send>,
+}
+
+impl std::fmt::Debug for VmImportSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "VmImportSlot({})", self.vm_id)
     }
 }
 
@@ -913,7 +1028,7 @@ where
 
 impl<S, A, B, M> CoreEngine<S, A, B, M>
 where
-    S: CatalogStore + MediaImportPort + BaselinePort + Send + 'static,
+    S: CatalogStore + MediaImportPort + BaselinePort + VmImportPort + Send + 'static,
     A: AuditSink + Send + 'static,
     B: BackendPort,
     M: MediaGuardPort + Send + 'static,
@@ -1519,7 +1634,7 @@ fn shot_reply(shot: &StoredShot) -> ResponseBody {
 
 impl<S, A, B, M> VmEngine for CoreEngine<S, A, B, M>
 where
-    S: CatalogStore + MediaImportPort + BaselinePort + Send + 'static,
+    S: CatalogStore + MediaImportPort + BaselinePort + VmImportPort + Send + 'static,
     A: AuditSink + Send + 'static,
     B: BackendPort,
     M: MediaGuardPort + Send + 'static,
@@ -2254,6 +2369,82 @@ where
     fn qemu_log(&mut self, vm_id: VmId) -> Option<String> {
         let run = self.core.vm_status(&Caller::User, vm_id).ok()?.run_id?;
         self.backend.qemu_log(vm_id, run)
+    }
+
+    fn vmware_context(
+        &mut self,
+        caller: &Caller,
+    ) -> Result<crate::vmware::VmwareContext, PublicError> {
+        if matches!(caller, Caller::Agent { .. }) {
+            let e = PublicError::permission_denied("VM import not available to agent sessions");
+            self.core.record_import_denied(caller, &e);
+            return Err(e);
+        }
+        let tool = self.backend.image_tool().ok_or_else(|| {
+            PublicError::unsupported("VMware import needs qemu-img: configure the QEMU folder")
+        })?;
+        let catalog_root = self.core.store().catalog_root().ok_or_else(|| {
+            PublicError::unsupported("VMware import not available on this catalog")
+        })?;
+        let l = self.core.creation_limits();
+        Ok(crate::vmware::VmwareContext {
+            tool,
+            limits: vmware_import::HostLimits {
+                max_vcpus: l.max_vcpus,
+                max_memory_mib: l.max_memory_mib,
+                max_disk_gib: l.max_disk_gib,
+            },
+            catalog_root,
+        })
+    }
+
+    fn vmware_denied(&mut self, caller: &Caller, error: &PublicError) {
+        self.core.record_import_denied(caller, error);
+    }
+
+    fn vmware_begin(
+        &mut self,
+        caller: &Caller,
+        config: &VmConfig,
+        required_bytes: u64,
+        free_bytes: Option<u64>,
+    ) -> Result<VmImportSlot, PublicError> {
+        self.apply_observations();
+        let reserve = self
+            .core
+            .config()
+            .host
+            .reserved_storage_gib
+            .saturating_mul(1 << 30);
+        let (_, slot) = self.core.begin_import(caller, config, |store, vm_id| {
+            crate::vmware::check_space(required_bytes, free_bytes, reserve)?;
+            store.begin_vm_import(vm_id)
+        })?;
+        Ok(slot)
+    }
+
+    fn vmware_finish(
+        &mut self,
+        caller: &Caller,
+        slot: VmImportSlot,
+        config: VmConfig,
+    ) -> Result<VmRecord, PublicError> {
+        let vm_id = slot.vm_id;
+        self.core
+            .finish_import(caller, vm_id, config, |store, rec| {
+                store.finish_vm_import(slot, rec)
+            })
+    }
+
+    fn vmware_abort(
+        &mut self,
+        caller: &Caller,
+        slot: VmImportSlot,
+        reason: PublicError,
+    ) -> PublicError {
+        let vm_id = slot.vm_id;
+        self.core
+            .abort_import(caller, vm_id, |store| store.abort_vm_import(slot), reason)
     }
 
     fn session_changes(&mut self) -> Vec<(SessionId, SessionState, Option<TerminationCause>)> {

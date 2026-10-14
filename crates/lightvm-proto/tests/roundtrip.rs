@@ -33,7 +33,57 @@ fn sample_config() -> VmConfig {
         data_media: None,
         firmware: Firmware::Uefi,
         limits: Default::default(),
+        imported: None,
     }
+}
+
+/// ADR-0030: an imported configuration round-trips, an older one (without
+/// the field) still reads, unknown fields stay refused, and the imported
+/// hardware is checked against the guest and the vCPUs.
+#[test]
+fn imported_hardware_roundtrip_and_checks() {
+    use lightvm_proto::{
+        DiskController, DisplayAdapter, GuestArch, ImportSource, ImportedHardware,
+    };
+    let mut c = sample_config();
+    let json = serde_json::to_value(&c).unwrap();
+    assert!(json.get("imported").is_none(), "absent when None: {json}");
+    let hw = ImportedHardware {
+        source: ImportSource::Vmware,
+        arch: GuestArch::X86_64,
+        disk_controller: DiskController::Pvscsi,
+        display: DisplayAdapter::Standard,
+        cores_per_socket: Some(2),
+        storage_driver_preparation: false,
+    };
+    c.vcpus = 4;
+    c.imported = Some(hw);
+    let back: VmConfig = serde_json::from_value(serde_json::to_value(&c).unwrap()).unwrap();
+    assert_eq!(back, c);
+    assert!(hw.validate(GuestOs::OtherLinuxX86_64, 4).is_ok());
+    assert!(
+        hw.validate(GuestOs::OtherLinuxX86_64, 3).is_err(),
+        "2 does not divide 3"
+    );
+    let svga = ImportedHardware {
+        display: DisplayAdapter::VmwareSvga,
+        ..hw
+    };
+    assert!(svga.validate(GuestOs::OtherLinuxX86_64, 4).is_err());
+    assert!(svga.validate(GuestOs::Windows7, 4).is_ok());
+    let virtio = ImportedHardware {
+        disk_controller: DiskController::Virtio,
+        ..hw
+    };
+    assert!(virtio.validate(GuestOs::Windows10, 4).is_err());
+    let ahci = ImportedHardware {
+        disk_controller: DiskController::Ahci,
+        ..hw
+    };
+    assert!(ahci.validate(GuestOs::WindowsXp, 4).is_err());
+    let mut bad = serde_json::to_value(&c).unwrap();
+    bad["imported"]["unknown"] = serde_json::json!(1);
+    assert!(serde_json::from_value::<VmConfig>(bad).is_err());
 }
 
 #[test]

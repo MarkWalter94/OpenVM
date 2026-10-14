@@ -624,6 +624,56 @@
         "os"
       ]
     },
+    "DiskController": {
+      "description": "Main disk controller of an imported VM (ADR-0030): the controller the\nguest was installed on, so that its boot driver finds the disk.",
+      "oneOf": [
+        {
+          "description": "`virtio-blk-pci` (Linux guests only).",
+          "type": "string",
+          "const": "virtio"
+        },
+        {
+          "description": "SATA AHCI (q35 ICH9 controller).",
+          "type": "string",
+          "const": "ahci"
+        },
+        {
+          "description": "Parallel IDE (PIIX controller of the i440fx board).",
+          "type": "string",
+          "const": "ide"
+        },
+        {
+          "description": "NVMe.",
+          "type": "string",
+          "const": "nvme"
+        },
+        {
+          "description": "VMware paravirtual SCSI (`pvscsi`).",
+          "type": "string",
+          "const": "pvscsi"
+        },
+        {
+          "description": "LSI Logic SAS 1068 (`mptsas1068`, VMware `lsisas1068`).",
+          "type": "string",
+          "const": "lsi_sas1068"
+        }
+      ]
+    },
+    "DisplayAdapter": {
+      "description": "Display adapter of an imported VM (ADR-0030).",
+      "oneOf": [
+        {
+          "description": "The adapter of the guest profile (ADR-0027: `VGA` for Windows,\n`virtio-vga` for Linux).",
+          "type": "string",
+          "const": "standard"
+        },
+        {
+          "description": "VMware SVGA II (`vmware-svga`), for a Windows guest that has the\nVMware Tools display driver.",
+          "type": "string",
+          "const": "vmware_svga"
+        }
+      ]
+    },
     "DisplayGeometry": {
       "description": "Guest display geometry in pixels.",
       "type": "object",
@@ -940,6 +990,128 @@
         }
       ]
     },
+    "ImportSource": {
+      "description": "Where an imported VM came from (ADR-0030).",
+      "oneOf": [
+        {
+          "description": "VMware Workstation or Player (`.vmx` + VMDK), converted to QCOW2.",
+          "type": "string",
+          "const": "vmware"
+        }
+      ]
+    },
+    "ImportWarning": {
+      "description": "Warning of a VMware import, in [`VmwareImportPreview`].",
+      "type": "object",
+      "properties": {
+        "detail": {
+          "description": "Values for the message (for example the VMware value and the one\nLightVM uses), shown as text.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "description": "What.",
+          "$ref": "#/$defs/ImportWarningKind"
+        }
+      },
+      "required": [
+        "kind"
+      ]
+    },
+    "ImportWarningKind": {
+      "description": "Kind of [`ImportWarning`].",
+      "oneOf": [
+        {
+          "description": "Windows on an LSI Logic parallel controller, which QEMU does not\nemulate: Windows may not start (stop 0x7B) until the storage driver\nof the new controller is enabled in the guest (manual preparation,\n`docs/USER_GUIDE.md`).",
+          "type": "string",
+          "const": "storage_driver_preparation"
+        },
+        {
+          "description": "A controller QEMU does not emulate on a Linux guest: the disk is\nattached to the profile's controller (the initramfs must have its\ndriver, as standard distributions do).",
+          "type": "string",
+          "const": "controller_replaced"
+        },
+        {
+          "description": "The guest memory was raised to the minimum of the guest system.",
+          "type": "string",
+          "const": "memory_raised"
+        },
+        {
+          "description": "The guest memory was lowered to the host limit.",
+          "type": "string",
+          "const": "memory_lowered"
+        },
+        {
+          "description": "The vCPUs were lowered to the host limit.",
+          "type": "string",
+          "const": "vcpus_lowered"
+        },
+        {
+          "description": "The VMware CPU topology could not be kept (one socket per vCPU).",
+          "type": "string",
+          "const": "topology_changed"
+        },
+        {
+          "description": "VMware uses the same guest type for Windows 8 and 8.1: LightVM\nsupports 8.1 only.",
+          "type": "string",
+          "const": "windows8_or81"
+        },
+        {
+          "description": "UEFI guest: the firmware starts with a new variable store, so the\nboot entries of VMware are not carried over (the default loader of\nthe disk is used).",
+          "type": "string",
+          "const": "new_uefi_variables"
+        },
+        {
+          "description": "A disk of the snapshot chain is marked dirty (not closed cleanly).",
+          "type": "string",
+          "const": "dirty_disk"
+        }
+      ]
+    },
+    "ImportedHardware": {
+      "description": "Hardware of a VM imported from VMware (ADR-0030), in\n[`VmConfig::imported`]. Fixed at import: a configuration change cannot\nalter it.",
+      "type": "object",
+      "properties": {
+        "arch": {
+          "description": "Architecture of the guest, from the VMware guest type.",
+          "$ref": "#/$defs/GuestArch"
+        },
+        "cores_per_socket": {
+          "description": "vCPUs per socket of the source VM (`cpuid.coresPerSocket`): client\neditions of Windows use at most one or two sockets. `None` = one\nsocket per vCPU, as for VMs created in LightVM.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "disk_controller": {
+          "description": "Controller of the main disk.",
+          "$ref": "#/$defs/DiskController"
+        },
+        "display": {
+          "description": "Display adapter.",
+          "$ref": "#/$defs/DisplayAdapter",
+          "default": "standard"
+        },
+        "source": {
+          "description": "Origin of the VM.",
+          "$ref": "#/$defs/ImportSource"
+        },
+        "storage_driver_preparation": {
+          "description": "The source disk was on a controller QEMU does not emulate (VMware\n`lsilogic`) and the guest is Windows: the storage driver of\n[`Self::disk_controller`] must be enabled for boot in the guest\nbefore it can start from this disk (ADR-0030). The automatic offline\npreparation is not available yet; the user prepares the guest in\nVMware (`docs/USER_GUIDE.md`).",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "arch",
+        "disk_controller"
+      ]
+    },
     "InputOwner": {
       "description": "Owner of the input of a VM: the user or one agent session, never both.",
       "oneOf": [
@@ -1140,6 +1312,96 @@
           "description": "No NIC.",
           "type": "string",
           "const": "offline"
+        }
+      ]
+    },
+    "NotImported": {
+      "description": "Part of a VMware VM that is not imported, in [`VmwareImportPreview`].",
+      "type": "object",
+      "properties": {
+        "detail": {
+          "description": "Detail from the `.vmx` (for example a file name or a count), shown\nas text.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "item": {
+          "description": "What.",
+          "$ref": "#/$defs/NotImportedItem"
+        }
+      },
+      "required": [
+        "item"
+      ]
+    },
+    "NotImportedItem": {
+      "description": "Kind of [`NotImported`].",
+      "oneOf": [
+        {
+          "description": "Network adapters: LightVM VMs are offline (ADR-0004).",
+          "type": "string",
+          "const": "network"
+        },
+        {
+          "description": "Shared folders: recreated later through LightVM Tools (ADR-0031).",
+          "type": "string",
+          "const": "shared_folders"
+        },
+        {
+          "description": "USB controllers and devices: recreated later through LightVM Tools.",
+          "type": "string",
+          "const": "usb"
+        },
+        {
+          "description": "Sound card.",
+          "type": "string",
+          "const": "sound"
+        },
+        {
+          "description": "3D acceleration.",
+          "type": "string",
+          "const": "accelerated3d"
+        },
+        {
+          "description": "Intermediate snapshots (only the current state is converted).",
+          "type": "string",
+          "const": "snapshots"
+        },
+        {
+          "description": "A hard disk other than the main one.",
+          "type": "string",
+          "const": "other_disk"
+        },
+        {
+          "description": "A CD/DVD drive (an ISO can be imported as a data medium).",
+          "type": "string",
+          "const": "cd_rom"
+        },
+        {
+          "description": "Floppy drive.",
+          "type": "string",
+          "const": "floppy"
+        },
+        {
+          "description": "Serial port.",
+          "type": "string",
+          "const": "serial_port"
+        },
+        {
+          "description": "Parallel port.",
+          "type": "string",
+          "const": "parallel_port"
+        },
+        {
+          "description": "Virtual printer.",
+          "type": "string",
+          "const": "printer"
+        },
+        {
+          "description": "VMware Tools features (clipboard, drag and drop, time sync):\nrecreated later through LightVM Tools (ADR-0031).",
+          "type": "string",
+          "const": "vmware_tools_features"
         }
       ]
     },
@@ -3055,6 +3317,60 @@
             "kind",
             "report"
           ]
+        },
+        {
+          "description": "Response to `preview_vmware_import`.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "vmware_import_preview"
+            },
+            "preview": {
+              "description": "What would be imported.",
+              "$ref": "#/$defs/VmwareImportPreview"
+            }
+          },
+          "required": [
+            "kind",
+            "preview"
+          ]
+        },
+        {
+          "description": "Response to `import_vmware`: the VM exists with its converted disk.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "vmware_imported"
+            },
+            "vm": {
+              "description": "New VM.",
+              "$ref": "#/$defs/VmRecord"
+            }
+          },
+          "required": [
+            "kind",
+            "vm"
+          ]
+        },
+        {
+          "description": "Response to `cancel_vmware_import`.",
+          "type": "object",
+          "properties": {
+            "cancelled": {
+              "description": "`true` if an import was in progress and is being cancelled.",
+              "type": "boolean"
+            },
+            "kind": {
+              "type": "string",
+              "const": "vmware_import_cancel"
+            }
+          },
+          "required": [
+            "kind",
+            "cancelled"
+          ]
         }
       ]
     },
@@ -3402,6 +3718,32 @@
           "required": [
             "kind",
             "session_id"
+          ]
+        },
+        {
+          "description": "Progress of the VMware import in progress (ADR-0030); published at\nmost a few times per second. The end is the reply to\n`import_vmware`.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "vmware_import_progress"
+            },
+            "percent": {
+              "description": "Percentage of the phase (0..=100).",
+              "type": "integer",
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0
+            },
+            "phase": {
+              "description": "Phase.",
+              "$ref": "#/$defs/VmwareImportPhase"
+            }
+          },
+          "required": [
+            "kind",
+            "phase",
+            "percent"
           ]
         }
       ]
@@ -4334,6 +4676,17 @@
           "description": "Declared guest operating system.",
           "$ref": "#/$defs/GuestOs"
         },
+        "imported": {
+          "description": "Hardware of a VM imported from VMware (ADR-0030), fixed at import:\ndisk controller, display adapter and CPU topology of the source VM.\n`None` for every VM created in LightVM (the profile of ADR-0027\napplies unchanged).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ImportedHardware"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "install_media": {
           "description": "Installation media from the media registry (kind `install_iso`).",
           "anyOf": [
@@ -4582,6 +4935,192 @@
         "state",
         "config",
         "config_revision"
+      ]
+    },
+    "VmwareController": {
+      "description": "Disk controller of a VMware VM.",
+      "oneOf": [
+        {
+          "description": "IDE.",
+          "type": "string",
+          "const": "ide"
+        },
+        {
+          "description": "SATA (AHCI).",
+          "type": "string",
+          "const": "sata"
+        },
+        {
+          "description": "NVMe.",
+          "type": "string",
+          "const": "nvme"
+        },
+        {
+          "description": "SCSI, VMware paravirtual (`pvscsi`).",
+          "type": "string",
+          "const": "pvscsi"
+        },
+        {
+          "description": "SCSI, LSI Logic parallel (`lsilogic`): not emulated by QEMU.",
+          "type": "string",
+          "const": "lsi_logic"
+        },
+        {
+          "description": "SCSI, LSI Logic SAS (`lsisas1068`).",
+          "type": "string",
+          "const": "lsi_sas1068"
+        },
+        {
+          "description": "SCSI, BusLogic (`buslogic`): not emulated by QEMU.",
+          "type": "string",
+          "const": "bus_logic"
+        }
+      ]
+    },
+    "VmwareDiskPreview": {
+      "description": "Main disk of a VMware VM, in [`VmwareImportPreview`].",
+      "type": "object",
+      "properties": {
+        "allocated_bytes": {
+          "description": "Bytes allocated by the files of the chain on the host.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "create_type": {
+          "description": "`createType` of the current VMDK.",
+          "type": "string"
+        },
+        "file_name": {
+          "description": "File name of the current VMDK (top of the snapshot chain).",
+          "type": "string"
+        },
+        "slot": {
+          "description": "VMware slot of the disk (`scsi0:0`, `sata0:1`, `ide0:0`, `nvme0:0`).",
+          "type": "string"
+        },
+        "snapshot_levels": {
+          "description": "Snapshot levels flattened into the converted disk (0 = no snapshot).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "virtual_size_bytes": {
+          "description": "Virtual size of the disk.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "vmware_controller": {
+          "description": "Controller of the disk in VMware.",
+          "$ref": "#/$defs/VmwareController"
+        }
+      },
+      "required": [
+        "file_name",
+        "slot",
+        "vmware_controller",
+        "create_type",
+        "virtual_size_bytes",
+        "allocated_bytes",
+        "snapshot_levels"
+      ]
+    },
+    "VmwareImportPhase": {
+      "description": "Phase of a VMware import, in [`ServiceEvent::VmwareImportProgress`].",
+      "oneOf": [
+        {
+          "description": "Examination of the `.vmx` and of the disk chain.",
+          "type": "string",
+          "const": "checking"
+        },
+        {
+          "description": "`qemu-img convert` running.",
+          "type": "string",
+          "const": "converting"
+        },
+        {
+          "description": "Check of the converted disk and creation of the VM.",
+          "type": "string",
+          "const": "finishing"
+        }
+      ]
+    },
+    "VmwareImportPreview": {
+      "description": "Outcome of the examination of a VMware VM (ADR-0030), for the UI. The\ntexts come from the user's files: they are shown, never interpreted.\nNo path is included, only file names.",
+      "type": "object",
+      "properties": {
+        "config": {
+          "description": "Configuration the import would create; the name is a suggestion\nfrom the VMware display name, the display the standard adapter.",
+          "$ref": "#/$defs/VmConfig"
+        },
+        "disk": {
+          "description": "Main disk.",
+          "$ref": "#/$defs/VmwareDiskPreview"
+        },
+        "display_name": {
+          "description": "`displayName` of the VMware VM, if present.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "free_bytes": {
+          "description": "Free bytes on the catalog volume, if measured.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "not_imported": {
+          "description": "What is not imported.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/NotImported"
+          }
+        },
+        "required_bytes": {
+          "description": "Bytes needed on the catalog volume for the converted disk\n(estimate: the data of the disk chain, at most its virtual size).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "vmware_guest_os": {
+          "description": "VMware guest type as written in the `.vmx` (`guestOS`).",
+          "type": "string"
+        },
+        "vmware_svga_offered": {
+          "description": "The VMware SVGA display adapter can be chosen (Windows guests).",
+          "type": "boolean",
+          "default": false
+        },
+        "vmware_tools_hint": {
+          "description": "The `.vmx` says the VMware Tools were installed in the guest (hint).",
+          "type": "boolean",
+          "default": false
+        },
+        "vmx_file": {
+          "description": "File name of the `.vmx`.",
+          "type": "string"
+        },
+        "warnings": {
+          "description": "Warnings the user should read before importing.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ImportWarning"
+          }
+        }
+      },
+      "required": [
+        "vmx_file",
+        "vmware_guest_os",
+        "config",
+        "disk",
+        "required_bytes"
       ]
     }
   }

@@ -1,6 +1,6 @@
 # Security
 
-Last updated: 2026-10-14 (ISOs used in place, ADR-0029); 2026-10-09 (F0 review)
+Last updated: 2026-10-14 (import of VMware VMs, ADR-0030; ISOs used in place, ADR-0029); 2026-10-09 (F0 review)
 
 Operational document required by section 17 of `docs/ROADMAP.md`: implementation of the controls and updated residual risks. **It does not weaken the threat model to make tests pass.** The requirements are in section 7 of the roadmap; this document records their operational translation and their status. No control is implemented in the product: all of them are "planned". Where an F0 spike demonstrated feasibility on the first host (Windows 11), the status reads "planned, feasibility proven in F0-xx": it is a feasibility test, not a control implemented or verified in the product (review in `docs/verification/F0-09-evidence-review.md`).
 
@@ -27,6 +27,7 @@ Operational document required by section 17 of `docs/ROADMAP.md`: implementation
 | MCP client with insufficient permissions | MCP adapter, IPC | Limited grant, check on receipt and before forwarding, rate limit |
 | Received parameters | Validation in the core, QEMU command generation | IDs instead of paths, controlled grammar of QEMU options |
 | Imported images | Media registry, QEMU | ISO used in place (ADR-0029; media imported before: managed read-only copy): absolute path resolved by the system at import, size and SHA-256; at every start opened with `FILE_SHARE_READ` only, no link on any path component, volume and final path re-checked, hash recomputed through that handle, QEMU given that path while the handle is held; never modified by LightVM; no import of external QCOW2 in the MVP |
+| VMware VMs to import (ADR-0030) | `vmware-import` parser, `qemu-img` | `.vmx` and VMDK descriptors (text or embedded in a sparse header) read with size, line and extent limits, known keys only, nothing passed to QEMU; extents and snapshot parents must be regular files inside the VM folder (no absolute path outside it, `..`, link or reparse point on any component, device, UNC or remote path), checked **before** `qemu-img` opens anything; bounded chain with consistent sizes and CIDs; raw device mappings and ESX formats refused; chain held read-only (`FILE_SHARE_READ` only) and examined twice, `qemu-img info` cross-checked against the validated files; conversion into a journal temporary, VMware files never written; the `.vmx` path chosen with the picker by the UI role only |
 | Local process without credential | IPC, QMP, display channel | Private OS channels, ACLs/permissions, per-run credentials |
 | Text in the guest instructing the agent | External agent | No LLM reasoning changes the policy; policy in the core |
 
@@ -110,6 +111,11 @@ Checklist to be completed with a reference to the verification file on the produ
 | Time to hash a large ISO at every start | Re-verification is the protection that replaces the copy | Hash off the supervisor thread with progress and cancellation (`crate::start`); same cost as for managed copies before |
 | ISO used in place writable by another process during a run on hosts without share modes (macOS, Linux) | No `FILE_SHARE_*` outside Windows | Declared limit (R2a), as for the other guarded files; on Windows the guard handle refuses writers, renames and deletions |
 | QEMU receives a path chosen by the user (ADR-0029) instead of a catalog path | Consequence of using the file in place | Path validated against QEMU's option grammar at import and at start; links, network volumes and paths inside the catalog refused |
+| VMware import: `qemu-img` parses the VMDK files itself (its `vmdk` driver reads the descriptors, sparse headers and grain tables of the user's files) | Conversion by the upstream tool (ADR-0030) | Only after LightVM validated every path of the chain; read-only; `qemu-img` runs in its own Job Object with a timeout and is terminated on cancellation; its output is cross-checked. A malformed VMDK can still exercise bugs of the `vmdk` driver of `qemu-img` (same class as QEMU vulnerabilities, kept up to date) |
+| VMware import: the files can change between the examination and the conversion on hosts without share modes (macOS, Linux) | No `FILE_SHARE_*` outside Windows | On Windows the chain is held with `FILE_SHARE_READ` only from the second examination to the end of the conversion; elsewhere a declared limit (R2a), as for the other guarded files |
+| VMware import: the `.vmx` folder path must be accepted by QEMU's option grammar | `qemu-img` receives the absolute path of the current VMDK | A path with `,`, `=`, `:`, quotes and similar characters is refused with a message (rename the folder); never escaped |
+| Windows guests imported from an LSI Logic SCSI controller may not boot (stop 0x7B) | QEMU has no LSI53C1030 emulation; the automatic offline driver enablement (ADR-0030) is not implemented yet | Clear warning in the preview and the VM settings, documented manual preparation in VMware before the import (`USER_GUIDE.md` §6.3); the VMware VM is never changed by LightVM |
+| Imported guests keep their own software (VMware Tools included) | Content of the user's VM | Offline profile; VMware Tools' host features have no counterpart in LightVM; host integration comes from LightVM Tools (ADR-0031) |
 
 ## 5. Vulnerability handling (minimal process)
 

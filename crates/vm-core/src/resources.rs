@@ -128,9 +128,15 @@ fn firmware_name(f: Firmware) -> &'static str {
 
 /// The firmware must be one the guest supports (ADR-0027): Linux boots with
 /// UEFI only, Windows XP, Vista and 7 with legacy BIOS only, Windows 8.1
-/// and 10 with either.
+/// and 10 with either. A VM imported from VMware keeps the firmware it was
+/// installed with ([`lightvm_proto::GuestOs::import_firmware`], ADR-0030:
+/// Linux also with legacy BIOS).
 pub fn check_firmware(config: &VmConfig) -> Result<(), PublicError> {
-    let allowed = config.guest_os.allowed_firmware();
+    let allowed = if config.imported.is_some() {
+        config.guest_os.import_firmware()
+    } else {
+        config.guest_os.allowed_firmware()
+    };
     if allowed.contains(&config.firmware) {
         return Ok(());
     }
@@ -156,6 +162,12 @@ pub fn check_profile_change(current: &VmConfig, new: &VmConfig) -> Result<(), Pu
             "the firmware of a VM cannot be changed after creation: the installed system would no longer boot; create a new VM instead",
         )
         .with_detail("field", "firmware"));
+    }
+    if new.imported != current.imported {
+        return Err(PublicError::invalid_argument(
+            "the hardware of an imported VM (disk controller, display, CPU topology) cannot be changed: the installed system was set up for it",
+        )
+        .with_detail("field", "imported"));
     }
     let both_linux = !current.guest_os.is_windows() && !new.guest_os.is_windows();
     if new.guest_os != current.guest_os && !both_linux {
@@ -208,8 +220,13 @@ pub fn validate_config(config: &VmConfig, limits: &ResourceLimits) -> Result<(),
         ))
         .with_detail("min", min_memory.to_string()));
     }
+    if let Some(hw) = &config.imported {
+        hw.validate(config.guest_os, config.vcpus)?;
+    }
+    // An imported disk already holds the installed system: its size is the
+    // source's (ADR-0030), not a choice the guest minimum applies to.
     let min_disk = min_disk_gib(config.guest_os);
-    if config.disk_gib < min_disk {
+    if config.imported.is_none() && config.disk_gib < min_disk {
         return Err(PublicError::invalid_argument(format!(
             "disk below the minimum for {} ({min_disk} GiB)",
             guest_name(config.guest_os)

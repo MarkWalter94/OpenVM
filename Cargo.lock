@@ -2118,6 +2118,7 @@ dependencies = [
  "tokio",
  "vm-core",
  "vm-storage",
+ "vmware-import",
  "widestring",
 ]
 
@@ -4072,6 +4073,15 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "uuid",
+]
+
+[[package]]
+name = "vmware-import"
+version = "0.0.0"
+dependencies = [
+ "lightvm-proto",
+ "proptest",
+ "serde_json",
 ]
 
 [[package]]

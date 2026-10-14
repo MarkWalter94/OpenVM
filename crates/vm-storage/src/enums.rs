@@ -260,6 +260,10 @@ str_enum!(
         /// on its own; until the whole restore commits, reconciliation puts
         /// the file back.
         DiscardFile => "discard_file",
+        /// Import of a VMware VM by conversion (schema v9, ADR-0030): the
+        /// converted disk is published as the VM's primary disk and the VM
+        /// row is inserted in the commit (target kind `vm`).
+        ImportVm => "import_vm",
     }
 );
 
@@ -273,6 +277,7 @@ impl IntentKind {
                 | Self::CopyVars
                 | Self::PromoteBaseline
                 | Self::ImportMedia
+                | Self::ImportVm
         )
     }
 }

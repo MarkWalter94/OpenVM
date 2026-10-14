@@ -208,7 +208,7 @@ Other Ubuntu versions may work but are not tested by the project.
 ## 6. Create the VM with the wizard
 
 1. On the **Dashboard**, press **New VM**. The wizard opens; move between steps with **Next** and **Back**, or leave with **Cancel**.
-2. **Name**: type a name for the VM, for example `ubuntu`. This is the only text field in LightVM; the name is used only inside LightVM. The wizard says when the name is not valid or already used.
+2. **Name**: type a name for the VM, for example `ubuntu`. This is the only text field in LightVM (the import of a VMware VM, section 6.3, has the same name field); the name is used only inside LightVM. The wizard says when the name is not valid or already used.
 3. **Installation media**: press **Import ISO…** and select `ubuntu-26.04.1-desktop-amd64.iso` in the file picker. LightVM uses the image **where it is**: it does not copy it (no disk space is used twice), it only checks it and records its SHA-256 and location. **Keep the file in that place**: LightVM never modifies, moves or deletes it, and checks it again before every start (see section 9.1 for what happens if it changes or disappears). Reading a 6 GiB image for its SHA-256 takes a minute or so. Images imported earlier are listed and can be chosen again for other VMs.
 4. **System**: LightVM looks inside the image you chose and preselects the system it detects. Check it and change it if it is wrong. If it does not recognize the image, nothing is preselected: choose the system yourself; **Next** stays disabled until you do (*Choose the system to continue*). **Ubuntu LTS (x86-64)** is the reference guest; **Other Linux (x86-64)** is listed but not tested by the project. Windows systems are described in [section 6.1](#61-create-a-windows-vm).
 5. **Data media** (optional): keep **No data media**. (A data ISO, imported with **Import data ISO…**, is attached to the VM as a read-only CD; it is not needed for the installation.)
@@ -278,6 +278,66 @@ What the wizard shows: after you import the ISO, the System step reads *Detected
 
 - **TPM 2.0 and Secure Boot** are provided by LightVM: an emulated TPM 2.0 per VM and a firmware built by the project with Secure Boot on and the Microsoft keys, so Windows setup passes its requirement check without workarounds. The TPM state belongs to the VM; baselines are planned to save and restore it together with the disk and the firmware settings (ADR-0028), so secrets sealed to the TPM (BitLocker, Windows Hello) follow the baseline they were created in.
 - **Offline only**, as for every VM: during setup choose to continue without internet / with a local account where setup offers it. If an edition of setup cannot complete offline, it cannot be installed in LightVM.
+
+### 6.3 Importing a VMware VM
+
+A VM you already have in **VMware Workstation or VMware Player** (a folder with a `.vmx` file and `.vmdk` disks) can be brought into LightVM without reinstalling the guest. LightVM **converts** the VMware disk into a new disk of its own catalog: the VMware files are only read, **never modified**, and the VM keeps working in VMware as before. The converted VM is independent: later changes in VMware do not reach it, and changes in LightVM do not reach VMware. **This is experimental: importing a real VMware VM and starting it to the desktop has not been verified yet** (ADR-0030).
+
+**Before you start**, in VMware:
+
+- **Shut the VM down** from inside the guest (Start → Shut down), not *Suspend*. A **suspended** VM is refused (*resume it in VMware and shut it down*), and so is a VM that is **running or locked** (VMware keeps `.lck` folders next to the files while the VM is open: close the VM, or VMware, first) and a VM that was **not shut down cleanly** (power it on in VMware and shut it down from the guest).
+- **Encrypted** VMs are refused: remove the encryption in VMware first (VM Settings → Options → Access Control).
+- Check the guest type in VMware (VM Settings → Options → General): LightVM maps it to its own systems (Windows XP, Vista, 7, 8.1, 10, Linux 64-bit). An **unknown or unsupported guest type** is refused, for example Windows 11, Windows Server or a 32-bit Linux. **Windows Vista 64-bit** VMs are refused on a Windows PC, as in section 6.1.
+- If the disk is on an **LSI Logic** SCSI controller and the guest is Windows, prepare it first: see [LSI Logic disks](#lsi-logic-disks) below.
+- Have enough free space on the drive of the LightVM catalog: about the space the VMware disk files use (the preview shows it).
+
+**Steps:**
+
+1. On the **Dashboard**, press **Import VMware VM** and select the `.vmx` file of the VM in the file picker.
+2. LightVM examines the VM (*Examining "….vmx" and its disks…*): it reads the `.vmx` and the descriptors of the disks, follows the chain of snapshot files and checks it with `qemu-img`. Nothing is written yet. If the VM cannot be imported, the page says why (*This VM cannot be imported: …*); fix it in VMware and press **Examine again**, or **Choose another .vmx…**.
+3. The preview shows:
+   - **Warnings** first, if any (see below);
+   - **VMware VM**: file, VMware name, guest type, the disk file with its slot and controller (for example *scsi0:0 on VMware Paravirtual SCSI*), its virtual size and the space it uses, and how many **snapshot levels** will be flattened;
+   - **New LightVM VM**: the **Name** (proposed from the VMware name; change it if you like, it must be valid and not already used), the system, firmware, virtual processors (with the VMware layout of cores per socket, kept because Windows client editions use at most one or two processor sockets), memory, disk and disk controller; **Network** is *Offline* as for every VM;
+   - **Display adapter** (Windows VMs only): **Standard VGA** works with every Windows; **VMware SVGA II** uses the VMware Tools display driver already installed in the guest (the page says when the `.vmx` shows that VMware Tools were installed). If the screen stays black or low-resolution with one choice, the setting is fixed at import: import the VM again with the other one;
+   - **Imported** and **Not imported** lists, and the space needed and free on the catalog drive. **Import** stays disabled while the name is not valid or the space is not enough.
+4. Press **Import**. The page shows the phase (*Checking the VMware files…*, *Converting the disk…*, *Checking the converted disk and creating the VM…*) and a progress bar. Converting a 60 GiB disk takes several minutes. Meanwhile LightVM keeps the VMware disk files open read-only, so VMware cannot start the VM until the import ends.
+5. When it ends (*Imported: "…" is in the catalog with its converted disk*), press **Go to the VM**: the VM is on the Dashboard, **Stopped**. Start it as any other VM (section 7 for the console).
+
+**Cancel import** stops the conversion at any time: the partial disk is removed and no VM is created (*Import cancelled*). The Emergency Stop, closing LightVM and an interruption of the computer also stop it; after a crash LightVM removes the partial disk the next time it starts. Nothing in the VMware folder is ever touched.
+
+**What is imported:** the guest system (from the VMware guest type), the virtual processors and memory (within what this PC can give; the preview warns when a value had to be lowered or raised), the firmware (**Legacy BIOS** or **UEFI**), and the **current state of the main disk**, with all its snapshot levels merged into one disk. The disk keeps its controller type, so the guest finds it with the driver it already has:
+
+| VMware disk controller | Controller in LightVM |
+| --- | --- |
+| SATA | SATA (AHCI) |
+| IDE | IDE (the VM uses the older PC chipset that has an IDE controller) |
+| NVMe | NVMe |
+| SCSI, VMware Paravirtual (PVSCSI) | VMware Paravirtual SCSI (the guest keeps its VMware PVSCSI driver) |
+| SCSI, LSI Logic SAS | LSI Logic SAS 1068 |
+| SCSI, LSI Logic (parallel) | the standard controller of the system: SATA (AHCI) for Vista and later, IDE for XP, virtio for Linux; see below |
+| SCSI, BusLogic | as LSI Logic |
+
+**What is not imported:** the snapshots themselves (only the current state is converted: the VMware snapshot tree stays in VMware), a suspended state, the network adapters (LightVM VMs are offline), sound, 3D acceleration, USB controllers and devices, serial and parallel ports, printers, floppy drives, hard disks other than the main one, and CD/DVD drives (an ISO the VM used can be imported as a data medium, section 9.1, and attached in **Edit**). **Shared folders, USB devices, clipboard and drag and drop** are not taken from the `.vmx`: they will come later through LightVM's own guest tools (*LightVM Tools*), not through VMware Tools. VMware Tools stay installed in the guest but their host features do nothing in LightVM; you can leave them or uninstall them.
+
+**UEFI VMs:** the firmware starts with new settings, so the boot entries VMware had are not carried over; the firmware starts the default boot loader on the disk, which Windows and the usual Linux distributions install. If an UEFI Linux VM does not boot, its boot loader is only registered in the old entries: reinstall it with the `--removable` option (for GRUB) from VMware before importing. Windows Vista and 7 VMs that use UEFI in VMware are refused (they need a legacy video path the LightVM firmware does not provide).
+
+#### LSI Logic disks
+
+QEMU, which runs the VMs, cannot emulate the **LSI Logic parallel SCSI** controller that VMware uses by default for many Windows VMs. LightVM attaches such a disk to the standard controller of the system (SATA AHCI for Windows Vista and later), but **Windows may not start: storage driver preparation needed**. Windows starts only from a disk controller whose driver it loads at boot; otherwise it stops with the blue screen **STOP 0x0000007B (INACCESSIBLE_BOOT_DEVICE)**. The preview warns about it, and the VM's **Edit** panel repeats the warning.
+
+An automatic preparation of the converted copy is planned (a separate spike will decide how); until then, prepare the VM **in VMware, before importing**, while it still runs on LSI Logic. Use one of these two ways.
+
+*Way 1: enable the SATA (AHCI) driver for boot in the registry.* In the Windows guest running in VMware, as an administrator:
+
+1. Open **regedit**.
+2. Windows Vista and 7: go to `HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\msahci` and set **Start** to `0`. If the keys `pciide` and `iaStorV` exist under `Services`, set their **Start** to `0` as well.
+3. Windows 8.1 and 10: go to `HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\storahci`, set **Start** to `0`, and if it has a subkey **StartOverride**, delete it (or set its value `0` to `0`).
+4. Shut Windows down cleanly from the Start menu (not Suspend), then import.
+
+*Way 2: let Windows install the driver itself.* In VMware, add a small second disk (1 GB) on a **SATA** controller to the VM (VM Settings → Add → Hard Disk → SATA), start Windows, let it find the new disk and install its driver, restart once, shut down, then remove that small disk in VMware and import. The second disk is not imported in any case.
+
+The same preparation applies if you choose to move the VM to another controller in VMware first (for example to SATA): a VM whose disk is already on SATA, PVSCSI, LSI Logic SAS, IDE or NVMe needs no preparation. Windows XP has no built-in SATA driver: an XP VM on LSI Logic is attached to IDE and needs the IDE driver enabled for boot (the standard XP *Mergeide* registry change), which the project has not verified. Linux VMs usually need no preparation: standard distributions load the driver of the new controller at boot (not verified by the project).
 
 ---
 
@@ -514,6 +574,7 @@ If you used the setup `.exe`, uninstall from **Settings → Apps → Installed a
 - **Keyboard**: Italian and English (US) layouts are the targets; other layouts and IME input are not verified.
 - **CPU model**: the VM uses a generic CPU model, not the host's (`-cpu host` does not boot on the test PC), so some guest software may run slower or detect fewer CPU features.
 - **One reference guest**: Ubuntu 26.04.1 LTS Desktop. Other guests are not tested. Windows XP, Vista, 7, 8.1 and 10 VMs can be created (section 6.1); the project has started Windows Setup from Vista 32-bit and Windows 10 images but has not completed an installation yet; Windows Vista 64-bit does not run on Windows PCs; Windows 8 and 11 are not supported.
+- **Importing VMware VMs** (section 6.3) is not verified with real VMware VMs yet; Windows VMs on LSI Logic SCSI disks need a manual preparation in VMware before the import.
 - Baselines are taken **with the VM off** only: no snapshot of a running VM, no RAM state (section 10). Baseline labels are generated by LightVM and cannot be renamed. Only one baseline operation at a time across all VMs.
 - Agent sessions (section 11): the MCP adapter `lightvm-mcp.exe` is included, but it has been verified only with a scripted test client: no real AI client (LLM) has been run against it yet, so client setup details may change. One agent session at a time; sessions never survive a restart of LightVM.
 - No console window: diagnostic messages are only in the log files (section 12).
