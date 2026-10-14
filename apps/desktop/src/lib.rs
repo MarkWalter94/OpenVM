@@ -2909,8 +2909,8 @@ impl LightVmApp {
                     ui,
                     &format!("Console · {name}"),
                     &format!(
-                        "Click the screen to send keyboard and mouse to the guest; {} gives them back.",
-                        console::LEAVE_CHORD
+                        "Click the screen to capture keyboard and mouse for the guest; {} gives them back.",
+                        console::RELEASE_CHORD
                     ),
                     |_| {},
                 );

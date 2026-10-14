@@ -782,7 +782,8 @@ pub fn console_ui(ui: &mut egui::Ui, layout: &mut crate::keymap::KeyboardLayout)
         ui.add_space(4.0);
         ui.label(
             egui::RichText::new(format!(
-                "{}: full screen on or off. {}: leave the console (exit full screen, release the keyboard). Neither reaches the guest.",
+                "Click the console to capture keyboard and mouse; {} alone releases them. {}: full screen on or off. {}: leave the console (exit full screen, release keyboard and mouse). Neither reaches the guest.",
+                crate::console::RELEASE_CHORD,
                 crate::console::FULLSCREEN_CHORD,
                 crate::console::LEAVE_CHORD
             ))

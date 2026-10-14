@@ -8,12 +8,19 @@
 //! token come from the ticket, the input from the authorised IPC path. The
 //! console exposes no text field.
 //!
+//! Capture (as in VMware): a click on the image captures keyboard and mouse
+//! (the click itself does not reach the guest); while captured the host
+//! pointer is confined to the window and hidden over the image, and every
+//! key goes to the guest. Pressing and releasing `Ctrl+Alt` alone gives both
+//! back ([`RELEASE_CHORD`]); so does losing the window focus. Without capture
+//! nothing reaches the guest, not even the pointer position.
+//!
 //! Key chords handled by LightVM and **not** forwarded to the guest (the
 //! modifiers pressed before the chord reach the guest and are released
 //! normally):
 //! - `Ctrl+Alt+Enter`: full screen on/off ([`FULLSCREEN_CHORD`]);
 //! - `Ctrl+Alt+Esc`: leave the console: exits full screen and releases the
-//!   keyboard focus ([`LEAVE_CHORD`]).
+//!   capture ([`LEAVE_CHORD`]).
 
 use std::collections::VecDeque;
 use std::sync::mpsc::{Receiver, channel};
@@ -34,6 +41,8 @@ use crate::theme::{self, Tone};
 pub const FULLSCREEN_CHORD: &str = "Ctrl+Alt+Enter";
 /// Description of the leave chord, shown in the UI.
 pub const LEAVE_CHORD: &str = "Ctrl+Alt+Esc";
+/// Description of the chord that releases keyboard and mouse, shown in the UI.
+pub const RELEASE_CHORD: &str = "Ctrl+Alt";
 
 /// Maximum console updates per second in normal mode.
 pub const DEFAULT_MAX_FPS: u32 = 30;
@@ -121,6 +130,67 @@ pub fn take_chords(
     c
 }
 
+/// Detects [`RELEASE_CHORD`]: Ctrl and the left Alt pressed together and
+/// released with no other key in between. The right Alt is not counted: on
+/// Windows AltGr arrives as Ctrl + right Alt, and AltGr is how `@`, `#`, `[`
+/// are typed on Italian and other ISO layouts.
+#[derive(Debug, Default)]
+pub struct ReleaseChord {
+    ctrl: bool,
+    alt: bool,
+    armed: bool,
+}
+
+impl ReleaseChord {
+    /// Feeds the key events of a frame; `true` when the chord completed.
+    pub fn feed(&mut self, events: &[egui::Event]) -> bool {
+        let mut fired = false;
+        for e in events {
+            let egui::Event::Key {
+                key,
+                physical_key,
+                pressed,
+                repeat,
+                ..
+            } = e
+            else {
+                continue;
+            };
+            let k = physical_key.unwrap_or(*key);
+            let slot = match k {
+                egui::Key::ControlLeft | egui::Key::ControlRight => &mut self.ctrl,
+                egui::Key::AltLeft => &mut self.alt,
+                _ => {
+                    if *pressed && !*repeat {
+                        self.armed = false;
+                    }
+                    continue;
+                }
+            };
+            *slot = *pressed;
+            if *pressed {
+                if self.ctrl && self.alt && !*repeat {
+                    self.armed = true;
+                }
+            } else if std::mem::take(&mut self.armed) {
+                fired = true;
+            }
+        }
+        fired
+    }
+
+    /// Forgets a half-typed chord (a LightVM chord used the same modifiers,
+    /// or the capture ended another way).
+    pub fn disarm(&mut self) {
+        self.armed = false;
+    }
+
+    /// Forgets everything (capture ended: modifier releases may never come).
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
 /// Largest rectangle with the guest aspect ratio inside `avail`, centred.
 pub fn fit(avail: egui::Rect, geom: (u32, u32)) -> egui::Rect {
     let (gw, gh) = (geom.0.max(1) as f32, geom.1.max(1) as f32);
@@ -140,6 +210,23 @@ pub fn to_framebuffer(rect: egui::Rect, geom: (u32, u32), p: egui::Pos2) -> Opti
     let x = ((p.x - rect.min.x) / rect.width() * geom.0 as f32).floor() as u32;
     let y = ((p.y - rect.min.y) / rect.height() * geom.1 as f32).floor() as u32;
     Some((x.min(geom.0 - 1), y.min(geom.1 - 1)))
+}
+
+/// Guest pixel nearest to a screen position (clamped to the image edge):
+/// while captured the pointer may leave the image but stays in the window.
+pub fn to_framebuffer_clamped(
+    rect: egui::Rect,
+    geom: (u32, u32),
+    p: egui::Pos2,
+) -> Option<(u32, u32)> {
+    if rect.width() <= 0.0 || rect.height() <= 0.0 {
+        return None;
+    }
+    let q = egui::pos2(
+        p.x.clamp(rect.min.x, rect.max.x - 0.01),
+        p.y.clamp(rect.min.y, rect.max.y - 0.01),
+    );
+    to_framebuffer(rect, geom, q)
 }
 
 /// State of the forwarded keys and buttons, for releasing them when focus is lost.
@@ -212,17 +299,23 @@ impl InputState {
     }
 
     /// Translates the egui events of a frame into guest input events.
-    /// - `keyboard`: the console has keyboard focus;
+    /// - `captured`: the console has captured keyboard and mouse; without
+    ///   capture nothing is forwarded except the releases of buttons
+    ///   pressed while captured;
     /// - `to_fb`: converts a screen position into guest pixels (`None`
-    ///   outside the image);
+    ///   outside the image), for buttons;
+    /// - `move_to_fb`: the same for pointer moves (clamped to the image
+    ///   edge while captured);
     /// - `geom`: current guest geometry.
     pub fn translate(
         &mut self,
         events: &[egui::Event],
-        keyboard: bool,
+        captured: bool,
         to_fb: &dyn Fn(egui::Pos2) -> Option<(u32, u32)>,
+        move_to_fb: &dyn Fn(egui::Pos2) -> Option<(u32, u32)>,
         geom: DisplayGeometry,
     ) -> Vec<InputEvent> {
+        let keyboard = captured;
         let mut out = Vec::new();
         for ev in events {
             match ev {
@@ -255,9 +348,8 @@ impl InputState {
                 egui::Event::Cut if keyboard => tap(&mut out, "x"),
                 egui::Event::Paste(_) if keyboard => tap(&mut out, "v"),
                 egui::Event::PointerMoved(pos) => {
-                    let fb = to_fb(*pos);
-                    self.pointer_inside = fb.is_some();
-                    if let Some((x, y)) = fb {
+                    self.pointer_inside = captured && to_fb(*pos).is_some();
+                    if captured && let Some((x, y)) = move_to_fb(*pos) {
                         self.push_abs(&mut out, x, y, geom);
                     }
                 }
@@ -275,6 +367,9 @@ impl InputState {
                         continue;
                     };
                     if *pressed {
+                        if !captured {
+                            continue;
+                        }
                         if let Some((x, y)) = to_fb(*pos) {
                             self.push_abs(&mut out, x, y, geom);
                             if !self.pressed_buttons.contains(&b) {
@@ -288,7 +383,7 @@ impl InputState {
                     }
                 }
                 egui::Event::MouseWheel { unit, delta, .. } => {
-                    if !self.pointer_inside || !delta.y.is_finite() {
+                    if !captured || !self.pointer_inside || !delta.y.is_finite() {
                         self.wheel_acc = 0.0;
                         continue;
                     }
@@ -417,6 +512,12 @@ pub struct LiveConsole {
     link: Link,
     input: InputState,
     had_focus: bool,
+    /// Detector of [`RELEASE_CHORD`].
+    release: ReleaseChord,
+    /// The host pointer is confined to the window (capture).
+    grabbed: bool,
+    /// Context the grab was requested on, to free it outside a frame.
+    grab_ctx: Option<egui::Context>,
     /// Input not sent yet, oldest first: the last batch keeps growing until
     /// it is sent (see [`INPUT_INTERVAL`]).
     pending: VecDeque<InputBatch>,
@@ -465,6 +566,9 @@ impl LiveConsole {
             link: Link::Connecting,
             input: InputState::default(),
             had_focus: false,
+            release: ReleaseChord::default(),
+            grabbed: false,
+            grab_ctx: None,
             pending: VecDeque::new(),
             last_sent: None,
             synthetic: None,
@@ -641,6 +745,7 @@ impl LiveConsole {
             let _ = self.input.release_all();
             self.pending.clear();
             self.had_focus = false;
+            self.ungrab();
         }
         self.input_blocked = blocked;
     }
@@ -656,17 +761,48 @@ impl LiveConsole {
         self.queue(ev);
     }
 
-    /// The page is not visible: releases the keys if it had focus.
+    /// Confines the host pointer to the window while captured, frees it
+    /// otherwise (only on a change: the command is not sent every frame).
+    fn set_grab(&mut self, ctx: &egui::Context, on: bool) {
+        if self.grabbed == on {
+            return;
+        }
+        self.grabbed = on;
+        self.grab_ctx = Some(ctx.clone());
+        let mode = if on {
+            egui::CursorGrab::Confined
+        } else {
+            egui::CursorGrab::None
+        };
+        ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(mode));
+    }
+
+    fn ungrab(&mut self) {
+        if let Some(ctx) = self.grab_ctx.clone() {
+            self.set_grab(&ctx, false);
+        }
+        self.release.reset();
+    }
+
+    /// The console has keyboard and mouse (last frame).
+    pub fn captured(&self) -> bool {
+        self.had_focus
+    }
+
+    /// The page is not visible: releases the keys and the pointer if it had
+    /// the capture.
     pub fn on_hidden(&mut self) {
         if self.had_focus {
             self.release_all();
             self.had_focus = false;
         }
+        self.ungrab();
     }
 
     /// Closes the display session; returns the last batches (key releases)
     /// to send.
     pub fn close(&mut self) -> Vec<InputBatch> {
+        self.ungrab();
         self.release_all();
         if let Some(mut s) = self.session.take() {
             s.stop();
@@ -865,6 +1001,8 @@ impl LiveConsole {
                 resp.surrender_focus();
             }
         } else if resp.clicked() || resp.drag_started() {
+            // Capture; the click itself stays with LightVM (its press was
+            // not forwarded, so its release is not either).
             resp.request_focus();
         }
         // With focus, Tab, arrows and Esc go to the guest and not to egui navigation.
@@ -879,15 +1017,27 @@ impl LiveConsole {
                 },
             );
         });
-        if chords.leave && resp.has_focus() {
-            resp.surrender_focus();
+        if chords.toggle_fullscreen || chords.leave {
+            self.release.disarm();
         }
         let window_focused = ctx.input(|i| i.focused);
-        let focused = resp.has_focus() && window_focused && !chords.leave && !self.input_blocked;
+        let release = resp.has_focus() && ctx.input(|i| self.release.feed(&i.events));
+        // Leaving the window ends the capture too: coming back needs a click.
+        if (chords.leave || release || !window_focused) && resp.has_focus() {
+            resp.surrender_focus();
+        }
+        let focused =
+            resp.has_focus() && window_focused && !chords.leave && !release && !self.input_blocked;
         if self.had_focus && !focused {
             self.release_all();
+            self.release.reset();
         }
         self.had_focus = focused;
+        self.set_grab(&ctx, focused);
+        if focused && resp.hovered() {
+            // The guest draws its own pointer.
+            ctx.set_cursor_icon(egui::CursorIcon::None);
+        }
         self.image_rect = Some(rect);
 
         let connected = matches!(self.link, Link::Connected(_));
@@ -906,11 +1056,19 @@ impl LiveConsole {
                 }
                 to_framebuffer(rect, geom, p)
             };
+            let move_to_fb = move |p: egui::Pos2| {
+                if blocked {
+                    return None;
+                }
+                to_framebuffer_clamped(rect, geom, p)
+            };
             let hover = ctx.input(|i| i.pointer.hover_pos());
             self.input
-                .set_pointer_inside(hover.and_then(&to_fb).is_some());
+                .set_pointer_inside(focused && hover.and_then(&to_fb).is_some());
             let events = ctx.input(|i| i.events.clone());
-            let out = self.input.translate(&events, focused, &to_fb, g);
+            let out = self
+                .input
+                .translate(&events, focused, &to_fb, &move_to_fb, g);
             self.queue(out);
         }
         let border = if focused {
@@ -947,6 +1105,14 @@ impl LiveConsole {
                         .color(p.text_weak),
                 )
                 .on_hover_text("Guest display resolution");
+            }
+            if !self.input_blocked {
+                let hint = if self.had_focus {
+                    format!("{RELEASE_CHORD} to release mouse and keyboard")
+                } else {
+                    "Click in the console to use mouse and keyboard".to_owned()
+                };
+                ui.label(egui::RichText::new(hint).color(p.text_weak));
             }
             let mut chosen = layout;
             let r = egui::ComboBox::from_id_salt("lightvm_console_layout")
@@ -1050,8 +1216,11 @@ mod tests {
         let mut st = InputState::default();
         let none = |_p: egui::Pos2| None;
         let ev = [k(egui::Key::ControlLeft, true), k(egui::Key::T, true)];
-        assert!(st.translate(&ev, false, &none, g(1280, 800)).is_empty());
-        let out = st.translate(&ev, true, &none, g(1280, 800));
+        assert!(
+            st.translate(&ev, false, &none, &none, g(1280, 800))
+                .is_empty()
+        );
+        let out = st.translate(&ev, true, &none, &none, g(1280, 800));
         assert_eq!(out, vec![qk("ctrl", true), qk("t", true)]);
         let rel = st.release_all();
         assert_eq!(rel, vec![qk("t", false), qk("ctrl", false)]);
@@ -1077,7 +1246,7 @@ mod tests {
                 modifiers: egui::Modifiers::NONE,
             },
         ];
-        let out = st.translate(&ev, false, &to_fb, g(1280, 800));
+        let out = st.translate(&ev, true, &to_fb, &to_fb, g(1280, 800));
         assert_eq!(
             out,
             vec![
@@ -1086,6 +1255,107 @@ mod tests {
                 btn(MouseButton::Left, false),
             ]
         );
+    }
+
+    /// Without capture nothing reaches the guest: neither the pointer
+    /// position nor the click that starts the capture.
+    #[test]
+    fn nothing_is_forwarded_without_capture() {
+        let mut st = InputState::default();
+        let to_fb = |p: egui::Pos2| Some((p.x as u32, p.y as u32));
+        let click = |pressed| egui::Event::PointerButton {
+            pos: egui::pos2(10.0, 10.0),
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let ev = [
+            egui::Event::PointerMoved(egui::pos2(10.0, 10.0)),
+            click(true),
+        ];
+        assert!(
+            st.translate(&ev, false, &to_fb, &to_fb, g(100, 100))
+                .is_empty()
+        );
+        // Captured from the next frame on: the release of that click stays
+        // with LightVM.
+        let out = st.translate(&[click(false)], true, &to_fb, &to_fb, g(100, 100));
+        assert!(out.is_empty(), "{out:?}");
+    }
+
+    /// While captured the pointer stays in the window but may leave the
+    /// image: moves are clamped to its edge, clicks outside are not sent.
+    #[test]
+    fn captured_moves_are_clamped_to_the_image() {
+        let rect = egui::Rect::from_min_size(egui::pos2(100.0, 50.0), egui::vec2(640.0, 400.0));
+        let geom = (1280, 800);
+        assert_eq!(
+            to_framebuffer_clamped(rect, geom, egui::pos2(0.0, 0.0)),
+            Some((0, 0))
+        );
+        assert_eq!(
+            to_framebuffer_clamped(rect, geom, egui::pos2(2000.0, 2000.0)),
+            Some((1279, 799))
+        );
+        let mut st = InputState::default();
+        let strict = move |p| to_framebuffer(rect, geom, p);
+        let clamped = move |p| to_framebuffer_clamped(rect, geom, p);
+        let ev = [
+            egui::Event::PointerMoved(egui::pos2(5.0, 5.0)),
+            egui::Event::PointerButton {
+                pos: egui::pos2(5.0, 5.0),
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ];
+        let out = st.translate(&ev, true, &strict, &clamped, g(1280, 800));
+        assert_eq!(
+            out,
+            vec![InputEvent::PointerMove(PointerMove { x: 0, y: 0 })]
+        );
+    }
+
+    #[test]
+    fn ctrl_alt_alone_releases_the_capture() {
+        use egui::Key::{AltLeft, AltRight, ControlLeft, Delete, Q};
+        let mut rc = ReleaseChord::default();
+        // Ctrl, Alt, release: fires once, on the first release.
+        assert!(!rc.feed(&[k(ControlLeft, true), k(AltLeft, true)]));
+        assert!(rc.feed(&[k(AltLeft, false)]));
+        assert!(!rc.feed(&[k(ControlLeft, false)]));
+        // Alt first, then Ctrl: same.
+        assert!(rc.feed(&[
+            k(AltLeft, true),
+            k(ControlLeft, true),
+            k(ControlLeft, false),
+        ]));
+        rc.feed(&[k(AltLeft, false)]);
+        // Ctrl+Alt with another key in between is for the guest.
+        assert!(!rc.feed(&[
+            k(ControlLeft, true),
+            k(AltLeft, true),
+            k(Delete, true),
+            k(Delete, false),
+            k(AltLeft, false),
+            k(ControlLeft, false),
+        ]));
+        // AltGr (Ctrl + right Alt on Windows), alone or with a key: never.
+        assert!(!rc.feed(&[k(ControlLeft, true), k(AltRight, true)]));
+        assert!(!rc.feed(&[k(AltRight, false), k(ControlLeft, false)]));
+        assert!(!rc.feed(&[
+            k(ControlLeft, true),
+            k(AltRight, true),
+            k(Q, true),
+            k(Q, false),
+            k(AltRight, false),
+            k(ControlLeft, false),
+        ]));
+        // A LightVM chord (Ctrl+Alt+Enter, swallowed before the console)
+        // disarms it.
+        assert!(!rc.feed(&[k(ControlLeft, true), k(AltLeft, true)]));
+        rc.disarm();
+        assert!(!rc.feed(&[k(AltLeft, false), k(ControlLeft, false)]));
     }
 
     #[test]
@@ -1102,22 +1372,34 @@ mod tests {
             egui::Event::PointerMoved(egui::pos2(10.0, 10.0)),
             wheel.clone(),
         ];
-        let out = st.translate(&ev, false, &inside, g(100, 100));
+        let out = st.translate(&ev, true, &inside, &inside, g(100, 100));
         assert!(out.contains(&btn(MouseButton::WheelUp, true)));
         let ev = [
             egui::Event::PointerMoved(egui::pos2(500.0, 10.0)),
             wheel.clone(),
         ];
-        assert!(st.translate(&ev, false, &inside, g(100, 100)).is_empty());
+        assert!(
+            st.translate(&ev, true, &inside, &inside, g(100, 100))
+                .is_empty()
+        );
         let ev = [egui::Event::PointerGone, wheel];
-        assert!(st.translate(&ev, false, &inside, g(100, 100)).is_empty());
+        assert!(
+            st.translate(&ev, true, &inside, &inside, g(100, 100))
+                .is_empty()
+        );
     }
 
     #[test]
     fn paste_does_not_forward_the_text() {
         let mut st = InputState::default();
         let none = |_p: egui::Pos2| None;
-        let out = st.translate(&[egui::Event::Paste("secret".into())], true, &none, g(1, 1));
+        let out = st.translate(
+            &[egui::Event::Paste("secret".into())],
+            true,
+            &none,
+            &none,
+            g(1, 1),
+        );
         assert_eq!(out, vec![qk("v", true), qk("v", false)]);
     }
 
@@ -1264,14 +1546,14 @@ mod tests {
             egui::Modifiers::NONE,
         )];
         take_chords(&mut frame, &mut swallow, &|k| st.is_forwarded(k));
-        let mut out = st.translate(&frame, true, &none, g(640, 480));
+        let mut out = st.translate(&frame, true, &none, &none, g(640, 480));
         let mut frame = vec![
             key_mod(egui::Key::Enter, true, true, ctrl_alt()),
             key_mod(egui::Key::Enter, false, false, ctrl_alt()),
         ];
         let c = take_chords(&mut frame, &mut swallow, &|k| st.is_forwarded(k));
         assert_eq!(c, Chords::default());
-        out.extend(st.translate(&frame, true, &none, g(640, 480)));
+        out.extend(st.translate(&frame, true, &none, &none, g(640, 480)));
         assert_eq!(out, vec![qk("ret", true), qk("ret", false)]);
         assert!(st.pressed_keys().is_empty());
     }
@@ -1292,7 +1574,7 @@ mod tests {
         use egui::MouseWheelUnit::{Line, Page, Point};
         let mut st = InputState::default();
         let inside = |p: egui::Pos2| Some((p.x as u32, p.y as u32));
-        let mut tr = |ev: &[egui::Event]| st.translate(ev, false, &inside, g(100, 100));
+        let mut tr = |ev: &[egui::Event]| st.translate(ev, true, &inside, &inside, g(100, 100));
         let mut ev = vec![egui::Event::PointerMoved(egui::pos2(5.0, 5.0))];
         // A touchpad gesture: 40 small events of 2.5 points = 100 points.
         ev.extend((0..40).map(|_| wheel(Point, 2.5)));

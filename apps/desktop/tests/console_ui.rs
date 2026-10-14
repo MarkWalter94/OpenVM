@@ -109,6 +109,8 @@ fn abs(px: u32, size: u32) -> u16 {
 fn coordinates_are_correct_after_resize() {
     let (mut h, hs) = console_app();
     steps(&mut h);
+    h.get_by_label("Console of ubuntu-dev").click();
+    steps(&mut h);
     for size in [
         egui::vec2(1100.0, 760.0),
         egui::vec2(900.0, 600.0),
@@ -142,15 +144,50 @@ fn coordinates_are_correct_after_resize() {
             assert_eq!(b.vm_id, common::vm_id(1));
             assert_eq!((b.geometry.width, b.geometry.height), (w, hgt));
         }
-        // Outside the image (letterbox): no movement forwarded.
-        hs.clear();
-        h.hover_at(egui::pos2(r.min.x - 3.0, r.center().y));
-        steps(&mut h);
-        assert!(
-            events(&hs).is_empty(),
-            "movement outside the image at {size:?}"
-        );
+        // Outside the image (letterbox) while captured: clamped to the edge.
+        let m = move_to(&mut h, &hs, egui::pos2(r.min.x - 3.0, r.center().y));
+        assert_eq!(m.x, 0, "movement outside the image at {size:?}");
     }
+}
+
+/// As in VMware: a click captures mouse and keyboard, Ctrl+Alt alone gives
+/// them back (the modifiers pressed meanwhile are released in the guest).
+#[test]
+fn ctrl_alt_releases_the_capture() {
+    let (mut h, hs) = console_app();
+    steps(&mut h);
+    let console = |h: &Harness<'_, LightVmApp>| h.state().live_console().unwrap().captured();
+    assert!(!console(&h));
+    h.get_by_label("Console of ubuntu-dev").click();
+    steps(&mut h);
+    assert!(console(&h), "click captures");
+    hs.clear();
+    for (key, pressed) in [
+        (egui::Key::ControlLeft, true),
+        (egui::Key::AltLeft, true),
+        (egui::Key::AltLeft, false),
+    ] {
+        h.event(egui::Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        steps(&mut h);
+    }
+    assert!(!console(&h), "Ctrl+Alt releases");
+    let k = keys(&hs);
+    assert!(
+        k.contains(&("ctrl".to_owned(), false)) && k.contains(&("alt".to_owned(), false)),
+        "modifiers released in the guest: {k:?}"
+    );
+    // Released: keys and pointer no longer reach the guest.
+    hs.clear();
+    press(&h, egui::Key::A, egui::Modifiers::NONE);
+    h.hover_at(image(&h).center());
+    steps(&mut h);
+    assert!(events(&hs).is_empty(), "{:?}", events(&hs));
 }
 
 #[test]
@@ -393,8 +430,11 @@ fn clicks_on_popups_and_dialogs_over_the_image_do_not_reach_the_guest() {
     let (mut h, hs) = console_app();
     steps(&mut h);
     let r = image(&h);
-    // Control: a click on the image reaches the guest.
+    // The first click only captures mouse and keyboard.
     hs.clear();
+    click_at(&mut h, r.center());
+    assert_eq!(buttons_sent(&hs), 0, "capture click: {:?}", events(&hs));
+    // Control: once captured, a click on the image reaches the guest.
     click_at(&mut h, r.center());
     assert_eq!(buttons_sent(&hs), 2, "control click: {:?}", events(&hs));
 

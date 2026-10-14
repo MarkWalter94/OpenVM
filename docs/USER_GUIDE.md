@@ -284,8 +284,9 @@ What the wizard shows: after you import the ISO, the System step reads *Detected
 ## 7. Install Ubuntu in the VM
 
 1. On the Dashboard, press **Start** on the VM. The state goes to **Starting**, then **Running**.
-2. Press **Console** on the VM (or open the **Console** page in the navigation and press **Open console**). The guest screen appears inside LightVM once the console shows **Connected**; click on it to send keyboard and mouse to the VM (a coloured border shows that the console has the keyboard).
-   - **Ctrl+Alt+Esc** gives the keyboard and mouse back to LightVM (and leaves full screen). Use it, for example, before pressing Tab to move between LightVM's own buttons.
+2. Press **Console** on the VM (or open the **Console** page in the navigation and press **Open console**). The guest screen appears inside LightVM once the console shows **Connected**; click on it to capture keyboard and mouse for the VM, as in VMware (a coloured border shows the capture). That first click only captures: it does not reach the guest. While captured, the Windows pointer stays inside the LightVM window and is hidden over the guest screen (the guest draws its own), and every key goes to the VM. Before capture nothing reaches the VM, not even the pointer position.
+   - **Ctrl+Alt** (press both and let go, with no other key) releases keyboard and mouse. Switching to another window releases them too; click the console again to capture them. Only the **left** Alt counts: AltGr (used to type `@`, `#`, `[` on an Italian keyboard) never releases, and neither does Ctrl+Alt followed by another key.
+   - **Ctrl+Alt+Esc** also releases keyboard and mouse, and leaves full screen.
    - **Ctrl+Alt+Enter** switches full screen on and off; the **Full screen** / **Exit full screen** button in the console toolbar does the same. Neither shortcut reaches the guest.
    - **Screenshot** saves the current guest screen as a PNG file (you choose where).
    - **Guest keyboard layout** (toolbar, **US** or **IT**; also in **Settings** → **Console**): set it to the layout configured inside the guest.
