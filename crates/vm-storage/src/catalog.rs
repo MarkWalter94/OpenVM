@@ -647,6 +647,14 @@ impl Catalog {
                     // manifest must be removed.
                     remove_baseline_leftovers(&self.layout, rel)?;
                 }
+                // An import that did not commit leaves no VM directory
+                // (created by `begin_intent`) behind.
+                if i.kind == IntentKind::ImportVm
+                    && !row_exists
+                    && let Some(rel) = &i.final_rel
+                {
+                    remove_empty_parent(&self.layout, rel);
+                }
                 if parts.is_empty() {
                     parts.push("nothing_to_undo");
                 }

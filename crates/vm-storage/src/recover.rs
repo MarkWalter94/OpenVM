@@ -5,7 +5,7 @@
 //!
 //! | Kind | Situation found | Action |
 //! | --- | --- | --- |
-//! | creation | DB row missing | removes the temporary and the orphaned final file → `aborted` |
+//! | creation | DB row missing | removes the temporary and the orphaned final file (VMware import, `import_vm`: also the empty VM directory) → `aborted` |
 //! | creation | row present, final file present | completes → `committed` |
 //! | creation | row present, file only in the temporary | completes the rename → `committed` |
 //! | creation | row present, no file | VM `recovering`, overlay `missing`, runs `failed`; baseline untouched → `aborted` |

@@ -568,3 +568,42 @@ fn managed_copies_of_a_v7_catalog_keep_working_after_the_upgrade() {
     );
     assert_eq!(cat.read(|tx| tx.media_ids()).unwrap(), [n.media_id]);
 }
+
+#[test]
+fn import_vm_intent_requires_schema_9_and_the_upgrade_keeps_the_journal() {
+    // ADR-0030: the `import_vm` kind does not exist before v9 (CHECK); the
+    // rebuild of 0009 keeps the rows, their identifiers and the sequence,
+    // after a dated backup.
+    let dir = common::tempdir();
+    let db = dir.path().join(DB_FILE);
+    let mut conn = migrate::open_connection(&db).unwrap();
+    migrate::migrate_to(&mut conn, &db, 8).unwrap();
+    let insert = |c: &rusqlite::Connection, kind: &str| {
+        c.execute(
+            "INSERT INTO journal(kind, state, target_kind, target_id, temp_path, created_at, updated_at)
+             VALUES (?1, 'aborted', 'vm', 'x', 'tmp/x.part', 'x', 'x')",
+            params![kind],
+        )
+    };
+    assert!(insert(&conn, "import_vm").is_err());
+    insert(&conn, "create_disk").unwrap();
+    let before: i64 = conn
+        .query_row("SELECT max(intent_id) FROM journal", [], |r| r.get(0))
+        .unwrap();
+    let rep = migrate::migrate(&mut conn, &db).unwrap();
+    assert_eq!((rep.from_version, rep.to_version), (8, LATEST_VERSION));
+    assert!(rep.backup.is_some(), "backup before migrating");
+    let kept: String = conn
+        .query_row(
+            "SELECT kind FROM journal WHERE intent_id = ?1",
+            params![before],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(kept, "create_disk");
+    insert(&conn, "import_vm").unwrap();
+    let after: i64 = conn
+        .query_row("SELECT max(intent_id) FROM journal", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(after, before + 1, "AUTOINCREMENT sequence kept");
+}
