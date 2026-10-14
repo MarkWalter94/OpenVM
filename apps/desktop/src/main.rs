@@ -702,6 +702,7 @@ fn main() -> std::process::ExitCode {
                     ui.set_service_exe(service_exe);
                     ui.set_folder_picker(lightvm_desktop::native_folder_picker());
                     ui.set_file_picker(lightvm_desktop::native_file_picker());
+                    ui.set_vmx_picker(lightvm_desktop::native_vmx_picker());
                     ui.set_save_picker(lightvm_desktop::native_save_picker());
                     ui.set_report_picker(lightvm_desktop::native_report_picker());
                     // Style and theme before the first frame (no frame with the

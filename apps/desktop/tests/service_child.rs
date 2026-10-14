@@ -213,6 +213,7 @@ fn vm_settings_and_open_vm_without_qemu() {
         data_media: None,
         firmware: Firmware::Uefi,
         limits: Default::default(),
+        imported: None,
     };
     assert!(s.send(ServiceCommand::Create(Box::new(vm))));
     wait_for(&s, "creation", |s| s.state().vms.len() == 1);
@@ -374,6 +375,7 @@ fn ui_role(qemu_dir: PathBuf) -> ! {
         data_media: None,
         firmware: Firmware::Uefi,
         limits: Default::default(),
+        imported: None,
     };
     assert!(s.send(ServiceCommand::Create(Box::new(vm))));
     wait_for(&s, "creation", |s| s.state().vms.len() == 1);

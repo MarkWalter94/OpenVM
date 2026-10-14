@@ -33,10 +33,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use lightvm_proto::DisplayAdapter;
 use lightvm_proto::ipc::{
     BaselineSummary, ConsoleTicket, InputOwner, ParentLossPolicy, Request, ResponseBody,
     ServerMessage, ServiceEvent, SessionApproval, SessionInfo, SessionRequestId,
-    SessionRequestInfo, SessionRequestOutcome, VmSummary,
+    SessionRequestInfo, SessionRequestOutcome, VmSummary, VmwareImportPhase, VmwareImportPreview,
 };
 use lightvm_proto::report::{
     ReportEvent, ReportFormat, SessionReport, SessionReportSummary, SessionVerifier,
@@ -45,7 +46,7 @@ use lightvm_proto::{
     BaselineId, ErrorCode, HostCapacity, InputBatch, InputEvent, KeyAction, Label, MediaId,
     MediaKind, MediaRecord, MouseButton, OperationId, OperationStatus, PointerButton, ReplyError,
     RunId, SessionId, SessionState, Sha256Digest, TerminationCause, TestOutcome, UtcTimestamp,
-    VmAction, VmConfig, VmId, VmRequest,
+    VmAction, VmConfig, VmId, VmName, VmRecord, VmRequest,
 };
 use lightvm_service::client::Client;
 use lightvm_service::credential::Credential;
@@ -746,6 +747,24 @@ pub struct ServiceState {
     pub agents: AgentState,
     /// Session reports (F5).
     pub reports: ReportsState,
+    /// Import of a VMware VM (ADR-0030).
+    pub vmware: VmwareImportState,
+}
+
+/// Import of a VMware VM as seen by the UI (ADR-0030).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct VmwareImportState {
+    /// `.vmx` the last preview was asked for.
+    pub preview_path: Option<PathBuf>,
+    /// Last preview.
+    pub preview: RequestStatus<Box<VmwareImportPreview>>,
+    /// Last import (reply after the conversion).
+    pub import: RequestStatus<VmRecord>,
+    /// Last progress event of the import in progress (cleared at every new
+    /// import and when it ends).
+    pub progress: Option<(VmwareImportPhase, u8)>,
+    /// Last cancellation request: `true` if an import was being cancelled.
+    pub cancel: RequestStatus<bool>,
 }
 
 impl ServiceState {
@@ -942,6 +961,21 @@ pub enum ServiceCommand {
     },
     /// Deletes the report and the screenshots of a terminated session.
     DeleteSessionReport(SessionId),
+    /// Examines the `.vmx` chosen by the user with the native file picker
+    /// (ADR-0030): what would be imported, what not, warnings.
+    PreviewVmwareImport(PathBuf),
+    /// Imports the VMware VM by conversion (long: the reply arrives when the
+    /// converted disk and the VM exist).
+    ImportVmware {
+        /// `.vmx` chosen in the picker.
+        path: PathBuf,
+        /// Name of the new VM.
+        name: VmName,
+        /// Display adapter.
+        display: DisplayAdapter,
+    },
+    /// Cancels the VMware import in progress.
+    CancelVmwareImport,
 }
 
 impl ServiceCommand {
@@ -1364,6 +1398,16 @@ pub fn mark_pending(
             s.reports
                 .set_shot(*session_id, *shot, RequestStatus::Pending);
         }
+        ServiceCommand::PreviewVmwareImport(path) => {
+            s.vmware.preview_path = Some(path.clone());
+            s.vmware.preview = RequestStatus::Pending;
+        }
+        ServiceCommand::ImportVmware { .. } => {
+            s.vmware.import = RequestStatus::Pending;
+            s.vmware.progress = None;
+            s.vmware.cancel = RequestStatus::Idle;
+        }
+        ServiceCommand::CancelVmwareImport => s.vmware.cancel = RequestStatus::Pending,
         c => {
             if let Some(op) = c.report_op() {
                 s.reports.action = Some(ReportControl {
@@ -1411,6 +1455,10 @@ fn fail_pending(s: &mut ServiceState, why: &str) {
         fail(&mut r.status, why);
     }
     fail(&mut s.agents.pairing, why);
+    fail(&mut s.vmware.preview, why);
+    fail(&mut s.vmware.import, why);
+    fail(&mut s.vmware.cancel, why);
+    s.vmware.progress = None;
     for (_, r) in &mut s.reports.shots {
         fail(r, why);
     }
@@ -1446,6 +1494,12 @@ fn mark_failed(s: &mut ServiceState, c: &ServiceCommand, f: Failure) {
             });
         }
         ServiceCommand::CreatePairing => s.agents.pairing = RequestStatus::Failed(f),
+        ServiceCommand::PreviewVmwareImport(_) => s.vmware.preview = RequestStatus::Failed(f),
+        ServiceCommand::ImportVmware { .. } => {
+            s.vmware.import = RequestStatus::Failed(f);
+            s.vmware.progress = None;
+        }
+        ServiceCommand::CancelVmwareImport => s.vmware.cancel = RequestStatus::Failed(f),
         ServiceCommand::ListSessionReports => s.reports.error = Some(f),
         ServiceCommand::GetSessionReport(id) => {
             if f.code == Some(ErrorCode::NotFound) {
@@ -1695,6 +1749,15 @@ async fn ipc_loop(
                     ev_lanes.queue(ServiceCommand::Refresh);
                     ev_lanes.queue(ServiceCommand::ListBaselines(vm_id));
                 }
+                Ok(Ok(ServiceEvent::VmwareImportProgress { phase, percent })) => {
+                    ev_lanes.update(|s| {
+                        // Only while this UI waits for an import: a late
+                        // event after the reply is not shown.
+                        if s.vmware.import.is_pending() {
+                            s.vmware.progress = Some((phase, percent.min(100)));
+                        }
+                    });
+                }
                 Ok(Ok(ev)) => agent_event(&ev_lanes, ev),
                 Ok(Err(m)) => {
                     let d = describe_error(&m);
@@ -1733,13 +1796,22 @@ async fn ipc_loop(
                 | ServiceCommand::ResumeSession(_)
                 | ServiceCommand::RevokeSession(_)
                 | ServiceCommand::SetInputOwner { .. }
-                | ServiceCommand::SetAgentAccess(_) => fast_in.push(c),
+                | ServiceCommand::SetAgentAccess(_)
+                // The cancellation of a VMware import never waits behind it.
+                | ServiceCommand::CancelVmwareImport => fast_in.push(c),
                 // Imports read whole ISOs (hash), exports copy files (an export can write
-                // hundreds of MiB of screenshots).
-                ServiceCommand::ImportMedia { .. } | ServiceCommand::ExportSessionReport { .. } => {
+                // hundreds of MiB of screenshots); a VMware preview reads the
+                // VM's files and runs `qemu-img info`.
+                ServiceCommand::ImportMedia { .. }
+                | ServiceCommand::ExportSessionReport { .. }
+                | ServiceCommand::PreviewVmwareImport(_) => {
                     let _ = slow_tx.send(c);
                 }
-                ServiceCommand::CreateBaseline { .. } | ServiceCommand::RestoreBaseline { .. } => {
+                // A VMware import converts a whole disk: like a baseline,
+                // the reply arrives when it ends, without timeout.
+                ServiceCommand::CreateBaseline { .. }
+                | ServiceCommand::RestoreBaseline { .. }
+                | ServiceCommand::ImportVmware { .. } => {
                     let _ = storage_tx.send(c);
                 }
                 ServiceCommand::Start(_) | ServiceCommand::OpenVm { .. } => {
@@ -2768,6 +2840,64 @@ async fn execute(c: &mut Client, lanes: &Lanes, command: ServiceCommand) -> Resu
                 m => Err(context("deletion", failure(&m))),
             }
         }
+        ServiceCommand::PreviewVmwareImport(path) => {
+            let body = Request::PreviewVmwareImport {
+                vmx_path: path.to_string_lossy().into_owned(),
+            };
+            match request(c, body).await? {
+                ServerMessage::Response {
+                    result: ResponseBody::VmwareImportPreview { preview },
+                    ..
+                } => {
+                    let mut s = lock(state);
+                    // A newer preview (another file) supersedes this one.
+                    if s.vmware.preview_path.as_ref() == Some(&path) {
+                        s.vmware.preview = RequestStatus::Done(preview);
+                    }
+                    Ok(())
+                }
+                m => Err(context("VMware VM", failure(&m))),
+            }
+        }
+        ServiceCommand::ImportVmware {
+            path,
+            name,
+            display,
+        } => {
+            let body = Request::ImportVmware {
+                vmx_path: path.to_string_lossy().into_owned(),
+                name,
+                display,
+            };
+            match request(c, body).await? {
+                ServerMessage::Response {
+                    result: ResponseBody::VmwareImported { vm },
+                    ..
+                } => {
+                    {
+                        let mut s = lock(state);
+                        s.last_outcome = Some(format!("imported: {}", vm.config.name.as_str()));
+                        s.vmware.progress = None;
+                        s.vmware.import = RequestStatus::Done(vm);
+                    }
+                    refresh_after(c, lanes).await;
+                    Ok(())
+                }
+                m => Err(context("VMware import", failure(&m))),
+            }
+        }
+        ServiceCommand::CancelVmwareImport => {
+            match request(c, Request::CancelVmwareImport).await? {
+                ServerMessage::Response {
+                    result: ResponseBody::VmwareImportCancel { cancelled },
+                    ..
+                } => {
+                    lock(state).vmware.cancel = RequestStatus::Done(cancelled);
+                    Ok(())
+                }
+                m => Err(context("cancellation", failure(&m))),
+            }
+        }
         ServiceCommand::EmergencyStop => match request(c, Request::EmergencyStop).await? {
             ServerMessage::Response {
                 result: ResponseBody::EmergencyStop(r),
@@ -3265,8 +3395,10 @@ mod tests {
                             }
                             return;
                         }
-                        let long = matches!(body, Request::CreateBaseline { .. })
-                            || matches!(&body, Request::SubmitVm { request }
+                        let long = matches!(
+                            body,
+                            Request::CreateBaseline { .. } | Request::ImportVmware { .. }
+                        ) || matches!(&body, Request::SubmitVm { request }
                                 if request.action == VmAction::Start);
                         if long {
                             while hold.load(Ordering::SeqCst) {
@@ -3658,6 +3790,95 @@ mod tests {
         };
         assert_eq!(f.code, Some(ErrorCode::StateConflict));
         assert_eq!(f.reason(), Some("baseline_referenced"));
+    }
+
+    /// ADR-0030: the `.vmx` path goes to the service as chosen; the preview
+    /// is kept; the import is a long request whose progress arrives as
+    /// events and whose cancellation is not queued behind it.
+    #[test]
+    fn vmware_import_preview_progress_and_cancel() {
+        use lightvm_proto::ipc::{
+            VmwareController, VmwareDiskPreview, VmwareImportPhase, VmwareImportPreview,
+        };
+        let preview = VmwareImportPreview {
+            vmx_file: "lab.vmx".into(),
+            display_name: None,
+            vmware_guest_os: "ubuntu-64".into(),
+            config: crate::vm_settings::default_config("lab").unwrap(),
+            disk: VmwareDiskPreview {
+                file_name: "lab.vmdk".into(),
+                slot: "sata0:0".into(),
+                vmware_controller: VmwareController::Sata,
+                create_type: "monolithicSparse".into(),
+                virtual_size_bytes: 16 << 30,
+                allocated_bytes: 1 << 30,
+                snapshot_levels: 0,
+            },
+            required_bytes: 1 << 30,
+            free_bytes: None,
+            not_imported: Vec::new(),
+            warnings: Vec::new(),
+            vmware_svga_offered: false,
+            vmware_tools_hint: false,
+        };
+        let record = VmRecord {
+            id: VmId::new_v7(),
+            config: preview.config.clone(),
+            config_revision: 1,
+            persisted_state: lightvm_proto::VmState::Stopped,
+            created_at: UtcTimestamp::now(),
+        };
+        let (p2, r2) = (preview.clone(), record.clone());
+        let server = fake::start(Arc::new(move |r: &Request| match r {
+            Request::PreviewVmwareImport { .. } => Ok(ResponseBody::VmwareImportPreview {
+                preview: Box::new(p2.clone()),
+            }),
+            Request::ImportVmware { .. } => Ok(ResponseBody::VmwareImported { vm: r2.clone() }),
+            Request::CancelVmwareImport => Ok(ResponseBody::VmwareImportCancel { cancelled: true }),
+            r => base_reply(r),
+        }));
+        server.hold_baseline.store(true, Ordering::SeqCst);
+        let l = Loop::start(server.endpoint.clone());
+        let vmx = PathBuf::from(r"D:\VMs\lab\lab.vmx");
+        assert!(l.send(ServiceCommand::PreviewVmwareImport(vmx.clone())));
+        l.wait(
+            "preview",
+            |s| matches!(&s.vmware.preview, RequestStatus::Done(p) if **p == preview),
+        );
+        assert!(requested(&server, |r| matches!(
+            r,
+            Request::PreviewVmwareImport { vmx_path } if vmx_path == r"D:\VMs\lab\lab.vmx"
+        )));
+        let name = VmName::parse("lab").unwrap();
+        assert!(l.send(ServiceCommand::ImportVmware {
+            path: vmx,
+            name: name.clone(),
+            display: DisplayAdapter::Standard,
+        }));
+        l.wait("import received", |_| {
+            requested(
+                &server,
+                |r| matches!(r, Request::ImportVmware { name: n, .. } if *n == name),
+            )
+        });
+        lock(&server.events).push(ServiceEvent::VmwareImportProgress {
+            phase: VmwareImportPhase::Converting,
+            percent: 37,
+        });
+        l.wait("progress", |s| {
+            s.vmware.progress == Some((VmwareImportPhase::Converting, 37))
+        });
+        // Held import: the cancellation is answered meanwhile.
+        assert!(l.send(ServiceCommand::CancelVmwareImport));
+        l.wait("cancel answered", |s| {
+            s.vmware.cancel == RequestStatus::Done(true)
+        });
+        assert!(l.state().vmware.import.is_pending());
+        server.hold_baseline.store(false, Ordering::SeqCst);
+        l.wait("import done", |s| {
+            s.vmware.import == RequestStatus::Done(record.clone())
+        });
+        assert_eq!(l.state().vmware.progress, None);
     }
 
     /// A start replies only after the verification of media and baseline

@@ -922,3 +922,54 @@ fn snapshot_report_dialogs() {
     h.run();
     h.snapshot("dialog_report_delete");
 }
+
+/// "Import VMware VM" page opened with a fake `.vmx` picker.
+fn open_vmware_import() -> (Harness<'static, LightVmApp>, common::Handles) {
+    let (mut app, hs) = app(catalog());
+    app.set_vmx_picker(Some(Box::new(|_t: &str| {
+        Some(std::path::PathBuf::from(
+            r"D:\VMs\Windows 7 x64\Windows 7 x64.vmx",
+        ))
+    })));
+    let mut h = harness(app, egui::vec2(1100.0, 1500.0));
+    h.get_by_role_and_label(Role::Button, "Import VMware VM")
+        .click();
+    // The examination shows a spinner: fixed number of steps.
+    h.run_steps(4);
+    (h, hs)
+}
+
+/// ADR-0030: preview of a Windows VM on LSI Logic (storage driver warning,
+/// display choice).
+#[test]
+fn snapshot_vmware_import_lsilogic() {
+    use lightvm_desktop::service::RequestStatus;
+    let _serial = serial();
+    let (mut h, hs) = open_vmware_import();
+    hs.update(|s| {
+        s.vmware.preview = RequestStatus::Done(Box::new(common::vmware_preview_lsilogic()));
+    });
+    h.run_steps(4);
+    h.snapshot("vmware_import_preview_lsilogic");
+}
+
+/// ADR-0030: preview of a Linux VM on PVSCSI, then the progress of the
+/// conversion.
+#[test]
+fn snapshot_vmware_import_linux_progress() {
+    use lightvm_desktop::service::RequestStatus;
+    let _serial = serial();
+    let (mut h, hs) = open_vmware_import();
+    hs.update(|s| {
+        s.vmware.preview = RequestStatus::Done(Box::new(common::vmware_preview_linux()));
+    });
+    h.run_steps(4);
+    h.snapshot("vmware_import_preview_linux");
+    h.get_by_role_and_label(Role::Button, "Import").click();
+    h.run_steps(4);
+    hs.update(|s| {
+        s.vmware.progress = Some((lightvm_proto::ipc::VmwareImportPhase::Converting, 42));
+    });
+    h.run_steps(4);
+    h.snapshot("vmware_import_progress");
+}
