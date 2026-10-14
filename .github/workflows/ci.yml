@@ -16,18 +16,20 @@
 # runners (docs/verification/F0-07-linux-kvm.md, "Proposta: CI minima per F1").
 # Tests that require a real QEMU are `#[ignore]`.
 #
-# No secrets, no lab access: read-only permissions, it also runs on PRs
-# from forks. Only actions pinned to a commit SHA; no third-party actions
-# besides checkout and cache (the MSVC environment is loaded with
+# Runs only when a tag is pushed (owner decision): pushes to branches and pull
+# requests do not trigger it; the full check before a commit is
+# scripts/regression.ps1 on the developer machine.
+#
+# No secrets, no lab access: read-only permissions. Only actions pinned to a
+# commit SHA; no third-party actions besides checkout and cache (the MSVC
+# environment is loaded with
 # vswhere/vcvars64, already present on the Windows image).
 
 name: CI
 
 on:
   push:
-    branches: [main]
-  pull_request:
-  workflow_dispatch:
+    tags: ["*"]
 
 permissions:
   contents: read
