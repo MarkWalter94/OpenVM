@@ -29,6 +29,10 @@
 //! - [`boot_prompt`]: automatic key at the "Press any key to boot from CD or
 //!   DVD" prompt of the Windows UEFI media, for a disk without an installed
 //!   system only.
+//! - [`vcpu_fault`]: a guest whose virtual CPUs stop on an error
+//!   (`internal-error`, for example a triple fault under WHPX) is reset and
+//!   resumed as hardware would, within a rate limit, then left stopped and
+//!   reported.
 //!
 //! # `unsafe` code
 //!
@@ -71,6 +75,7 @@ pub mod screenshot;
 pub mod storage_guard;
 mod sys;
 pub mod validate;
+pub mod vcpu_fault;
 
 pub use cmdline::{
     Accelerator, CdromBus, CpuModel, CpuPolicy, DeviceProfile, DiskBus, DiskFormat, DiskSpec,
@@ -93,3 +98,4 @@ pub use run::{
     RunConfig, ShutdownPolicy, StopPhase,
 };
 pub use screenshot::CapturedScreenshot;
+pub use vcpu_fault::{VcpuFaultEvent, VcpuFaultPolicy, VcpuFaults};

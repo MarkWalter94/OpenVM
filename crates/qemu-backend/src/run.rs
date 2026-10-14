@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 
 use lightvm_proto::{
     BackendObservation, DisplayGeometry, InputEvent, KeyAction, ObservationSource, ObservedState,
-    QCode, RunId, UtcTimestamp, VmState,
+    QCode, RunId, UtcTimestamp, VmState, ipc::VcpuHalt,
 };
 use tokio::sync::{broadcast, watch};
 
@@ -53,6 +53,9 @@ use crate::qmp::{
 };
 use crate::screenshot::{CapturedScreenshot, RgbImage};
 use crate::storage_guard::StorageGuards;
+use crate::vcpu_fault::{
+    VcpuFaultEvent, VcpuFaultPolicy, VcpuFaults, reset_and_resume, watch_vcpu_faults,
+};
 
 pub use crate::process::EMERGENCY_EXIT_CODE;
 
@@ -102,6 +105,9 @@ pub struct RunConfig {
     pub max_screenshot_bytes: u64,
     /// Leaves the vCPUs paused after the checks (no `cont`).
     pub leave_paused: bool,
+    /// Automatic reset of a guest whose vCPUs stop on an error
+    /// ([`crate::vcpu_fault`]).
+    pub vcpu_faults: VcpuFaultPolicy,
 }
 
 impl Default for RunConfig {
@@ -112,6 +118,7 @@ impl Default for RunConfig {
             screendump_timeout: Duration::from_secs(10),
             max_screenshot_bytes: 32 * 1024 * 1024,
             leave_paused: false,
+            vcpu_faults: VcpuFaultPolicy::default(),
         }
     }
 }
@@ -569,6 +576,10 @@ pub struct QemuRun {
     guards: StorageGuards,
     /// When the vCPUs were started (`cont`), if they were.
     vcpus_started: Option<Instant>,
+    /// Faults of the guest's vCPUs ([`crate::vcpu_fault`]).
+    faults: Arc<VcpuFaults>,
+    /// Watcher of the vCPU faults, aborted with the run.
+    fault_watch: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl QemuRun {
@@ -693,9 +704,11 @@ impl QemuRun {
                 enabled: String::new(),
                 present: vec![],
             },
+            faults: Arc::new(VcpuFaults::new(cfg.vcpu_faults)),
             cfg,
             guards,
             vcpus_started: None,
+            fault_watch: None,
         };
         match run.post_start_checks(spec).await {
             Ok(acc) => {
@@ -719,6 +732,11 @@ impl QemuRun {
                         stderr_tail: read_stderr_tail(&run.command.stderr),
                     });
                 }
+                run.fault_watch = Some(tokio::spawn(watch_vcpu_faults(
+                    run.qmp.clone(),
+                    run.state_tx.subscribe(),
+                    run.faults.clone(),
+                )));
                 Ok(run)
             }
             Err(e) => {
@@ -957,10 +975,27 @@ impl QemuRun {
         Ok(self.qmp.network_diagnostics().await?)
     }
 
-    /// `system_reset`.
+    /// `system_reset`; a guest whose vCPUs were stopped on an error
+    /// (`internal-error`, `guest-panicked`) or before start is resumed with
+    /// `cont` after the reset ([`crate::vcpu_fault::reset_and_resume`]), and
+    /// its halt is cleared.
     pub async fn reset(&self) -> Result<()> {
         self.ensure_running()?;
-        Ok(self.qmp.system_reset().await?)
+        reset_and_resume(&self.qmp).await?;
+        self.faults.cleared();
+        Ok(())
+    }
+
+    /// The guest's vCPUs are stopped on an error and were not reset
+    /// automatically (limit reached, failed reset or guest panic).
+    pub fn vcpu_halt(&self) -> Option<VcpuHalt> {
+        self.faults.halt()
+    }
+
+    /// Decisions of the vCPU fault watcher since the last call (automatic
+    /// resets, halts), for the owner's log and audit.
+    pub fn take_vcpu_fault_events(&self) -> Vec<VcpuFaultEvent> {
+        self.faults.take_events()
     }
 
     /// Screenshot via `screendump` (file chosen by the backend in the private
@@ -1269,6 +1304,9 @@ impl QemuRun {
 
 impl Drop for QemuRun {
     fn drop(&mut self) {
+        if let Some(w) = self.fault_watch.take() {
+            w.abort();
+        }
         // Losing the object means losing control of the run:
         // the process is terminated (closing the Job Object with the last
         // reference to the container would do it anyway).

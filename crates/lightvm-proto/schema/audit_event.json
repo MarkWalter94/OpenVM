@@ -333,6 +333,11 @@
           "description": "Deletion of an imported medium from the registry (user only): a\nmanaged copy is removed with it, a file used in place is kept.",
           "type": "string",
           "const": "media_delete"
+        },
+        {
+          "description": "Automatic reset of a guest whose virtual CPUs stopped on an\nunrecoverable error (QEMU `internal-error`, for example a triple fault\nunder WHPX), as hardware would reset: `succeeded` (reset and resumed),\n`failed` (QMP refused), `denied` with `resource_limit` (too many in a\nshort time: the guest is left stopped for the user). Actor `system`.",
+          "type": "string",
+          "const": "vm_auto_reset"
         }
       ]
     },

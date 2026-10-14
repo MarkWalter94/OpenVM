@@ -88,6 +88,8 @@ Observed state derived from the process and QMP, not from the database alone (se
 | Failed | Startup error or unexpected exit | recover, diagnostics | No automatic promotion to baseline |
 | Recovering | Reconciliation after a crash | no external mutation | Applies the journal, checks files and processes |
 
+**Guest stopped on a virtual CPU error.** The process can be alive while the guest no longer runs. On a guest triple fault, real hardware and KVM reset the machine. Under WHPX, QEMU 11.1 logs `WHPX: Unexpected VP exit code 4`, stops the vCPUs and leaves run state `internal-error` (QMP `STOP`). The VM stays `Running` in this table, because the process is alive and QMP is ready. Each run watches its QMP events (`qemu_backend::vcpu_fault`). On `STOP` it reads `query-status`. For `internal-error` it behaves as hardware: `system_reset`, then `cont` once QEMU has moved the guest to `prelaunch`. The limit is 3 automatic resets in 120 s. The next fault leaves the guest stopped and is reported in the VM summary (`vcpu_halt`). The UI shows it with reset and force stop. Input is refused with `state_conflict` (`reason=vcpu_halted`) instead of QEMU's `VM not running`. Each decision is logged and audited (`vm_auto_reset`, actor `system`). A user reset of such a guest sends `cont` after the reset. `guest-panicked` is reported, never reset automatically. **[verified with synthetic QMP: `R2c-01`, 2026-10-14; not yet against the real Vista fault]**
+
 ## 5. Per-VM operation queue
 
 - One mutation queue per VM; incompatible operations blocked (`vm_busy`, `state_conflict`).

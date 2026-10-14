@@ -224,6 +224,29 @@ fn keyboard_goes_as_batches_only_with_focus_and_is_released_on_focus_loss() {
     assert!(h.state().live_console().is_some_and(|c| !c.has_focus()));
 }
 
+/// A guest stopped on a virtual CPU error: the console says why input does
+/// not reach it, instead of the bare refusal code.
+#[test]
+fn vcpu_halt_replaces_the_input_refusal_code() {
+    use lightvm_proto::ipc::{VcpuHalt, VcpuHaltReason};
+    let (mut h, hs) = console_app();
+    hs.update(|s| s.input_error = Some("input refused: state_conflict".into()));
+    steps(&mut h);
+    h.get_by_label("input refused: state_conflict");
+    hs.update(|s| {
+        s.vms[0].vcpu_halt = Some(VcpuHalt {
+            reason: VcpuHaltReason::InternalError,
+            automatic_resets: 0,
+        });
+    });
+    steps(&mut h);
+    assert!(h.query_by_label("input refused: state_conflict").is_none());
+    h.get_by_label(
+        "Stopped on a virtual CPU error: the guest hit an unrecoverable error. Keyboard and \
+         mouse cannot reach it. Reset it, or force stop it and start it again.",
+    );
+}
+
 #[test]
 fn chords_toggle_full_screen_and_leave_without_reaching_the_guest() {
     let (mut h, hs) = console_app();

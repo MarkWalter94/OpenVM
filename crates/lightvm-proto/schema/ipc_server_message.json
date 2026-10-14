@@ -4180,6 +4180,41 @@
       "type": "string",
       "format": "date-time"
     },
+    "VcpuHalt": {
+      "description": "Guest whose virtual CPUs stopped and were not restarted automatically, in\n[`VmSummary::vcpu_halt`]. A reset (`reset`) restarts the guest; a forced\nstop ends the run.",
+      "type": "object",
+      "properties": {
+        "automatic_resets": {
+          "description": "Automatic resets done in the recent window before the service gave up\n(0 when the reason is not reset automatically).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "reason": {
+          "description": "Why the virtual CPUs stopped.",
+          "$ref": "#/$defs/VcpuHaltReason"
+        }
+      },
+      "required": [
+        "reason",
+        "automatic_resets"
+      ]
+    },
+    "VcpuHaltReason": {
+      "description": "Cause of a [`VcpuHalt`].",
+      "oneOf": [
+        {
+          "description": "Unrecoverable virtual CPU error reported by the accelerator (QEMU\nrun state `internal-error`; for example a guest triple fault under\nWHPX, which real hardware would answer with a reset).",
+          "type": "string",
+          "const": "internal_error"
+        },
+        {
+          "description": "The guest reported a panic (QEMU run state `guest-panicked`).",
+          "type": "string",
+          "const": "guest_panicked"
+        }
+      ]
+    },
     "Verdict": {
       "description": "A verdict on the session, with its source and rationale.",
       "type": "object",
@@ -4524,6 +4559,17 @@
         "state": {
           "description": "Current state as seen by the core (derived from the process and QMP).",
           "$ref": "#/$defs/VmState"
+        },
+        "vcpu_halt": {
+          "description": "The guest's virtual CPUs stopped on an error and stay stopped (state\n`running`: the QEMU process is alive, the guest is not). Absent while\nthe guest runs. Additive field: older clients ignore it.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VcpuHalt"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "vm_id": {
           "description": "VM.",

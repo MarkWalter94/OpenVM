@@ -1021,6 +1021,31 @@ where
         );
     }
 
+    /// Records an automatic reset decided by the backend for a guest whose
+    /// virtual CPUs stopped on an unrecoverable error (audit `vm_auto_reset`,
+    /// actor `system`): `succeeded`, `failed` with the code, or `denied` with
+    /// `resource_limit` when the backend gave up and left the guest stopped.
+    /// The VM state does not change: the process is alive.
+    pub fn record_auto_reset(
+        &mut self,
+        vm_id: VmId,
+        run_id: RunId,
+        outcome: AuditOutcome,
+        error: Option<ErrorCode>,
+    ) {
+        self.emit_after(
+            Actor::System,
+            AuditAction::VmAutoReset,
+            outcome,
+            Ev {
+                vm_id: Some(vm_id),
+                run_id: Some(run_id),
+                error,
+                ..Ev::default()
+            },
+        );
+    }
+
     /// Side-effect-free authorization check of a call (no audit, no
     /// admission): used by the supervisor to decide whether a costly
     /// preparatory step (for example re-reading the display geometry with a

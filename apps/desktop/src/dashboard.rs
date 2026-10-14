@@ -4,7 +4,7 @@
 //! chosen [`DashboardAction`], so it can be tested without processes.
 
 use egui::WidgetType;
-use lightvm_proto::ipc::{StartPhase, StartProgress, VmSummary};
+use lightvm_proto::ipc::{StartPhase, StartProgress, VcpuHalt, VcpuHaltReason, VmSummary};
 use lightvm_proto::{GuestOs, VmId, VmState};
 
 use crate::service::{BaselineList, ServiceCommand, ServiceState};
@@ -184,6 +184,33 @@ pub fn start_fraction(p: &StartProgress) -> Option<f32> {
         .then(|| (p.verified_bytes.min(p.total_bytes) as f64 / p.total_bytes as f64) as f32)
 }
 
+/// Guest of a running VM stopped on a virtual CPU error (the QEMU process is
+/// alive, the guest does not run), if the supervisor reports one.
+pub fn vcpu_halt(v: &VmSummary) -> Option<VcpuHalt> {
+    v.vcpu_halt.filter(|_| v.state == VmState::Running)
+}
+
+/// Short label of a [`VcpuHalt`] (pill and console notice title).
+pub const VCPU_HALT_LABEL: &str = "Stopped on a virtual CPU error";
+
+/// What happened to a guest stopped on a virtual CPU error, and what to do.
+pub fn vcpu_halt_text(h: &VcpuHalt) -> String {
+    let what = match h.reason {
+        VcpuHaltReason::InternalError if h.automatic_resets > 0 => format!(
+            "{VCPU_HALT_LABEL}: the guest hit an unrecoverable error again after {} automatic restart{}.",
+            h.automatic_resets,
+            if h.automatic_resets == 1 { "" } else { "s" }
+        ),
+        VcpuHaltReason::InternalError => {
+            format!("{VCPU_HALT_LABEL}: the guest hit an unrecoverable error.")
+        }
+        VcpuHaltReason::GuestPanicked => "The guest reported a crash and is stopped.".to_owned(),
+    };
+    format!(
+        "{what} Keyboard and mouse cannot reach it. Reset it, or force stop it and start it again."
+    )
+}
+
 /// Space on the host above which the VM disk is considered to hold an
 /// installed system (a fresh disk occupies a few MiB).
 pub const INSTALLED_DISK_BYTES: u64 = 1 << 30;
@@ -236,6 +263,7 @@ fn vm_row(
     // A baseline operation in progress: the VM is busy.
     let busy = v.baselines.operation;
     let busy_hover = "A baseline operation is in progress on this VM";
+    let halt = vcpu_halt(v);
     ui.horizontal(|ui| {
         ui.set_min_height(46.0);
         let left = (ui.available_width() - ACTIONS_WIDTH - 12.0).max(150.0);
@@ -251,6 +279,9 @@ fn vm_row(
                             .truncate(),
                     );
                     theme::pill(ui, state_text, tone);
+                    if halt.is_some() {
+                        theme::pill(ui, "vCPU error", Tone::Danger);
+                    }
                     if let Some(op) = busy {
                         theme::pill(ui, crate::baselines::operation_label(op), Tone::Warning);
                     }
@@ -398,6 +429,31 @@ fn vm_row(
             },
         );
     });
+    if let Some(h) = halt {
+        theme::notice(ui, &vcpu_halt_text(&h), Tone::Danger);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            if action_button(
+                ui,
+                active && v.run_id.is_some(),
+                egui::Button::new("Reset…"),
+                &format!("Reset {name}"),
+                "Restarts the guest, like the reset button",
+            ) {
+                *choice = Some(DashboardAction::Confirm(Confirm::Reset(v.vm_id)));
+            }
+            if action_button(
+                ui,
+                active,
+                egui::Button::new("Force stop…"),
+                &format!("Force stop {name}"),
+                "Terminates the VM at once; then start it again",
+            ) {
+                *choice = Some(DashboardAction::Confirm(Confirm::ForceStop(v.vm_id)));
+            }
+        });
+        ui.add_space(4.0);
+    }
     if install_media_pending(v) {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;

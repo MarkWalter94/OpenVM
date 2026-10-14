@@ -543,6 +543,11 @@ pub struct FakeVmBackend {
     /// Delay of every input forwarding (stop-latency measurements: a slow
     /// backend keeps the supervisor busy).
     pub input_delay: Option<std::time::Duration>,
+    /// Guests stopped on a vCPU error, injected by the test; cleared by a
+    /// reset, as the QEMU backend does.
+    pub vcpu_halts: Arc<Mutex<BTreeMap<VmId, lightvm_proto::ipc::VcpuHalt>>>,
+    /// Automatic resets to report, injected by the test.
+    pub auto_resets: Arc<Mutex<Vec<crate::engine::AutoReset>>>,
 }
 
 /// Outcomes of background graceful stops injected by a test.
@@ -590,8 +595,9 @@ impl VmBackend for FakeVmBackend {
         lock(&self.emergency_killed).remove(&vm_id);
         Ok(())
     }
-    fn reset(&mut self, _vm_id: VmId, _run_id: RunId) -> Result<(), PublicError> {
+    fn reset(&mut self, vm_id: VmId, _run_id: RunId) -> Result<(), PublicError> {
         push(&self.calls, "vm_reset");
+        lock(&self.vcpu_halts).remove(&vm_id);
         Ok(())
     }
     fn screenshot(
@@ -664,6 +670,12 @@ impl BackendPort for FakeVmBackend {
     }
     fn take_exits(&mut self) -> Vec<(VmId, RunId, bool)> {
         std::mem::take(&mut self.exits)
+    }
+    fn vcpu_halt(&self, vm_id: VmId, _run_id: RunId) -> Option<lightvm_proto::ipc::VcpuHalt> {
+        lock(&self.vcpu_halts).get(&vm_id).copied()
+    }
+    fn take_auto_resets(&mut self) -> Vec<crate::engine::AutoReset> {
+        std::mem::take(&mut *lock(&self.auto_resets))
     }
     fn drain_observations(&mut self) -> Vec<(VmId, BackendObservation)> {
         if let Some(g) = &self.gate {

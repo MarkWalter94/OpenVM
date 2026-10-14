@@ -153,6 +153,7 @@ Started on 2026-10-12 at the owner's request (ADR-0027); it does not change the 
 | SeaBIOS (`bios-256k.bin`, pinned hash) under WHPX with `Skylake-Client-v4` on `pc-q35-11.1` and `pc-i440fx-11.1` | `R2c-01` | verified with the Ubuntu ISO only (boot loader and kernel reached, no `Unexpected VP exit`) |
 | Detection and Windows Setup from real media: Vista x86 (BIOS), Windows 10 x64 (UEFI, CD prompt answered by the backend) and x86 (BIOS) | `R2c-01` | verified up to the first Setup page |
 | Windows Vista x64 on Windows hosts | ADR-0027, `R2c-01` | not supported: `STOP 0x5C` under WHPX; refused by `vm-core` and the wizard |
+| Guest stopped on a virtual CPU error (`WHPX: Unexpected VP exit code 4`, a triple fault; QEMU leaves it in `internal-error`), seen at Vista x86's first Setup reboot | `R2c-01` (2026-10-14) | handled: automatic `system_reset` + `cont` as on hardware, at most 3 in 120 s, audited (`vm_auto_reset`); past the limit the Dashboard and console say so and offer reset/force stop. Verified with synthetic QMP and UI tests; the Vista installation with the new build is not yet verified |
 | Install, reboot, pointer/keyboard, shutdown, baseline/restore for each Windows system | `R2c-01` (pending) | not verified: no Windows installation completed; XP, 7 and 8.1 media missing |
 | Ubuntu/KVM host for Windows guests (R2c) | — | not verified (no physical Linux host, ADR-0016) |
 

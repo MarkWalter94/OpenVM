@@ -136,6 +136,22 @@ No QEMU process was left after any VM or at the end.
 
 **Test bug found on the way.** The first version of the test accepted any frame with 1 % lit pixels and took the Vista x64 stop screen for Setup; a second version required that no colour covered 90 % of the frame and rejected the flat purple background of the Windows 10 Setup. The distinct-colour criterion above separates the recorded frames (stop screens 2 colours, UEFI Shell 4, Windows 10 Setup 852).
 
+## Vista x86 installation: virtual CPU error at the first Setup reboot (2026-10-14)
+
+Host as above (Windows 11 x86_64, WHPX, QEMU 11.1.0). The user installed Vista x86 from the desktop app (VM Vista, Legacy BIOS, q35, AHCI, UHCI tablet, the profile of the table above).
+
+**Observed.** About 22 minutes into Setup, at its first reboot, the QEMU log of the run recorded `WHPX: Unexpected VP exit code 4` twice. Exit code 4 is `WHvRunVpExitReasonUnrecoverableException`: the guest triple-faulted. Real hardware or KVM resets the machine at that point. Under WHPX, QEMU 11.1 stops the virtual CPUs and moves the guest to run state `internal-error` (QMP `STOP`), while the process stays alive. LightVM did not notice. The VM stayed *Running* in the app, the console showed the last frame, and every keyboard and mouse batch was refused as `input refused: infrastructure_error`. In the service log that refusal reads `QEMU rejected input-send-event: GenericError: VM not running`. The installation could only go on after a forced stop and a new start. Not investigated: why the reboot triple-faults under WHPX (Vista's reboot path, the SeaBIOS reset vector or WHPX itself).
+
+**New behaviour** (`qemu_backend::vcpu_fault`, run supervision in `docs/ARCHITECTURE.md`):
+
+- The run follows its QMP events. On `STOP`, it reads `query-status`. For `internal-error`, it does what hardware does on a triple fault: `system_reset`, then `cont`. QEMU moves the guest to `prelaunch` after a reset from `internal-error` and refuses `cont` until the reset has happened, so the state is polled in between.
+- At most 3 automatic resets within 120 s. A 4th fault in that window leaves the guest stopped. The VM summary then reports `vcpu_halt` (`internal_error`, number of automatic resets). The Dashboard shows the notice "Stopped on a virtual CPU error…" with Reset and Force stop. The console shows the same text in place of the refusal code, and the service refuses input with `state_conflict` (`reason=vcpu_halted`).
+- Every decision goes to the service log and to the audit, as `vm_auto_reset` with actor `system`: `succeeded`, `failed`, or `denied` with `resource_limit` when the limit is reached.
+- The Reset action works on such a guest: reset, then `cont`, then the halt is cleared.
+- `guest-panicked` is never reset automatically. It is reported as a halt.
+
+**Verified** with the synthetic QMP server only (`qemu-backend` `tests/qmp_mock.rs`: automatic reset and `cont` twice; limit reached, left in `internal-error`, then the user's reset resumes it), with the policy unit tests (`vcpu_fault`), the supervisor test (summary, state event, audit, reset), and the Dashboard and console UI tests. Not yet verified: the same Vista x86 installation with the new build (whether one automatic reset lets Setup continue).
+
 ## Required actions
 
 - Obtain installation media for the systems above from the user (LightVM does not redistribute Windows images; licences are the user's). Vista and Windows 10 media are available; XP, 7 and 8.1 are missing.

@@ -45,7 +45,7 @@ use std::sync::Arc;
 
 use lightvm_proto::ipc::{
     AgentCall, AgentVmView, BaselineSummary, InputOwner, ResponseBody, SCREENSHOT_CHUNK_BYTES,
-    SessionInfo, StorageOperation, VmBaselines, VmSummary,
+    SessionInfo, StorageOperation, VcpuHalt, VmBaselines, VmSummary,
 };
 use lightvm_proto::{
     Actor, Admission, AuditAction, AuditOutcome, BackendObservation, BaselineId, Caller,
@@ -679,11 +679,36 @@ pub struct ConsoleTarget {
     pub geometry: Option<DisplayGeometry>,
 }
 
+/// Automatic reset decided by the backend for a guest whose virtual CPUs
+/// stopped on an unrecoverable error (audit `vm_auto_reset`, actor `system`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutoReset {
+    /// VM.
+    pub vm_id: VmId,
+    /// Run.
+    pub run_id: RunId,
+    /// `succeeded` (reset and resumed), `failed` (QMP refused) or `denied`
+    /// (limit reached: the guest is left stopped).
+    pub outcome: AuditOutcome,
+    /// Code of a failure or denial.
+    pub error: Option<ErrorCode>,
+}
+
 /// VM backend as seen by the engine: the core's `VmBackend` port plus the
 /// asynchronous observations (process exit not requested by the core).
 pub trait BackendPort: VmBackend + Send + 'static {
     /// Accumulated observations to apply to the core with `Core::observe`.
     fn drain_observations(&mut self) -> Vec<(VmId, BackendObservation)>;
+    /// The guest of the run is stopped on a virtual CPU error and was not
+    /// restarted automatically (the process is alive): shown in
+    /// [`VmSummary::vcpu_halt`].
+    fn vcpu_halt(&self, _vm_id: VmId, _run_id: RunId) -> Option<VcpuHalt> {
+        None
+    }
+    /// Automatic resets decided since the last call, for the audit.
+    fn take_auto_resets(&mut self) -> Vec<AutoReset> {
+        Vec::new()
+    }
     /// Guests this backend can run on this host (ADR-0007, ADR-0028): by
     /// default the ones the host accelerates
     /// ([`lightvm_proto::GuestOs::runs_on_this_host_with`]).
@@ -785,6 +810,7 @@ fn summary(s: VmStatus, disk_used_bytes: Option<u64>, mut baselines: VmBaselines
         disk_used_bytes,
         baselines,
         start: None,
+        vcpu_halt: None,
     }
 }
 
@@ -800,6 +826,9 @@ where
     ids: SystemIds,
     /// State and run of every VM at the last [`VmEngine::state_changes`].
     last: BTreeMap<VmId, (VmState, Option<RunId>)>,
+    /// VMs whose guest was stopped on a vCPU error at the last
+    /// [`VmEngine::state_changes`].
+    last_halted: BTreeSet<VmId>,
     /// Last display geometry refresh per VM (run, instant): debounce.
     last_refresh: BTreeMap<VmId, (RunId, std::time::Instant)>,
     /// Graceful stops forwarded and still running in the backend: VM â†’
@@ -916,6 +945,7 @@ where
             inspector,
             ids: SystemIds::default(),
             last: BTreeMap::new(),
+            last_halted: BTreeSet::new(),
             last_refresh: BTreeMap::new(),
             pending_stops: BTreeMap::new(),
             offload: false,
@@ -985,6 +1015,10 @@ where
         }
         for (vm_id, obs) in self.backend.drain_observations() {
             let _ = self.core.observe(vm_id, obs);
+        }
+        for r in self.backend.take_auto_resets() {
+            self.core
+                .record_auto_reset(r.vm_id, r.run_id, r.outcome, r.error);
         }
         self.record_exits();
         self.settle_pending_stops();
@@ -1072,9 +1106,21 @@ where
             }
             _ => None,
         };
+        let vcpu_halt = match (s.state, s.run_id) {
+            (VmState::Running, Some(run)) => self.backend.vcpu_halt(s.vm_id, run),
+            _ => None,
+        };
         let mut out = summary(s, used, baselines);
         out.start = start;
+        out.vcpu_halt = vcpu_halt;
         out
+    }
+
+    /// Guests stopped on a virtual CPU error, for the change detection of
+    /// [`VmEngine::state_changes`].
+    fn halted(&self, vm: &VmStatus) -> bool {
+        matches!((vm.state, vm.run_id), (VmState::Running, Some(run))
+            if self.backend.vcpu_halt(vm.vm_id, run).is_some())
     }
 
     /// Starts in progress (checks running on a worker).
@@ -1600,11 +1646,21 @@ where
         for vm in vms {
             seen.insert(vm.vm_id);
             let now = (vm.state, vm.run_id);
-            if self.last.insert(vm.vm_id, now) != Some(now) {
+            // A guest that stops on a vCPU error (or runs again) keeps the
+            // `running` state: the change is published as a state event so
+            // the clients re-read the summary (`vcpu_halt`).
+            let halted = self.halted(&vm);
+            let halt_changed = if halted {
+                self.last_halted.insert(vm.vm_id)
+            } else {
+                self.last_halted.remove(&vm.vm_id)
+            };
+            if self.last.insert(vm.vm_id, now) != Some(now) || halt_changed {
                 out.push((vm.vm_id, vm.state));
             }
         }
         self.last.retain(|id, _| seen.contains(id));
+        self.last_halted.retain(|id| seen.contains(id));
         out
     }
 

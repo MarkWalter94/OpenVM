@@ -91,6 +91,12 @@ pub enum AuditAction {
     /// Deletion of an imported medium from the registry (user only): a
     /// managed copy is removed with it, a file used in place is kept.
     MediaDelete,
+    /// Automatic reset of a guest whose virtual CPUs stopped on an
+    /// unrecoverable error (QEMU `internal-error`, for example a triple fault
+    /// under WHPX), as hardware would reset: `succeeded` (reset and resumed),
+    /// `failed` (QMP refused), `denied` with `resource_limit` (too many in a
+    /// short time: the guest is left stopped for the user). Actor `system`.
+    VmAutoReset,
 }
 
 /// Recorded outcome.

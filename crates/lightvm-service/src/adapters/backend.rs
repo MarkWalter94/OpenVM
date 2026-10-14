@@ -81,16 +81,24 @@
 //!   the first seconds of the run (`qemu_backend::boot_prompt`), in a task
 //!   on the backend runtime that ends on its own, stops with the run and
 //!   never fails the start; start and outcome go to the service log.
+//! - a guest whose virtual CPUs stop on an unrecoverable error (QEMU
+//!   `internal-error`, for example a triple fault under WHPX) is reset and
+//!   resumed by the run itself, as hardware would, at most 3 times in 120 s
+//!   (`qemu_backend::vcpu_fault`); every decision goes to the service log
+//!   and to the audit (`vm_auto_reset`, actor `system`). Past the limit the
+//!   guest is left stopped: the VM summary reports it (`vcpu_halt`), input
+//!   is refused with a reason (`state_conflict`, `vcpu_halted`) instead of
+//!   QEMU's `VM not running`, and a reset resumes it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use lightvm_proto::ipc::StopReason;
+use lightvm_proto::ipc::{StopReason, VcpuHalt};
 use lightvm_proto::{
-    BackendObservation, DisplayGeometry, HostCapacity, InputEvent, MediaId, PublicError, RunId,
-    Screenshot, VmId, VmRecord,
+    AuditOutcome, BackendObservation, DisplayGeometry, ErrorCode, HostCapacity, InputEvent,
+    MediaId, PublicError, RunId, Screenshot, VmId, VmRecord,
 };
 use qemu_backend::cmdline::{DiskFormat, DiskSpec};
 use qemu_backend::probe::{
@@ -100,13 +108,13 @@ use qemu_backend::probe::{
 use qemu_backend::{
     Accelerator, BackendError, CpuModel, CpuPolicy, DeviceProfile, ExitCause, FirmwareKind,
     HostCapabilities, JobLimits, MachineType, ManagedPath, ManagedPaths, ProcessState, QemuRun,
-    RunConfig, ShutdownPolicy, VmLaunchSpec, boot_prompt, image, prepare,
+    RunConfig, ShutdownPolicy, VcpuFaultEvent, VmLaunchSpec, boot_prompt, image, prepare,
 };
 use vm_core::media::VerifiedMedia;
 use vm_core::ports::VmBackend;
 use vm_storage::CatalogLayout;
 
-use crate::engine::{BackendPort, GuardedMedia, ImageTool, StartDisks};
+use crate::engine::{AutoReset, BackendPort, GuardedMedia, ImageTool, StartDisks};
 use crate::supervisor::{Backend, EmergencyOutcome, EmergencyStop, ParentLossPolicy};
 
 type Registry = Arc<Mutex<BTreeMap<VmId, (RunId, qemu_backend::EmergencyStop)>>>;
@@ -1515,9 +1523,19 @@ impl VmBackend for QemuVmBackend {
         }
     }
 
+    /// `system_reset`; a guest stopped on a vCPU error is resumed (`cont`)
+    /// after the reset and its halt cleared (`QemuRun::reset`).
     fn reset(&mut self, vm_id: VmId, run_id: RunId) -> Result<(), PublicError> {
         let run = self.run(vm_id, run_id)?;
-        self.rt.block_on(run.reset()).map_err(|e| public(&e))
+        let halted = run.vcpu_halt();
+        self.rt.block_on(run.reset()).map_err(|e| public(&e))?;
+        if let Some(h) = halted {
+            crate::diag!(
+                "lightvm-service: guest stopped on a vCPU error ({:?}) reset by the user and resumed",
+                h.reason
+            );
+        }
+        Ok(())
     }
 
     /// `screendump` in the private directory; the metadata (geometry, hash,
@@ -1551,6 +1569,9 @@ impl VmBackend for QemuVmBackend {
         events: &[InputEvent],
     ) -> Result<(), PublicError> {
         let run = self.run(vm_id, run_id)?;
+        if run.vcpu_halt().is_some() {
+            return Err(halted_error());
+        }
         let pointer = events
             .iter()
             .any(|e| matches!(e, InputEvent::PointerMove(_)));
@@ -1602,6 +1623,50 @@ pub fn ensure_vm_vars(template: &Path, dest: &Path) -> std::io::Result<bool> {
     result.map(|()| true)
 }
 
+/// Refusal of input to a guest stopped on a vCPU error: QEMU would refuse it
+/// with `VM not running` (an infrastructure error); this says why.
+fn halted_error() -> PublicError {
+    PublicError::state_conflict(
+        "the VM stopped on an unrecoverable virtual CPU error: reset it, or stop it and start it again",
+    )
+    .with_detail("reason", "vcpu_halted")
+}
+
+/// Audit entry and service log line of a decision of the vCPU fault watcher.
+fn auto_reset_record(vm_id: VmId, run_id: RunId, ev: &VcpuFaultEvent) -> AutoReset {
+    let (outcome, error) = match ev {
+        VcpuFaultEvent::AutoReset {
+            reason,
+            resets_in_window,
+        } => {
+            crate::diag!(
+                "lightvm-service: guest stopped on a vCPU error ({reason:?}, QEMU `internal-error`): reset and resumed automatically (automatic reset {resets_in_window} within the rate-limit window)"
+            );
+            (AuditOutcome::Succeeded, None)
+        }
+        VcpuFaultEvent::AutoResetFailed { reason, error } => {
+            crate::diag!(
+                "lightvm-service: guest stopped on a vCPU error ({reason:?}): automatic reset failed ({error}); left stopped"
+            );
+            (AuditOutcome::Failed, Some(ErrorCode::InfrastructureError))
+        }
+        VcpuFaultEvent::Halted(h) => {
+            crate::diag!(
+                "lightvm-service: guest stopped on a vCPU error ({:?}) after {} automatic resets: left stopped for the user (reset, or stop and start)",
+                h.reason,
+                h.automatic_resets
+            );
+            (AuditOutcome::Denied, Some(ErrorCode::ResourceLimit))
+        }
+    };
+    AutoReset {
+        vm_id,
+        run_id,
+        outcome,
+        error,
+    }
+}
+
 /// Removes the private directory of a run (sockets already closed).
 fn remove_private_dir(dir: &Path) {
     if let Err(e) = std::fs::remove_dir_all(dir)
@@ -1629,6 +1694,22 @@ impl BackendPort for QemuVmBackend {
 
     fn take_exits(&mut self) -> Vec<(VmId, RunId, bool)> {
         std::mem::take(&mut self.exits)
+    }
+
+    fn vcpu_halt(&self, vm_id: VmId, run_id: RunId) -> Option<VcpuHalt> {
+        self.run(vm_id, run_id).ok()?.vcpu_halt()
+    }
+
+    fn take_auto_resets(&mut self) -> Vec<AutoReset> {
+        self.runs
+            .iter()
+            .flat_map(|(vm_id, run)| {
+                let run_id = run.run_id();
+                run.take_vcpu_fault_events()
+                    .into_iter()
+                    .map(move |ev| auto_reset_record(*vm_id, run_id, &ev))
+            })
+            .collect()
     }
 
     fn display_socket(&self, vm_id: VmId, run_id: RunId) -> Option<PathBuf> {
@@ -2067,7 +2148,7 @@ mod tests {
         assert!(check_start_space(Some(64 << 30)).is_ok());
         assert!(check_start_space(None).is_ok(), "unmeasurable: not refused");
         let e = check_start_space(Some(300 << 20)).unwrap_err();
-        assert_eq!(e.code, lightvm_proto::ErrorCode::ResourceLimit);
+        assert_eq!(e.code, ErrorCode::ResourceLimit);
         assert!(e.message.contains("free space"), "{}", e.message);
         let d = e.details.unwrap();
         assert_eq!(d.get("free_mib").map(String::as_str), Some("300"));
@@ -2128,7 +2209,7 @@ mod tests {
             (GuestOs::OtherLinuxX86_64, Firmware::Bios),
         ] {
             let e = profile_for(&cfg(os, fw)).unwrap_err();
-            assert_eq!(e.code, lightvm_proto::ErrorCode::InvalidArgument);
+            assert_eq!(e.code, ErrorCode::InvalidArgument);
         }
     }
 

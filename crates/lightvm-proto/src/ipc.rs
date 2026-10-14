@@ -843,6 +843,37 @@ pub struct VmSummary {
     /// nothing to verify. Additive field: older clients ignore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start: Option<StartProgress>,
+    /// The guest's virtual CPUs stopped on an error and stay stopped (state
+    /// `running`: the QEMU process is alive, the guest is not). Absent while
+    /// the guest runs. Additive field: older clients ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vcpu_halt: Option<VcpuHalt>,
+}
+
+/// Guest whose virtual CPUs stopped and were not restarted automatically, in
+/// [`VmSummary::vcpu_halt`]. A reset (`reset`) restarts the guest; a forced
+/// stop ends the run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct VcpuHalt {
+    /// Why the virtual CPUs stopped.
+    pub reason: VcpuHaltReason,
+    /// Automatic resets done in the recent window before the service gave up
+    /// (0 when the reason is not reset automatically).
+    pub automatic_resets: u32,
+}
+
+/// Cause of a [`VcpuHalt`].
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum VcpuHaltReason {
+    /// Unrecoverable virtual CPU error reported by the accelerator (QEMU
+    /// run state `internal-error`; for example a guest triple fault under
+    /// WHPX, which real hardware would answer with a reset).
+    InternalError,
+    /// The guest reported a panic (QEMU run state `guest-panicked`).
+    GuestPanicked,
 }
 
 /// Progress of the checks of a start, in [`VmSummary::start`].

@@ -38,6 +38,8 @@ struct Parts {
     observations: Observations,
     stops: StopResults,
     killed: Arc<Mutex<std::collections::BTreeSet<VmId>>>,
+    halts: Arc<Mutex<std::collections::BTreeMap<VmId, lightvm_proto::ipc::VcpuHalt>>>,
+    auto_resets: Arc<Mutex<Vec<crate::engine::AutoReset>>>,
 }
 
 fn engine(async_stop: bool) -> (MemoryEngine, Parts) {
@@ -55,6 +57,8 @@ fn engine(async_stop: bool) -> (MemoryEngine, Parts) {
         observations: backend.observations.clone(),
         stops: backend.stop_results.clone(),
         killed: backend.emergency_killed.clone(),
+        halts: backend.vcpu_halts.clone(),
+        auto_resets: backend.auto_resets.clone(),
     };
     (sample_engine(backend, audit), parts)
 }
@@ -678,4 +682,86 @@ fn emergency_stop_during_a_graceful_stop_is_recorded_as_emergency_stop() {
             .any(|ev| ev.action == AuditAction::VmStop && ev.outcome == AuditOutcome::Succeeded),
         "the graceful stop is not recorded as completed"
     );
+}
+
+/// A guest stopped on a vCPU error (QEMU `internal-error`): the automatic
+/// resets are audited (`vm_auto_reset`, actor `system`); once the backend
+/// gives up, the VM stays `running` but its summary reports the halt, a
+/// state event tells the clients to re-read it, input is refused with the
+/// reason; the user's reset clears it and another event follows.
+#[test]
+fn vcpu_halt_is_reported_audited_and_cleared_by_a_reset() {
+    use crate::engine::AutoReset;
+    use lightvm_proto::ipc::{VcpuHalt, VcpuHaltReason};
+    let (e, parts) = engine(false);
+    let (mut sup, _rx) = supervisor(Box::new(e));
+    let e = &mut *sup.engine;
+    let vm = vm_of(e);
+    let run = start(e, vm);
+    sup.publish_state_changes();
+    let mut events = sup.events.subscribe();
+    // Two automatic resets, then the limit: the guest is left stopped.
+    let e = &mut *sup.engine;
+    let halt = VcpuHalt {
+        reason: VcpuHaltReason::InternalError,
+        automatic_resets: 2,
+    };
+    lock(&parts.auto_resets).extend([
+        AutoReset {
+            vm_id: vm,
+            run_id: run,
+            outcome: AuditOutcome::Succeeded,
+            error: None,
+        },
+        AutoReset {
+            vm_id: vm,
+            run_id: run,
+            outcome: AuditOutcome::Succeeded,
+            error: None,
+        },
+        AutoReset {
+            vm_id: vm,
+            run_id: run,
+            outcome: AuditOutcome::Denied,
+            error: Some(ErrorCode::ResourceLimit),
+        },
+    ]);
+    lock(&parts.halts).insert(vm, halt);
+    e.observe();
+    let s = e.vm_status(&Caller::User, vm).unwrap();
+    assert_eq!(s.state, VmState::Running);
+    assert_eq!(s.vcpu_halt, Some(halt));
+    let audit = parts.audit.events();
+    let auto: Vec<_> = audit
+        .iter()
+        .filter(|ev| ev.action == AuditAction::VmAutoReset)
+        .collect();
+    assert_eq!(auto.len(), 3);
+    assert!(
+        auto.iter()
+            .all(|ev| ev.actor == Actor::System && ev.vm_id == Some(vm) && ev.run_id == Some(run))
+    );
+    assert_eq!(auto[2].outcome, AuditOutcome::Denied);
+    assert_eq!(auto[2].error, Some(ErrorCode::ResourceLimit));
+    sup.publish_state_changes();
+    assert_eq!(
+        events.try_recv().unwrap(),
+        ServiceEvent::VmState {
+            vm_id: vm,
+            state: VmState::Running
+        }
+    );
+    // Published once.
+    sup.publish_state_changes();
+    assert!(events.try_recv().is_err());
+    // The user's reset resumes the guest: the halt is gone.
+    let e = &mut *sup.engine;
+    submit(e, &Caller::User, vm, Some(run), VmAction::Reset).unwrap();
+    assert!(lock(&parts.calls).iter().any(|c| c == "vm_reset"));
+    assert_eq!(e.vm_status(&Caller::User, vm).unwrap().vcpu_halt, None);
+    sup.publish_state_changes();
+    assert!(matches!(
+        events.try_recv(),
+        Ok(ServiceEvent::VmState { vm_id, state: VmState::Running }) if vm_id == vm
+    ));
 }

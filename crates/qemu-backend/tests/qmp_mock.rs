@@ -190,6 +190,199 @@ fn invalid_greeting_rejected() {
     server.join().unwrap();
 }
 
+/// Simulated QEMU run state for the vCPU fault tests, following the QEMU
+/// 11.1 rules: `vm_stop(internal-error)` emits `STOP`; `cont` is refused
+/// while a reset is needed; a reset from a stopped state moves to
+/// `prelaunch`. `faults` faults are injected, the first one right after the
+/// handshake and each further one when `cont` resumes the guest. Every
+/// command name is recorded in `log`.
+fn qemu_with_faults(
+    path: &ManagedPath,
+    faults: u32,
+    log: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) -> std::thread::JoinHandle<()> {
+    serve(path, move |mut c| {
+        let mut left = faults;
+        let mut status = "running";
+        let fault = |c: &mut Conn, status: &mut &str, left: &mut u32| {
+            if *left > 0 {
+                *left -= 1;
+                *status = "internal-error";
+                c.send(json!({"event": "STOP", "timestamp": {"seconds": 1, "microseconds": 0}}));
+            }
+        };
+        fault(&mut c, &mut status, &mut left);
+        while let Some(v) = c.recv() {
+            let cmd = v["execute"].as_str().unwrap_or_default().to_owned();
+            log.lock().unwrap().push(cmd.clone());
+            let needs_reset = matches!(status, "internal-error" | "guest-panicked" | "shutdown");
+            match cmd.as_str() {
+                "query-status" => c.send(json!({
+                    "return": {"status": status, "running": status == "running"},
+                    "id": v["id"]
+                })),
+                "system_reset" => {
+                    if status != "running" {
+                        status = "prelaunch";
+                    }
+                    c.send(json!({"return": {}, "id": v["id"]}));
+                    c.send(json!({"event": "RESET", "data": {"guest": false, "reason": "host-qmp-system-reset"},
+                        "timestamp": {"seconds": 2, "microseconds": 0}}));
+                }
+                "cont" if needs_reset => c.send(json!({
+                    "error": {"class": "GenericError", "desc": "Resetting the Virtual Machine is required"},
+                    "id": v["id"]
+                })),
+                "cont" => {
+                    status = "running";
+                    c.send(json!({"return": {}, "id": v["id"]}));
+                    fault(&mut c, &mut status, &mut left);
+                }
+                _ => c.send(json!({"return": {}, "id": v["id"]})),
+            }
+        }
+    })
+}
+
+fn count(log: &std::sync::Mutex<Vec<String>>, cmd: &str) -> usize {
+    log.lock().unwrap().iter().filter(|c| *c == cmd).count()
+}
+
+/// Waits (at most 5 s) for `f`.
+async fn until(mut f: impl FnMut() -> bool) {
+    let t0 = std::time::Instant::now();
+    while !f() {
+        assert!(
+            t0.elapsed() < Duration::from_secs(5),
+            "condition not reached"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[test]
+fn internal_error_is_reset_and_resumed() {
+    use qemu_backend::ProcessState;
+    use qemu_backend::vcpu_fault::{
+        VcpuFaultEvent, VcpuFaultPolicy, VcpuFaults, watch_vcpu_faults,
+    };
+    let path = socket_path("vcpu-reset");
+    let log = std::sync::Arc::default();
+    let server = qemu_with_faults(&path, 2, std::sync::Arc::clone(&log));
+    rt().block_on(async {
+        let c = std::sync::Arc::new(
+            QmpClient::connect(&path, QmpConfig::default())
+                .await
+                .unwrap(),
+        );
+        let (tx, rx) = tokio::sync::watch::channel(ProcessState::Running);
+        let faults = std::sync::Arc::new(VcpuFaults::new(VcpuFaultPolicy::default()));
+        let w = tokio::spawn(watch_vcpu_faults(c.clone(), rx, faults.clone()));
+        let mut events = Vec::new();
+        until(|| {
+            events.extend(faults.take_events());
+            events.len() == 2
+        })
+        .await;
+        let reason = lightvm_proto::ipc::VcpuHaltReason::InternalError;
+        assert_eq!(
+            events,
+            vec![
+                VcpuFaultEvent::AutoReset {
+                    reason,
+                    resets_in_window: 1
+                },
+                VcpuFaultEvent::AutoReset {
+                    reason,
+                    resets_in_window: 2
+                },
+            ]
+        );
+        assert_eq!(count(&log, "cont"), 2);
+        assert_eq!(c.query_status().await.unwrap().status, RunState::Running);
+        assert_eq!(faults.halt(), None);
+        assert_eq!(count(&log, "system_reset"), 2);
+        // `cont` only after the reset happened (never refused).
+        let l = log.lock().unwrap().clone();
+        let first_reset = l.iter().position(|x| x == "system_reset").unwrap();
+        let first_cont = l.iter().position(|x| x == "cont").unwrap();
+        assert!(first_reset < first_cont, "{l:?}");
+        drop(l);
+        // The watcher ends with the process.
+        tx.send_replace(ProcessState::Exited {
+            code: Some(0),
+            cause: qemu_backend::ExitCause::QmpQuit,
+        });
+        tokio::time::timeout(Duration::from_secs(3), w)
+            .await
+            .unwrap()
+            .unwrap();
+        c.close(Duration::from_secs(2)).await;
+    });
+    server.join().unwrap();
+}
+
+#[test]
+fn repeated_internal_error_is_left_halted_and_a_manual_reset_resumes() {
+    use lightvm_proto::ipc::{VcpuHalt, VcpuHaltReason};
+    use qemu_backend::ProcessState;
+    use qemu_backend::vcpu_fault::{
+        VcpuFaultEvent, VcpuFaultPolicy, VcpuFaults, reset_and_resume, watch_vcpu_faults,
+    };
+    let path = socket_path("vcpu-halt");
+    let log = std::sync::Arc::default();
+    // Three faults, two automatic resets allowed: the third is left halted.
+    let server = qemu_with_faults(&path, 3, std::sync::Arc::clone(&log));
+    rt().block_on(async {
+        let c = std::sync::Arc::new(
+            QmpClient::connect(&path, QmpConfig::default())
+                .await
+                .unwrap(),
+        );
+        let (_tx, rx) = tokio::sync::watch::channel(ProcessState::Running);
+        let faults = std::sync::Arc::new(VcpuFaults::new(VcpuFaultPolicy {
+            max_resets: 2,
+            window: Duration::from_secs(120),
+            reset_guest_panicked: false,
+        }));
+        let w = tokio::spawn(watch_vcpu_faults(c.clone(), rx, faults.clone()));
+        until(|| faults.halt().is_some()).await;
+        let halt = VcpuHalt {
+            reason: VcpuHaltReason::InternalError,
+            automatic_resets: 2,
+        };
+        assert_eq!(faults.halt(), Some(halt));
+        let reset = VcpuFaultEvent::AutoReset {
+            reason: VcpuHaltReason::InternalError,
+            resets_in_window: 1,
+        };
+        let events = faults.take_events();
+        assert_eq!(events.len(), 3, "{events:?}");
+        assert_eq!(events[0], reset);
+        assert_eq!(events[2], VcpuFaultEvent::Halted(halt));
+        // Left stopped: no third reset.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(count(&log, "system_reset"), 2);
+        assert_eq!(
+            c.query_status().await.unwrap().status,
+            RunState::InternalError
+        );
+        // The user's reset: reset, then `cont` once the reset happened.
+        assert!(reset_and_resume(&c).await.unwrap());
+        faults.cleared();
+        assert_eq!(c.query_status().await.unwrap().status, RunState::Running);
+        assert_eq!(count(&log, "system_reset"), 3);
+        assert_eq!(count(&log, "cont"), 3);
+        assert_eq!(faults.halt(), None);
+        // A reset of a running guest does not send `cont`.
+        assert!(!reset_and_resume(&c).await.unwrap());
+        assert_eq!(count(&log, "cont"), 3);
+        w.abort();
+        c.close(Duration::from_secs(2)).await;
+    });
+    server.join().unwrap();
+}
+
 #[test]
 fn local_close() {
     let path = socket_path("close");

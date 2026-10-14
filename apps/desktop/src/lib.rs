@@ -2904,6 +2904,15 @@ impl LightVmApp {
             if let Some(live) = &mut self.live {
                 live.set_input_blocked(agent.is_some());
             }
+            // The guest stopped on a vCPU error: input cannot reach it; the
+            // notice says why instead of the bare refusal code.
+            if let Some(h) = state
+                .as_ref()
+                .and_then(|s| s.vms.iter().find(|v| v.vm_id == vm_id))
+                .and_then(dashboard::vcpu_halt)
+            {
+                input_error = Some(dashboard::vcpu_halt_text(&h));
+            }
             if !self.fullscreen {
                 theme::page_header(
                     ui,
