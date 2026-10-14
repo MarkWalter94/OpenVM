@@ -17,7 +17,7 @@ flate2 = { version = "=1.1.10", default-features = false, features = ["rust_back
 socket2 = { version = "=0.6.5", features = ["all"] }
 # TLS for VeNCrypt X.509 with a client certificate. `ring` provider: aws-lc-rs
 # would require CMake/NASM on the build host.
-rustls = { version = "=0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 
 [target.'cfg(windows)'.dependencies]
 # Alternative AF_UNIX implementation, tested against socket2 in F0-04.
