@@ -471,7 +471,7 @@ Tutti i punti sono obbligatori sul target dichiarato supportato:
 | R3 — Agente integrato opzionale | Provider adapter, loop limitato, cancellazione e valutazione risultati |
 | R4 — Guest agent e import avanzato | Dopo v1.0; tre incrementi distinti R4a–R4c, ciascuno con verifica propria |
 | R5 — macOS guest | Solo studio iniziale; nuova decisione tecnica, legale e di prodotto prima di qualunque implementazione |
-| R6 — Import VMware e integrazione in uso manuale | Conversione verificata su VM VMware reali; integrazioni disattivate e scollegate prima di ogni sessione agente |
+| R6 — Import VMware, snapshot e integrazione in uso manuale | Conversione verificata su VM VMware reali; snapshot del disco provati su guest reali; integrazioni disattivate e scollegate prima di ogni sessione agente |
 
 L'ordine pianificato è F0–F6, R1, R2a–R2c, R3, poi R4. R6 procede in parallelo per decisione del proprietario e non è requisito di v1.0. La v1.0 richiede MVP, R1, R2a–R2c e R3; non si dichiara completa se una di queste qualificazioni è bloccata. R2d e R5 sono estensioni condizionali senza impegno di consegna dell'intera visione originaria.
 
@@ -523,13 +523,15 @@ R4b importa soltanto formati dichiarati, con limiti di parsing/decompressione, b
 
 R4c abilita `vm.create` da template e media approvati con quote di catalogo e risorse; `vm.delete` soltanto per VM eleggibili, entro un permesso distruttivo esplicito, senza cancellare file arbitrari. La VM appena creata non acquisisce automaticamente tutti i permessi di controllo. Restano esclusi dalla baseline multi-VM concorrenti, snapshot RAM/live, migrazione, GPU passthrough, USB passthrough nelle sessioni agente (in uso manuale vedi R6), bundle automatico QEMU e cataloghi di immagini: non sono dipendenze nascoste di v1.0 o R4.
 
-### R6 — Import VMware e integrazione host/guest in uso manuale
+### R6 — Import VMware, snapshot e integrazione host/guest in uso manuale
 
 **Import VMware.** L'utente sceglie il file `.vmx` di una VM VMware spenta; LightVM ricava profilo guest, CPU, RAM, firmware e controller del disco e converte lo stato corrente del disco (catena di snapshot inclusa) in un disco QCOW2 gestito. La VM VMware non viene mai modificata. `.vmx` e descrittori VMDK sono input non fidato: chiavi note, limiti di parsing, estensioni e parent solo nella cartella della VM, nessun valore passato a QEMU. VM sospese, bloccate o cifrate sono rifiutate. Controller: PVSCSI, LSI SAS, SATA, IDE e NVMe mappati su dispositivi QEMU equivalenti; per LSI Logic, che QEMU non emula, LightVM abilita offline nella copia convertita il driver di archiviazione del controller di destinazione.
 
+**Snapshot in uso manuale.** Più snapshot con nome per VM, organizzati ad albero, presi a VM spenta (consistenti) o accesa (solo disco, come un'interruzione di corrente in quell'istante; con LightVM Tools i file system del guest vengono prima scaricati su disco), ripristino a VM spenta ed eliminazione di uno qualsiasi senza perdere gli altri. Lo snapshot contiene lo stato del disco, lo stato firmware scrivibile e la configurazione; non contiene la RAM, che con WHPX non può essere salvata. Gli snapshot non sono esposti agli agenti né usati durante una sessione agente; uno snapshot a VM spenta può diventare baseline secondo le regole della sezione 8. L'import VMware può convertire anche gli snapshot della VM, senza i loro stati di memoria.
+
 **Integrazione in uso manuale.** Cartelle condivise (lettura o lettura/scrittura), clipboard, trascinamento di file nei due sensi e collegamento di dispositivi USB dell'host, tramite un componente guest LightVM Tools installato dall'utente da un supporto generato dall'app. Ogni funzione è disattivata per difetto e abilitata per singola VM. Prima di ogni sessione agente o grant MCP sulla VM il supervisor le disattiva e scollega tutte; se una non può essere scollegata la sessione è rifiutata. Il profilo 7.2 resta quello delle sessioni agente, invariato. Il canale guest non offre percorsi verso host, LAN o Internet; i percorsi condivisi seguono le regole di 6.3 e 7.4.
 
-**Criterio di uscita:** VM VMware reali (Windows con PVSCSI, LSI Logic e SATA; Linux) importate e avviate fino al desktop; ogni integrazione provata su Windows Vista, Windows 10/11 e Linux; test negativi di 7.4 ripetuti con le integrazioni abilitate; sessione agente rifiutata finché un'integrazione resta collegata.
+**Criterio di uscita:** VM VMware reali (Windows con PVSCSI, LSI Logic e SATA; Linux) importate e avviate fino al desktop; snapshot presi a VM spenta e accesa, ripristinati ed eliminati su un guest Windows e uno Linux; ogni integrazione provata su Windows Vista, Windows 10/11 e Linux; test negativi di 7.4 ripetuti con le integrazioni abilitate; sessione agente rifiutata finché un'integrazione resta collegata.
 
 ## 13. Verifica e budget di prestazione
 
