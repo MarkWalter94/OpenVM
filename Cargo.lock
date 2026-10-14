@@ -4075,6 +4075,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "vmware-import"
+version = "0.0.0"
+dependencies = [
+ "lightvm-proto",
+ "proptest",
+ "serde_json",
+]
+
+[[package]]
 name = "wait-timeout"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

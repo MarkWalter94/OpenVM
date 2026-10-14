@@ -29,6 +29,8 @@
 //! - VNC display on a Unix socket and QMP on a Unix socket in the private directory;
 //! - devices only from the closed set of the hardware profiles (ADR-0027):
 //!   `virtio-blk-pci`, `ide-hd` or `nvme`, `virtio-vga`, `VGA` or `ramfb`,
+//!   (imported VMware VMs, ADR-0030: `scsi-hd` on `pvscsi` or
+//!   `mptsas1068`, `vmware-svga`),
 //!   virtio tablet/keyboard or a USB controller (`qemu-xhci`,
 //!   `piix3-usb-uhci`) with `usb-tablet` (and `usb-kbd` on AArch64).
 
@@ -37,7 +39,9 @@ use std::ffi::OsString;
 use crate::error::{BackendError, Result};
 use crate::paths::{ManagedPath, ManagedPaths, names};
 use crate::validate::{check_block_protocol, check_token};
-use lightvm_proto::{Firmware, GuestOs, MediaId, RunId};
+use lightvm_proto::{
+    DiskController, DisplayAdapter, Firmware, GuestOs, ImportedHardware, MediaId, RunId,
+};
 
 /// Hardware accelerator. There is no TCG variant (ADR-0007).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -262,7 +266,17 @@ pub enum DiskBus {
     PiixIde,
     /// `nvme` with a fixed serial (inbox driver of Windows on ARM, ADR-0028).
     Nvme,
+    /// `scsi-hd` on a `pvscsi` controller (VMware paravirtual SCSI;
+    /// imported VMware VMs only, ADR-0030).
+    Pvscsi,
+    /// `scsi-hd` on a `mptsas1068` controller (LSI Logic SAS 1068, VMware
+    /// `lsisas1068`; imported VMware VMs only, ADR-0030).
+    Mptsas1068,
 }
+
+/// Id of the SCSI controller of the [`DiskBus::Pvscsi`] and
+/// [`DiskBus::Mptsas1068`] disks.
+const SCSI_CONTROLLER_ID: &str = "scsi0";
 
 /// Bus of the installation and data CDs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -292,6 +306,9 @@ pub enum DisplayDevice {
     StdVga,
     /// `ramfb` (Windows on ARM has no inbox virtio-gpu driver, ADR-0028).
     Ramfb,
+    /// `vmware-svga` (VMware SVGA II), offered to Windows guests imported
+    /// from VMware with the VMware Tools display driver (ADR-0030).
+    VmwareSvga,
 }
 
 impl DisplayDevice {
@@ -301,6 +318,7 @@ impl DisplayDevice {
             Self::VirtioVga => "virtio-vga",
             Self::StdVga => "VGA",
             Self::Ramfb => "ramfb",
+            Self::VmwareSvga => "vmware-svga",
         }
     }
 }
@@ -461,6 +479,71 @@ impl DeviceProfile {
         })
     }
 
+    /// Profile of a VM imported from VMware (ADR-0030): the guest's profile
+    /// ([`Self::for_guest`]; for Linux with legacy BIOS the Linux profile on
+    /// SeaBIOS) with the disk controller and display adapter of the source
+    /// VM. A PIIX IDE disk runs on the i440fx board (the board that has that
+    /// controller, as VMware's), an AHCI disk on q35; the other controllers
+    /// keep the guest's board. Every value comes from the closed sets of
+    /// [`DiskBus`] and [`DisplayDevice`]: nothing of the source VM reaches
+    /// the command line as text.
+    pub fn for_imported(os: GuestOs, firmware: Firmware, hw: &ImportedHardware) -> Result<Self> {
+        let unsupported = |what: String| BackendError::Unsupported {
+            what,
+            hint: "imported VMs keep the hardware allowed by ADR-0030".into(),
+        };
+        if os.is_aarch64() {
+            return Err(unsupported(format!("imported guest {os:?}")));
+        }
+        if !os.import_firmware().contains(&firmware) {
+            return Err(unsupported(format!(
+                "firmware {firmware:?} for the imported guest {os:?}"
+            )));
+        }
+        if !hw.disk_controller.usable_by(os)
+            || (hw.display == DisplayAdapter::VmwareSvga && !os.is_windows())
+        {
+            return Err(unsupported(format!(
+                "{:?} / {:?} for the guest {os:?}",
+                hw.disk_controller, hw.display
+            )));
+        }
+        let mut p = if os.is_windows() {
+            Self::for_guest(os, firmware)?
+        } else {
+            Self {
+                firmware: FirmwareKind::from_proto(firmware),
+                ..Self::LINUX
+            }
+        };
+        p.disk_bus = match hw.disk_controller {
+            DiskController::Virtio => DiskBus::Virtio,
+            DiskController::Ahci => DiskBus::Ahci,
+            DiskController::Ide => DiskBus::PiixIde,
+            DiskController::Nvme => DiskBus::Nvme,
+            DiskController::Pvscsi => DiskBus::Pvscsi,
+            DiskController::LsiSas1068 => DiskBus::Mptsas1068,
+        };
+        match p.disk_bus {
+            DiskBus::PiixIde => p.machine_family = MachineFamily::I440fx,
+            DiskBus::Ahci => p.machine_family = MachineFamily::Q35,
+            _ => {}
+        }
+        if hw.display == DisplayAdapter::VmwareSvga {
+            p.display = DisplayDevice::VmwareSvga;
+        }
+        Ok(p)
+    }
+
+    /// Profile of a VM configuration: [`Self::for_imported`] for a VM
+    /// imported from VMware, [`Self::for_guest`] otherwise.
+    pub fn for_config(os: GuestOs, firmware: Firmware, imported: Option<&ImportedHardware>) -> Result<Self> {
+        match imported {
+            Some(hw) => Self::for_imported(os, firmware, hw),
+            None => Self::for_guest(os, firmware),
+        }
+    }
+
     /// `true` for the AArch64 profiles (`qemu-system-aarch64`).
     pub fn is_aarch64(&self) -> bool {
         self.machine_family.is_aarch64()
@@ -534,11 +617,13 @@ impl DeviceProfile {
                 v.extend(["qemu-xhci", "usb-kbd", "usb-tablet"]);
             }
         }
-        v.push(match self.disk_bus {
-            DiskBus::Virtio => "virtio-blk-pci",
-            DiskBus::Ahci | DiskBus::PiixIde => "ide-hd",
-            DiskBus::Nvme => "nvme",
-        });
+        match self.disk_bus {
+            DiskBus::Virtio => v.push("virtio-blk-pci"),
+            DiskBus::Ahci | DiskBus::PiixIde => v.push("ide-hd"),
+            DiskBus::Nvme => v.push("nvme"),
+            DiskBus::Pvscsi => v.extend(["pvscsi", "scsi-hd"]),
+            DiskBus::Mptsas1068 => v.extend(["mptsas1068", "scsi-hd"]),
+        }
         match self.cdrom {
             CdromBus::Ide => v.push("ide-cd"),
             CdromBus::UsbBot => v.extend(["usb-bot", "scsi-cd"]),
@@ -549,15 +634,24 @@ impl DeviceProfile {
         v
     }
 
-    /// `-device` value of the main disk.
-    fn disk_device(&self, bootindex: u32) -> String {
+    /// `-device` values of the main disk (with its SCSI controller first,
+    /// for the SCSI buses).
+    fn disk_devices(&self, bootindex: u32) -> Vec<String> {
+        let scsi = |controller: &str| {
+            vec![
+                format!("{controller},id={SCSI_CONTROLLER_ID}"),
+                format!("scsi-hd,drive=disk0,bus={SCSI_CONTROLLER_ID}.0,bootindex={bootindex}"),
+            ]
+        };
         match self.disk_bus {
-            DiskBus::Virtio => format!("virtio-blk-pci,drive=disk0,bootindex={bootindex}"),
-            DiskBus::Ahci => format!("ide-hd,drive=disk0,bus=ide.2,bootindex={bootindex}"),
+            DiskBus::Virtio => vec![format!("virtio-blk-pci,drive=disk0,bootindex={bootindex}")],
+            DiskBus::Ahci => vec![format!("ide-hd,drive=disk0,bus=ide.2,bootindex={bootindex}")],
             DiskBus::PiixIde => {
-                format!("ide-hd,drive=disk0,bus=ide.0,unit=0,bootindex={bootindex}")
+                vec![format!("ide-hd,drive=disk0,bus=ide.0,unit=0,bootindex={bootindex}")]
             }
-            DiskBus::Nvme => format!("nvme,drive=disk0,serial=lv0,bootindex={bootindex}"),
+            DiskBus::Nvme => vec![format!("nvme,drive=disk0,serial=lv0,bootindex={bootindex}")],
+            DiskBus::Pvscsi => scsi("pvscsi"),
+            DiskBus::Mptsas1068 => scsi("mptsas1068"),
         }
     }
 
@@ -731,6 +825,9 @@ pub struct VmLaunchSpec {
     pub cpu: CpuModel,
     /// Number of vCPUs.
     pub vcpus: u32,
+    /// vCPUs per socket (imported VMs, ADR-0030): `-smp` with an explicit
+    /// topology; `None` = `-smp cpus=N` as for every other VM.
+    pub cores_per_socket: Option<u32>,
     /// RAM in MiB.
     pub memory_mib: u32,
     /// Disk, if any.
@@ -817,6 +914,14 @@ impl VmLaunchSpec {
                 self.memory_mib,
                 limits::MIN_MEMORY_MIB,
                 limits::MAX_MEMORY_MIB
+            )));
+        }
+        if let Some(c) = self.cores_per_socket
+            && (c == 0 || c > self.vcpus || !self.vcpus.is_multiple_of(c))
+        {
+            return Err(BackendError::ResourceLimit(format!(
+                "{c} cores per socket do not divide {} vCPUs",
+                self.vcpus
             )));
         }
         if self.install_media.is_some() && self.install_media == self.data_media {
@@ -907,7 +1012,17 @@ impl VmLaunchSpec {
         }
         a.opt("-accel", self.accelerator.qemu_name());
         a.opt("-cpu", self.cpu.as_str());
-        a.opt("-smp", format!("cpus={}", self.vcpus));
+        match self.cores_per_socket {
+            Some(c) if c > 1 => a.opt(
+                "-smp",
+                format!(
+                    "cpus={},sockets={},cores={c},threads=1",
+                    self.vcpus,
+                    self.vcpus / c
+                ),
+            ),
+            _ => a.opt("-smp", format!("cpus={}", self.vcpus)),
+        }
         a.opt("-m", format!("size={}M", self.memory_mib));
         match &firmware {
             (code, Some(vars)) => {
@@ -985,7 +1100,9 @@ impl VmLaunchSpec {
                     ),
                 ),
             }
-            a.opt("-device", profile.disk_device(next_boot));
+            for d in profile.disk_devices(next_boot) {
+                a.opt("-device", d);
+            }
         } else if paths.disk(run)?.is_some() {
             return Err(BackendError::invalid(
                 "disk",
@@ -1298,6 +1415,7 @@ pub(crate) mod tests {
             accelerator: Accelerator::Whpx,
             cpu: CpuModel::nominal("qemu64").unwrap(),
             vcpus: 2,
+            cores_per_socket: None,
             memory_mib: 4096,
             disk: Some(DiskSpec {
                 format: DiskFormat::Qcow2,
@@ -1341,7 +1459,7 @@ pub(crate) mod tests {
         );
         t.insert("-accel", None);
         t.insert("-cpu", None);
-        t.insert("-smp", Some(&["cpus"]));
+        t.insert("-smp", Some(&["cpus", "sockets", "cores", "threads"]));
         t.insert("-m", Some(&["size"]));
         t.insert(
             "-blockdev",
@@ -1398,6 +1516,10 @@ pub(crate) mod tests {
         "usb-bot",
         "scsi-cd",
         "tpm-tis-device",
+        "pvscsi",
+        "mptsas1068",
+        "scsi-hd",
+        "vmware-svga",
     ];
     /// Allowed first part (type) of the options that have one.
     fn typed_option(opt: &str) -> Option<&'static [&'static str]> {
@@ -1965,6 +2087,150 @@ pub(crate) mod tests {
             req.sort();
             assert_eq!(emitted, req, "{profile:?}");
         }
+    }
+
+    fn imported(c: DiskController, d: DisplayAdapter) -> ImportedHardware {
+        ImportedHardware {
+            source: lightvm_proto::ImportSource::Vmware,
+            arch: lightvm_proto::GuestArch::X86_64,
+            disk_controller: c,
+            display: d,
+            cores_per_socket: None,
+            storage_driver_preparation: false,
+        }
+    }
+
+    /// ADR-0030: imported VMs keep their disk controller, display and CPU
+    /// topology through the closed device set; the arguments of the disk
+    /// and display are exact, the rest of the command is the guest profile's.
+    #[test]
+    fn imported_hardware_argv() {
+        use DisplayAdapter::{Standard, VmwareSvga};
+        let cases = [
+            (
+                GuestOs::Windows7,
+                Firmware::Bios,
+                DiskController::Pvscsi,
+                VmwareSvga,
+                MachineFamily::Q35,
+                vec!["pvscsi,id=scsi0", "scsi-hd,drive=disk0,bus=scsi0.0,bootindex=1"],
+                "vmware-svga",
+            ),
+            (
+                GuestOs::Windows10,
+                Firmware::Uefi,
+                DiskController::LsiSas1068,
+                Standard,
+                MachineFamily::Q35,
+                vec!["mptsas1068,id=scsi0", "scsi-hd,drive=disk0,bus=scsi0.0,bootindex=1"],
+                "VGA",
+            ),
+            (
+                GuestOs::WindowsVista,
+                Firmware::Bios,
+                DiskController::Ide,
+                Standard,
+                MachineFamily::I440fx,
+                vec!["ide-hd,drive=disk0,bus=ide.0,unit=0,bootindex=1"],
+                "VGA",
+            ),
+            (
+                GuestOs::WindowsXp,
+                Firmware::Bios,
+                DiskController::Pvscsi,
+                Standard,
+                MachineFamily::I440fx,
+                vec!["pvscsi,id=scsi0", "scsi-hd,drive=disk0,bus=scsi0.0,bootindex=1"],
+                "VGA",
+            ),
+            (
+                GuestOs::Windows10,
+                Firmware::Bios,
+                DiskController::Nvme,
+                Standard,
+                MachineFamily::Q35,
+                vec!["nvme,drive=disk0,serial=lv0,bootindex=1"],
+                "VGA",
+            ),
+            (
+                GuestOs::OtherLinuxX86_64,
+                Firmware::Bios,
+                DiskController::Ahci,
+                Standard,
+                MachineFamily::Q35,
+                vec!["ide-hd,drive=disk0,bus=ide.2,bootindex=1"],
+                "virtio-vga",
+            ),
+            (
+                GuestOs::OtherLinuxX86_64,
+                Firmware::Uefi,
+                DiskController::Virtio,
+                Standard,
+                MachineFamily::Q35,
+                vec!["virtio-blk-pci,drive=disk0,bootindex=1"],
+                "virtio-vga",
+            ),
+        ];
+        for (os, fw, c, d, family, disk_devs, display) in cases {
+            let hw = imported(c, d);
+            let profile = DeviceProfile::for_imported(os, fw, &hw).unwrap();
+            assert_eq!(profile.machine_family(), family, "{os:?} {c:?}");
+            assert_eq!(profile.firmware(), FirmwareKind::from_proto(fw));
+            assert_eq!(DeviceProfile::for_config(os, fw, Some(&hw)).unwrap(), profile);
+            let mut s = spec_for(profile);
+            s.vcpus = 4;
+            s.cores_per_socket = Some(2);
+            let p = FakePaths::for_profile(&profile);
+            let cmd = s.build(&p).unwrap();
+            audit_args(&cmd.args).unwrap();
+            let a = strs(&cmd);
+            let devices: Vec<&str> = a
+                .windows(2)
+                .filter(|w| w[0] == "-device")
+                .map(|w| w[1].as_str())
+                .collect();
+            for want in &disk_devs {
+                assert!(devices.contains(want), "{os:?} {c:?}: {devices:?}");
+            }
+            assert!(devices.contains(&display), "{os:?}: {devices:?}");
+            let smp = a.iter().position(|x| x == "-smp").unwrap();
+            assert_eq!(a[smp + 1], "cpus=4,sockets=2,cores=2,threads=1");
+            // Devices emitted = the profile's required devices.
+            let mut emitted: Vec<String> = devices
+                .iter()
+                .map(|d| d.split(',').next().unwrap().to_owned())
+                .collect();
+            emitted.sort();
+            emitted.dedup();
+            let mut req = vec_of(&profile.required_devices());
+            req.sort();
+            assert_eq!(emitted, req, "{os:?} {c:?}");
+        }
+        // Refused combinations.
+        let bad = [
+            (GuestOs::Windows10, Firmware::Uefi, DiskController::Virtio, Standard),
+            (GuestOs::WindowsXp, Firmware::Bios, DiskController::Ahci, Standard),
+            (GuestOs::OtherLinuxX86_64, Firmware::Uefi, DiskController::Ahci, VmwareSvga),
+            (GuestOs::Windows7, Firmware::Uefi, DiskController::Ahci, Standard),
+            (GuestOs::Windows11Arm64, Firmware::Uefi, DiskController::Nvme, Standard),
+        ];
+        for (os, fw, c, d) in bad {
+            assert!(
+                DeviceProfile::for_imported(os, fw, &imported(c, d)).is_err(),
+                "{os:?} {fw:?} {c:?} {d:?}"
+            );
+        }
+        // A topology that does not divide the vCPUs is refused.
+        let mut s = spec();
+        s.cores_per_socket = Some(3);
+        assert!(s.build(&FakePaths::new()).is_err());
+        s.cores_per_socket = Some(0);
+        assert!(s.build(&FakePaths::new()).is_err());
+        // Not imported: the profile of the guest, unchanged.
+        assert_eq!(
+            DeviceProfile::for_config(GuestOs::Windows7, Firmware::Bios, None).unwrap(),
+            DeviceProfile::WINDOWS_VISTA_7
+        );
     }
 
     /// Contract table: `(guest, firmware) -> profile`, and the rejected

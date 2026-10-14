@@ -311,6 +311,7 @@ fn spec(caps: &HostCapabilities, paths: &LabPaths, run_id: RunId) -> VmLaunchSpe
         accelerator: Accelerator::Whpx,
         cpu: caps.cpu_model(CpuModel::VERIFIED_DEFAULT).unwrap(),
         vcpus: 2,
+        cores_per_socket: None,
         memory_mib: 2048,
         disk: Some(DiskSpec {
             format: DiskFormat::Qcow2,
@@ -1651,6 +1652,7 @@ fn real_windows_hardware_profiles() {
             accelerator: Accelerator::Whpx,
             cpu: cpu.clone(),
             vcpus: 2,
+            cores_per_socket: None,
             memory_mib: 2048,
             disk: Some(DiskSpec {
                 format: DiskFormat::Qcow2,
