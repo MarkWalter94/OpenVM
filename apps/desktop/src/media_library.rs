@@ -1,8 +1,11 @@
 //! Imported media in Settings: the installation and data ISOs of the
-//! registry with their size, the detected system and the VMs whose
-//! configuration uses them, and their deletion, always confirmed. A medium
-//! used by a VM cannot be deleted (button disabled with the reason; the
-//! supervisor refuses it anyway, naming the VMs). The view executes
+//! registry with where the file is (ADR-0029: the user's own file, used in
+//! place; or LightVM's read-only copy for media imported before), their
+//! size, the detected system and the VMs whose configuration uses them, a
+//! file that is no longer found shown as missing with what to do, and their
+//! deletion, always confirmed: it never touches a file used in place. A
+//! medium used by a VM cannot be deleted (button disabled with the reason;
+//! the supervisor refuses it anyway, naming the VMs). The view executes
 //! nothing: it returns the medium to delete; the dialog returns the command
 //! to send.
 
@@ -84,6 +87,30 @@ pub fn error_text(f: &Failure) -> String {
     }
 }
 
+/// What to do about a medium whose file is no longer found.
+pub const MISSING_HINT: &str = "LightVM uses the ISO where you selected it and does not keep a copy. Put the file back at this location (or connect its drive), or import it again in the New VM wizard.";
+
+/// Where the medium is, for the second line of its row, and its tone
+/// (danger when the file is missing).
+pub fn location_line(m: &MediaRecord) -> (String, Tone) {
+    match (&m.location, m.missing) {
+        (Some(path), true) => (
+            format!(
+                "File not found at {path}: put it back there, or import it again in the New VM wizard."
+            ),
+            Tone::Danger,
+        ),
+        (Some(path), false) => (
+            format!("{path} \u{b7} used where it is, not copied"),
+            Tone::Neutral,
+        ),
+        (None, _) => (
+            "Read-only copy in the LightVM catalog (imported by an earlier version)".to_owned(),
+            Tone::Neutral,
+        ),
+    }
+}
+
 fn kind_label(k: MediaKind) -> &'static str {
     match k {
         MediaKind::InstallIso => "Installation",
@@ -130,7 +157,7 @@ pub fn media_ui(
         crate::empty_state(
             ui,
             "No imported media.",
-            "ISOs you choose in the New VM wizard are copied here, read-only, and can be used by any VM.",
+            "ISOs you choose in the New VM wizard are used where they are, not copied, and can be used by any VM. Keep each file in its place: LightVM checks it before every start.",
         );
         return None;
     }
@@ -161,12 +188,13 @@ fn media_row(
     let name = m.declared_origin.as_str();
     let used = users(m.id, vms);
     const ACTIONS: f32 = 90.0;
+    const HEIGHT: f32 = 64.0;
     let mut clicked = false;
     ui.horizontal(|ui| {
-        ui.set_min_height(46.0);
+        ui.set_min_height(HEIGHT);
         let left = (ui.available_width() - ACTIONS - 12.0).max(150.0);
         ui.allocate_ui_with_layout(
-            egui::vec2(left, 46.0),
+            egui::vec2(left, HEIGHT),
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
                 ui.set_width(left);
@@ -182,7 +210,22 @@ fn media_row(
                         theme::pill(ui, "In use", Tone::Accent)
                             .on_hover_text("The configuration of a VM uses this medium");
                     }
+                    if m.missing {
+                        theme::pill(ui, "File missing", Tone::Danger)
+                            .on_hover_text(MISSING_HINT);
+                    }
                 });
+                let (where_text, tone) = location_line(m);
+                ui.add(
+                    egui::Label::new(egui::RichText::new(where_text).small().color(
+                        if tone == Tone::Danger {
+                            p.danger
+                        } else {
+                            p.text_weak
+                        },
+                    ))
+                    .wrap(),
+                );
                 let mut details = vec![format_bytes(m.size_bytes)];
                 if let Some(d) = &m.detected_guest {
                     details.push(crate::wizard::detected_label(d));
@@ -204,13 +247,15 @@ fn media_row(
             },
         );
         ui.allocate_ui_with_layout(
-            egui::vec2(ACTIONS, 46.0),
+            egui::vec2(ACTIONS, HEIGHT),
             egui::Layout::right_to_left(egui::Align::Center),
             |ui| {
                 let refusal = delete_refusal(m.id, vms, connected, deleting);
-                let hover = refusal.as_deref().unwrap_or(
-                    "Removes this medium and its copy from the host (asks for confirmation)",
-                );
+                let hover = refusal.as_deref().unwrap_or(if m.location.is_some() {
+                    "Removes this medium from LightVM; the ISO file stays where it is (asks for confirmation)"
+                } else {
+                    "Removes this medium and its copy from the host (asks for confirmation)"
+                });
                 let r = ui
                     .add_enabled(
                         refusal.is_none(),
@@ -233,6 +278,8 @@ pub struct DeleteDialog {
     media_id: MediaId,
     name: String,
     size: u64,
+    /// The user's file, for a medium used in place (kept by the deletion).
+    location: Option<String>,
     /// The deletion was sent: waiting for the outcome.
     sent: bool,
     focus: bool,
@@ -245,6 +292,7 @@ impl DeleteDialog {
             media_id: m.id,
             name: m.declared_origin.as_str().to_owned(),
             size: m.size_bytes,
+            location: m.location.clone(),
             sent: false,
             focus: true,
         }
@@ -292,10 +340,16 @@ pub fn dialog_ui(ui: &egui::Ui, d: &mut DeleteDialog, state: &ServiceState) -> D
     }
     let spec = dialogs::ConfirmSpec {
         title: format!("Delete \u{201c}{}\u{201d}?", d.name),
-        body: format!(
-            "LightVM's read-only copy of this medium ({}) is removed from the host permanently. The original file you imported it from is not touched. To use it again, import it again in the New VM wizard.",
-            format_bytes(d.size)
-        ),
+        body: match &d.location {
+            Some(path) => format!(
+                "The medium is removed from LightVM's list. The ISO file itself ({}) is kept where it is and is not changed:\n{path}\nTo use it again, import it again in the New VM wizard.",
+                format_bytes(d.size)
+            ),
+            None => format!(
+                "LightVM's read-only copy of this medium ({}) is removed from the host permanently. The original file you imported it from is not touched. To use it again, import it again in the New VM wizard.",
+                format_bytes(d.size)
+            ),
+        },
         confirm: "Delete medium".into(),
         destructive: true,
     };

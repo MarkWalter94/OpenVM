@@ -12,7 +12,11 @@
 //!   backup before migrating ([`migrate`]).
 //! - One instance per catalog, guaranteed by a file lock ([`CatalogLock`]).
 //! - Paths always relative to the root and validated ([`ManagedPath`]); links,
-//!   junctions and paths outside the root are rejected.
+//!   junctions and paths outside the root are rejected. One exception: the
+//!   ISO files the user selected are used where they are (ADR-0029,
+//!   [`MediaLocation::Referenced`]), recorded as absolute paths, never
+//!   written or removed, and re-verified (no link on any component, hash)
+//!   through a guard handle before every use ([`MediaGuard`]).
 //! - An SQL transaction does not make a file move atomic: every
 //!   DB + filesystem operation goes through the journal (`begin_intent` →
 //!   `mark_applied` → `commit`/`abort`) and [`Catalog::recover`] reconciles it;
@@ -86,15 +90,15 @@ pub use manifest::{
     sha256_file,
 };
 pub use media::{
-    CopiedMedia, MAX_DECLARED_ORIGIN, MediaCheck, MediaGuard, MediaImportJob,
-    MediaImportReservation, MediaLimits, NOT_OPTICAL_IMAGE,
+    HashedMedia, MAX_DECLARED_ORIGIN, MediaCheck, MediaGuard, MediaImportReservation, MediaLimits,
+    NOT_OPTICAL_IMAGE, canonical_source,
 };
 pub use ops::PromoteBaseline;
 pub use paths::ManagedPath;
 pub use records::{
     ArtifactRecord, AuditEvent, AuditRecord, BaselineRecord, CurrentStateRecord, DiskRecord,
-    FirmwareRecord, GrantRecord, MediaRecord, NewVm, OperationRecord, RunRecord, SessionRecord, Tx,
-    VmRecord,
+    FirmwareRecord, GrantRecord, MediaLocation, MediaRecord, NewVm, OperationRecord, RunRecord,
+    SessionRecord, Tx, VmRecord,
 };
 pub use recover::{IntegrityIssue, IntentRecovery, RecoveryOutcome, RecoveryReport};
 pub use time::{UtcMillis, now_rfc3339};

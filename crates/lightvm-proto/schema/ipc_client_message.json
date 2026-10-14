@@ -1187,7 +1187,7 @@
           ]
         },
         {
-          "description": "Import of an ISO chosen by the user with the native picker of the UI\n(UI only, never from agent sessions): read-only managed copy, SHA-256\nand registry row (ADR-0008). The path is opened as a regular file\nwithout following links and is never passed to QEMU.",
+          "description": "Import of an ISO chosen by the user with the native picker of the UI\n(UI only, never from agent sessions): SHA-256 and registry row, the\nfile is used where it is and never copied (ADR-0008, ADR-0029). The\npath is opened as a regular file without following links and\nchecked by the service; QEMU later receives the path the system\nresolved for that file, re-verified (hash) before every start.",
           "type": "object",
           "properties": {
             "declared_origin": {
@@ -1215,7 +1215,7 @@
           ]
         },
         {
-          "description": "Deletion of an imported medium (UI only, never from agent sessions;\nthe UI asks for confirmation): registry row and read-only managed\ncopy removed through the catalog journal. Refused (`state_conflict`)\nwhile the configuration of a VM uses it as installation or data\nmedia, and (`vm_busy`) while a run holds the copy open.",
+          "description": "Deletion of an imported medium (UI only, never from agent sessions;\nthe UI asks for confirmation): registry row removed; a read-only\nmanaged copy (media imported before ADR-0029) is removed with it\nthrough the catalog journal, a file used in place is never touched.\nRefused (`state_conflict`) while the configuration of a VM uses it as\ninstallation or data media, and (`vm_busy`) while a run holds a\nmanaged copy open.",
           "type": "object",
           "properties": {
             "media_id": {

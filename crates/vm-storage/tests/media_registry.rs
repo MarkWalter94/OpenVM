@@ -1,13 +1,14 @@
-//! Approved media registry (ADR-0008; ROADMAP 7.4, "File" and "Host" rows):
-//! read-only managed copy, SHA-256 of the copied bytes, `CREATE_NEW`,
-//! no overwriting, source replaced after approval.
+//! Approved media registry (ADR-0008, ADR-0029; ROADMAP 7.4, "File" and
+//! "Host" rows): the user's file used in place, SHA-256 read through the
+//! handle at approval and before every use, no copy and nothing left behind;
+//! managed copies of older catalogs still verified and deleted.
 
 mod common;
 
 use sha2::{Digest, Sha256};
 use vm_storage::{
-    Catalog, CatalogLayout, IntentKind, IntentSpec, IntentState, MediaId, MediaKind, MediaSlot,
-    MediaStatus, PathRejection, StorageError, TargetKind,
+    Catalog, CatalogLayout, IntentKind, IntentSpec, IntentState, MediaId, MediaKind, MediaLocation,
+    MediaSlot, MediaStatus, PathRejection, StorageError, TargetKind,
 };
 
 fn sha_hex(bytes: &[u8]) -> String {
@@ -17,8 +18,18 @@ fn sha_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
+fn entries(dir: &std::path::Path, sub: &str) -> usize {
+    std::fs::read_dir(dir.join(sub)).map_or(0, Iterator::count)
+}
+
+/// Path the catalog records for a source (resolved by the system).
+fn resolved(p: &std::path::Path) -> std::path::PathBuf {
+    let f = std::fs::File::open(p).unwrap();
+    vm_storage::canonical_source(&f, p).unwrap()
+}
+
 #[test]
-fn approved_media_is_a_readonly_managed_copy_with_hash() {
+fn approved_media_is_the_users_file_used_in_place_with_hash() {
     let dir = common::tempdir();
     let src_dir = common::tempdir();
     let src = src_dir.path().join("ubuntu.iso");
@@ -36,26 +47,28 @@ fn approved_media_is_a_readonly_managed_copy_with_hash() {
     assert_eq!(m.sha256, sha_hex(&content));
     assert_eq!(m.size_bytes, content.len() as u64);
     assert_eq!(m.status, MediaStatus::Approved);
-    assert_eq!(
-        m.managed_path,
-        CatalogLayout::media_file(&m.media_id, "iso").unwrap()
-    );
-    let copy = cat.layout().resolve(&m.managed_path).unwrap();
-    assert_eq!(std::fs::read(&copy).unwrap(), content);
-    assert!(std::fs::metadata(&copy).unwrap().permissions().readonly());
+    assert_eq!(m.location, MediaLocation::Referenced(resolved(&src)));
+    // Nothing copied, nothing left behind, the source untouched.
+    assert_eq!(entries(dir.path(), "media"), 0, "no managed copy");
+    assert_eq!(entries(dir.path(), "tmp"), 0, "no temporary");
     assert!(cat.open_intents().unwrap().is_empty());
+    assert_eq!(std::fs::read(&src).unwrap(), content);
+    assert!(!std::fs::metadata(&src).unwrap().permissions().readonly());
     assert_eq!(cat.read(|tx| tx.media(&m.media_id)).unwrap(), m);
-    assert_eq!(
-        std::fs::read_dir(dir.path().join("tmp")).unwrap().count(),
-        0,
-        "no leftover temporary"
-    );
-
-    // ISO replaced after approval: the managed copy does not change.
-    std::fs::write(&src, b"replaced content").unwrap();
     let check = cat.verify_media(&m.media_id).unwrap();
-    assert_eq!(check.record.sha256, sha_hex(&content));
+    assert_eq!(check.record, m);
     assert!(!check.readonly_restored);
+
+    // ISO replaced after approval: the use is refused, naming the file only.
+    std::fs::write(&src, b"replaced content").unwrap();
+    let err = cat.verify_media(&m.media_id).unwrap_err();
+    let StorageError::IntegrityMismatch { path, .. } = &err else {
+        panic!("{err:?}")
+    };
+    assert_eq!(path, "ubuntu.iso");
+    // Content back: usable again.
+    std::fs::write(&src, &content).unwrap();
+    cat.verify_media(&m.media_id).unwrap();
 
     // Can be attached to a VM as installation media.
     let vm = common::new_vm(&mut cat, "vm");
@@ -63,15 +76,80 @@ fn approved_media_is_a_readonly_managed_copy_with_hash() {
         .unwrap();
 }
 
+/// ADR-0029: selecting the same file again (after it changed) approves it
+/// again in its own row, so the VMs that use it keep working; the same file
+/// as the other kind is another medium.
 #[test]
-fn altered_managed_copy_is_detected() {
+fn selecting_the_same_file_again_updates_its_row() {
+    let dir = common::tempdir();
+    let src_dir = common::tempdir();
+    let src = src_dir.path().join("win.iso");
+    std::fs::write(&src, b"CD001 first build").unwrap();
+    let mut cat = Catalog::open(dir.path()).unwrap();
+    let m = cat.approve_media(&src, MediaKind::Iso, "first").unwrap();
+    std::fs::write(&src, b"CD001 second build, longer").unwrap();
+    assert!(matches!(
+        cat.verify_media(&m.media_id),
+        Err(StorageError::IntegrityMismatch { .. })
+    ));
+    let again = cat.approve_media(&src, MediaKind::Iso, "second").unwrap();
+    assert_eq!(again.media_id, m.media_id, "same row");
+    assert_eq!(again.sha256, sha_hex(b"CD001 second build, longer"));
+    assert_eq!(again.declared_origin, "second");
+    assert_eq!(cat.read(|tx| tx.media_ids()).unwrap(), [m.media_id]);
+    cat.verify_media(&m.media_id).unwrap();
+    let data = cat.approve_media(&src, MediaKind::Data, "as data").unwrap();
+    assert_ne!(data.media_id, m.media_id);
+    assert_eq!(cat.read(|tx| tx.media_ids()).unwrap().len(), 2);
+}
+
+/// File moved or deleted: `missing` and not usable; back in place: usable
+/// again after the hash.
+#[test]
+fn a_missing_file_marks_the_medium_missing_until_it_is_back() {
     let dir = common::tempdir();
     let src_dir = common::tempdir();
     let src = src_dir.path().join("data.iso");
-    std::fs::write(&src, b"original data").unwrap();
+    std::fs::write(&src, b"CD001 data").unwrap();
     let mut cat = Catalog::open(dir.path()).unwrap();
     let m = cat.approve_media(&src, MediaKind::Data, "fixture").unwrap();
-    let copy = cat.layout().resolve(&m.managed_path).unwrap();
+    let moved = src_dir.path().join("elsewhere.iso");
+    std::fs::rename(&src, &moved).unwrap();
+    let err = cat.verify_media(&m.media_id).unwrap_err();
+    assert!(
+        matches!(&err, StorageError::NotFound { id, .. } if id == "data.iso"),
+        "{err:?}"
+    );
+    assert_eq!(
+        cat.read(|tx| tx.media(&m.media_id)).unwrap().status,
+        MediaStatus::Missing
+    );
+    // Reconciliation does not look outside the catalog: still missing, the
+    // row kept.
+    drop(cat);
+    let mut cat = Catalog::open(dir.path()).unwrap();
+    assert_eq!(
+        cat.read(|tx| tx.media(&m.media_id)).unwrap().status,
+        MediaStatus::Missing
+    );
+    std::fs::rename(&moved, &src).unwrap();
+    let check = cat.verify_media(&m.media_id).unwrap();
+    assert_eq!(check.record.status, MediaStatus::Approved);
+    assert_eq!(
+        cat.read(|tx| tx.media(&m.media_id)).unwrap().status,
+        MediaStatus::Approved
+    );
+}
+
+#[test]
+fn altered_managed_copy_is_detected() {
+    let dir = common::tempdir();
+    let mut cat = Catalog::open(dir.path()).unwrap();
+    let m = common::managed_media(&mut cat, b"original data", MediaKind::Data, "fixture");
+    let rel = m.location.managed().unwrap().clone();
+    let copy = cat.layout().resolve(&rel).unwrap();
+    assert!(std::fs::metadata(&copy).unwrap().permissions().readonly());
+    cat.verify_media(&m.media_id).unwrap();
     #[allow(clippy::permissions_set_readonly_false)]
     {
         let mut p = std::fs::metadata(&copy).unwrap().permissions();
@@ -85,7 +163,7 @@ fn altered_managed_copy_is_detected() {
         "{err:?}"
     );
 
-    // Copy removed: media `missing`.
+    // Copy removed: media `missing`, and it stays so.
     std::fs::remove_file(&copy).unwrap();
     let err = cat.verify_media(&m.media_id).unwrap_err();
     assert!(matches!(err, StorageError::NotFound { .. }), "{err:?}");
@@ -142,11 +220,9 @@ fn source_that_is_a_directory_or_link_is_refused() {
         .approve_media(&target, MediaKind::Iso, "line1\nline2")
         .unwrap_err();
     assert!(matches!(err, StorageError::Constraint(_)), "{err:?}");
-    // No file or intent left behind by the refusals.
-    assert_eq!(
-        std::fs::read_dir(dir.path().join("media")).unwrap().count(),
-        0
-    );
+    // No row, file or intent left behind by the refusals.
+    assert!(cat.read(|tx| tx.media_ids()).unwrap().is_empty());
+    assert_eq!(entries(dir.path(), "media"), 0);
     assert!(cat.open_intents().unwrap().is_empty());
 }
 
@@ -193,6 +269,8 @@ fn source_that_is_a_fifo_is_refused_without_blocking() {
     }
 }
 
+/// The `import_media` intents of older catalogs still publish without
+/// overwriting and roll back cleanly.
 #[test]
 fn destination_appearing_before_publication_is_never_overwritten() {
     let dir = common::tempdir();
@@ -225,6 +303,32 @@ fn destination_appearing_before_publication_is_never_overwritten() {
         b"foreign file",
         "the rollback does not touch a row-less file it did not create"
     );
+}
+
+/// An `import_media` intent left open by an older version (service stopped
+/// mid-copy) is still rolled back at the next open: no row, no file.
+#[test]
+fn an_unfinished_import_of_an_older_version_still_reconciles() {
+    let dir = common::tempdir();
+    let mut cat = Catalog::open(dir.path()).unwrap();
+    let id = MediaId::new_v7();
+    let i = cat
+        .begin_intent(IntentSpec {
+            kind: IntentKind::ImportMedia,
+            vm_id: None,
+            operation_id: None,
+            target_kind: TargetKind::Media,
+            target_id: Some(id.to_string()),
+            final_path: Some(CatalogLayout::media_file(&id, "iso").unwrap()),
+            read_only: true,
+        })
+        .unwrap();
+    common::write_bytes(&i.temp_path, b"half a copy").unwrap();
+    drop(cat);
+    let cat = Catalog::open(dir.path()).unwrap();
+    assert!(cat.open_intents().unwrap().is_empty());
+    assert_eq!(entries(dir.path(), "tmp"), 0);
+    assert_eq!(entries(dir.path(), "media"), 0);
 }
 
 #[cfg(windows)]
@@ -272,7 +376,7 @@ fn checked_approval_enforces_size_and_optical_signature_on_the_handle() {
             .unwrap();
         assert_eq!(m.size_bytes, 40 * 1024);
     }
-    // Wrong signature and file too short: refused, nothing left behind.
+    // Wrong signature and file too short: refused, nothing recorded.
     for p in [
         image("zip.iso", b"PK\x03\x04\x00", 40 * 1024),
         image("short.iso", b"", 1024),
@@ -282,23 +386,20 @@ fn checked_approval_enforces_size_and_optical_signature_on_the_handle() {
             other => panic!("{other:?}"),
         }
     }
-    // Over the size limit: refused before copying.
+    // Over the size limit: refused before reading.
     let big = image("big.iso", b"CD001", 65 * 1024);
     assert!(matches!(
         cat.approve_media_checked(&big, MediaKind::Iso, "x", strict),
         Err(StorageError::ResourceLimit(_))
     ));
     assert!(cat.open_intents().unwrap().is_empty());
-    assert_eq!(
-        std::fs::read_dir(dir.path().join("tmp")).unwrap().count(),
-        0
-    );
-    let media = std::fs::read_dir(dir.path().join("media")).unwrap().count();
-    assert_eq!(media, 2, "only the two accepted copies");
+    assert_eq!(entries(dir.path(), "tmp"), 0);
+    assert_eq!(entries(dir.path(), "media"), 0, "nothing copied");
+    assert_eq!(cat.read(|tx| tx.media_ids()).unwrap().len(), 2);
 }
 
 #[test]
-fn import_in_three_steps_copies_outside_the_catalog() {
+fn import_in_three_steps_hashes_outside_the_catalog() {
     use vm_storage::MediaLimits;
     let dir = common::tempdir();
     let src_dir = common::tempdir();
@@ -311,37 +412,40 @@ fn import_in_three_steps_copies_outside_the_catalog() {
         optical_signature: true,
     };
     let mut cat = Catalog::open(dir.path()).unwrap();
-    let job = cat
-        .begin_media_import(&src, MediaKind::Data, "built with oscdimg", limits)
+    let r = cat
+        .reserve_media_import(&src, MediaKind::Data, "built with oscdimg", limits)
         .unwrap();
-    assert_eq!(job.size_bytes(), content.len() as u64);
-    // While the job holds the source, nobody can write it.
-    assert!(std::fs::OpenOptions::new().write(true).open(&src).is_err() || cfg!(not(windows)));
-    // The catalog keeps serving while the copy runs on another thread.
-    let copied = std::thread::spawn(move || job.copy()).join().unwrap();
+    // The reservation records nothing.
+    assert!(cat.open_intents().unwrap().is_empty());
+    assert!(cat.read(|tx| tx.media_ids()).unwrap().is_empty());
+    // The catalog keeps serving while the hash runs on another thread.
+    let hashed = std::thread::spawn(move || r.open_and_hash(vm_storage::canonical_source))
+        .join()
+        .unwrap();
+    // Until the row is written the source is held: nobody can write it.
+    #[cfg(windows)]
+    assert!(std::fs::OpenOptions::new().write(true).open(&src).is_err());
     let other = common::new_vm(&mut cat, "meanwhile");
     assert!(cat.read(|tx| tx.vm(&other)).is_ok());
-    let m = cat.finish_media_import(copied).unwrap();
+    let m = cat.finish_media_import(hashed).unwrap();
     assert_eq!(m.sha256, sha_hex(&content));
-    assert!(cat.open_intents().unwrap().is_empty());
+    assert_eq!(m.location, MediaLocation::Referenced(resolved(&src)));
+    // Released after the row is written.
+    drop(std::fs::OpenOptions::new().write(true).open(&src).unwrap());
 
-    // A job never finished (service stopped mid-copy) is rolled back at the
-    // next open: no row, no file, no temporary.
-    let job = cat
-        .begin_media_import(&src, MediaKind::Data, "x", limits)
+    // An import abandoned at any step (service stopped mid-hash) leaves
+    // nothing to reconcile: no intent, no row, no file.
+    let r = cat
+        .reserve_media_import(&src, MediaKind::Iso, "x", limits)
         .unwrap();
-    drop(job);
+    let hashed = r.open_and_hash(vm_storage::canonical_source);
+    drop(hashed);
     drop(cat);
     let cat = Catalog::open(dir.path()).unwrap();
+    assert!(cat.open_report().unwrap().recovery.intents.is_empty());
     assert!(cat.open_intents().unwrap().is_empty());
-    assert_eq!(
-        std::fs::read_dir(dir.path().join("tmp")).unwrap().count(),
-        0
-    );
-    assert_eq!(
-        std::fs::read_dir(dir.path().join("media")).unwrap().count(),
-        1
-    );
+    assert_eq!(entries(dir.path(), "tmp"), 0);
+    assert_eq!(entries(dir.path(), "media"), 0);
 }
 
 #[test]
@@ -361,82 +465,84 @@ fn reserved_import_opens_the_source_only_on_the_worker() {
     let r = cat
         .reserve_media_import(&src, MediaKind::Data, "x", limits)
         .unwrap();
-    assert_eq!(cat.open_intents().unwrap().len(), 1);
     std::fs::write(&src, &content).unwrap();
     let mut checked = false;
-    let copied = r.open_and_copy(|f| {
-        checked = f.metadata().unwrap().len() == content.len() as u64;
-        Ok(())
+    let hashed = r.open_and_hash(|f, p| {
+        checked = f.metadata().unwrap().len() == content.len() as u64 && p == src.as_path();
+        vm_storage::canonical_source(f, p)
     });
     assert!(checked);
-    let m = cat.finish_media_import(copied).unwrap();
+    let m = cat.finish_media_import(hashed).unwrap();
     assert_eq!(m.sha256, sha_hex(&content));
-    assert!(cat.open_intents().unwrap().is_empty());
 
-    // Rejected by the caller's check: nothing copied, intent aborted.
+    // Rejected by the caller's check: nothing recorded.
     let r = cat
-        .reserve_media_import(&src, MediaKind::Data, "x", limits)
+        .reserve_media_import(&src, MediaKind::Iso, "x", limits)
         .unwrap();
-    let copied = r.open_and_copy(|_| Err(StorageError::Unsupported("remote volume")));
+    let hashed = r.open_and_hash(|_, _| Err(StorageError::Unsupported("remote volume")));
     assert!(matches!(
-        cat.finish_media_import(copied),
+        cat.finish_media_import(hashed),
         Err(StorageError::Unsupported("remote volume"))
     ));
-    assert!(cat.open_intents().unwrap().is_empty());
+    // A relative path to record is refused.
+    let r = cat
+        .reserve_media_import(&src, MediaKind::Iso, "x", limits)
+        .unwrap();
+    let hashed = r.open_and_hash(|_, _| Ok("late.iso".into()));
+    assert!(cat.finish_media_import(hashed).is_err());
 
     // Missing source: the error comes from the worker step.
     let r = cat
         .reserve_media_import(
             &src_dir.path().join("missing.iso"),
-            MediaKind::Data,
+            MediaKind::Iso,
             "x",
             limits,
         )
         .unwrap();
-    let copied = r.open_and_copy(|_| Ok(()));
-    assert!(cat.finish_media_import(copied).is_err());
+    let hashed = r.open_and_hash(vm_storage::canonical_source);
+    assert!(cat.finish_media_import(hashed).is_err());
 
-    // Cancelled after the copy: aborted, temporary removed, nothing published.
+    // Cancelled after the hash: nothing recorded.
     let r = cat
-        .reserve_media_import(&src, MediaKind::Data, "x", limits)
+        .reserve_media_import(&src, MediaKind::Iso, "x", limits)
         .unwrap();
-    let copied = r.open_and_copy(|_| Ok(()));
-    cat.abort_media_import(copied).unwrap();
+    let hashed = r.open_and_hash(vm_storage::canonical_source);
+    cat.abort_media_import(hashed).unwrap();
+    assert_eq!(cat.read(|tx| tx.media_ids()).unwrap(), [m.media_id]);
     assert!(cat.open_intents().unwrap().is_empty());
-    assert_eq!(
-        std::fs::read_dir(dir.path().join("tmp")).unwrap().count(),
-        0
-    );
-    assert_eq!(
-        std::fs::read_dir(dir.path().join("media")).unwrap().count(),
-        1
-    );
+    assert_eq!(entries(dir.path(), "tmp"), 0);
+    assert_eq!(entries(dir.path(), "media"), 0);
 }
 
 #[test]
-fn detected_guest_is_recorded_with_the_copy_and_can_be_updated() {
+fn detected_guest_is_recorded_with_the_row_and_can_be_updated() {
     use lightvm_proto::{DetectedGuest, GuestArch, GuestOs, Label};
+    use std::io::Read as _;
     let dir = common::tempdir();
     let src_dir = common::tempdir();
     let src = src_dir.path().join("win7.iso");
     let content = b"CD001 fake windows medium".repeat(100);
     std::fs::write(&src, &content).unwrap();
     let mut cat = Catalog::open(dir.path()).unwrap();
-    let job = cat
-        .begin_media_import(&src, MediaKind::Iso, "x", vm_storage::MediaLimits::NONE)
+    let r = cat
+        .reserve_media_import(&src, MediaKind::Iso, "x", vm_storage::MediaLimits::NONE)
         .unwrap();
-    let mut copied = job.copy();
-    // The copied bytes can be examined before publication.
-    let file = copied.copied_file().expect("copy succeeded").to_path_buf();
-    assert_eq!(std::fs::read(&file).unwrap(), content);
+    let mut hashed = r.open_and_hash(vm_storage::canonical_source);
+    // The hashed file can be examined through the held handle.
+    let mut f = hashed.source_file().expect("hash succeeded");
+    std::io::Seek::seek(&mut f, std::io::SeekFrom::Start(0)).unwrap();
+    let mut read = Vec::new();
+    f.read_to_end(&mut read).unwrap();
+    assert_eq!(read, content);
     let guest = DetectedGuest {
         os: GuestOs::Windows7,
         arch: Some(GuestArch::X86_64),
         build: Some(7601),
         edition: Some(Label::parse("Windows 7 Professional").unwrap()),
     };
-    copied.set_detected_guest(Some(guest.clone()));
-    let m = cat.finish_media_import(copied).unwrap();
+    hashed.set_detected_guest(Some(guest.clone()));
+    let m = cat.finish_media_import(hashed).unwrap();
     assert_eq!(m.detected_guest.as_ref(), Some(&guest));
     assert!(m.guest_examined);
     assert_eq!(cat.read(|tx| tx.media(&m.media_id)).unwrap(), m);
@@ -471,25 +577,127 @@ fn detected_guest_is_recorded_with_the_copy_and_can_be_updated() {
     assert!(r.detected_guest.is_none() && r.guest_examined);
 }
 
-/// Medium with its managed copy, for the deletion tests.
-fn approved(cat: &mut Catalog, src_dir: &std::path::Path, name: &str) -> vm_storage::MediaRecord {
-    let src = src_dir.join(name);
-    std::fs::write(&src, format!("CD001 fake medium {name}").repeat(200)).unwrap();
-    cat.approve_media(&src, MediaKind::Iso, name).unwrap()
+/// The guard of a start on a file used in place: every component checked
+/// against links (a junction in a directory is refused), the file pinned
+/// while the guard lives (Windows share mode), a missing file `NotFound`.
+#[test]
+fn guard_of_a_file_used_in_place() {
+    let src_dir = common::tempdir();
+    let real = src_dir.path().join("real");
+    std::fs::create_dir_all(&real).unwrap();
+    let file = real.join("pinned.iso");
+    std::fs::write(&file, b"CD001 pinned").unwrap();
+    let path = resolved(&file);
+    let g = vm_storage::MediaGuard::open_external(&path).unwrap();
+    assert_eq!(g.path(), path.as_path());
+    assert_eq!(g.size_bytes(), 12);
+    #[cfg(windows)]
+    {
+        assert!(std::fs::OpenOptions::new().write(true).open(&path).is_err());
+        assert!(std::fs::rename(&path, real.join("other.iso")).is_err());
+        assert!(std::fs::remove_file(&path).is_err());
+        assert!(std::fs::rename(&real, src_dir.path().join("real2")).is_err());
+    }
+    let (hex, n) = g.sha256_with(&|| false, &|_| {}).unwrap();
+    assert_eq!((hex, n), (sha_hex(b"CD001 pinned"), 12));
+    drop(g);
+    // A directory reached through a junction (or symbolic link) is refused.
+    let link = src_dir.path().join("via-link");
+    #[cfg(unix)]
+    let made = std::os::unix::fs::symlink(&real, &link).is_ok();
+    #[cfg(windows)]
+    let made = common::make_junction(&link, &real);
+    if made {
+        let err = vm_storage::MediaGuard::open_external(&link.join("pinned.iso")).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                StorageError::InvalidPath {
+                    reason: PathRejection::Link,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        assert!(
+            !err.to_string().contains("via-link"),
+            "file name only: {err}"
+        );
+    } else {
+        eprintln!("junction not available: part skipped");
+    }
+    // Relative path, missing file.
+    assert!(vm_storage::MediaGuard::open_external(std::path::Path::new("pinned.iso")).is_err());
+    std::fs::remove_file(&path).unwrap();
+    match vm_storage::MediaGuard::open_external(&path) {
+        Err(StorageError::Io { source, .. }) => {
+            assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
+        }
+        other => panic!("{other:?}"),
+    }
 }
 
-fn tmp_entries(dir: &std::path::Path) -> usize {
-    std::fs::read_dir(dir.join("tmp")).map_or(0, Iterator::count)
+/// Medium with its managed copy (older catalogs), for the deletion tests.
+fn approved(cat: &mut Catalog, name: &str) -> vm_storage::MediaRecord {
+    common::managed_media(
+        cat,
+        format!("CD001 fake medium {name}").repeat(200).as_bytes(),
+        MediaKind::Iso,
+        name,
+    )
+}
+
+fn managed_copy(cat: &Catalog, m: &vm_storage::MediaRecord) -> std::path::PathBuf {
+    cat.layout()
+        .resolve(m.location.managed().expect("managed copy"))
+        .unwrap()
+}
+
+/// ADR-0029: deleting a medium used in place removes its row only; the
+/// user's file is never touched.
+#[test]
+fn deleting_a_medium_used_in_place_keeps_the_users_file() {
+    let dir = common::tempdir();
+    let src_dir = common::tempdir();
+    let src = src_dir.path().join("keep-me.iso");
+    let content = b"CD001 the user's own file".repeat(300);
+    std::fs::write(&src, &content).unwrap();
+    let mut cat = Catalog::open(dir.path()).unwrap();
+    let m = cat.approve_media(&src, MediaKind::Iso, "mine").unwrap();
+    let vm = common::new_vm(&mut cat, "user");
+    cat.with_tx(|tx| tx.attach_media(&vm, MediaSlot::Install, &m.media_id))
+        .unwrap();
+    assert!(matches!(
+        cat.delete_media(&m.media_id),
+        Err(StorageError::StateConflict(_))
+    ));
+    cat.with_tx(|tx| tx.detach_media(&vm, MediaSlot::Install))
+        .unwrap();
+    cat.delete_media(&m.media_id).unwrap();
+    assert!(matches!(
+        cat.read(|tx| tx.media(&m.media_id)),
+        Err(StorageError::NotFound { .. })
+    ));
+    assert_eq!(std::fs::read(&src).unwrap(), content, "file kept as it was");
+    assert!(cat.open_intents().unwrap().is_empty());
+    assert_eq!(entries(dir.path(), "tmp"), 0);
+    // A medium whose file is already gone loses its row the same way.
+    let gone = cat.approve_media(&src, MediaKind::Data, "gone").unwrap();
+    let elsewhere = src_dir.path().join("moved.iso");
+    std::fs::rename(&src, &elsewhere).unwrap();
+    assert!(cat.verify_media(&gone.media_id).is_err());
+    cat.delete_media(&gone.media_id).unwrap();
+    assert!(cat.read(|tx| tx.media_ids()).unwrap().is_empty());
+    assert_eq!(std::fs::read(&elsewhere).unwrap(), content);
 }
 
 #[test]
 fn deleting_a_medium_removes_the_readonly_copy_and_the_row() {
     let dir = common::tempdir();
-    let src_dir = common::tempdir();
     let mut cat = Catalog::open(dir.path()).unwrap();
-    let m = approved(&mut cat, src_dir.path(), "a.iso");
-    let keep = approved(&mut cat, src_dir.path(), "b.iso");
-    let copy = cat.layout().resolve(&m.managed_path).unwrap();
+    let m = approved(&mut cat, "a.iso");
+    let keep = approved(&mut cat, "b.iso");
+    let copy = managed_copy(&cat, &m);
     assert!(std::fs::metadata(&copy).unwrap().permissions().readonly());
 
     cat.delete_media(&m.media_id).unwrap();
@@ -499,7 +707,7 @@ fn deleting_a_medium_removes_the_readonly_copy_and_the_row() {
         Err(StorageError::NotFound { .. })
     ));
     assert!(cat.open_intents().unwrap().is_empty());
-    assert_eq!(tmp_entries(dir.path()), 0, "no leftover temporary");
+    assert_eq!(entries(dir.path(), "tmp"), 0, "no leftover temporary");
     // The other medium is untouched.
     assert_eq!(cat.read(|tx| tx.media_ids()).unwrap(), [keep.media_id]);
     cat.verify_media(&keep.media_id).unwrap();
@@ -513,9 +721,8 @@ fn deleting_a_medium_removes_the_readonly_copy_and_the_row() {
 #[test]
 fn an_attached_medium_is_not_deleted_and_the_refusal_names_the_vms() {
     let dir = common::tempdir();
-    let src_dir = common::tempdir();
     let mut cat = Catalog::open(dir.path()).unwrap();
-    let m = approved(&mut cat, src_dir.path(), "a.iso");
+    let m = approved(&mut cat, "a.iso");
     let one = common::new_vm(&mut cat, "web-test");
     let two = common::new_vm(&mut cat, "api-test");
     cat.with_tx(|tx| {
@@ -531,7 +738,7 @@ fn an_attached_medium_is_not_deleted_and_the_refusal_names_the_vms() {
         msg,
         "the medium is used by 2 VMs: \u{201c}api-test\u{201d}, \u{201c}web-test\u{201d}"
     );
-    let copy = cat.layout().resolve(&m.managed_path).unwrap();
+    let copy = managed_copy(&cat, &m);
     assert!(std::fs::metadata(&copy).unwrap().permissions().readonly());
     assert!(cat.open_intents().unwrap().is_empty());
     cat.verify_media(&m.media_id).unwrap();
@@ -556,11 +763,10 @@ fn an_attached_medium_is_not_deleted_and_the_refusal_names_the_vms() {
 #[test]
 fn a_medium_held_by_a_run_is_not_deleted() {
     let dir = common::tempdir();
-    let src_dir = common::tempdir();
     let mut cat = Catalog::open(dir.path()).unwrap();
-    let m = approved(&mut cat, src_dir.path(), "a.iso");
-    let copy = cat.layout().resolve(&m.managed_path).unwrap();
-    let guard = vm_storage::MediaGuard::open(dir.path(), &m.managed_path).unwrap();
+    let m = approved(&mut cat, "a.iso");
+    let copy = managed_copy(&cat, &m);
+    let guard = vm_storage::MediaGuard::open(dir.path(), m.location.managed().unwrap()).unwrap();
     let err = cat.delete_media(&m.media_id).unwrap_err();
     assert!(
         matches!(&err, StorageError::VmBusy(msg) if msg.contains("held open by a running VM")),
@@ -571,7 +777,7 @@ fn a_medium_held_by_a_run_is_not_deleted() {
     assert!(std::fs::metadata(&copy).unwrap().permissions().readonly());
     assert!(cat.read(|tx| tx.media(&m.media_id)).is_ok());
     assert!(cat.open_intents().unwrap().is_empty());
-    assert_eq!(tmp_entries(dir.path()), 0);
+    assert_eq!(entries(dir.path(), "tmp"), 0);
     drop(guard);
     cat.delete_media(&m.media_id).unwrap();
     assert!(!copy.exists());
@@ -580,10 +786,9 @@ fn a_medium_held_by_a_run_is_not_deleted() {
 #[test]
 fn a_medium_whose_copy_is_missing_loses_only_its_row() {
     let dir = common::tempdir();
-    let src_dir = common::tempdir();
     let mut cat = Catalog::open(dir.path()).unwrap();
-    let m = approved(&mut cat, src_dir.path(), "a.iso");
-    let copy = cat.layout().resolve(&m.managed_path).unwrap();
+    let m = approved(&mut cat, "a.iso");
+    let copy = managed_copy(&cat, &m);
     #[allow(clippy::permissions_set_readonly_false)]
     {
         let mut p = std::fs::metadata(&copy).unwrap().permissions();
@@ -607,9 +812,8 @@ fn crash_during_deletion(
     meanwhile: impl FnOnce(&mut Catalog, &vm_storage::MediaRecord),
 ) -> (tempfile::TempDir, Catalog, vm_storage::MediaRecord) {
     let dir = common::tempdir();
-    let src_dir = common::tempdir();
     let mut cat = Catalog::open(dir.path()).unwrap();
-    let m = approved(&mut cat, src_dir.path(), "a.iso");
+    let m = approved(&mut cat, "a.iso");
     cat.inject_fault(point, vm_storage::FaultAction::Crash);
     let err = cat.delete_media(&m.media_id).unwrap_err();
     assert!(
@@ -628,8 +832,7 @@ fn a_deletion_interrupted_after_the_move_is_completed_at_the_next_start() {
         crash_during_deletion(vm_storage::FaultPoint::DeleteBeforeCommit, |cat, m| {
             // Interrupted with the copy moved into `tmp/` and the row still
             // there.
-            let copy = cat.layout().resolve(&m.managed_path).unwrap();
-            assert!(!copy.exists());
+            assert!(!managed_copy(cat, m).exists());
             assert_eq!(cat.open_intents().unwrap().len(), 1);
             assert!(cat.read(|tx| tx.media(&m.media_id)).is_ok());
         });
@@ -647,9 +850,9 @@ fn a_deletion_interrupted_after_the_move_is_completed_at_the_next_start() {
         cat.read(|tx| tx.media(&m.media_id)),
         Err(StorageError::NotFound { .. })
     ));
-    assert!(!cat.layout().resolve(&m.managed_path).unwrap().exists());
+    assert!(!managed_copy(&cat, &m).exists());
     assert!(cat.open_intents().unwrap().is_empty());
-    assert_eq!(tmp_entries(dir.path()), 0, "read-only temporary removed");
+    assert_eq!(entries(dir.path(), "tmp"), 0, "read-only temporary removed");
 }
 
 #[test]
@@ -660,7 +863,7 @@ fn a_deletion_interrupted_when_a_vm_was_attached_meanwhile_restores_the_copy() {
             cat.with_tx(|tx| tx.attach_media(&vm, MediaSlot::Install, &m.media_id))
                 .unwrap();
         });
-    let copy = cat.layout().resolve(&m.managed_path).unwrap();
+    let copy = managed_copy(&cat, &m);
     assert!(copy.exists(), "copy moved back in place");
     assert!(std::fs::metadata(&copy).unwrap().permissions().readonly());
     assert_eq!(
@@ -669,7 +872,7 @@ fn a_deletion_interrupted_when_a_vm_was_attached_meanwhile_restores_the_copy() {
     );
     cat.verify_media(&m.media_id).unwrap();
     assert!(cat.open_intents().unwrap().is_empty());
-    assert_eq!(tmp_entries(dir.path()), 0);
+    assert_eq!(entries(dir.path(), "tmp"), 0);
 }
 
 #[test]
@@ -680,5 +883,5 @@ fn a_deletion_interrupted_after_the_commit_leaves_no_temporary() {
         Err(StorageError::NotFound { .. })
     ));
     assert!(cat.open_intents().unwrap().is_empty());
-    assert_eq!(tmp_entries(dir.path()), 0, "read-only temporary removed");
+    assert_eq!(entries(dir.path(), "tmp"), 0, "read-only temporary removed");
 }

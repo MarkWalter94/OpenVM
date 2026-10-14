@@ -1250,7 +1250,16 @@ impl QemuVmBackend {
         let (swtpm, tpm_state) = self.tpm_files(vm, profile)?;
         let mut media_paths = BTreeMap::new();
         for m in media {
-            let p = managed_abs(&self.setup.catalog_root, m.entry().managed_path.as_str());
+            // The file the start guard holds open and verified: the managed
+            // copy, or the user's file used in place (ADR-0029), whose
+            // path was checked for QEMU's option syntax at import and is
+            // checked again here.
+            let p = match &m.entry().location {
+                lightvm_proto::MediaLocation::Managed(rel) => {
+                    managed_abs(&self.setup.catalog_root, rel.as_str())
+                }
+                lightvm_proto::MediaLocation::Referenced(p) => p.clone(),
+            };
             media_paths.insert(
                 m.record().id,
                 ManagedPath::verify(p).map_err(|e| public(&e))?,

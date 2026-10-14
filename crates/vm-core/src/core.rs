@@ -28,7 +28,7 @@ use lightvm_proto::ipc::InputOwner;
 use lightvm_proto::{
     Actor, Admission, AuditAction, AuditEvent, AuditOutcome, BackendObservation, Caller,
     Capability, DisplayGeometry, EffectivePolicy, ErrorCode, FileIdentity, Grant, GuestOs,
-    HostCapacity, InputEvent, Label, Lease, ManagedRelPath, MediaEntry, MediaId, MediaKind,
+    HostCapacity, InputEvent, Label, Lease, MediaEntry, MediaId, MediaKind, MediaLocation,
     MediaRecord, OperationId, OperationKind, OperationRecord, OperationStatus, PolicyLayer,
     PolicyRevision, PublicError, ResourceLimits, RevocationReport, RunEndReason, RunId, RunRecord,
     Screenshot, SessionId, SessionState, SessionToken, Sha256Digest, TerminationCause,
@@ -184,20 +184,21 @@ pub struct SessionTermination {
     pub emergency_stops: Vec<EmergencyStopPlan>,
 }
 
-/// Data to register an approved medium (managed copy already created by storage).
+/// Data to register an approved medium (file already checked and hashed by
+/// the storage).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MediaRegistration {
     /// Kind.
     pub kind: MediaKind,
-    /// SHA-256 of the managed copy.
+    /// SHA-256 of the file.
     pub sha256: Sha256Digest,
     /// Size in bytes.
     pub size_bytes: u64,
     /// Declared origin.
     pub declared_origin: Label,
-    /// Relative path of the managed copy.
-    pub managed_path: ManagedRelPath,
-    /// OS identity of the managed copy.
+    /// Managed copy or the user's file used in place (ADR-0029).
+    pub location: MediaLocation,
+    /// OS identity of the file.
     pub file_identity: Option<FileIdentity>,
 }
 
@@ -739,10 +740,15 @@ where
             declared_origin: reg.declared_origin,
             approved_at: self.clock.now(),
             detected_guest: None,
+            location: match &reg.location {
+                MediaLocation::Managed(_) => None,
+                MediaLocation::Referenced(p) => Some(p.to_string_lossy().into_owned()),
+            },
+            missing: false,
         };
         let entry = MediaEntry {
             record: record.clone(),
-            managed_path: reg.managed_path,
+            location: reg.location,
             file_identity: reg.file_identity,
         };
         self.store.insert_media(&entry)?;
@@ -761,11 +767,12 @@ where
     }
 
     /// Imports a medium chosen by the user with the native picker of the UI
-    /// (ADR-0008): the catalog makes the read-only managed copy and the
-    /// registry row. User only; audited (`media_import`) without the path.
-    /// Blocking: the copy of a multi-GiB ISO takes as long as the disk (the
-    /// supervisor can split it with [`Self::begin_media_import`] and
-    /// [`Self::finish_media_import`] and copy on another thread).
+    /// (ADR-0008, ADR-0029): the catalog checks and hashes the file, which
+    /// stays where it is, and records the registry row. User only; audited
+    /// (`media_import`) without the path. Blocking: hashing a multi-GiB ISO
+    /// takes as long as the disk needs to read it (the supervisor can split
+    /// it with [`Self::begin_media_import`] and [`Self::finish_media_import`]
+    /// and hash on another thread).
     pub fn import_media(
         &mut self,
         caller: &Caller,
@@ -780,7 +787,7 @@ where
     }
 
     /// First step of a media import: denies (and audits) agent sessions,
-    /// then runs `begin` on the catalog (checks, journal intent); an error of
+    /// then runs `begin` on the catalog (checks, reservation); an error of
     /// `begin` is audited as a failed import.
     pub fn begin_media_import<T>(
         &mut self,
@@ -802,8 +809,8 @@ where
         })
     }
 
-    /// Last step of a media import: `finish` publishes the copy and the
-    /// registry row; the outcome is audited.
+    /// Last step of a media import: `finish` records the registry row; the
+    /// outcome is audited.
     pub fn finish_media_import(
         &mut self,
         caller: &Caller,
@@ -831,11 +838,12 @@ where
         }
     }
 
-    /// Deletes an imported medium with its managed copy: user only; refused
+    /// Deletes an imported medium from the registry: user only; refused
     /// (`state_conflict`, the VMs named in the message) while the
     /// configuration of a VM uses it as installation or data media, so no
-    /// run can hold it. The catalog removes row and file through its
-    /// journal. Audited (`media_delete`).
+    /// run can hold it. The catalog removes the row, and a managed copy
+    /// through its journal; a file used in place is never touched (ADR-0029).
+    /// Audited (`media_delete`).
     pub fn delete_media(&mut self, caller: &Caller, media_id: MediaId) -> Result<(), PublicError> {
         let actor = caller.actor();
         if matches!(caller, Caller::Agent { .. }) {

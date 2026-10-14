@@ -154,12 +154,11 @@ impl CatalogStore for MemStore {
                 declared_origin: declared_origin.clone(),
                 approved_at: UtcTimestamp::from_unix_millis(T0).unwrap(),
                 detected_guest: None,
+                location: Some(source.to_string_lossy().into_owned()),
+                missing: false,
             },
-            managed_path: ManagedRelPath::parse(format!(
-                "media/{}",
-                source.file_name().and_then(|n| n.to_str()).unwrap_or("x")
-            ))
-            .unwrap(),
+            // ADR-0029: the file chosen by the user is used in place.
+            location: MediaLocation::Referenced(source.to_path_buf()),
             file_identity: None,
         };
         self.insert_media(&entry)?;
@@ -420,7 +419,9 @@ impl Harness {
                 sha256: Sha256Digest::from_bytes([1; 32]),
                 size_bytes: 6 * 1024 * 1024 * 1024,
                 declared_origin: Label::parse("downloaded by the user").unwrap(),
-                managed_path: ManagedRelPath::parse(format!("media/{name}")).unwrap(),
+                location: MediaLocation::Managed(
+                    ManagedRelPath::parse(format!("media/{name}")).unwrap(),
+                ),
                 file_identity: Some(FileIdentity {
                     volume: 1,
                     file_id: [9; 16],

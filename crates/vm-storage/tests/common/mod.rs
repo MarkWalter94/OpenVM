@@ -79,3 +79,48 @@ pub fn make_junction(link: &Path, target: &Path) -> bool {
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
+
+/// Medium with a read-only managed copy, as catalogs before ADR-0029
+/// imported them (journal `import_media` intent, copy published under
+/// `media/`): new imports use the file in place, but such media keep
+/// working and must stay covered.
+pub fn managed_media(
+    cat: &mut Catalog,
+    bytes: &[u8],
+    kind: vm_storage::MediaKind,
+    origin: &str,
+) -> vm_storage::MediaRecord {
+    use sha2::Digest as _;
+    let id = vm_storage::MediaId::new_v7();
+    let rel = vm_storage::CatalogLayout::media_file(&id, "iso").unwrap();
+    let i = cat
+        .begin_intent(vm_storage::IntentSpec {
+            kind: vm_storage::IntentKind::ImportMedia,
+            vm_id: None,
+            operation_id: None,
+            target_kind: vm_storage::TargetKind::Media,
+            target_id: Some(id.to_string()),
+            final_path: Some(rel.clone()),
+            read_only: true,
+        })
+        .unwrap();
+    write_bytes(&i.temp_path, bytes).unwrap();
+    cat.mark_applied(&i).unwrap();
+    let record = vm_storage::MediaRecord {
+        media_id: id,
+        sha256: sha2::Sha256::digest(bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect(),
+        size_bytes: bytes.len() as u64,
+        kind,
+        declared_origin: origin.into(),
+        approved_at: vm_storage::now_rfc3339(),
+        location: vm_storage::MediaLocation::Managed(rel),
+        status: vm_storage::MediaStatus::Approved,
+        detected_guest: None,
+        guest_examined: true,
+    };
+    cat.commit(&i, |tx| tx.insert_media(&record)).unwrap();
+    record
+}

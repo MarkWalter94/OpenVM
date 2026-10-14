@@ -209,7 +209,7 @@ Other Ubuntu versions may work but are not tested by the project.
 
 1. On the **Dashboard**, press **New VM**. The wizard opens; move between steps with **Next** and **Back**, or leave with **Cancel**.
 2. **Name**: type a name for the VM, for example `ubuntu`. This is the only text field in LightVM; the name is used only inside LightVM. The wizard says when the name is not valid or already used.
-3. **Installation media**: press **Import ISO…** and select `ubuntu-26.04.1-desktop-amd64.iso` in the file picker. LightVM **copies** the image into its catalog and records its SHA-256; the original file is not modified and you can delete it afterwards. Importing a 6 GiB image takes a while. Images imported earlier are listed and can be chosen again for other VMs.
+3. **Installation media**: press **Import ISO…** and select `ubuntu-26.04.1-desktop-amd64.iso` in the file picker. LightVM uses the image **where it is**: it does not copy it (no disk space is used twice), it only checks it and records its SHA-256 and location. **Keep the file in that place**: LightVM never modifies, moves or deletes it, and checks it again before every start (see section 9.1 for what happens if it changes or disappears). Reading a 6 GiB image for its SHA-256 takes a minute or so. Images imported earlier are listed and can be chosen again for other VMs.
 4. **System**: LightVM looks inside the image you chose and preselects the system it detects. Check it and change it if it is wrong. If it does not recognize the image, nothing is preselected: choose the system yourself; **Next** stays disabled until you do (*Choose the system to continue*). **Ubuntu LTS (x86-64)** is the reference guest; **Other Linux (x86-64)** is listed but not tested by the project. Windows systems are described in [section 6.1](#61-create-a-windows-vm).
 5. **Data media** (optional): keep **No data media**. (A data ISO, imported with **Import data ISO…**, is attached to the VM as a read-only CD; it is not needed for the installation.)
 6. **Resources**: **Virtual processors**, **Memory** and **Disk**. The defaults (2 vCPUs, 4 GiB, 32 GiB disk) are the standard template for Ubuntu LTS, shown as *Template: Ubuntu LTS — 2 vCPU, 4 GiB RAM, 32 GiB disk*, and suit Ubuntu Desktop; if you change them, **Reset to template** puts them back. The wizard does not offer more than the host can give. The disk file grows on the host only as the guest writes data.
@@ -322,17 +322,23 @@ What the wizard shows: after you import the ISO, the System step reads *Detected
 | **More** → **Force stop…** | Terminates the VM at once, like pulling the plug. Unsaved data in the guest is lost; the guest's file system may need a check at the next boot. | Only when the guest does not respond to **Stop**. |
 | **More** → **Reset…** | Restarts the guest at once, like a PC's reset button. | Guest frozen. |
 | **Emergency Stop** | Button at the top right of the Dashboard. Immediately terminates **all** VMs and revokes the agent sessions. | Anything looks wrong and you want everything to stop now. |
-| **More** → **Delete…** | Removes the VM and its disk after a confirmation. Only possible while the VM is stopped (otherwise: *Stop the VM to delete it*). **Cannot be undone.** Imported installation images stay in the catalog (to remove them see section 9.1). | VM no longer needed. |
+| **More** → **Delete…** | Removes the VM and its disk after a confirmation. Only possible while the VM is stopped (otherwise: *Stop the VM to delete it*). **Cannot be undone.** Imported installation images stay in the registry (to remove them see section 9.1). | VM no longer needed. |
 
 Resources and execution limits (**Virtual processors**, **Memory (RAM)**, **Disk**, **Maximum CPU**, **Memory margin**, **Storage budget**) are changed with **Edit** → **Save settings**, only while the VM is **Stopped**; the disk can only grow.
 
 Closing LightVM while VMs are running opens a dialog: **Stop them and quit** shuts the VMs down in an orderly way (terminating those that do not stop within the timeout) and then closes LightVM; **Cancel** keeps everything running. VMs are not left running in the background. If the VMs stop by themselves while the dialog is open, LightVM closes without asking further. If the supervisor has already stopped or lost its connection, LightVM closes at once: the VMs it was running follow the **If LightVM closes unexpectedly** setting.
 
-### 9.1 Delete imported ISOs
+### 9.1 Imported ISOs: where they are, and deleting them
 
-Every ISO imported in the wizard (installation and data media) is a read-only copy in the catalog, so it takes as much disk space as the original. **Settings** → **Installation media** lists them: name, **Installation** or **Data**, size, the system LightVM detected in it, when it was imported and which VMs use it (*used by "web-test"* or *not used by any VM*).
+An ISO imported in the wizard (installation and data media) is **used where it is**: LightVM records its location and SHA-256 and never copies, modifies, moves or deletes the file. **Settings** → **Installation media** lists them: name, **Installation** or **Data**, the file's location (*… · used where it is, not copied*), size, the system LightVM detected in it, when it was imported and which VMs use it (*used by "web-test"* or *not used by any VM*). Images imported by an earlier version of LightVM were copied into the catalog: they show *Read-only copy in the LightVM catalog* and keep working as before.
 
-To free the space, press **Delete…** next to an image and confirm with **Delete medium**. LightVM removes its copy from the catalog; the original file you imported it from is not touched, and you can import it again later. **Cannot be undone.**
+Keep each file in its place. While a VM runs, LightVM holds the file open so that no program can change, rename or delete it. Between runs it can, so every start reads the file again and compares its SHA-256 (the VM's row shows *Verifying installation media… N %*; for a large ISO this takes a moment at every start):
+
+- **The file changed** (for example overwritten by a newer download with the same name): the start is refused with *the ISO file "…" changed since it was selected: import it again to use it*. Import the same file again with **Import ISO…**: LightVM updates the existing entry, so the VMs that use it start again.
+- **The file was moved, renamed or deleted, or its drive is not connected**: the start is refused with *the ISO file "…" is no longer where it was selected*, and the list shows it with **File missing** and *File not found at …: put it back there, or import it again in the New VM wizard*. Put it back (or connect the drive) and it is usable again; an ISO imported again from a new place is a new entry, to choose in the VM's **Edit** → **Installation media**.
+- Files on network shares, files reached through links or junctions, files inside the LightVM catalog folder, and files whose path contains a character QEMU cannot accept (a comma, `=`, a quote…) are refused at import with the reason; rename or move the file and import it again.
+
+To remove an image from the list, press **Delete…** next to it and confirm with **Delete medium**. For an image used in place only the entry is removed: **the ISO file stays where it is, untouched** (the dialog says so). For a copy made by an earlier version, LightVM removes its copy from the catalog and frees that space; the original file is not touched. You can import either again later. **Cannot be undone.**
 
 An image that a VM uses as installation or data media cannot be deleted: **Delete…** is disabled and its tooltip names the VMs. Remove it first with **Edit** → **Installation media** (or **Data media**) → **Remove** → **Save settings**, or with **Remove installation media…** on the Dashboard, or delete the VM. If the supervisor still refuses (for example a VM started using it from another window meanwhile), the dialog stays open and says why: *The medium was not deleted: it is used by 1 VM: "…"*, or *a running VM or another operation holds it open*. Agent sessions can never delete media. If LightVM is interrupted during a deletion, it finishes or undoes it the next time it starts.
 
@@ -456,7 +462,7 @@ On the report page:
 | What | Where |
 | --- | --- |
 | Program files | `%LOCALAPPDATA%\Programs\LightVM` (or the `-Prefix` you chose) |
-| VM catalog: database, VM disks, UEFI variables, baselines, imported images | `%LOCALAPPDATA%\LightVM\catalog` (or the folder chosen in **Settings** → **VM catalog**) |
+| VM catalog: database, VM disks, UEFI variables, baselines, copies of images imported by earlier versions (ISOs imported now stay where you keep them) | `%LOCALAPPDATA%\LightVM\catalog` (or the folder chosen in **Settings** → **VM catalog**) |
 | App settings | `%LOCALAPPDATA%\LightVM\ui-settings.json` |
 | QEMU used by the supervisor | The folder chosen in **Settings** → **QEMU distribution**; if none is chosen, the one LightVM finds by itself (`%LOCALAPPDATA%\Programs\qemu-11.1.0`, `C:\Program Files\qemu` or a folder in `PATH`, shown as *(found automatically)*, section 2.3) |
 | Audit log of the supervisor | `%LOCALAPPDATA%\LightVM\audit.jsonl` |
@@ -465,11 +471,11 @@ On the report page:
 
 `%LOCALAPPDATA%` is usually `C:\Users\<you>\AppData\Local`. Do not edit or move files in the catalog by hand while LightVM is running; LightVM keeps a journal to recover from interruptions, but manual changes are not supported. To back up VMs, close LightVM and copy the whole catalog folder.
 
-The catalog folder holds everything about your VMs: `catalog.sqlite3` (the database), `media\` (imported installation images), `vms\<VM id>\` (disk `primary.qcow2`, baselines in `base\`, overlays in `overlays\`, UEFI variables in `firmware\`, TPM state in `tpm\`), `runs\`, `sessions\` (agent session reports) and `tmp\`.
+The catalog folder holds everything about your VMs: `catalog.sqlite3` (the database), `media\` (copies of images imported by earlier versions; ISOs imported now are used where they are and are not in the catalog), `vms\<VM id>\` (disk `primary.qcow2`, baselines in `base\`, overlays in `overlays\`, UEFI variables in `firmware\`, TPM state in `tpm\`), `runs\`, `sessions\` (agent session reports) and `tmp\`.
 
 ### 12.1 Move the VMs to another folder or drive
 
-**Settings** → **Supervisor** → **VM catalog** → **Move catalog…** moves the whole catalog, with every VM, disk, baseline, imported image and session report, and makes LightVM use the new folder.
+**Settings** → **Supervisor** → **VM catalog** → **Move catalog…** moves the whole catalog, with every VM, disk, baseline, image copy and session report, and makes LightVM use the new folder. ISOs used where they are (section 9.1) are outside the catalog: they are not moved or copied, and the VMs keep using them from their place.
 
 1. Stop every VM. The button is disabled while a VM runs (hover over it for the reason), while the supervisor is restarting, when a changed catalog folder has not been applied yet, and when LightVM was started from the command line with `--catalog`.
 2. Choose the destination folder. An empty (or new) folder receives the catalog directly; a folder that already contains files gets a `catalog` subfolder, so nothing of yours is mixed with it.

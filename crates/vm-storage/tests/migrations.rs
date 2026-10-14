@@ -449,3 +449,122 @@ fn media_of_a_v6_catalog_are_not_examined_after_the_upgrade() {
         .unwrap();
     assert!(cat.read(|tx| tx.media(&mid)).unwrap().guest_examined);
 }
+
+/// ADR-0029 (schema 8): a v7 catalog with a managed copy attached to a VM
+/// upgrades with a backup; the copy keeps working (verified, attached,
+/// deletable with its file), new imports use the file in place, and the
+/// rebuilt table keeps its constraints and the reference from `vm_media`.
+#[test]
+fn managed_copies_of_a_v7_catalog_keep_working_after_the_upgrade() {
+    use sha2::Digest as _;
+    use vm_storage::{MediaKind, MediaLocation, MediaStatus};
+    let dir = common::tempdir();
+    let db = dir.path().join(DB_FILE);
+    let vm = "0190f7a4-0000-7000-8000-000000000001";
+    let id = "0190f7a4-0000-7000-8000-0000000000e2";
+    let rel = format!("media/{id}.iso");
+    let bytes = b"CD001 copy made by an older version".repeat(50);
+    let sha: String = sha2::Sha256::digest(&bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    {
+        drop(Catalog::open(dir.path()).unwrap());
+        std::fs::remove_file(&db).unwrap();
+        let _ = std::fs::remove_file(dir.path().join(format!("{DB_FILE}-wal")));
+        let _ = std::fs::remove_file(dir.path().join(format!("{DB_FILE}-shm")));
+        let mut conn = migrate::open_connection(&db).unwrap();
+        migrate::migrate_to(&mut conn, &db, 7).unwrap();
+        conn.execute(
+            "INSERT INTO vms(vm_id, name, guest_os, config_version, config_json, created_at, updated_at)
+             VALUES (?1, 'legacy', 'ubuntu', 1, '{}', 'x', 'x')",
+            params![vm],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO media(media_id, sha256, size_bytes, kind, declared_origin, approved_at,
+                               managed_path, status, guest_examined)
+             VALUES (?1, ?2, ?3, 'iso', 'legacy', 'x', ?4, 'approved', 1)",
+            params![id, sha, bytes.len() as i64, rel],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO vm_media(vm_id, slot, media_id) VALUES (?1, 'install', ?2)",
+            params![vm, id],
+        )
+        .unwrap();
+        let copy = dir.path().join("media").join(format!("{id}.iso"));
+        std::fs::write(&copy, &bytes).unwrap();
+        let mut p = std::fs::metadata(&copy).unwrap().permissions();
+        p.set_readonly(true);
+        std::fs::set_permissions(&copy, p).unwrap();
+    }
+    let mut cat = Catalog::open(dir.path()).unwrap();
+    let rep = cat.open_report().unwrap().clone();
+    assert_eq!(
+        (rep.migration.from_version, rep.migration.to_version),
+        (7, LATEST_VERSION)
+    );
+    assert!(
+        rep.migration.backup.is_some(),
+        "backup before the migration"
+    );
+    assert!(rep.recovery.integrity.is_empty(), "{:?}", rep.recovery);
+    let mid: vm_storage::MediaId = id.parse().unwrap();
+    let m = cat.read(|tx| tx.media(&mid)).unwrap();
+    assert_eq!(
+        m.location,
+        MediaLocation::Managed(vm_storage::ManagedPath::parse(&rel).unwrap())
+    );
+    assert_eq!(
+        (m.status, m.sha256.as_str()),
+        (MediaStatus::Approved, sha.as_str())
+    );
+    cat.verify_media(&mid).unwrap();
+    // The reference from `vm_media` survived the rebuild: still enforced.
+    assert!(matches!(
+        cat.delete_media(&mid),
+        Err(StorageError::StateConflict(_))
+    ));
+    let conn = migrate::open_connection(&db).unwrap();
+    // Constraints of the new columns: a row must be one kind or the other.
+    for (storage, managed, external) in [
+        ("managed", None, Some("/x.iso")),
+        ("referenced", Some("media/y.iso"), None),
+        ("referenced", None, None),
+        ("copied", Some("media/z.iso"), None),
+    ] {
+        assert!(
+            conn.execute(
+                "INSERT INTO media(media_id, sha256, size_bytes, kind, declared_origin,
+                                   approved_at, storage, managed_path, external_path)
+                 VALUES ('bad', ?1, 1, 'iso', 'x', 'x', ?2, ?3, ?4)",
+                params!["b".repeat(64), storage, managed, external],
+            )
+            .is_err(),
+            "{storage} {managed:?} {external:?}"
+        );
+    }
+    drop(conn);
+    // A new import of the same kind is used in place, next to the copy.
+    let src = common::tempdir();
+    let iso = src.path().join("new.iso");
+    std::fs::write(&iso, b"CD001 new").unwrap();
+    let n = cat.approve_media(&iso, MediaKind::Iso, "new").unwrap();
+    assert!(matches!(n.location, MediaLocation::Referenced(_)));
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("media")).unwrap().count(),
+        1,
+        "only the old copy"
+    );
+    // Once detached, the old copy is deleted with its file.
+    let svm: vm_storage::VmId = vm.parse().unwrap();
+    cat.with_tx(|tx| tx.detach_media(&svm, vm_storage::MediaSlot::Install))
+        .unwrap();
+    cat.delete_media(&mid).unwrap();
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("media")).unwrap().count(),
+        0
+    );
+    assert_eq!(cat.read(|tx| tx.media_ids()).unwrap(), [n.media_id]);
+}

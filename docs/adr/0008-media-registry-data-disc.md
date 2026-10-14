@@ -1,6 +1,6 @@
 # ADR-0008 — Approved media registry and read-only data medium
 
-- Status: Accepted; operational details of the data medium recorded on 2026-10-10 (section "Data medium details")
+- Status: Accepted; operational details of the data medium recorded on 2026-10-10 (section "Data medium details"); the managed copy is replaced by the file used in place for new imports by ADR-0029 (owner decision, 2026-10-14)
 - Date: 2026-10-09
 - Owner: to be assigned
 
@@ -17,6 +17,10 @@ A path selected by the user can be replaced after approval (symlink, junction, f
 - No automatic mounting of guest filesystems on the host; no automatic image catalog; ISOs introduced by the user through the native picker.
 - The MCP client supplies IDs, not paths (section 7.2, point 5).
 
+## Amendment (ADR-0029, owner decision)
+
+The first point above no longer holds for new imports: the registry records the user's own file **in place** (absolute path resolved by the system, size, SHA-256) and makes no copy. What the copy protected is kept by other means: the file is opened without following links, with `FILE_SHARE_READ` only, at import and at every start; every component of its path is checked against links; the hash is recomputed through the handle before every start and QEMU receives that same path while the handle is held. Media imported before keep their managed copy and keep working. Residual risks (file changed, moved or deleted between runs; hashing at every start; no share modes outside Windows) are in ADR-0029 and `docs/SECURITY.md`. The rest of this ADR (data medium, no MCP tool, IDs instead of paths, read-only CD-ROM) is unchanged.
+
 ## Details to be closed in F0
 
 Section 17 lists the "approved data medium" among the F0 decisions. Still to be settled: the tool and format with which the user produces the data ISO, size limits, type of emulated device (read-only CD-ROM) and verification that the guest cannot write to it. These details must be recorded in this ADR (additional section) or in a later linked ADR, without changing the decision above.
@@ -28,10 +32,10 @@ Implementation data (section 17), without changing the decision above:
 | Item | Choice | Where |
 | --- | --- | --- |
 | Format | **ISO 9660** optical image (including hybrids with UDF or Joliet/Rock Ridge) or **UDF**: `CD001` or `BEA01` signature in the first volume descriptor (offset 32769). Other files are rejected at inspection (`invalid_argument`) | `lightvm-service/src/adapters/catalog.rs` (`is_optical_image`, `ManagedMediaInspector`) |
-| Tool | In the MVP the user produces the data ISO with a standard tool outside LightVM (for example `oscdimg` from the Windows ADK or any ISO 9660/UDF generator); LightVM makes a managed copy of it and verifies its signature, size and hash. Generating the ISO from a folder inside LightVM is a possible extension (to be evaluated with ADR-0023 for licenses), not a requirement | — |
-| Size | Installation ISO ≤ 16 GiB, data ISO ≤ 8 GiB (dual-layer DVD); above that → `resource_limit` at registration. Managed copies count toward the storage budget (ADR-0017) | `lightvm-proto` (`MAX_INSTALL_MEDIA_BYTES`, `MAX_DATA_MEDIA_BYTES`), `vm-core` (`register_media`) |
+| Tool | In the MVP the user produces the data ISO with a standard tool outside LightVM (for example `oscdimg` from the Windows ADK or any ISO 9660/UDF generator); LightVM verifies its signature, size and hash and uses it in place (ADR-0029; media imported before have a managed copy). Generating the ISO from a folder inside LightVM is a possible extension (to be evaluated with ADR-0023 for licenses), not a requirement | — |
+| Size | Installation ISO ≤ 16 GiB, data ISO ≤ 8 GiB (dual-layer DVD); above that → `resource_limit` at registration. Managed copies count toward the storage budget (ADR-0017); files used in place (ADR-0029) are outside the catalog and do not | `lightvm-proto` (`MAX_INSTALL_MEDIA_BYTES`, `MAX_DATA_MEDIA_BYTES`), `vm-core` (`register_media`) |
 | Emulated device | IDE CD-ROM (`ide-cd`) on the q35 AHCI controller, never bootable for the data medium (no `bootindex`); `raw` node with `read-only=on` on both the format and the file | `qemu-backend/src/cmdline.rs` (`push_cdrom`) |
-| Guest cannot write | Three layers: a CD-ROM does not accept writes from the guest; the QEMU block is opened read-only; the managed copy is read-only and its hash is re-verified by the core before every start (`verify_media`): a modification prevents startup | `vm-core/src/media.rs` |
+| Guest cannot write | Three layers: a CD-ROM does not accept writes from the guest; the QEMU block is opened read-only; the file (managed copy or, since ADR-0029, the user's file used in place) has its hash re-verified by the core before every start (`verify_media`) through a handle that refuses writers until the run ends: a modification prevents startup | `vm-core/src/media.rs` |
 | Mounting | Only with the VM off (VM configuration, `data_media`); no MCP tool changes it | `vm-core` (`update_vm_config` requires the VM to be off) |
 
 Evidence: `vm-core` `scenarios::register_media_rejects_oversized_images`; `lightvm-service` `adapters::catalog::tests::iso_9660_or_udf_signature`; the reference Ubuntu ISO has the `CD001` signature. Writing from the guest with real QEMU: **verified impossible** on 2026-10-10 (`docs/verification/F1-11-second-user-and-data-disc.md`: `touch`, remount and `dd` failed with "Read-only file system", ISO hash unchanged).

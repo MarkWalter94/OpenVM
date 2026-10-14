@@ -247,7 +247,9 @@ str_enum!(
         CopyVars => "copy_vars",
         /// Materialization of a new baseline base.
         PromoteBaseline => "promote_baseline",
-        /// Managed copy of an approved media.
+        /// Managed copy of an approved media (catalogs before ADR-0029: new
+        /// imports use the file in place and record no intent; unfinished
+        /// intents of this kind still reconcile).
         ImportMedia => "import_media",
         /// Deletion of a managed file or directory.
         DeleteFile => "delete_file",

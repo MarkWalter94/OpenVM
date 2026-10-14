@@ -10,7 +10,7 @@ Allowed outcomes: **verified**, **failed**, **not executed** (section 17). The r
 
 ## Purpose
 
-1. `list_media` / `import_media` (UI role only): checks on the path chosen with the native picker, managed read-only copy through the storage journal, ADR-0008 size limits, kinds install/data; the imported medium is usable as `install_media`/`data_media` in `create_vm` and verified by the media inspector at start.
+1. `list_media` / `import_media` (UI role only): checks on the path chosen with the native picker, managed read-only copy through the storage journal (replaced by the file used in place for new imports since ADR-0029: the measurements below concern the managed copy), ADR-0008 size limits, kinds install/data; the imported medium is usable as `install_media`/`data_media` in `create_vm` and verified by the media inspector at start.
 2. `delete_vm`: only a stopped VM without queued or forwarded operations; rows and files (disk, run directories with the UEFI variables and logs) removed through the storage journal; audit.
 3. `VmSummary.disk_used_bytes` and `Capabilities.host`.
 4. Input, screenshot and reset connected to the QEMU backend; input from the console without a prior screenshot while still rejecting stale coordinates; IPC→QMP latency.
@@ -98,7 +98,7 @@ Totals for the seven crates: **318 tests passed, 0 failed, 14 ignored** (real-QE
 | Item | Outcome | Evidence |
 | --- | --- | --- |
 | Pairing role refused on `list_media`, `import_media`, `delete_vm`, `open_console`, no effect | verified | `f2.rs::f2_requests_are_refused_for_the_pairing_role` |
-| Invalid import paths refused (relative, UNC, `\\?\`, `\\.\PhysicalDrive0`, `//?/`, ADS, `NUL.iso`, `..`, `.txt`, directory, missing, no signature, empty, junction) with nothing copied | verified | `f2.rs::import_list_create_and_delete_with_the_sqlite_catalog`; `media/` contains only the accepted copy |
+| Invalid import paths refused (relative, UNC, `\\?\`, `\\.\PhysicalDrive0`, `//?/`, ADS, `NUL.iso`, `..`, `.txt`, directory, missing, no signature, empty, junction) with nothing imported | verified | `f2.rs::import_list_create_and_delete_with_the_sqlite_catalog`; `media/` contained only the accepted copy (since ADR-0029 it stays empty: the file is used in place) |
 | Import → `list_media` → `create_vm` with the medium → start verifies the managed copy (real inspector) | verified | same test (`vm_start:f2-vm:media=1`); copy read-only |
 | `disk_used_bytes` = VM files + run directories | verified | same test (4000 bytes written, 4000 reported) |
 | `delete_vm` refused while running and with a stale revision; then files, directories and rows removed; VM absent after a restart; medium kept | verified | same test; audit `vm_delete` denied/succeeded, `media_import` succeeded/failed, no host path in the audit |

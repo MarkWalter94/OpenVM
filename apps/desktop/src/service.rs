@@ -1734,7 +1734,7 @@ async fn ipc_loop(
                 | ServiceCommand::RevokeSession(_)
                 | ServiceCommand::SetInputOwner { .. }
                 | ServiceCommand::SetAgentAccess(_) => fast_in.push(c),
-                // Imports and exports copy files (an export can write
+                // Imports read whole ISOs (hash), exports copy files (an export can write
                 // hundreds of MiB of screenshots).
                 ServiceCommand::ImportMedia { .. } | ServiceCommand::ExportSessionReport { .. } => {
                     let _ = slow_tx.send(c);

@@ -501,7 +501,7 @@ fn empty_media_cannot_be_registered() {
             sha256: Sha256Digest::from_bytes([1; 32]),
             size_bytes: 0,
             declared_origin: Label::parse("empty").unwrap(),
-            managed_path: ManagedRelPath::parse("media/empty.iso").unwrap(),
+            location: MediaLocation::Managed(ManagedRelPath::parse("media/empty.iso").unwrap()),
             file_identity: None,
         })
         .unwrap_err();

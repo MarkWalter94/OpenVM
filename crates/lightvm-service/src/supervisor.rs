@@ -16,8 +16,8 @@
 //! - **revocation**: a request whose connection was revoked or closed (the
 //!   revocation sender gone counts as revoked) is not executed, and a
 //!   mutation queued before an Emergency Stop is discarded (media imports
-//!   included, also when their copy ends after the revocation or the
-//!   Emergency Stop: the copy is then discarded and the import audited as
+//!   included, also when their hash ends after the revocation or the
+//!   Emergency Stop: the outcome is then discarded and the import audited as
 //!   failed);
 //! - **baselines (F3)**: creation and restore run on a worker thread like
 //!   the media import ([`SupervisorThread::start_storage_job`]); their work
@@ -71,7 +71,7 @@ use crate::engine::{
 use crate::reports::{CallRecord, OpenReport, ReportStore};
 use lightvm_proto::report::{ReportFormat, SessionVerifier};
 
-/// Media imports copying at the same time (each holds a worker thread).
+/// Media imports hashing at the same time (each holds a worker thread).
 pub const MAX_CONCURRENT_IMPORTS: usize = 2;
 
 /// Longest wait of the service shutdown for baseline jobs still running
@@ -441,9 +441,9 @@ pub(crate) struct SupervisorThread {
     pub(crate) vms_with_process: Arc<AtomicUsize>,
     /// Console tickets and display proxies.
     pub(crate) display: Arc<DisplayRegistry>,
-    /// Sender towards this same thread (end of a media import copy).
+    /// Sender towards this same thread (end of a media import hash).
     pub(crate) self_tx: mpsc::Sender<Command>,
-    /// Media imports whose copy is in progress.
+    /// Media imports whose hash is in progress.
     pub(crate) imports: usize,
     /// Baseline jobs whose work is in progress (F3).
     pub(crate) storage_jobs: usize,
@@ -641,7 +641,7 @@ impl SupervisorThread {
                     declared_origin,
                 } = req
                 {
-                    // The reply is sent when the copy ends.
+                    // The reply is sent when the hash ends.
                     if let Some(reply) = slot.take() {
                         self.start_import(
                             caller,
@@ -883,7 +883,7 @@ impl SupervisorThread {
                     reply,
                     ..
                 } => {
-                    // The copy is not published.
+                    // Nothing is recorded.
                     let e = self.engine.abort_import(
                         &caller,
                         copied,
@@ -1290,11 +1290,12 @@ impl SupervisorThread {
             .store(self.engine.vms_with_process(), Ordering::SeqCst);
     }
 
-    /// First step of a media import on this thread (text checks and journal
-    /// intent, no access to the file), copy on a worker thread (open, file
-    /// checks, copy), last step back here with [`Command::FinishImport`]: the
+    /// First step of a media import on this thread (text checks and
+    /// reservation, no access to the file), hash on a worker thread (open,
+    /// file checks, SHA-256; nothing is copied, ADR-0029), last step back
+    /// here with [`Command::FinishImport`]: the
     /// supervisor keeps serving the VMs (console input included) while a
-    /// multi-GiB ISO is copied, and a slow source never blocks it.
+    /// multi-GiB ISO is hashed, and a slow source never blocks it.
     fn start_import(
         &mut self,
         caller: Option<Caller>,
@@ -1327,8 +1328,8 @@ impl SupervisorThread {
             .name("lightvm-media-import".into())
             .spawn(move || {
                 let copied = job.run();
-                // If the supervisor is gone the copy stays unpublished and
-                // the catalog rolls it back at the next open.
+                // If the supervisor is gone nothing is recorded: an import
+                // leaves nothing to roll back.
                 let _ = tx.send(Command::FinishImport {
                     caller,
                     copied,
@@ -1388,7 +1389,7 @@ impl SupervisorThread {
                 let Ok(job) = job_rx.recv() else { return };
                 let done = job.run();
                 // If the supervisor is gone the result stays unpublished and
-                // the catalog rolls it back at the next open.
+                // leaves nothing to roll back.
                 let _ = tx.send(Command::FinishStorage {
                     done,
                     reply,
@@ -1652,7 +1653,7 @@ impl SupervisorThread {
                 let c = who()?;
                 self.open_console(c, vm_id, connection_id)
             }
-            // Served by `start_import` (reply after the copy).
+            // Served by `start_import` (reply after the hash).
             SupervisorRequest::ImportMedia { .. } => {
                 Err(PublicError::infrastructure("media import not dispatched"))
             }

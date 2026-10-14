@@ -1072,7 +1072,7 @@
       ]
     },
     "MediaRecord": {
-      "description": "Approved media, as seen by clients: no host path.",
+      "description": "Approved media, as seen by clients. Sent only to the `ui` role\n(`list_media`, `import_media`): agent sessions never receive it.",
       "type": "object",
       "properties": {
         "approved_at": {
@@ -1102,12 +1102,23 @@
           "description": "Kind of media.",
           "$ref": "#/$defs/MediaKind"
         },
+        "location": {
+          "description": "Where the ISO is, shown to the user (ADR-0029): absolute path of the\nuser's own file, used in place and never copied. `None` for a\nread-only copy kept in the catalog (media imported before ADR-0029).\nInformative text: no request carries it back.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "missing": {
+          "description": "The file was not found at [`Self::location`] the last time it was\nlooked for (moved, renamed, deleted, or its drive is not connected):\nno VM can use the medium until the file is back there or the ISO is\nimported again.",
+          "type": "boolean"
+        },
         "sha256": {
-          "description": "SHA-256 of the managed copy, computed at approval.",
+          "description": "SHA-256 of the file, computed at approval and re-verified before\nevery start.",
           "$ref": "#/$defs/Sha256Digest"
         },
         "size_bytes": {
-          "description": "Size in bytes of the managed copy.",
+          "description": "Size in bytes of the file.",
           "type": "integer",
           "format": "uint64",
           "minimum": 0

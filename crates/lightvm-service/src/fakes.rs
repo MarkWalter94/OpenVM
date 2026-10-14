@@ -11,7 +11,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use lightvm_proto::ipc::StopReason;
 use lightvm_proto::{
     AuditEvent, BackendObservation, Caller, DisplayGeometry, GuestOs, HostCapacity, ImageFormat,
-    InputEvent, Label, ManagedRelPath, MediaEntry, MediaId, MediaKind, MediaRecord, NetworkProfile,
+    InputEvent, Label, MediaEntry, MediaId, MediaKind, MediaLocation, MediaRecord, NetworkProfile,
     OperationId, OperationRecord, PublicError, RunEndReason, RunId, RunRecord, Screenshot,
     Sha256Digest, UtcTimestamp, VmConfig, VmId, VmName, VmRecord, VmState,
 };
@@ -385,9 +385,11 @@ fn fake_entry(
             declared_origin,
             approved_at: UtcTimestamp::now(),
             detected_guest: None,
+            location: Some(source.to_string_lossy().into_owned()),
+            missing: false,
         },
-        managed_path: ManagedRelPath::parse(format!("media/{id}.iso"))
-            .map_err(|_| PublicError::infrastructure("path"))?,
+        // ADR-0029: the file is used where it is.
+        location: MediaLocation::Referenced(source.to_path_buf()),
         file_identity: None,
     })
 }

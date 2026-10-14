@@ -129,8 +129,10 @@ fn verify_media_checks_every_field() {
             declared_origin: Label::parse("x").unwrap(),
             approved_at: UtcTimestamp::from_unix_millis(0).unwrap(),
             detected_guest: None,
+            location: None,
+            missing: false,
         },
-        managed_path: ManagedRelPath::parse("media/x.iso").unwrap(),
+        location: MediaLocation::Managed(ManagedRelPath::parse("media/x.iso").unwrap()),
         file_identity: Some(FileIdentity {
             volume: 1,
             file_id: [2; 16],
@@ -172,6 +174,51 @@ fn verify_media_checks_every_field() {
         let e = verify_media(&entry, &bad, now).unwrap_err();
         assert_eq!(e.code, ErrorCode::PermissionDenied);
     }
+}
+
+/// ADR-0029: a file used in place is the user's and normally writable (the
+/// guard's share mode keeps it unchanged during the run), so writability is
+/// not checked; a different hash names the file, never its path.
+#[test]
+fn verify_media_of_a_file_used_in_place() {
+    use vm_core::media::{ObservedMediaFacts, verify_media};
+    let path = std::path::Path::new("isos").join("ubuntu.iso");
+    let entry = MediaEntry {
+        record: MediaRecord {
+            id: MediaId::from_unix_millis(1, [1; 10]),
+            kind: MediaKind::InstallIso,
+            sha256: Sha256Digest::from_bytes([1; 32]),
+            size_bytes: 10,
+            declared_origin: Label::parse("x").unwrap(),
+            approved_at: UtcTimestamp::from_unix_millis(0).unwrap(),
+            detected_guest: None,
+            location: Some(path.to_string_lossy().into_owned()),
+            missing: false,
+        },
+        location: MediaLocation::Referenced(path),
+        file_identity: None,
+    };
+    let ok = ObservedMediaFacts {
+        sha256: entry.record.sha256,
+        size_bytes: 10,
+        file_identity: None,
+        read_only: false,
+    };
+    let now = UtcTimestamp::from_unix_millis(5).unwrap();
+    assert!(verify_media(&entry, &ok, now).is_ok());
+    let changed = ObservedMediaFacts {
+        sha256: Sha256Digest::from_bytes([3; 32]),
+        ..ok
+    };
+    let e = verify_media(&entry, &changed, now).unwrap_err();
+    assert_eq!(e.code, ErrorCode::PermissionDenied);
+    assert!(
+        e.message
+            .contains("\u{201c}ubuntu.iso\u{201d} changed since it was selected"),
+        "{}",
+        e.message
+    );
+    assert!(!e.message.contains("isos"), "no path: {}", e.message);
 }
 
 // ----- lifecycle, queue, idempotency ---------------------------------------
@@ -1142,7 +1189,7 @@ fn register_media_rejects_oversized_images() {
             sha256: Sha256Digest::from_bytes([3; 32]),
             size_bytes,
             declared_origin: Label::parse("test").unwrap(),
-            managed_path: ManagedRelPath::parse("media/x.iso").unwrap(),
+            location: MediaLocation::Managed(ManagedRelPath::parse("media/x.iso").unwrap()),
             file_identity: None,
         };
         denied(

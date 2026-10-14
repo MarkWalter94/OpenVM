@@ -330,7 +330,7 @@
           "const": "report_delete"
         },
         {
-          "description": "Deletion of an imported medium with its managed copy (user only).",
+          "description": "Deletion of an imported medium from the registry (user only): a\nmanaged copy is removed with it, a file used in place is kept.",
           "type": "string",
           "const": "media_delete"
         }

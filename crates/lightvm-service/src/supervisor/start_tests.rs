@@ -64,8 +64,12 @@ fn fixture() -> Fx {
             declared_origin: Label::parse("test").unwrap(),
             approved_at: UtcTimestamp::now(),
             detected_guest: None,
+            location: None,
+            missing: false,
         },
-        managed_path: ManagedRelPath::parse("media/x.iso").unwrap(),
+        location: lightvm_proto::MediaLocation::Managed(
+            ManagedRelPath::parse("media/x.iso").unwrap(),
+        ),
         file_identity: None,
     };
     let mut store = MemoryStore::default();

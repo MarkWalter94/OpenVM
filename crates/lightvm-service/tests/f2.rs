@@ -735,8 +735,10 @@ async fn import_list_create_and_delete_with_the_sqlite_catalog() {
     };
     assert_eq!(media.kind, MediaKind::InstallIso);
     assert_eq!(media.size_bytes, 48 * 1024);
-    let copy = dir.join("media").join(format!("{}.iso", media.id));
-    assert!(std::fs::metadata(&copy).unwrap().permissions().readonly());
+    // ADR-0029: the user's file is used in place, nothing is copied.
+    assert_eq!(media.location.as_deref(), Some(iso.to_str().unwrap()));
+    assert!(!media.missing);
+    assert_eq!(std::fs::read_dir(dir.join("media")).unwrap().count(), 0);
     match req(&mut ui, Request::ListMedia).await {
         ServerMessage::Response {
             result: ResponseBody::MediaList { media: list },
@@ -821,7 +823,7 @@ async fn import_list_create_and_delete_with_the_sqlite_catalog() {
             assert_eq!(code(&m), Some(ErrorCode::PermissionDenied), "{m:?}");
         }
     }
-    assert_eq!(std::fs::read_dir(dir.join("media")).unwrap().count(), 1);
+    assert_eq!(std::fs::read_dir(dir.join("media")).unwrap().count(), 0);
 
     // The imported medium is usable as installation media.
     let mut cfg = sample_config("f2-vm");
@@ -833,7 +835,7 @@ async fn import_list_create_and_delete_with_the_sqlite_catalog() {
         } => vm,
         other => panic!("{other:?}"),
     };
-    // The managed copy is verified at start (real inspector).
+    // The file is verified at start (real inspector).
     let run = start_vm(&mut ui, vm.id).await;
     assert!(
         calls(&svc).iter().any(|c| c == "vm_start:f2-vm:media=1"),
@@ -889,7 +891,7 @@ async fn import_list_create_and_delete_with_the_sqlite_catalog() {
     let m = req(&mut ui, Request::VmStatus { vm_id: vm.id }).await;
     assert_eq!(code(&m), Some(ErrorCode::NotFound));
     // The medium stays in the registry.
-    assert!(copy.exists());
+    assert!(iso.exists());
     svc.handle.shutdown().await;
 
     let events = read_audit(&dir);
@@ -944,7 +946,7 @@ async fn imported_media_are_deleted_only_when_no_vm_uses_them() {
         } => media,
         other => panic!("{other:?}"),
     };
-    let copy = dir.join("media").join(format!("{}.iso", media.id));
+    let original = std::fs::read(&iso).unwrap();
     let delete = Request::DeleteMedia { media_id: media.id };
 
     let mut cfg = sample_config("media-user");
@@ -956,7 +958,7 @@ async fn imported_media_are_deleted_only_when_no_vm_uses_them() {
         } => vm,
         other => panic!("{other:?}"),
     };
-    // Running (the copy is held by the run) and then stopped: refused, the
+    // Running (the file is held by the run) and then stopped: refused, the
     // VM is named.
     start_vm(&mut ui, vm.id).await;
     for running in [true, false] {
@@ -975,7 +977,7 @@ async fn imported_media_are_deleted_only_when_no_vm_uses_them() {
             }
             other => panic!("{other:?}"),
         }
-        assert!(std::fs::metadata(&copy).unwrap().permissions().readonly());
+        assert_eq!(std::fs::read(&iso).unwrap(), original);
         if running {
             succeeded(&submit(&mut ui, vm.id, None, VmAction::Stop).await);
         }
@@ -1002,7 +1004,8 @@ async fn imported_media_are_deleted_only_when_no_vm_uses_them() {
         } => assert_eq!(media_id, media.id),
         other => panic!("{other:?}"),
     }
-    assert!(!copy.exists());
+    // ADR-0029: only the registry row goes, the user's file is kept.
+    assert_eq!(std::fs::read(&iso).unwrap(), original);
     match req(&mut ui, Request::ListMedia).await {
         ServerMessage::Response {
             result: ResponseBody::MediaList { media: list },
@@ -1129,8 +1132,8 @@ fn rfb_watch(ticket: &ConsoleTicket) -> Arc<std::sync::Mutex<RfbSeen>> {
     seen
 }
 
-/// Removes a test catalog even if the test fails: the managed copy of the
-/// ISO is large and read-only.
+/// Removes a test catalog even if the test fails: it may hold read-only
+/// files (and, before ADR-0029, a large managed copy of the ISO).
 struct RemoveCatalog(PathBuf);
 
 impl Drop for RemoveCatalog {
@@ -1170,7 +1173,7 @@ fn ms(d: Duration) -> f64 {
 /// stop, deletion. Requires `LIGHTVM_E2E_QEMU_DIR`; optional
 /// `LIGHTVM_E2E_ISO` (default `lab/media/ubuntu-26.04.1-desktop-amd64.iso`)
 /// and `LIGHTVM_E2E_BOOT_S` (wait for the live system, default 150). The
-/// catalog (with the 6 GiB managed copy) is removed at the end. Run in
+/// catalog is removed at the end (the ISO is used in place, ADR-0029). Run in
 /// release: `cargo test --release -p lightvm-service --test f2 --
 /// --ignored --nocapture`.
 #[test]
@@ -1197,7 +1200,7 @@ fn e2e_real_qemu_import_console_input_stop_delete() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(150);
-    // Catalogs left by an interrupted run (QEMU kept the copy open).
+    // Catalogs left by an interrupted run (QEMU kept a file open).
     if let Ok(rd) = std::fs::read_dir(std::env::temp_dir().join("lightvm-service-tests")) {
         for e in rd.flatten() {
             if e.file_name().to_string_lossy().starts_with("f2-e2e-") {
@@ -1219,7 +1222,7 @@ fn e2e_real_qemu_import_console_input_stop_delete() {
     assert!(capacity.accelerator_available, "accelerator not available");
     assert!(capacity.input_available && capacity.screenshot_available);
     // The lab host may have less free space than the 16 GiB reserve plus the
-    // VM disk after the 6 GiB managed copy: the qcow2 disk is sparse and the
+    // VM disk: the qcow2 disk is sparse and the
     // live session does not write to it, so the test lowers the reserve
     // (declared in F2-01) instead of failing on host capacity.
     if capacity.free_storage_gib < capacity.reserved_storage_gib + 25 {
@@ -1262,7 +1265,7 @@ fn e2e_real_qemu_import_console_input_stop_delete() {
             other => panic!("{other:?}"),
         }
 
-        // 1. Import: the supervisor keeps answering during the copy.
+        // 1. Import: the supervisor keeps answering during the hash.
         let size = std::fs::metadata(&iso).unwrap().len();
         let (mut other, _) = connect_ui(&svc).await;
         let t0 = Instant::now();

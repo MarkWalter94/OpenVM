@@ -61,7 +61,7 @@ When a Proposed ADR is closed, the following are updated: the ADR's status and D
 | [0005](0005-baseline-with-vm-off.md) | Baseline with the VM off and per-session overlay | Accepted | 8 |
 | [0006](0006-mcp-stdio-pairing-grant.md) | MCP over stdio with pairing and a limited grant, no generic QMP | Accepted | 9 |
 | [0007](0007-no-tcg-fallback-for-ai-sessions.md) | No TCG fallback for AI sessions | Accepted | 3, 7.2 |
-| [0008](0008-media-registry-data-disc.md) | Approved media registry and read-only data medium | Accepted | 4, 6.3 |
+| [0008](0008-media-registry-data-disc.md) | Approved media registry and read-only data medium | Accepted; copy rule amended by ADR-0029 | 4, 6.3 |
 | [0009](0009-emergency-stop-os-primitives.md) | Emergency Stop with OS primitives, independent of QMP | Accepted | 7.3 |
 | [0010](0010-qemu-build-and-source.md) | QEMU build and source | Accepted (Windows; Linux in R2a) | 6.3, 10 F0, 17 |
 | [0011](0011-guest-release-and-firmware.md) | Guest release and firmware | Accepted | 4, 8, 17 |
@@ -82,3 +82,4 @@ When a Proposed ADR is closed, the following are updated: the ADR's status and D
 | [0026](0026-authentication-authorization-codes.md) | Public codes for authentication and authorization | Accepted (2026-10-10) | 6.3, 7.3, 7.4, 9 |
 | [0027](0027-windows-guest-hardware-profiles.md) | Windows guest hardware profiles (XP, Vista, 7, 8.1, 10; SeaBIOS; offline) | Accepted (2026-10-12): direction set; evidence pending | 4, 5, 12 (R2c) |
 | [0028](0028-macos-hvf-windows11-arm64.md) | macOS Apple Silicon host and Windows 11 ARM64 guest (HVF, swtpm, project-built Secure Boot firmware, offline) | Accepted (2026-10-12): direction set; evidence partial | 5, 7.2, 12 (R2b) |
+| [0029](0029-media-used-in-place.md) | Installation and data ISOs used in place, without a managed copy (owner decision; amends ADR-0008, deviation from ROADMAP 6.3) | Accepted (2026-10-14) | 6.3, 7.4 |

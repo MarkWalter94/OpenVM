@@ -17,9 +17,9 @@
 //!   referenced by [`VmId`], media by registry [`crate::MediaId`]. Two
 //!   exceptions, both reserved to the `ui` role and never to agent sessions:
 //!   [`Request::ImportMedia`] carries the file the user chose with the native
-//!   picker of the UI (opened read-only as a regular file and copied into the
-//!   catalog, never passed to QEMU), and [`ConsoleTicket`] returns the path of
-//!   the per-run display socket (ADR-0013);
+//!   picker of the UI (opened read-only as a regular file, checked and hashed
+//!   by the service, then used in place: ADR-0029), and [`ConsoleTicket`]
+//!   returns the path of the per-run display socket (ADR-0013);
 //! - errors are [`ReplyError`]: operational ([`crate::PublicError`]) or
 //!   protocol ([`crate::ProtocolError`]), never mixed up. Missing, malformed,
 //!   unknown or revoked credential → `unauthenticated`; insufficient role
@@ -158,9 +158,11 @@ pub enum Request {
     /// Approved media of the registry (UI only).
     ListMedia,
     /// Import of an ISO chosen by the user with the native picker of the UI
-    /// (UI only, never from agent sessions): read-only managed copy, SHA-256
-    /// and registry row (ADR-0008). The path is opened as a regular file
-    /// without following links and is never passed to QEMU.
+    /// (UI only, never from agent sessions): SHA-256 and registry row, the
+    /// file is used where it is and never copied (ADR-0008, ADR-0029). The
+    /// path is opened as a regular file without following links and
+    /// checked by the service; QEMU later receives the path the system
+    /// resolved for that file, re-verified (hash) before every start.
     ImportMedia {
         /// File chosen by the user.
         source_path: String,
@@ -170,10 +172,12 @@ pub enum Request {
         declared_origin: String,
     },
     /// Deletion of an imported medium (UI only, never from agent sessions;
-    /// the UI asks for confirmation): registry row and read-only managed
-    /// copy removed through the catalog journal. Refused (`state_conflict`)
-    /// while the configuration of a VM uses it as installation or data
-    /// media, and (`vm_busy`) while a run holds the copy open.
+    /// the UI asks for confirmation): registry row removed; a read-only
+    /// managed copy (media imported before ADR-0029) is removed with it
+    /// through the catalog journal, a file used in place is never touched.
+    /// Refused (`state_conflict`) while the configuration of a VM uses it as
+    /// installation or data media, and (`vm_busy`) while a run holds a
+    /// managed copy open.
     DeleteMedia {
         /// Medium of the registry.
         media_id: crate::MediaId,

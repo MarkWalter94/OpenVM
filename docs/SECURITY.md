@@ -1,6 +1,6 @@
 # Security
 
-Last updated: 2026-10-09 (F0 review)
+Last updated: 2026-10-14 (ISOs used in place, ADR-0029); 2026-10-09 (F0 review)
 
 Operational document required by section 17 of `docs/ROADMAP.md`: implementation of the controls and updated residual risks. **It does not weaken the threat model to make tests pass.** The requirements are in section 7 of the roadmap; this document records their operational translation and their status. No control is implemented in the product: all of them are "planned". Where an F0 spike demonstrated feasibility on the first host (Windows 11), the status reads "planned, feasibility proven in F0-xx": it is a feasibility test, not a control implemented or verified in the product (review in `docs/verification/F0-09-evidence-review.md`).
 
@@ -26,7 +26,7 @@ Operational document required by section 17 of `docs/ROADMAP.md`: implementation
 | Test output | Reports, logs, screenshots | Rendering as text or limited Markdown, size limits, no link opened automatically |
 | MCP client with insufficient permissions | MCP adapter, IPC | Limited grant, check on receipt and before forwarding, rate limit |
 | Received parameters | Validation in the core, QEMU command generation | IDs instead of paths, controlled grammar of QEMU options |
-| Imported images | Media registry, QEMU | Managed read-only copy with hash; no import of external QCOW2 in the MVP |
+| Imported images | Media registry, QEMU | ISO used in place (ADR-0029; media imported before: managed read-only copy): absolute path resolved by the system at import, size and SHA-256; at every start opened with `FILE_SHARE_READ` only, no link on any path component, volume and final path re-checked, hash recomputed through that handle, QEMU given that path while the handle is held; never modified by LightVM; no import of external QCOW2 in the MVP |
 | Local process without credential | IPC, QMP, display channel | Private OS channels, ACLs/permissions, per-run credentials |
 | Text in the guest instructing the agent | External agent | No LLM reasoning changes the policy; policy in the core |
 
@@ -105,6 +105,11 @@ Checklist to be completed with a reference to the verification file on the produ
 | Remote protocol drivers included in the QEMU build (`http`, `ssh`, `nbd`, …) | Third-party build | Allowlisted protocols and structured representations (section 6.3; backlog F1-08) |
 | Host clipboard read by egui-winit on Ctrl+V | Library behaviour (`F0-04` §4) | Text discarded by the UI; path blocked before F2 (backlog F1-13) |
 | Memory limit exceeded at steady state: QEMU crash instead of a handled error | Observed behaviour (`F0-08`) | `resource_limit` classification from the job notification; overlay not promoted (ADR-0017) |
+| ISO used in place changed between runs (owner decision, ADR-0029: no managed copy) | The file belongs to the user and stays writable outside a run | SHA-256 recomputed through the guard handle before every start: a changed file refuses the start until it is imported again |
+| ISO used in place moved, renamed, deleted or on a disconnected drive | Same | Start refused naming the file (never its path); medium shown as missing; usable again when the file is back or imported again |
+| Time to hash a large ISO at every start | Re-verification is the protection that replaces the copy | Hash off the supervisor thread with progress and cancellation (`crate::start`); same cost as for managed copies before |
+| ISO used in place writable by another process during a run on hosts without share modes (macOS, Linux) | No `FILE_SHARE_*` outside Windows | Declared limit (R2a), as for the other guarded files; on Windows the guard handle refuses writers, renames and deletions |
+| QEMU receives a path chosen by the user (ADR-0029) instead of a catalog path | Consequence of using the file in place | Path validated against QEMU's option grammar at import and at start; links, network volumes and paths inside the catalog refused |
 
 ## 5. Vulnerability handling (minimal process)
 

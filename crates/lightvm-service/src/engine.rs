@@ -131,8 +131,8 @@ pub trait VmEngine: Send + 'static {
         copied: ImportCopied,
         reason: PublicError,
     ) -> PublicError;
-    /// Deletion of an imported medium no VM configuration uses, with its
-    /// managed copy.
+    /// Deletion of an imported medium no VM configuration uses (a managed
+    /// copy is removed with it, a file used in place is kept).
     fn delete_media(&mut self, _caller: &Caller, _media_id: MediaId) -> Result<(), PublicError> {
         Err(PublicError::unsupported("media deletion not available"))
     }
@@ -616,7 +616,8 @@ pub trait BaselinePort {
     fn record_exit(&self, _run: RunId, _clean: bool) {}
 }
 
-/// Copy of a media import, to run on a worker thread; its result goes back
+/// Worker step of a media import (open, checks, hash: ADR-0029, nothing is
+/// copied), to run on a worker thread; its result goes back
 /// to [`VmEngine::finish_import`] on the supervisor thread.
 pub struct ImportJob(Box<dyn FnOnce() -> ImportCopied + Send>);
 
@@ -626,7 +627,7 @@ impl ImportJob {
         Self(Box::new(f))
     }
 
-    /// Runs the copy (blocking).
+    /// Runs the step (blocking).
     pub fn run(self) -> ImportCopied {
         (self.0)()
     }
@@ -647,20 +648,24 @@ impl std::fmt::Debug for ImportCopied {
     }
 }
 
-/// Media import in two steps on a catalog (the copy runs between them,
+/// Media import in two steps on a catalog (the hash runs between them,
 /// outside the catalog).
 pub trait MediaImportPort {
-    /// Opens the source, checks it and records the intent.
+    /// Reserves the import; the returned job opens, checks and hashes the
+    /// source.
     fn begin_import(
         &mut self,
         source: &Path,
         kind: MediaKind,
         declared_origin: &Label,
     ) -> Result<ImportJob, PublicError>;
-    /// Publishes the copy made by the job.
+    /// Records the medium checked and hashed by the job.
     fn finish_import(&mut self, copied: ImportCopied) -> Result<MediaEntry, PublicError>;
-    /// Discards the copy made by the job without publishing it.
+    /// Discards the outcome of the job without recording anything.
     fn abort_import(&mut self, copied: ImportCopied) -> Result<(), PublicError>;
+    /// A start found the file of a medium used in place missing (ADR-0029):
+    /// the registry marks it `missing`. Best effort, no outcome.
+    fn mark_media_missing(&self, _id: MediaId) {}
 }
 
 /// Data for a console ticket.
@@ -1101,6 +1106,9 @@ where
             match self.inspector.open_for_start(&entry) {
                 Ok(g) => media.push((entry, g)),
                 Err(e) => {
+                    if e.code == ErrorCode::NotFound {
+                        self.core.store().mark_media_missing(entry.record.id);
+                    }
                     drop(disks);
                     self.core.finish_dispatch(vm_id, d.operation_id, Err(e))?;
                     return Ok(None);

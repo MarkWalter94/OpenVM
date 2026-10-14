@@ -17,7 +17,8 @@
 //!
 //! It then removes leftover temporaries of already committed deletions and
 //! exports, and checks that the registered disk, firmware and media files
-//! exist (a path that cannot be verified is reported as
+//! exist (managed media copies only: files used in place, ADR-0029, are
+//! outside the catalog; a path that cannot be verified is reported as
 //! [`IntegrityIssue::Unverifiable`]). A missing base file is only reported:
 //! reconciliation never modifies a baseline's rows or files.
 
@@ -505,7 +506,13 @@ impl Catalog {
             let media: Vec<(String, String)> = {
                 let mut st = tx
                     .conn()
-                    .prepare("SELECT media_id, managed_path FROM media WHERE status = 'approved'")
+                    // Managed copies only: a file used in place (ADR-0029)
+                    // is outside the catalog; its presence is checked when
+                    // the registry is listed and before every use.
+                    .prepare(
+                        "SELECT media_id, managed_path FROM media
+                         WHERE status = 'approved' AND storage = 'managed'",
+                    )
                     .db()?;
                 let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).db()?;
                 rows.collect::<rusqlite::Result<_>>().db()?

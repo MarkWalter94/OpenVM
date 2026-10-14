@@ -143,3 +143,31 @@ fn no_deletion_without_the_supervisor_and_empty_list() {
     let (h, _hs) = harness(s);
     h.get_by_label("No imported media.");
 }
+
+/// ADR-0029: a medium used in place shows where the file is; deleting it
+/// says the file is kept; a file no longer found is shown as missing with
+/// what to do; a medium imported by an earlier version is LightVM's copy.
+#[test]
+fn location_missing_file_and_deletion_of_a_file_used_in_place() {
+    let mut s = state();
+    s.vms[0].config.install_media = None;
+    let (mut h, hs) = harness(s);
+    h.get_by_label_contains(
+        r"D:\ISO\ubuntu-24.04.3-live-server-amd64.iso · used where it is, not copied",
+    );
+    h.get_by_label_contains("Read-only copy in the LightVM catalog");
+    assert!(h.query_by_label("File missing").is_none());
+    click(&mut h, INSTALL);
+    h.get_by_label_contains("The ISO file itself");
+    h.get_by_label_contains("is kept where it is and is not changed");
+    click(&mut h, "Cancel");
+
+    hs.update(|s| s.media.records[0].missing = true);
+    h.run_steps(4);
+    h.get_by_label("File missing");
+    h.get_by_label_contains(
+        r"File not found at D:\ISO\ubuntu-24.04.3-live-server-amd64.iso: put it back there, or import it again",
+    );
+    // Still deletable (only the registry row goes).
+    assert!(enabled(&h, INSTALL));
+}

@@ -951,9 +951,9 @@ fn media_step(
     let install = kind == MediaKind::InstallIso;
     ui.label(
         egui::RichText::new(if install {
-            "ISO image the VM boots from to install the system. LightVM keeps a verified read-only copy in its catalog."
+            "ISO image the VM boots from to install the system. LightVM uses the file where it is, without copying it: keep it in place, its SHA-256 is checked before every start."
         } else {
-            "Optional read-only ISO to bring files into the guest, for example the software to test."
+            "Optional read-only ISO to bring files into the guest, for example the software to test. Used where it is, not copied."
         })
         .color(p.text_weak),
     );
@@ -996,8 +996,19 @@ fn media_step(
                 detail.push_str(NOT_SUPPORTED_ON_HOST);
             }
         }
+        if m.missing {
+            detail.push_str(" · file missing: put it back or import it again");
+        }
         ui.horizontal(|ui| {
-            let r = ui.radio(*selected == Some(m.id), &title);
+            // ADR-0029: a medium whose file is gone cannot be used.
+            let r = ui.add_enabled(
+                !m.missing || *selected == Some(m.id),
+                egui::RadioButton::new(*selected == Some(m.id), &title),
+            );
+            let r = match &m.location {
+                Some(path) => r.on_hover_text(path),
+                None => r,
+            };
             if r.clicked() {
                 *selected = Some(m.id);
             }
@@ -1035,7 +1046,9 @@ fn media_step(
                 env.active && env.file_picker && !importing,
                 egui::Button::new(text),
             )
-            .on_hover_text("Choose an ISO file: LightVM copies it into the catalog and verifies it")
+            .on_hover_text(
+                "Choose an ISO file: LightVM checks it and uses it where it is, without copying it",
+            )
             .on_disabled_hover_text(if env.file_picker {
                 "An import is in progress or the supervisor is not connected"
             } else {
@@ -1056,7 +1069,7 @@ fn media_step(
     if importing {
         ui.label(
             egui::RichText::new(
-                "The file is copied into the catalog and its SHA-256 is computed: this can take a few minutes.",
+                "The file is checked and its SHA-256 is computed (it is not copied): this can take a minute for a large ISO.",
             )
             .small()
             .color(p.text_weak),
@@ -1331,6 +1344,8 @@ mod tests {
             declared_origin: lightvm_proto::Label::parse("x.iso").unwrap(),
             approved_at: lightvm_proto::UtcTimestamp::from_unix_millis(1_760_000_000_000).unwrap(),
             detected_guest: detected,
+            location: None,
+            missing: false,
         }
     }
 

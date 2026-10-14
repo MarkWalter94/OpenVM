@@ -17,7 +17,7 @@ Bring `crates/vm-storage` to the state required by F1 for the storage part:
 3. intent journal with reconciliation at startup, including the outcome "to be checked" when reconciliation does not succeed;
 4. single-instance lock under concurrency;
 5. managed paths with rejection of reparse points, junctions and paths outside the root;
-6. registry of approved media with a managed read-only copy, SHA-256, `CREATE_NEW` and no overwriting;
+6. registry of approved media with a managed read-only copy, SHA-256, `CREATE_NEW` and no overwriting (since ADR-0029 new imports use the file in place: the tests named below were updated accordingly, the managed-copy path is still covered for catalogs created before);
 7. budget manifest (usage per catalog, VM, baseline, run and declared limits);
 8. disk protection (F1-09, storage part): baseline and its vars opened with `FILE_SHARE_READ` only for the duration of the run, verification of the baseline hash before every start, detector of unexpected writers, overlay handle without `FILE_SHARE_DELETE`.
 
@@ -85,7 +85,7 @@ Test count of `vm-storage`: **50 before** the work, **77 after** (all passed, no
 | Crash between hard link and removal of the temporary file: roll-forward completion with the base read-only again | verified (synthetic) | `crash_between_link_and_temp_removal_keeps_the_base_readonly` |
 | Single-instance lock: 8 threads open the same catalog together → a single instance; different spellings (`.`, `sub\..`, uppercase) rejected; distinct catalogs coexist | verified (synthetic) | `concurrency.rs` (3 tests) |
 | Absolute paths accepted only under the root; `..`, reserved names, empty root, junctions pointing outside rejected | verified (synthetic) | `paths_lock.rs::absolute_paths_are_accepted_only_inside_the_root` (`CatalogLayout::managed_from_absolute`) |
-| Media registry: managed read-only copy, SHA-256 of the copied bytes, no leftover temporary file; ISO replaced after approval does not change the copy | verified (synthetic) | `media_registry.rs::approved_media_is_a_readonly_managed_copy_with_hash` |
+| Media registry: at the time of this file, managed read-only copy, SHA-256 of the copied bytes, no leftover temporary file; ISO replaced after approval does not change the copy. Since ADR-0029: the file is used in place, nothing is copied, and an ISO replaced after approval is refused at the next use | verified (synthetic) | `media_registry.rs::approved_media_is_the_users_file_used_in_place_with_hash`, `media_registry.rs::altered_managed_copy_is_detected` |
 | Media registry: altered copy detected (`IntegrityMismatch`), copy removed → `missing` | verified (synthetic) | `altered_managed_copy_is_detected` |
 | Media registry: source that is a directory, a symbolic link or has an active writer rejected; origin with control characters rejected | verified (synthetic; writer only on Windows) | `source_that_is_a_directory_or_link_is_refused`, `source_open_by_a_writer_is_refused` |
 | No overwriting: destination appearing before publication never replaced nor removed by the rollback | verified (synthetic) | `destination_appearing_before_publication_is_never_overwritten` |

@@ -159,6 +159,17 @@ pub(crate) fn media(n: u8, kind: MediaKind, origin: &str) -> MediaRecord {
         declared_origin: Label::parse(origin).unwrap(),
         approved_at: UtcTimestamp::from_unix_millis(1_760_000_000_000 + i64::from(n)).unwrap(),
         detected_guest: None,
+        // ADR-0029: the user's file, used in place.
+        location: Some(format!("D:\\ISO\\{origin}")),
+        missing: false,
+    }
+}
+
+/// Medium with a read-only managed copy (imported by an earlier version).
+pub(crate) fn managed_media(n: u8, kind: MediaKind, origin: &str) -> MediaRecord {
+    MediaRecord {
+        location: None,
+        ..media(n, kind, origin)
     }
 }
 
@@ -199,7 +210,7 @@ pub(crate) fn connected(vms: Vec<VmSummary>) -> ServiceState {
                     MediaKind::InstallIso,
                     "ubuntu-24.04.3-live-server-amd64.iso",
                 ),
-                media(2, MediaKind::DataIso, "tools.iso"),
+                managed_media(2, MediaKind::DataIso, "tools.iso"),
             ],
             error: None,
         },

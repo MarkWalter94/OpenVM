@@ -952,8 +952,12 @@ async fn start_reply_waits_for_the_checks_while_the_connection_keeps_serving() {
             declared_origin: Label::parse("test").unwrap(),
             approved_at: UtcTimestamp::now(),
             detected_guest: None,
+            location: None,
+            missing: false,
         },
-        managed_path: ManagedRelPath::parse("media/a.iso").unwrap(),
+        location: lightvm_proto::MediaLocation::Managed(
+            ManagedRelPath::parse("media/a.iso").unwrap(),
+        ),
         file_identity: None,
     };
     let mut store = MemoryStore::default();

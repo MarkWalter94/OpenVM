@@ -23,17 +23,19 @@ fn never() -> bool {
     false
 }
 
-/// Catalog with a VM, a baseline (read-only base), an imported medium
-/// (read-only, larger than one copy block) and a few unregistered files.
+/// Catalog with a VM, a baseline (read-only base), a medium with a managed
+/// copy as older catalogs have (read-only, larger than one copy block) and
+/// a few unregistered files.
 fn populated(root: &Path) -> VmId {
-    let src = common::tempdir();
-    let iso = src.path().join("install.iso");
-    std::fs::write(&iso, b"CD001 fake iso ".repeat(150_000)).unwrap();
     let mut cat = Catalog::open(root).unwrap();
     let vm = common::new_vm(&mut cat, "moved");
     common::baseline(&mut cat, &vm, false);
-    cat.approve_media(&iso, MediaKind::Iso, "test image")
-        .unwrap();
+    common::managed_media(
+        &mut cat,
+        &b"CD001 fake iso ".repeat(150_000),
+        MediaKind::Iso,
+        "test image",
+    );
     let primary = root.join("vms").join(vm.to_string()).join("primary.qcow2");
     std::fs::write(primary, b"QFI\xfb primary").unwrap();
     std::fs::create_dir_all(root.join("sessions").join("s1")).unwrap();
@@ -134,6 +136,52 @@ fn copy_moves_every_file_verified_and_removes_the_source() {
     assert_eq!(last_copy.total_bytes, report.bytes);
 }
 
+/// ADR-0029: a medium used in place is outside the catalog: the move
+/// neither copies nor touches the user's file, and the moved catalog keeps
+/// the reference (same row, same path, still verifiable).
+#[test]
+fn media_used_in_place_keep_their_reference_and_are_not_copied() {
+    let base = common::tempdir();
+    let from = base.path().join("catalog");
+    let to = base.path().join("moved");
+    let isos = common::tempdir();
+    let iso = isos.path().join("user.iso");
+    let content = b"CD001 user's iso ".repeat(100_000);
+    std::fs::write(&iso, &content).unwrap();
+    let m = {
+        let mut cat = Catalog::open(&from).unwrap();
+        common::new_vm(&mut cat, "with media");
+        cat.approve_media(&iso, MediaKind::Iso, "mine").unwrap()
+    };
+    let report = move_catalog(
+        &MoveRequest {
+            fault: Some(MoveFault::NoRename),
+            ..request(&from, &to)
+        },
+        &roomy,
+        &|_| {},
+        &never,
+    )
+    .unwrap();
+    assert_eq!(report.media, 1);
+    assert!(
+        report.bytes < content.len() as u64,
+        "the ISO was copied: {report:?}"
+    );
+    assert!(
+        std::fs::read_dir(to.join("media")).map_or(0, Iterator::count) == 0,
+        "no copy under media/"
+    );
+    assert_eq!(
+        std::fs::read(&iso).unwrap(),
+        content,
+        "user's file untouched"
+    );
+    let mut cat = Catalog::open(&to).unwrap();
+    let moved = cat.read(|tx| tx.media(&m.media_id)).unwrap();
+    assert_eq!(moved, m);
+    cat.verify_media(&m.media_id).unwrap();
+}
 #[test]
 fn same_volume_move_renames_the_folder() {
     let base = common::tempdir();

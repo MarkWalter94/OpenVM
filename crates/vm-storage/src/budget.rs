@@ -40,7 +40,8 @@ pub struct StorageUsage {
     pub artifacts: u64,
     /// Logs.
     pub logs: u64,
-    /// Media registry (catalog total only).
+    /// Managed media copies (catalog total only; files used in place,
+    /// ADR-0029, are outside the catalog and not counted).
     pub media: u64,
     /// Database and auxiliary files (catalog total only).
     pub metadata: u64,
@@ -204,9 +205,11 @@ impl Catalog {
         if vm.is_none() {
             let media: i64 = self
                 .conn
-                .query_row("SELECT coalesce(sum(size_bytes),0) FROM media", [], |r| {
-                    r.get(0)
-                })
+                .query_row(
+                    "SELECT coalesce(sum(size_bytes),0) FROM media WHERE storage = 'managed'",
+                    [],
+                    |r| r.get(0),
+                )
                 .db()?;
             usage.media = u(media);
             let db = self.layout.db_path();

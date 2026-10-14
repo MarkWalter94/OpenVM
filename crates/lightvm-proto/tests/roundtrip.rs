@@ -94,16 +94,45 @@ fn models_roundtrip() {
         declared_origin: Label::parse("ISO produced by the user").unwrap(),
         approved_at: ts(10),
         detected_guest: None,
+        location: None,
+        missing: false,
     };
     rt(&media);
+    // The optional fields are omitted when empty: records of a supervisor
+    // that predates them still read.
+    let text = serde_json::to_string(&media).unwrap();
+    assert!(
+        !text.contains("location") && !text.contains("missing"),
+        "{text}"
+    );
     rt(&MediaEntry {
-        record: media,
-        managed_path: ManagedRelPath::parse("media/0192-abc.iso").unwrap(),
+        record: media.clone(),
+        location: MediaLocation::Managed(ManagedRelPath::parse("media/0192-abc.iso").unwrap()),
         file_identity: Some(FileIdentity {
             volume: 7,
             file_id: [3; 16],
         }),
     });
+    let referenced = MediaRecord {
+        location: Some("C:\\ISO\\ubuntu.iso".into()),
+        missing: true,
+        ..media
+    };
+    rt(&referenced);
+    let entry = MediaEntry {
+        record: referenced,
+        location: MediaLocation::Referenced("C:\\ISO\\ubuntu.iso".into()),
+        file_identity: None,
+    };
+    rt(&entry);
+    assert_eq!(
+        entry.location.file_name().as_deref(),
+        Some(if cfg!(windows) {
+            "ubuntu.iso"
+        } else {
+            "C:\\ISO\\ubuntu.iso"
+        })
+    );
     rt(&BaselineRecord {
         id: BaselineId::from_unix_millis(9, [9; 10]),
         vm_id: vm(1),

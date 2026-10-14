@@ -1,6 +1,6 @@
 # Project status
 
-Last updated: 2026-10-12
+Last updated: 2026-10-14
 
 Operational document required by section 17 of `docs/ROADMAP.md`: current phase, impediments and progress. **This file does not change the Definition of Done (section 11), the scope or the exit criteria.** A status reported here does not count as verification: the evidence is in `docs/verification/`.
 
@@ -77,7 +77,7 @@ Started on 2026-10-10 at the owner's request, before the closure of F0 and of th
 | Manual Ubuntu installation, boot from disk, persistence after reopening | `F2-01` | verified on hardware through the service (unattended install, media removed, boot from disk to the login screen, new service on the same catalog, boot again); **by a user following the guide: not executed** (exit criterion) |
 | Graceful stop with timeout, distinct force stop, explicit reset | `F2-01`, `F2-02` | verified on hardware; graceful stop runs in the background, force stop wins |
 | Delete dialog, close with running VMs | `F2-02`, `F2-01` | verified headless; deletion verified on hardware |
-| Deletion of imported media (Settings → Installation media; IPC `delete_media`, UI role only, refused to agent sessions; journaled `delete_file` intent, refused while a VM configuration uses the medium or a run holds it, reconciliation after an interruption) | `vm-storage` `media_registry`, `vm-core` `f2_catalog`, `lightvm-service` `f2`/`f4`, `lightvm-desktop` `media_ui` | verified in simulation/test; not verified by hand in the app |
+| Deletion of imported media (Settings → Installation media; IPC `delete_media`, UI role only, refused to agent sessions; refused while a VM configuration uses the medium; a managed copy through a journaled `delete_file` intent, refused while a run holds it, reconciliation after an interruption; a file used in place keeps existing, only its row goes, ADR-0029) | `vm-storage` `media_registry`, `vm-core` `f2_catalog`, `lightvm-service` `f2`/`f4`, `lightvm-desktop` `media_ui` | verified in simulation/test; not verified by hand in the app |
 | Config changes only with the VM stopped; media detach | `F2-02`, `F1-10` | verified headless; baseline invalidation not applicable until F3 |
 | Dark/light mode, resizable layout, keyboard operation, AccessKit, status not by colour only; Settings (QEMU paths, host capacity, security, network/MCP shown unavailable) | `F2-02` | verified headless; screen reader, DPI scaling and multi-monitor **not executed** (manual) |
 | Experimental installer and first test on a clean machine | `F2-03` | per-user zip and Inno Setup installer verified on the development host; clean machine **not executed** (Windows Sandbox procedure ready) |
@@ -123,7 +123,7 @@ Started on 2026-10-11 at the owner's request; not usable for the exit criteria u
 
 ## Catalog move (Settings)
 
-**Settings → Supervisor → Move catalog…** moves the whole catalog (database, media, VM disks, baselines, overlays, firmware and TPM state, runs, session reports) to another folder; **Browse…** keeps only switching LightVM to another catalog and now says that existing VMs are not moved. The move runs in `lightvm-service --move-catalog` with the supervisor stopped (the UI does not open catalog files, ADR-0024) and is `vm_storage::move_catalog`: every VM stopped and no open journal intent, destination empty and outside the catalog, free space checked, rename on the same volume, otherwise copy with SHA-256 read-back of every file, then the destination opened and checked (`quick_check`, same VMs, media, baselines) before the source is removed; any failure or cancellation removes the partial destination and leaves the source unchanged.
+**Settings → Supervisor → Move catalog…** moves the whole catalog (database, managed media copies, VM disks, baselines, overlays, firmware and TPM state, runs, session reports) to another folder; **Browse…** keeps only switching LightVM to another catalog and now says that existing VMs are not moved. The move runs in `lightvm-service --move-catalog` with the supervisor stopped (the UI does not open catalog files, ADR-0024) and is `vm_storage::move_catalog`: every VM stopped and no open journal intent, destination empty and outside the catalog, free space checked, rename on the same volume, otherwise copy with SHA-256 read-back of every file, then the destination opened and checked (`quick_check`, same VMs, media, baselines) before the source is removed; any failure or cancellation removes the partial destination and leaves the source unchanged.
 
 | Item | Evidence | Declared outcome |
 | --- | --- | --- |
@@ -131,6 +131,17 @@ Started on 2026-10-11 at the owner's request; not usable for the exit criteria u
 | Child-process contract (JSON progress, exit codes) and real executable end to end | `crates/lightvm-service/src/catalog_move.rs` tests; `apps/desktop/tests/service_child.rs` | verified in simulation/test |
 | Settings flow: availability, confirmation, progress with Cancel, settings updated only after success, supervisor restarted | `apps/desktop/tests/catalog_move_ui.rs` | verified in simulation/test |
 | Move of a real catalog with installed VMs between two physical drives | — | not verified |
+
+## ISOs used in place (ADR-0029)
+
+Owner decision of 2026-10-14: a selected ISO is no longer copied into the catalog. New imports record the user's file in place (absolute path resolved by the system, size, SHA-256, guest detection through the same held handle; nothing copied, no temporary file, no journal intent); every start opens the file with `FILE_SHARE_READ` only, checks every path component against links, the volume and the final path, re-hashes it through that handle and gives QEMU that same path while the handle is held. Schema 8 (`0008_media_in_place.sql`) adds `storage` (`managed` | `referenced`) and `external_path`; media imported before keep their managed copy and keep working. Deleting a medium used in place removes only its registry row. This deviates from the copy rule of ROADMAP 6.3 and ADR-0008 (residual risks in ADR-0029 and `SECURITY.md`).
+
+| Item | Evidence | Declared outcome |
+| --- | --- | --- |
+| Import in place (no file under `media/`, path recorded, same file and kind selected again updates its row), refusals (inside the catalog, path QEMU cannot take, a junction on the path at start), changed file refused at start naming the file, missing file `missing` and back, deletion keeps the file | `vm-storage` `media_registry`; `lightvm-service` `adapters::catalog` tests and `f2`; `vm-core` `scenarios`; `lightvm-desktop` `media_ui` | verified in simulation/test |
+| Migration from schema 7 with a managed copy attached to a VM (backup, copy verified and deletable, constraints of the rebuilt table) | `vm-storage` `migrations` | verified in simulation/test |
+| Catalog move with a medium used in place (not copied, reference kept) | `vm-storage` `catalog_move` | verified in simulation/test |
+| Real Ubuntu/Windows ISO used in place through the app with real QEMU | — | not verified |
 
 ## R2c work: Windows guests
 

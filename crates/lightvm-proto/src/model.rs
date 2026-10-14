@@ -449,16 +449,18 @@ pub enum MediaKind {
     DataIso,
 }
 
-/// Approved media, as seen by clients: no host path.
+/// Approved media, as seen by clients. Sent only to the `ui` role
+/// (`list_media`, `import_media`): agent sessions never receive it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct MediaRecord {
     /// Identifier.
     pub id: MediaId,
     /// Kind of media.
     pub kind: MediaKind,
-    /// SHA-256 of the managed copy, computed at approval.
+    /// SHA-256 of the file, computed at approval and re-verified before
+    /// every start.
     pub sha256: Sha256Digest,
-    /// Size in bytes of the managed copy.
+    /// Size in bytes of the file.
     pub size_bytes: u64,
     /// Origin declared by the user (text, never interpreted).
     pub declared_origin: Label,
@@ -468,6 +470,43 @@ pub struct MediaRecord {
     /// `None` = not recognized, data medium, or imported before detection).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detected_guest: Option<DetectedGuest>,
+    /// Where the ISO is, shown to the user (ADR-0029): absolute path of the
+    /// user's own file, used in place and never copied. `None` for a
+    /// read-only copy kept in the catalog (media imported before ADR-0029).
+    /// Informative text: no request carries it back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    /// The file was not found at [`Self::location`] the last time it was
+    /// looked for (moved, renamed, deleted, or its drive is not connected):
+    /// no VM can use the medium until the file is back there or the ISO is
+    /// imported again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub missing: bool,
+}
+
+/// Where the bytes of an approved medium are (internal only, no public
+/// schema).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaLocation {
+    /// Read-only copy in the catalog, relative to its root (media imported
+    /// before ADR-0029).
+    Managed(ManagedRelPath),
+    /// The user's own file, used in place (ADR-0029): absolute path as
+    /// resolved by the system when the file was selected.
+    Referenced(std::path::PathBuf),
+}
+
+impl MediaLocation {
+    /// File name of a referenced medium, for messages (never the full
+    /// path); `None` for a managed copy.
+    #[must_use]
+    pub fn file_name(&self) -> Option<String> {
+        match self {
+            Self::Managed(_) => None,
+            Self::Referenced(p) => p.file_name().map(|n| n.to_string_lossy().into_owned()),
+        }
+    }
 }
 
 /// Identity of the managed file according to the OS (for example volume serial
@@ -483,13 +522,13 @@ pub struct FileIdentity {
 }
 
 /// Full media registry entry, **internal only** to the supervisor and
-/// storage: it contains the opaque managed path. It has no public schema.
+/// storage: it contains the location of the file. It has no public schema.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MediaEntry {
     /// Public data.
     pub record: MediaRecord,
-    /// Relative path of the read-only managed copy.
-    pub managed_path: ManagedRelPath,
+    /// Read-only managed copy, or the user's file used in place.
+    pub location: MediaLocation,
     /// OS identity recorded at approval, if available.
     pub file_identity: Option<FileIdentity>,
 }

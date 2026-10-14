@@ -88,7 +88,8 @@ pub enum AuditAction {
     ReportExport,
     /// Deletion of a session report and its screenshots (F5).
     ReportDelete,
-    /// Deletion of an imported medium with its managed copy (user only).
+    /// Deletion of an imported medium from the registry (user only): a
+    /// managed copy is removed with it, a file used in place is kept.
     MediaDelete,
 }
 

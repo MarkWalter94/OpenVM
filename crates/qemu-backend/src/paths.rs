@@ -126,7 +126,8 @@ pub trait ManagedPaths: Send + Sync {
         Ok(None)
     }
 
-    /// Approved medium from the media registry (read-only managed copy).
+    /// Approved medium from the media registry (read-only managed copy, or
+    /// the user's file used in place after the supervisor's checks, ADR-0029).
     fn media(&self, media: &MediaId) -> Result<ManagedPath>;
 
     /// Run directory (stdout/stderr logs).

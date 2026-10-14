@@ -112,10 +112,10 @@ pub trait CatalogStore {
     fn list_media(&self) -> Result<Vec<MediaRecord>, PublicError> {
         Ok(Vec::new())
     }
-    /// Imports the file chosen by the user with the native picker: read-only
-    /// managed copy, hash and registry row, with the size limit of `kind`
-    /// (ADR-0008). The path is never passed to QEMU. The copy reads the
-    /// whole file: it blocks the caller for as long as the copy takes.
+    /// Imports the file chosen by the user with the native picker: checks,
+    /// hash and registry row, with the size limit of `kind`; the file is
+    /// used where it is, never copied (ADR-0008, ADR-0029). Hashing reads
+    /// the whole file: it blocks the caller for as long as that takes.
     fn import_media(
         &mut self,
         _source: &std::path::Path,
@@ -124,8 +124,9 @@ pub trait CatalogStore {
     ) -> Result<MediaEntry, PublicError> {
         Err(PublicError::unsupported("media import not available"))
     }
-    /// Removes an imported medium with its managed copy (journaled by the
-    /// storage). The core has checked that no VM configuration uses it.
+    /// Removes an imported medium from the registry: a managed copy with it
+    /// (journaled by the storage), never a file used in place. The core has
+    /// checked that no VM configuration uses it.
     fn remove_media(&mut self, _id: MediaId) -> Result<(), PublicError> {
         Err(PublicError::unsupported("media deletion not available"))
     }
@@ -146,11 +147,12 @@ pub trait AuditSink {
     fn append(&mut self, event: &AuditEvent) -> Result<(), PublicError>;
 }
 
-/// Inspection of a managed copy in the media registry: computes hash, size and
-/// OS identity on the file opened in a protected way (implemented by `vm-storage` or
-/// `qemu-backend`). The comparison with the registry belongs to the core ([`crate::media::verify_media`]).
+/// Inspection of an approved medium (managed copy or file used in place):
+/// computes hash, size and OS identity on the file opened in a protected
+/// way (implemented by `vm-storage` or `qemu-backend`). The comparison with
+/// the registry belongs to the core ([`crate::media::verify_media`]).
 pub trait MediaInspector {
-    /// Observes the managed copy of the entry.
+    /// Observes the file of the entry.
     fn inspect(&mut self, entry: &MediaEntry) -> Result<ObservedMediaFacts, PublicError>;
 }
 

@@ -8,7 +8,7 @@ use vm_storage::{
     IntentSpec, Lifecycle, ManagedPath, MediaKind, MediaRecord, MediaSlot, MediaStatus, NewVm,
     RunState, StorageError, TargetKind, TerminationCause, now_rfc3339,
 };
-use vm_storage::{DiskId, MediaId};
+use vm_storage::{DiskId, MediaId, MediaLocation};
 
 #[test]
 fn vm_name_is_unique_case_insensitive() {
@@ -159,7 +159,7 @@ fn referenced_media_cannot_be_deleted() {
             kind: MediaKind::Iso,
             declared_origin: "ubuntu.com, checksum verified".into(),
             approved_at: now_rfc3339(),
-            managed_path: CatalogLayout::media_file(&media, "iso")?,
+            location: MediaLocation::Managed(CatalogLayout::media_file(&media, "iso")?),
             status: MediaStatus::Approved,
             detected_guest: None,
             guest_examined: false,
