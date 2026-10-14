@@ -14,12 +14,16 @@
 //!   response; unknown operations cannot be deserialized
 //!   (`malformed_message`, no effect);
 //! - no field is interpreted as a host path or option: VMs are
-//!   referenced by [`VmId`], media by registry [`crate::MediaId`]. Two
-//!   exceptions, both reserved to the `ui` role and never to agent sessions:
+//!   referenced by [`VmId`], media by registry [`crate::MediaId`]. Three
+//!   exceptions, all reserved to the `ui` role and never to agent sessions:
 //!   [`Request::ImportMedia`] carries the file the user chose with the native
 //!   picker of the UI (opened read-only as a regular file, checked and hashed
-//!   by the service, then used in place: ADR-0029), and [`ConsoleTicket`]
-//!   returns the path of the per-run display socket (ADR-0013);
+//!   by the service, then used in place: ADR-0029),
+//!   [`Request::PreviewVmwareImport`] / [`Request::ImportVmware`] carry the
+//!   `.vmx` file chosen with the picker (read as untrusted input, its disks
+//!   converted into the catalog and never modified: ADR-0030), and
+//!   [`ConsoleTicket`] returns the path of the per-run display socket
+//!   (ADR-0013);
 //! - errors are [`ReplyError`]: operational ([`crate::PublicError`]) or
 //!   protocol ([`crate::ProtocolError`]), never mixed up. Missing, malformed,
 //!   unknown or revoked credential → `unauthenticated`; insufficient role
@@ -390,6 +394,38 @@ pub enum Request {
         /// Session.
         session_id: SessionId,
     },
+    /// Examination of a VMware VM before its import (UI only, never from
+    /// agent sessions; ADR-0030): `vmx_path` is the `.vmx` file the user
+    /// chose with the native picker. The `.vmx` and the VMDK descriptors
+    /// are read as untrusted input, the disk chain is checked with
+    /// `qemu-img info`; nothing is written. The reply says what would be
+    /// imported, what not, and the warnings.
+    PreviewVmwareImport {
+        /// `.vmx` file chosen by the user.
+        vmx_path: String,
+    },
+    /// Import of a VMware VM by conversion (UI only, never from agent
+    /// sessions; ADR-0030). The `.vmx` and its disks are examined again (the
+    /// preview is not trusted), the storage budget is checked, then the
+    /// current state of the disk (snapshot chain flattened) is converted
+    /// into a new QCOW2 disk of the catalog; the VMware files are opened
+    /// read-only and never modified. Long: progress is published as
+    /// [`ServiceEvent::VmwareImportProgress`] and the reply arrives when the
+    /// VM exists. One import at a time; cancelled by
+    /// [`Request::CancelVmwareImport`], the Emergency Stop, the revocation or
+    /// closing of the connection and the service shutdown (nothing is
+    /// left behind).
+    ImportVmware {
+        /// `.vmx` file chosen by the user.
+        vmx_path: String,
+        /// Name of the new VM.
+        name: VmName,
+        /// Display adapter (VMware SVGA only for Windows guests).
+        #[serde(default)]
+        display: crate::DisplayAdapter,
+    },
+    /// Cancels the VMware import in progress (UI only).
+    CancelVmwareImport,
 }
 
 impl Request {
@@ -441,6 +477,9 @@ impl Request {
             Self::VerifySession { .. } => "verify_session",
             Self::ExportSessionReport { .. } => "export_session_report",
             Self::DeleteSessionReport { .. } => "delete_session_report",
+            Self::PreviewVmwareImport { .. } => "preview_vmware_import",
+            Self::ImportVmware { .. } => "import_vmware",
+            Self::CancelVmwareImport => "cancel_vmware_import",
         }
     }
 }
@@ -1410,6 +1449,208 @@ pub enum ResponseBody {
         /// Summary of the session's report.
         report: SessionReportSummary,
     },
+    /// Response to `preview_vmware_import`.
+    VmwareImportPreview {
+        /// What would be imported.
+        preview: Box<VmwareImportPreview>,
+    },
+    /// Response to `import_vmware`: the VM exists with its converted disk.
+    VmwareImported {
+        /// New VM.
+        vm: VmRecord,
+    },
+    /// Response to `cancel_vmware_import`.
+    VmwareImportCancel {
+        /// `true` if an import was in progress and is being cancelled.
+        cancelled: bool,
+    },
+}
+
+/// Longest text taken from a VMware file into a preview (display name,
+/// guest type, file names): control characters removed, then truncated.
+pub const MAX_VMWARE_TEXT_CHARS: usize = 128;
+
+/// Outcome of the examination of a VMware VM (ADR-0030), for the UI. The
+/// texts come from the user's files: they are shown, never interpreted.
+/// No path is included, only file names.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct VmwareImportPreview {
+    /// File name of the `.vmx`.
+    pub vmx_file: String,
+    /// `displayName` of the VMware VM, if present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// VMware guest type as written in the `.vmx` (`guestOS`).
+    pub vmware_guest_os: String,
+    /// Configuration the import would create; the name is a suggestion
+    /// from the VMware display name, the display the standard adapter.
+    pub config: VmConfig,
+    /// Main disk.
+    pub disk: VmwareDiskPreview,
+    /// Bytes needed on the catalog volume for the converted disk
+    /// (estimate: the data of the disk chain, at most its virtual size).
+    pub required_bytes: u64,
+    /// Free bytes on the catalog volume, if measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub free_bytes: Option<u64>,
+    /// What is not imported.
+    #[serde(default)]
+    pub not_imported: Vec<NotImported>,
+    /// Warnings the user should read before importing.
+    #[serde(default)]
+    pub warnings: Vec<ImportWarning>,
+    /// The VMware SVGA display adapter can be chosen (Windows guests).
+    #[serde(default)]
+    pub vmware_svga_offered: bool,
+    /// The `.vmx` says the VMware Tools were installed in the guest (hint).
+    #[serde(default)]
+    pub vmware_tools_hint: bool,
+}
+
+/// Main disk of a VMware VM, in [`VmwareImportPreview`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct VmwareDiskPreview {
+    /// File name of the current VMDK (top of the snapshot chain).
+    pub file_name: String,
+    /// VMware slot of the disk (`scsi0:0`, `sata0:1`, `ide0:0`, `nvme0:0`).
+    pub slot: String,
+    /// Controller of the disk in VMware.
+    pub vmware_controller: VmwareController,
+    /// `createType` of the current VMDK.
+    pub create_type: String,
+    /// Virtual size of the disk.
+    pub virtual_size_bytes: u64,
+    /// Bytes allocated by the files of the chain on the host.
+    pub allocated_bytes: u64,
+    /// Snapshot levels flattened into the converted disk (0 = no snapshot).
+    pub snapshot_levels: u32,
+}
+
+/// Disk controller of a VMware VM.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum VmwareController {
+    /// IDE.
+    Ide,
+    /// SATA (AHCI).
+    Sata,
+    /// NVMe.
+    Nvme,
+    /// SCSI, VMware paravirtual (`pvscsi`).
+    Pvscsi,
+    /// SCSI, LSI Logic parallel (`lsilogic`): not emulated by QEMU.
+    LsiLogic,
+    /// SCSI, LSI Logic SAS (`lsisas1068`).
+    LsiSas1068,
+    /// SCSI, BusLogic (`buslogic`): not emulated by QEMU.
+    BusLogic,
+}
+
+/// Part of a VMware VM that is not imported, in [`VmwareImportPreview`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct NotImported {
+    /// What.
+    pub item: NotImportedItem,
+    /// Detail from the `.vmx` (for example a file name or a count), shown
+    /// as text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// Kind of [`NotImported`].
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum NotImportedItem {
+    /// Network adapters: LightVM VMs are offline (ADR-0004).
+    Network,
+    /// Shared folders: recreated later through LightVM Tools (ADR-0031).
+    SharedFolders,
+    /// USB controllers and devices: recreated later through LightVM Tools.
+    Usb,
+    /// Sound card.
+    Sound,
+    /// 3D acceleration.
+    Accelerated3d,
+    /// Intermediate snapshots (only the current state is converted).
+    Snapshots,
+    /// A hard disk other than the main one.
+    OtherDisk,
+    /// A CD/DVD drive (an ISO can be imported as a data medium).
+    CdRom,
+    /// Floppy drive.
+    Floppy,
+    /// Serial port.
+    SerialPort,
+    /// Parallel port.
+    ParallelPort,
+    /// Virtual printer.
+    Printer,
+    /// VMware Tools features (clipboard, drag and drop, time sync):
+    /// recreated later through LightVM Tools (ADR-0031).
+    VmwareToolsFeatures,
+}
+
+/// Warning of a VMware import, in [`VmwareImportPreview`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ImportWarning {
+    /// What.
+    pub kind: ImportWarningKind,
+    /// Values for the message (for example the VMware value and the one
+    /// LightVM uses), shown as text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// Kind of [`ImportWarning`].
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportWarningKind {
+    /// Windows on an LSI Logic parallel controller, which QEMU does not
+    /// emulate: Windows may not start (stop 0x7B) until the storage driver
+    /// of the new controller is enabled in the guest (manual preparation,
+    /// `docs/USER_GUIDE.md`).
+    StorageDriverPreparation,
+    /// A controller QEMU does not emulate on a Linux guest: the disk is
+    /// attached to the profile's controller (the initramfs must have its
+    /// driver, as standard distributions do).
+    ControllerReplaced,
+    /// The guest memory was raised to the minimum of the guest system.
+    MemoryRaised,
+    /// The guest memory was lowered to the host limit.
+    MemoryLowered,
+    /// The vCPUs were lowered to the host limit.
+    VcpusLowered,
+    /// The VMware CPU topology could not be kept (one socket per vCPU).
+    TopologyChanged,
+    /// VMware uses the same guest type for Windows 8 and 8.1: LightVM
+    /// supports 8.1 only.
+    Windows8Or81,
+    /// UEFI guest: the firmware starts with a new variable store, so the
+    /// boot entries of VMware are not carried over (the default loader of
+    /// the disk is used).
+    NewUefiVariables,
+    /// A disk of the snapshot chain is marked dirty (not closed cleanly).
+    DirtyDisk,
+}
+
+/// Phase of a VMware import, in [`ServiceEvent::VmwareImportProgress`].
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum VmwareImportPhase {
+    /// Examination of the `.vmx` and of the disk chain.
+    Checking,
+    /// `qemu-img convert` running.
+    Converting,
+    /// Check of the converted disk and creation of the VM.
+    Finishing,
 }
 
 /// State of the service.
@@ -1515,6 +1756,15 @@ pub enum ServiceEvent {
     SessionReportChanged {
         /// Session.
         session_id: SessionId,
+    },
+    /// Progress of the VMware import in progress (ADR-0030); published at
+    /// most a few times per second. The end is the reply to
+    /// `import_vmware`.
+    VmwareImportProgress {
+        /// Phase.
+        phase: VmwareImportPhase,
+        /// Percentage of the phase (0..=100).
+        percent: u8,
     },
 }
 

@@ -40,8 +40,10 @@ pub use input::{
     PointerButton, PointerMove,
 };
 pub use model::{
-    BaselineOrigin, BaselineRecord, DetectedGuest, DisplayGeometry, FileIdentity, Firmware,
-    GuestArch, GuestOs, HostCapacity, ImageFormat, MAX_DATA_MEDIA_BYTES, MAX_INSTALL_MEDIA_BYTES,
+    BaselineOrigin, BaselineRecord, DetectedGuest, DiskController, DisplayAdapter,
+    DisplayGeometry, FileIdentity, Firmware, GuestArch, GuestOs, HostCapacity, ImageFormat,
+    ImportSource, ImportedHardware, MAX_CORES_PER_SOCKET, MAX_DATA_MEDIA_BYTES,
+    MAX_INSTALL_MEDIA_BYTES,
     MAX_MEMORY_MARGIN_MIB, MAX_STORAGE_BUDGET_GIB, MIN_CPU_MAX_PERCENT, MIN_MEMORY_MARGIN_MIB,
     MediaEntry, MediaKind, MediaLocation, MediaRecord, NetworkProfile, OperationKind,
     OperationRecord, OperationStatus, ResourceLimits, ResourceTemplate, RunEndReason, RunRecord,
