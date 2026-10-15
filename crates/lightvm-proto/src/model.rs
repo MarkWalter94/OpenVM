@@ -803,6 +803,13 @@ pub enum OperationKind {
     Restore,
     /// Emergency Stop (priority path, outside the queue).
     EmergencyStop,
+    /// User snapshot taken, VM off or running (ADR-0032; outside the queue).
+    UserSnapshot,
+    /// Revert to a user snapshot with the VM off (ADR-0032; outside the
+    /// queue).
+    UserSnapshotRevert,
+    /// Deletion of a user snapshot (ADR-0032; outside the queue).
+    UserSnapshotDelete,
 }
 
 impl OperationKind {
@@ -819,6 +826,9 @@ impl OperationKind {
                 | OperationKind::Snapshot
                 | OperationKind::Restore
                 | OperationKind::EmergencyStop
+                | OperationKind::UserSnapshot
+                | OperationKind::UserSnapshotRevert
+                | OperationKind::UserSnapshotDelete
         )
     }
 

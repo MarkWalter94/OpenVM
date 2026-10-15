@@ -53,8 +53,10 @@ mod media;
 pub mod migrate;
 mod ops;
 mod paths;
+mod qcow2;
 mod records;
 mod recover;
+mod snapshot;
 mod time;
 mod vm_delete;
 mod vm_import;
@@ -83,7 +85,7 @@ pub use fsx::HASH_CANCELLED;
 pub use guard::{BaselineGuard, GuardReport, RunGuard, WriterProbe};
 pub use ids::{
     ArtifactId, BaselineId, DiskId, FirmwareId, GrantId, MediaId, OperationId, RunId, SessionId,
-    VmId,
+    SnapshotId, VmId,
 };
 pub use layout::{CatalogLayout, CatalogLock, DB_FILE, LOCK_FILE, TMP_DIR, TmpCleanup};
 pub use manifest::{
@@ -96,12 +98,19 @@ pub use media::{
 };
 pub use ops::PromoteBaseline;
 pub use paths::ManagedPath;
+pub use qcow2::{
+    Qcow2Info, Qcow2Snapshot, active_matches as qcow2_active_matches, read_info as qcow2_read_info,
+};
 pub use records::{
     ArtifactRecord, AuditEvent, AuditRecord, BaselineRecord, CurrentStateRecord, DiskRecord,
     FirmwareRecord, GrantRecord, MediaLocation, MediaRecord, NewVm, OperationRecord, RunRecord,
     SessionRecord, Tx, VmRecord,
 };
 pub use recover::{IntegrityIssue, IntentRecovery, RecoveryOutcome, RecoveryReport};
+pub use snapshot::{
+    MAX_THUMBNAIL_BYTES, RESTORE_WITH_SNAPSHOTS, RevertSnapshot, SNAPSHOT_NO_DISK,
+    SNAPSHOT_ON_OVERLAY, Settled, SnapshotList, SnapshotOp, SnapshotRecord, TakeSnapshot,
+};
 pub use time::{UtcMillis, now_rfc3339};
 pub use vm_delete::VmDeletionReport;
 pub use vm_import::VmImport;

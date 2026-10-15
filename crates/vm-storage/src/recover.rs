@@ -13,6 +13,7 @@
 //! | deletion | file in the temporary, row present | completes the row deletion; if a reference prevents it, restores the file → `committed`/`aborted` |
 //! | deletion | no file, row present | same as creation's "row present, no file" → `aborted` |
 //! | export | any | removes the temporary → `aborted` (the external destination is never touched) |
+//! | user snapshot (`take_snapshot`, `revert_snapshot`, `delete_snapshot`) | decided from the VM disk's QCOW2 snapshot table (tag present, active L1 equal to the snapshot's) | completed or undone as in `snapshot.rs` → `committed`/`aborted` |
 //! | any | error during reconciliation (file in use, link, I/O) | intent `needs_review`, VM `recovering` and busy; retried at the next reconciliation |
 //!
 //! It then removes leftover temporaries of already committed deletions and
@@ -32,6 +33,7 @@ use crate::error::{Result, SqlResultExt, StorageError};
 use crate::fsx;
 use crate::ids::{ArtifactId, BaselineId, DiskId, FirmwareId, MediaId, VmId, parse_id};
 use crate::records::Tx;
+use crate::snapshot::Settled;
 use crate::time::now_rfc3339;
 
 /// Overall outcome of reconciliation.
@@ -187,6 +189,15 @@ impl Catalog {
         i: &Intent,
         prior: IntentState,
     ) -> Result<(RecoveryOutcome, String, IntentState)> {
+        // User snapshots (ADR-0032): settled from the disk's QCOW2 snapshot
+        // table, see `snapshot.rs`.
+        if i.kind.is_snapshot() {
+            let (settled, detail) = self.settle_snapshot_intent(i)?;
+            return Ok(match settled {
+                Settled::Done => (RolledForward, detail, IntentState::Committed),
+                Settled::NotDone => (RolledBack, detail, IntentState::Aborted),
+            });
+        }
         let temp_exists = exists_no_follow(&i.temp_path)?;
         let final_exists = match &i.final_path {
             Some(p) => exists_no_follow(p)?,
@@ -428,8 +439,10 @@ impl Catalog {
                 .conn
                 .prepare(
                     "SELECT intent_id FROM journal
-                     WHERE state = 'committed' AND kind IN ('delete_file','export','discard_file')
-                       AND resolution IS NULL",
+                     WHERE state = 'committed'
+                       AND ((kind IN ('delete_file','export','discard_file') AND resolution IS NULL)
+                            OR (kind IN ('take_snapshot','revert_snapshot','delete_snapshot')
+                                AND (resolution IS NULL OR resolution IN ('taken','reverted','deleted'))))",
                 )
                 .db()?;
             let rows = st.query_map([], |r| r.get(0)).db()?;
@@ -579,6 +592,9 @@ fn delete_target_rows(tx: &Tx<'_>, kind: TargetKind, id: &str) -> Result<()> {
         TargetKind::Artifact => tx.delete_artifact(&parse_id::<ArtifactId>(id)?),
         TargetKind::Media => tx.delete_media(&parse_id::<MediaId>(id)?),
         TargetKind::Vm => crate::vm_delete::delete_vm_rows(tx, &parse_id::<VmId>(id)?),
+        TargetKind::Snapshot => Err(StorageError::StateConflict(
+            "snapshot rows are settled by their own intents".into(),
+        )),
         TargetKind::None => Ok(()),
     }
 }

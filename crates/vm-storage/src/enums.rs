@@ -264,8 +264,31 @@ str_enum!(
         /// converted disk is published as the VM's primary disk and the VM
         /// row is inserted in the commit (target kind `vm`).
         ImportVm => "import_vm",
+        /// User snapshot taken (schema v10, ADR-0032): the snapshot's files
+        /// (UEFI variables, thumbnail) in the temporary directory, the
+        /// QCOW2 internal snapshot in the VM's disk, then the row. Settled
+        /// by the presence of the tag in the disk.
+        TakeSnapshot => "take_snapshot",
+        /// Revert to a user snapshot (schema v10, ADR-0032): disk, UEFI
+        /// variables and configuration. Settled by comparing the disk's
+        /// active L1 table with the snapshot's.
+        RevertSnapshot => "revert_snapshot",
+        /// Deletion of a user snapshot (schema v10, ADR-0032). Settled by
+        /// the absence of the tag in the disk.
+        DeleteSnapshot => "delete_snapshot",
     }
 );
+
+impl IntentKind {
+    /// `true` for the user snapshot intents (settled from the disk's QCOW2
+    /// snapshot table, not by the generic file rules).
+    pub fn is_snapshot(self) -> bool {
+        matches!(
+            self,
+            Self::TakeSnapshot | Self::RevertSnapshot | Self::DeleteSnapshot
+        )
+    }
+}
 
 impl IntentKind {
     /// `true` for intents that create a file in a managed location.
@@ -314,6 +337,8 @@ str_enum!(
         Media => "media",
         /// Row of `vms` (deletion of a VM with its files, schema v5).
         Vm => "vm",
+        /// Row of `snapshots` (user snapshots, schema v10).
+        Snapshot => "snapshot",
         /// No row (export).
         None => "none",
     }

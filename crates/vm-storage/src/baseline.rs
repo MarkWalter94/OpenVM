@@ -71,6 +71,14 @@ pub enum FaultPoint {
     /// Any journaled operation: transaction committed, temporaries of the
     /// discarded or deleted files not yet removed.
     AfterCommit,
+    /// User snapshot (ADR-0032): the caller's disk operation ended, nothing
+    /// settled yet.
+    SnapshotBeforeSettle,
+    /// User snapshot: files published or moved, transaction not committed.
+    SnapshotAfterPublish,
+    /// Snapshot revert: the VM's UEFI variables removed, the snapshot's
+    /// copy not yet in place.
+    SnapshotRevertVarsRemoved,
 }
 
 /// What happens at a [`FaultPoint`].
@@ -251,7 +259,11 @@ impl BaselineJob {
 
 /// Copies a guarded file into a new temporary (`CREATE_NEW`), syncs it and
 /// returns SHA-256 and bytes of what was written.
-fn copy_from_handle(mut src: &File, src_path: &Path, dst: &Path) -> Result<(String, u64)> {
+pub(crate) fn copy_from_handle(
+    mut src: &File,
+    src_path: &Path,
+    dst: &Path,
+) -> Result<(String, u64)> {
     use sha2::{Digest, Sha256};
     src.seek(SeekFrom::Start(0))
         .map_err(|e| StorageError::io(src_path, e))?;
@@ -698,6 +710,13 @@ impl Catalog {
     pub fn begin_restore(&mut self, req: RestoreBaseline) -> Result<RestoreJob> {
         let vm = self.stopped_without_runs(&req.vm_id, "restore")?;
         refuse_tpm_guest(&vm)?;
+        // ADR-0032: the user snapshots live inside the VM's own disk, which
+        // a restore discards. The user deletes them (or keeps the VM) first.
+        if self.read(|tx| tx.snapshot_count(&req.vm_id))? > 0 {
+            return Err(StorageError::StateConflict(
+                crate::RESTORE_WITH_SNAPSHOTS.into(),
+            ));
+        }
         let (b, base, base_vars, current) = self.read(|tx| {
             let b = tx.baseline(&req.baseline_id)?;
             let d = tx.disk(&b.base_disk_id)?;

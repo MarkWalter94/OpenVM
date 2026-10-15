@@ -165,6 +165,11 @@ define_id!(
     MediaId
 );
 define_id!(
+    /// Identifier of a user snapshot of a VM (ADR-0032): a named disk state
+    /// inside the VM's own disk, with its firmware state and configuration.
+    SnapshotId
+);
+define_id!(
     /// Identifier of a grant issued by the supervisor (ROADMAP 9).
     GrantId
 );

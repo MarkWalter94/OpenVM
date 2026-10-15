@@ -40,8 +40,8 @@ use crate::{
     Admission, BaselineId, CapabilitySet, DisplayGeometry, Grant, HostCapacity, Label, Lease,
     MediaKind, MediaRecord, OperationId, OperationRecord, PROTOCOL_VERSION, Quotas, ReplyError,
     RevocationReport, RunId, Screenshot, SessionId, SessionState, SessionToken, Sha256Digest,
-    TerminationCause, TestOutcome, UtcTimestamp, VmConfig, VmId, VmName, VmRecord, VmRequest,
-    VmState,
+    SnapshotId, TerminationCause, TestOutcome, UtcTimestamp, VmConfig, VmId, VmName, VmRecord,
+    VmRequest, VmState,
 };
 
 /// IPC protocol versions supported by the service, in order of preference.
@@ -248,6 +248,82 @@ pub enum Request {
         vm_id: VmId,
         /// Baseline of the same VM.
         baseline_id: BaselineId,
+    },
+    /// User snapshots of a VM as a tree (UI only, ADR-0032).
+    ListSnapshots {
+        /// VM.
+        vm_id: VmId,
+    },
+    /// Takes a user snapshot (UI only, never from agent sessions;
+    /// ADR-0032): an internal snapshot of the VM's own disk, plus a copy of
+    /// its UEFI variables and of its configuration. With the VM off the
+    /// state is consistent; while it runs only the disk is saved, as after
+    /// a power cut at that instant (no memory: WHPX cannot save it).
+    /// Refused while an agent session targets the VM or while the VM runs
+    /// on an overlay of a baseline.
+    TakeSnapshot {
+        /// VM (`stopped` or `running`).
+        vm_id: VmId,
+        /// Name shown in the snapshot manager.
+        name: Label,
+        /// Optional description (at most [`MAX_SNAPSHOT_DESCRIPTION_CHARS`]
+        /// characters, line breaks allowed, no other control characters).
+        #[serde(default)]
+        description: String,
+    },
+    /// Reverts the VM to a user snapshot (UI only, ADR-0032): VM `stopped`
+    /// only, never a hidden shutdown. The disk, the UEFI variables and the
+    /// configuration (except the name) of the snapshot come back; the
+    /// current state since the snapshot is lost; the guest starts with a
+    /// normal boot. The reply arrives when done.
+    RevertSnapshot {
+        /// VM (must be `stopped`).
+        vm_id: VmId,
+        /// Snapshot of the same VM.
+        snapshot_id: SnapshotId,
+    },
+    /// Deletes a user snapshot (UI only, ADR-0032; VM `stopped` or
+    /// `running`): the other snapshots keep their state, its children move
+    /// to its parent.
+    DeleteSnapshot {
+        /// VM.
+        vm_id: VmId,
+        /// Snapshot of the same VM.
+        snapshot_id: SnapshotId,
+    },
+    /// Renames a user snapshot or changes its description (UI only).
+    UpdateSnapshot {
+        /// VM.
+        vm_id: VmId,
+        /// Snapshot of the same VM.
+        snapshot_id: SnapshotId,
+        /// New name.
+        name: Label,
+        /// New description.
+        #[serde(default)]
+        description: String,
+    },
+    /// Thumbnail of a snapshot taken while the VM ran (UI only): a small
+    /// PNG of the screen at that instant, if one was kept.
+    GetSnapshotThumbnail {
+        /// VM.
+        vm_id: VmId,
+        /// Snapshot of the same VM.
+        snapshot_id: SnapshotId,
+    },
+    /// Promotes a snapshot taken with the VM off to a baseline (UI only,
+    /// ADR-0032 and ADR-0005): the snapshot's disk state is materialized
+    /// into a standalone, read-only, hashed baseline with the snapshot's
+    /// UEFI variables and configuration. VM `stopped`; long like
+    /// `create_baseline`. Refused for snapshots taken while running (not a
+    /// verified state).
+    PromoteSnapshot {
+        /// VM (must be `stopped`).
+        vm_id: VmId,
+        /// Snapshot of the same VM, taken with the VM off.
+        snapshot_id: SnapshotId,
+        /// Label of the new baseline.
+        label: Label,
     },
     /// Session request of an agent (`pairing` role only, F4): refused while
     /// the agent access switch is off. The reply carries the verification
@@ -456,6 +532,13 @@ impl Request {
             Self::CreateBaseline { .. } => "create_baseline",
             Self::RestoreBaseline { .. } => "restore_baseline",
             Self::DeleteBaseline { .. } => "delete_baseline",
+            Self::ListSnapshots { .. } => "list_snapshots",
+            Self::TakeSnapshot { .. } => "take_snapshot",
+            Self::RevertSnapshot { .. } => "revert_snapshot",
+            Self::DeleteSnapshot { .. } => "delete_snapshot",
+            Self::UpdateSnapshot { .. } => "update_snapshot",
+            Self::GetSnapshotThumbnail { .. } => "get_snapshot_thumbnail",
+            Self::PromoteSnapshot { .. } => "promote_snapshot",
             Self::RequestSession { .. } => "request_session",
             Self::AwaitSession { .. } => "await_session",
             Self::Agent { .. } => "agent",
@@ -876,6 +959,10 @@ pub struct VmSummary {
     /// Baselines and current state of the VM (F3).
     #[serde(default)]
     pub baselines: VmBaselines,
+    /// User snapshots of the VM (ADR-0032). Additive field: older clients
+    /// ignore it.
+    #[serde(default)]
+    pub snapshots: VmSnapshots,
     /// Sub-status of a start in progress (state `starting`): verification of
     /// the approved media and of the baseline before QEMU is launched
     /// (ADR-0008, ADR-0025). Absent outside a start, and for a start with
@@ -977,6 +1064,105 @@ pub enum StorageOperation {
     CreateBaseline,
     /// `restore_baseline`.
     RestoreBaseline,
+    /// `take_snapshot` (ADR-0032).
+    TakeSnapshot,
+    /// `revert_snapshot` (ADR-0032).
+    RevertSnapshot,
+    /// `delete_snapshot` (ADR-0032).
+    DeleteSnapshot,
+    /// `promote_snapshot` (ADR-0032).
+    PromoteSnapshot,
+}
+
+/// Longest description of a user snapshot, in characters.
+pub const MAX_SNAPSHOT_DESCRIPTION_CHARS: usize = 1000;
+
+/// Checks the description of a user snapshot: at most
+/// [`MAX_SNAPSHOT_DESCRIPTION_CHARS`] characters, line breaks and tabs
+/// allowed, no other control characters. Text only, never interpreted.
+pub fn validate_snapshot_description(s: &str) -> Result<(), &'static str> {
+    if s.chars().count() > MAX_SNAPSHOT_DESCRIPTION_CHARS {
+        return Err("description too long (at most 1000 characters)");
+    }
+    if s.chars()
+        .any(|c| c.is_control() && !matches!(c, '\n' | '\t'))
+    {
+        return Err("control characters not allowed in the description");
+    }
+    Ok(())
+}
+
+/// Largest snapshot thumbnail kept, in bytes of PNG (fits one IPC frame).
+pub const MAX_SNAPSHOT_THUMBNAIL_BYTES: usize = 40 * 1024;
+
+/// User snapshot facts of a VM, in [`VmSummary`] (ADR-0032).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct VmSnapshots {
+    /// Number of user snapshots.
+    #[serde(default)]
+    pub count: u32,
+    /// Snapshot the current state descends from ("you are here"), if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<SnapshotId>,
+}
+
+/// User snapshot of a VM (ADR-0032), for the snapshot manager.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SnapshotSummary {
+    /// Snapshot.
+    pub snapshot_id: SnapshotId,
+    /// Owning VM.
+    pub vm_id: VmId,
+    /// Snapshot this one descends from; `None` = a root of the tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<SnapshotId>,
+    /// Name given by the user.
+    pub name: Label,
+    /// Description given by the user (may be empty).
+    #[serde(default)]
+    pub description: String,
+    /// Creation instant.
+    pub created_at: UtcTimestamp,
+    /// Taken while the VM ran: the disk state is like after a power cut at
+    /// that instant (crash-consistent); `false` = taken with the VM off.
+    pub taken_while_running: bool,
+    /// The VM was off after an observed clean guest shutdown (or had never
+    /// run) when the snapshot was taken: it can become a verified baseline.
+    pub clean_shutdown: bool,
+    /// The snapshot carries a copy of the UEFI variables.
+    pub firmware_saved: bool,
+    /// A thumbnail of the screen is available
+    /// ([`Request::GetSnapshotThumbnail`]).
+    pub has_thumbnail: bool,
+    /// Disk size of the VM at that moment (GiB), from the saved
+    /// configuration.
+    pub disk_gib: u64,
+    /// VM configuration revision when the snapshot was taken.
+    pub config_revision: u64,
+    /// Bytes of the snapshot's own files on the host (UEFI variables and
+    /// thumbnail). The disk clusters the snapshot keeps live inside the VM's
+    /// disk and are counted in the VM's disk usage.
+    pub files_bytes: u64,
+}
+
+/// User snapshots of a VM as a tree, in [`ResponseBody::Snapshots`].
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SnapshotTree {
+    /// Snapshots, oldest first; parents always before their children.
+    #[serde(default)]
+    pub snapshots: Vec<SnapshotSummary>,
+    /// Snapshot the current state descends from ("you are here"): the last
+    /// one taken or reverted to; `None` if the current state descends from
+    /// no snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<SnapshotId>,
+    /// Snapshots are available for this VM now (it runs on its own disk);
+    /// otherwise `unavailable_reason` says why.
+    pub available: bool,
+    /// Why snapshots cannot be taken or reverted now (agent session on the
+    /// VM, VM on an overlay of a baseline, TPM guest...), for the UI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
 }
 
 /// Baseline of a VM, for `list_baselines` and `create_baseline` (F3).
@@ -1257,6 +1443,42 @@ pub enum ResponseBody {
         vm_id: VmId,
         /// Deleted baseline.
         baseline_id: BaselineId,
+    },
+    /// Response to `list_snapshots`.
+    Snapshots {
+        /// VM.
+        vm_id: VmId,
+        /// Snapshot tree.
+        tree: SnapshotTree,
+    },
+    /// Response to `take_snapshot` and `update_snapshot`.
+    Snapshot {
+        /// The snapshot.
+        snapshot: SnapshotSummary,
+    },
+    /// Response to `revert_snapshot`: the VM is now at the snapshot.
+    SnapshotReverted {
+        /// VM.
+        vm_id: VmId,
+        /// Snapshot reverted to.
+        snapshot_id: SnapshotId,
+        /// Configuration revision after the revert.
+        config_revision: u64,
+    },
+    /// Response to `delete_snapshot`.
+    SnapshotDeleted {
+        /// VM.
+        vm_id: VmId,
+        /// Deleted snapshot.
+        snapshot_id: SnapshotId,
+    },
+    /// Response to `get_snapshot_thumbnail`.
+    SnapshotThumbnail {
+        /// Snapshot.
+        snapshot_id: SnapshotId,
+        /// PNG, standard base64 with padding; `None` if none was kept.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        png_base64: Option<String>,
     },
     /// Response to `request_session`.
     SessionRequested {
@@ -1709,6 +1931,13 @@ pub enum ServiceEvent {
     /// started or ended, baseline created, restored or deleted): re-read
     /// `vm_status` and `list_baselines` (F3).
     BaselinesChanged {
+        /// VM.
+        vm_id: VmId,
+    },
+    /// The user snapshots of a VM changed (taken, reverted, deleted,
+    /// renamed, operation started or ended): re-read `list_snapshots`
+    /// (ADR-0032).
+    SnapshotsChanged {
         /// VM.
         vm_id: VmId,
     },

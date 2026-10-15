@@ -1490,6 +1490,182 @@
           ]
         },
         {
+          "description": "User snapshots of a VM as a tree (UI only, ADR-0032).",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "list_snapshots"
+            },
+            "vm_id": {
+              "description": "VM.",
+              "$ref": "#/$defs/VmId"
+            }
+          },
+          "required": [
+            "op",
+            "vm_id"
+          ]
+        },
+        {
+          "description": "Takes a user snapshot (UI only, never from agent sessions;\nADR-0032): an internal snapshot of the VM's own disk, plus a copy of\nits UEFI variables and of its configuration. With the VM off the\nstate is consistent; while it runs only the disk is saved, as after\na power cut at that instant (no memory: WHPX cannot save it).\nRefused while an agent session targets the VM or while the VM runs\non an overlay of a baseline.",
+          "type": "object",
+          "properties": {
+            "description": {
+              "description": "Optional description (at most [`MAX_SNAPSHOT_DESCRIPTION_CHARS`]\ncharacters, line breaks allowed, no other control characters).",
+              "type": "string",
+              "default": ""
+            },
+            "name": {
+              "description": "Name shown in the snapshot manager.",
+              "$ref": "#/$defs/Label"
+            },
+            "op": {
+              "type": "string",
+              "const": "take_snapshot"
+            },
+            "vm_id": {
+              "description": "VM (`stopped` or `running`).",
+              "$ref": "#/$defs/VmId"
+            }
+          },
+          "required": [
+            "op",
+            "vm_id",
+            "name"
+          ]
+        },
+        {
+          "description": "Reverts the VM to a user snapshot (UI only, ADR-0032): VM `stopped`\nonly, never a hidden shutdown. The disk, the UEFI variables and the\nconfiguration (except the name) of the snapshot come back; the\ncurrent state since the snapshot is lost; the guest starts with a\nnormal boot. The reply arrives when done.",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "revert_snapshot"
+            },
+            "snapshot_id": {
+              "description": "Snapshot of the same VM.",
+              "$ref": "#/$defs/SnapshotId"
+            },
+            "vm_id": {
+              "description": "VM (must be `stopped`).",
+              "$ref": "#/$defs/VmId"
+            }
+          },
+          "required": [
+            "op",
+            "vm_id",
+            "snapshot_id"
+          ]
+        },
+        {
+          "description": "Deletes a user snapshot (UI only, ADR-0032; VM `stopped` or\n`running`): the other snapshots keep their state, its children move\nto its parent.",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "delete_snapshot"
+            },
+            "snapshot_id": {
+              "description": "Snapshot of the same VM.",
+              "$ref": "#/$defs/SnapshotId"
+            },
+            "vm_id": {
+              "description": "VM.",
+              "$ref": "#/$defs/VmId"
+            }
+          },
+          "required": [
+            "op",
+            "vm_id",
+            "snapshot_id"
+          ]
+        },
+        {
+          "description": "Renames a user snapshot or changes its description (UI only).",
+          "type": "object",
+          "properties": {
+            "description": {
+              "description": "New description.",
+              "type": "string",
+              "default": ""
+            },
+            "name": {
+              "description": "New name.",
+              "$ref": "#/$defs/Label"
+            },
+            "op": {
+              "type": "string",
+              "const": "update_snapshot"
+            },
+            "snapshot_id": {
+              "description": "Snapshot of the same VM.",
+              "$ref": "#/$defs/SnapshotId"
+            },
+            "vm_id": {
+              "description": "VM.",
+              "$ref": "#/$defs/VmId"
+            }
+          },
+          "required": [
+            "op",
+            "vm_id",
+            "snapshot_id",
+            "name"
+          ]
+        },
+        {
+          "description": "Thumbnail of a snapshot taken while the VM ran (UI only): a small\nPNG of the screen at that instant, if one was kept.",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "get_snapshot_thumbnail"
+            },
+            "snapshot_id": {
+              "description": "Snapshot of the same VM.",
+              "$ref": "#/$defs/SnapshotId"
+            },
+            "vm_id": {
+              "description": "VM.",
+              "$ref": "#/$defs/VmId"
+            }
+          },
+          "required": [
+            "op",
+            "vm_id",
+            "snapshot_id"
+          ]
+        },
+        {
+          "description": "Promotes a snapshot taken with the VM off to a baseline (UI only,\nADR-0032 and ADR-0005): the snapshot's disk state is materialized\ninto a standalone, read-only, hashed baseline with the snapshot's\nUEFI variables and configuration. VM `stopped`; long like\n`create_baseline`. Refused for snapshots taken while running (not a\nverified state).",
+          "type": "object",
+          "properties": {
+            "label": {
+              "description": "Label of the new baseline.",
+              "$ref": "#/$defs/Label"
+            },
+            "op": {
+              "type": "string",
+              "const": "promote_snapshot"
+            },
+            "snapshot_id": {
+              "description": "Snapshot of the same VM, taken with the VM off.",
+              "$ref": "#/$defs/SnapshotId"
+            },
+            "vm_id": {
+              "description": "VM (must be `stopped`).",
+              "$ref": "#/$defs/VmId"
+            }
+          },
+          "required": [
+            "op",
+            "vm_id",
+            "snapshot_id",
+            "label"
+          ]
+        },
+        {
           "description": "Session request of an agent (`pairing` role only, F4): refused while\nthe agent access switch is off. The reply carries the verification\ncode the user compares in the app; the decision is awaited with\n[`Request::AwaitSession`].",
           "type": "object",
           "properties": {
@@ -2128,6 +2304,12 @@
           ]
         }
       ]
+    },
+    "SnapshotId": {
+      "description": "SnapshotId: version 7 UUID, lowercase with hyphens.",
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     },
     "TestOutcome": {
       "description": "Outcome of a test (ROADMAP 9). Completing the conversation does not\nautomatically produce `passed`.",

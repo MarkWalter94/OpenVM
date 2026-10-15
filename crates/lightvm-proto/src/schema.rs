@@ -26,6 +26,7 @@ pub fn public_schemas() -> Vec<(&'static str, Schema)> {
         ("session_id", generate::<SessionId>()),
         ("baseline_id", generate::<BaselineId>()),
         ("media_id", generate::<MediaId>()),
+        ("snapshot_id", generate::<SnapshotId>()),
         ("grant_id", generate::<GrantId>()),
         ("utc_timestamp", generate::<UtcTimestamp>()),
         ("vm_state", generate::<VmState>()),

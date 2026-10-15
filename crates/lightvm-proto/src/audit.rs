@@ -102,6 +102,18 @@ pub enum AuditAction {
     /// cancellation) or succeeded (VM created with its converted disk).
     /// Never the path of the source files.
     VmImport,
+    /// User snapshot taken (ADR-0032, user only): with the VM off, or while
+    /// it runs (disk state only, like a power cut at that instant).
+    SnapshotTake,
+    /// Revert of a VM to a user snapshot with the VM off (ADR-0032): disk,
+    /// firmware state and configuration of the snapshot.
+    SnapshotRevert,
+    /// Deletion of a user snapshot (ADR-0032); its children keep their
+    /// state and move to its parent.
+    SnapshotDelete,
+    /// Rename or new description of a user snapshot (ADR-0032; never the
+    /// texts).
+    SnapshotUpdate,
 }
 
 /// Recorded outcome.
