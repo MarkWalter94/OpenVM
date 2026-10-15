@@ -670,6 +670,16 @@ pub fn report_sections(
                 });
             }
         });
+        theme::row(ui, "Network", None, |ui| {
+            if r.network_endpoints.is_empty() {
+                ui.label("No network endpoints granted");
+            } else {
+                plain(
+                    ui,
+                    &format!("Only these endpoints: {}", r.network_endpoints.join(", ")),
+                );
+            }
+        });
         theme::row(ui, "Time", None, |ui| {
             ui.label(format!(
                 "Approved {} \u{b7} granted until {}",
