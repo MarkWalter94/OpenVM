@@ -898,10 +898,14 @@ impl VmBackend for FakeVmBackend {
                 if disks.is_some() { ":overlay" } else { "" }
             ),
         );
-        push(
-            &self.calls,
-            format!("vm_network:{:?}", vm.config.network).to_lowercase(),
-        );
+        // Logged only for a run with a network adapter: the call logs of
+        // the other tests stay as they were.
+        if vm.config.network != NetworkProfile::Offline {
+            push(
+                &self.calls,
+                format!("vm_network:{:?}", vm.config.network).to_lowercase(),
+            );
+        }
         if vm.config.network == NetworkProfile::Endpoints {
             self.net_allowed
                 .lock()

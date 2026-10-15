@@ -558,11 +558,8 @@ async fn nat_is_for_manual_use_only() {
     }
     assert_eq!(
         network_calls(&svc),
-        [
-            "vm_network:nat",
-            "vm_network:endpoints",
-            "vm_network:offline"
-        ]
+        ["vm_network:nat", "vm_network:endpoints"],
+        "the run without the capability has no network adapter"
     );
 }
 
