@@ -77,9 +77,9 @@ Device start check (§Results 9): `qemu-system-x86_64.exe -nodefaults -accel whp
 
 ## Required actions
 
-- Import and start real VMware VMs as listed in ADR-0030 (item 19), recording each guest, controller and outcome in a new dated section or file — started in `R6-01b` (partial: one Linux VM to the session entry, one refused VM, one NVMe/BIOS boot-failure finding; Windows Vista and Mint outstanding).
-- Resolve the NVMe/BIOS combination found in `R6-01b` item 5: refuse or warn at the preview when the imported firmware cannot boot the imported disk controller (legacy BIOS + NVMe), with a `vmware-import` plan test.
-- Spike for the offline storage driver enablement of LSI Logic Windows guests (ADR-0030), then its implementation behind the existing hook (`lightvm_service::vmware::prepare_storage_driver`).
+- Import and start real VMware VMs as listed in ADR-0030 (item 19), recording each guest, controller and outcome in a new dated section or file — done in `R6-01b` (2026-10-14/15): the suspended VM refused, the Debian 12 Linux VM to the session entry, the Windows Vista LSI Logic VM to the desktop with the automatic storage driver preparation, the Mint 14-level chain to the desktop; the legacy-BIOS NVMe VM (Windows 10 x86) now gets a bootable controller, but the guest resets itself in early boot under WHPX and does not reach the desktop (open, `R6-01b` §Run 5).
+- ~~Resolve the NVMe/BIOS combination found in `R6-01b` item 5~~ — done (2026-10-15): the controlled experiment of `R6-01b` §Run 5 isolates the failure as the firmware/device combination (SeaBIOS does not read an NVMe boot disk), and the plan now replaces the NVMe controller of a legacy-BIOS guest with the profile's controller (Windows: storage driver preparation; UEFI keeps NVMe) — a bootable result instead of a refusal — with the plan test `nvme_needs_uefi` (ADR-0030).
+- ~~Spike for the offline storage driver enablement of LSI Logic Windows guests (ADR-0030), then its implementation behind the existing hook (`lightvm_service::vmware::prepare_storage_driver`)~~ — done (2026-10-15): `R6-02-lsi-driver-spike.md` (the storage helper), implemented and verified on the real Windows Vista guest.
 
 ## Proposed decisions
 

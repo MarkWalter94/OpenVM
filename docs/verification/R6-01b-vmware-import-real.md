@@ -92,6 +92,12 @@ The source VM (`D:\VMCR2011`, read-only): `guestOS = "windows9"`, 4 vCPU, 4096 M
 
 Not executed in the 2026-10-14 run (it died during the Vista import, 20:33 local; no catalog left, no `qemu-img` residue). Re-executed on 2026-10-15 after the NVMe/BIOS decision, with the storage helper enabled (§Run 5 for the experiment that settled that decision).
 
+| # | Item | Outcome |
+| --- | --- | --- |
+| 6 | **Windows Vista x86, LSI Logic** (`D:\CerantolaVM`, two-level chain; folder read-only): preview, conversion, then the automatic storage driver preparation of `R6-02` on the converted copy (storage helper: `SYSTEM` hive found on `/dev/vda1`, `msahci` `Start`=0 and the `CriticalDeviceDatabase` entry for `PCI#VEN_8086&DEV_2922&CC_010601` imported, "operation SUCCEEDED"), start on AHCI, **Windows running with the activation dialog after 28 s** (`vista-run-2026-10-15T1258/Windows Vista-VS2010-desktop.png`; Windows reports "this copy of Windows is not genuine": the hardware change asks for activation, a licensing matter of the user), graceful stop | verified (the test process then exited with code `0xffffffff` after the stop, without a panic message: cause not determined, the records file of this run was not written) |
+| 7 | **Linux Mint, 14-level snapshot chain** (`D:\VM\Mint`): import and start, **desktop after 15 s** (`run-2026-10-15b/Mint-desktop.png`), graceful stop | verified (the run was then stopped by the host's memory pressure handling before the records file was written) |
+| 8 | **VMCR2011 (Windows 10 x86, NVMe, legacy BIOS)** after the plan rule of §Run 5: not re-executed through the product; in the §Run 5 experiment the same disk on AHCI is read by SeaBIOS and Windows starts, then the guest resets itself in early boot and the vCPU leaves WHPX with exit code 4 | **not verified**: the firmware/controller problem is solved, the guest does not reach the desktop under WHPX (open, see §Run 5) |
+
 ### Run 5 — Controlled experiment: legacy BIOS + NVMe (2026-10-15)
 
 The VMCR2011 disk was converted once (two-level NVMe chain → `vmcr2011.qcow2`; `qemu-img convert` exit 0, `qemu-img compare` against the source chain exit 0, source folder hash-compared unchanged), then the **same disk** was booted under the same SeaBIOS (QEMU 11.1.0) and WHPX, Skylake-Client-v4, 4096 MiB, 4 vCPU, on three controllers (AHCI and IDE on qcow2 overlays of the base disk; NVMe on the base disk, which never writes):
