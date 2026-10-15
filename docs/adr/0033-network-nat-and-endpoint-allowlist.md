@@ -43,7 +43,7 @@ Three network modes per VM, chosen in the VM settings (VM stopped); **Offline st
 ## Required evidence
 
 - Allowlist: from the guest only the listed virtual endpoints answer; host services not listed, LAN, Internet, IPv4/IPv6, DNS, UDP unreachable (section 7.4 network row repeated with the allowlist on); a grant without the capability gives an Offline guest. — **verified** with the Ubuntu live guest (R6-06 §3) and the IPC tests (R6-06 §2).
-- NAT: refused for agent sessions; manual use reaches LAN/Internet. — refusal verified (IPC tests); manual use reaching the host verified with the Ubuntu live guest (R6-06 §4).
+- NAT: refused for agent sessions; manual use reaches LAN/Internet. — refusal verified (core and IPC tests); manual use reaching the host and the Internet verified with the Ubuntu live guest at the QEMU back-end level (R6-06 §4).
 - Real case: Windows guest client reaching a WCF service and SQL Server on the host through the allowlist. **Not verified.**
 
 ## References

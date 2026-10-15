@@ -173,7 +173,7 @@ fn media_not_editable_while_running() {
     assert!(!enabled(&h, "Remove the installation media"));
 }
 
-/// Focuses the text field label and types 	ext into it.
+/// Focuses the text field `label` and types `text` into it.
 fn type_into(h: &mut Harness<'_, Fixture>, label: &str, text: &str) {
     h.get_by_label(label).click();
     h.run_steps(2);

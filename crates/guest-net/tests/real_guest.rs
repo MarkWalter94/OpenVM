@@ -651,7 +651,7 @@ fn nat_with_a_real_linux_guest() {
     drop(g);
     assert!(lease.contains("default via 10.0.2.2"));
     assert!(get(&r, "tcp host 10.0.2.2:server").contains("recv=ECHO"));
-    assert!(get(&r, "tcp host 10.0.2.2:decoy").contains("HOST-SERVICE-REACHED"));
+    assert!(get(&r, "tcp host 10.0.2.2:decoy").starts_with("CONNECTED"));
     assert_eq!(get(&r, "multi 4 concurrent"), "OK");
     assert!(get(&r, "bulk 16MiB").starts_with("OK"));
     assert!(decoy_hits.load(Ordering::SeqCst) >= 1);

@@ -66,6 +66,7 @@ Examples: `F0-01-toolchain-eframe.md`, `F0-02-qemu-whpx-qmp.md`, `F1-04-start-st
 | `R6-01-vmware-import.md` | R6 (import of VMware VMs, ADR-0030) | partial: parser, hostile inputs, mapping, journal, conversion with the real `qemu-img`, IPC and UI verified in test; real VMware VMs partially executed (see `R6-01b`) | complete |
 | `R6-01b-vmware-import-real.md` | R6 (real VMware VMs, continuation of `R6-01`) | partial: one real Linux VM to the session entry (source unchanged, content identical, no orphans), one suspended VM refused; NVMe + legacy-BIOS boot-failure finding; Vista and Mint not executed | in progress |
 | `R6-02-lsi-driver-spike.md` | R6 (offline storage-driver preparation for LSI Logic Windows guests) | in progress: technique and driver source identified; execution pending | in progress |
+| `R6-06-guest-network.md` | R6 (guest network: NAT in manual use, endpoint allowlist, `network.endpoints`; ADR-0033) | partial: stack, core, service, MCP and UI verified in test; allowlist and NAT with a real Linux guest at the QEMU level and product command lines under WHPX verified on hardware; product end to end without guest traffic; Windows guest with WCF and SQL Server not verified | complete |
 
 ## Template
 

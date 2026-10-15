@@ -1012,16 +1012,43 @@ fn e2e_real_qemu_network_endpoints() {
         a_approval.network_endpoints = vec!["sql.lan".into()];
         let mut a = new_agent(&ep, &mut u, a_approval).await;
         let t = Instant::now();
-        let m = a
-            .submit(VmRequest {
-                operation_id: OperationId::new_v7(),
-                vm_id: vm,
-                expected_run_id: None,
-                action: VmAction::Start,
-            })
-            .await;
-        assert!(matches!(m, ServerMessage::Response { .. }), "{m:?}");
-        let run = wait_state(&mut u, vm, VmState::Running, T).await.expect("run");
+        // The user starts the VM while the session is live: the run gets
+        // the session's allowlist (never the VM's mode in manual use). The
+        // reply of a start comes after the 6 GB ISO is verified; the agent
+        // keeps renewing its 10 s lease meanwhile on its own connection.
+        let mut u2 = Client::connect(&ep).await.unwrap();
+        assert!(matches!(
+            u2.hello(&ui_cred).await.unwrap(),
+            ServerMessage::HelloOk { role: Role::Ui, .. }
+        ));
+        let starter = tokio::spawn(async move {
+            ok(
+                &mut u2,
+                Request::SubmitVm {
+                    request: VmRequest {
+                        operation_id: OperationId::new_v7(),
+                        vm_id: vm,
+                        expected_run_id: None,
+                        action: VmAction::Start,
+                    },
+                },
+            )
+            .await
+        });
+        while !starter.is_finished() {
+            a.sleep(Duration::from_secs(1)).await;
+            assert!(t.elapsed() < Duration::from_secs(600), "start reply");
+        }
+        let r = starter.await.unwrap();
+        assert!(matches!(r, ResponseBody::Operation { .. }), "{r:?}");
+        let run = loop {
+            let (s, run) = vm_state(&mut u, vm).await;
+            if s == VmState::Running {
+                break run.expect("run");
+            }
+            assert!(t.elapsed() < Duration::from_secs(600), "VM not running: {s:?}");
+            a.sleep(Duration::from_secs(1)).await;
+        };
         match a.read(AgentCall::VmStatus { vm_id: vm }).await {
             ResponseBody::AgentVm { vm } => {
                 log.push_str(&format!("agent view of the network: {:?}\n", vm.network_endpoints));
@@ -1029,33 +1056,42 @@ fn e2e_real_qemu_network_endpoints() {
             }
             other => panic!("{other:?}"),
         }
-        let boot = a
-            .wait_desktop(vm, run, Duration::from_secs(900))
-            .await
-            .expect("desktop");
-        log.push_str(&format!("desktop after {boot:?} (started {:?} ago)\n", t.elapsed()));
-        // Terminal, then the probes typed by the agent.
-        a.keys(
-            vm,
-            run,
-            vec![
-                key("ctrl", true),
-                key("alt", true),
-                key("t", true),
-                key("t", false),
-                key("alt", false),
-                key("ctrl", false),
-            ],
-        )
-        .await;
-        a.sleep(Duration::from_secs(8)).await;
+        // The live desktop is not needed: wait for it (logged), then use a
+        // text console (Ctrl+Alt+F3, user `ubuntu` without password on the
+        // live system), which does not depend on GNOME being responsive.
+        let boot = a.wait_desktop(vm, run, Duration::from_secs(600)).await;
+        log.push_str(&format!(
+            "desktop: {boot:?} (started {:?} ago)\n",
+            t.elapsed()
+        ));
         let cmd = format!(
             "for i in 1 2 3; do (exec 3<>/dev/tcp/sql.lan/{sql_port} && echo HELLO-E2E-$i >&3 && head -n1 <&3); done; (exec 3<>/dev/tcp/wcf/{wcf_port}); (exec 3<>/dev/tcp/10.0.2.101/{wcf_port}); (exec 3<>/dev/tcp/10.0.2.2/{wcf_port})\n"
         );
-        a.type_text(vm, run, &cmd).await;
-        a.sleep(Duration::from_secs(15)).await;
-        let (_, _, _, png) = a.stable(vm, run).await;
-        let _ = std::fs::write(evidence.join("net-e2e-terminal.png"), &png);
+        for attempt in 0..3 {
+            a.keys(
+                vm,
+                run,
+                vec![
+                    key("ctrl", true),
+                    key("alt", true),
+                    key("f3", true),
+                    key("f3", false),
+                    key("alt", false),
+                    key("ctrl", false),
+                ],
+            )
+            .await;
+            a.sleep(Duration::from_secs(8)).await;
+            a.type_text(vm, run, "ubuntu\n").await;
+            a.sleep(Duration::from_secs(10)).await;
+            a.type_text(vm, run, &cmd).await;
+            a.sleep(Duration::from_secs(20)).await;
+            let (_, _, _, png) = a.stable(vm, run).await;
+            let _ = std::fs::write(evidence.join(format!("net-e2e-console-{attempt}.png")), &png);
+            if sql_conns.load(Ordering::SeqCst) >= 3 {
+                break;
+            }
+        }
         let lines = sql_lines.lock().unwrap().clone();
         log.push_str(&format!(
             "sql.lan server: {} connections, lines {lines:?}; wcf server: {} connections\n",
