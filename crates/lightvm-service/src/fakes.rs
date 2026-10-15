@@ -271,7 +271,6 @@ pub struct FakeStorageHelper {
     pub jobs: Mutex<Vec<(Vec<String>, Option<String>)>>,
 }
 
-
 /// Fake disk with internal snapshots for the user snapshot tests
 /// (ADR-0032), without `qemu-img`: a minimal QCOW2 v3 image whose snapshot
 /// table and L1 tables are real (the catalog settles snapshot operations by
