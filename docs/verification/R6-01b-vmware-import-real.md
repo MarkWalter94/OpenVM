@@ -1,16 +1,16 @@
 # R6-01b — Real VMware VMs imported and started (continuation of R6-01)
 
-- Execution date (UTC): 2026-10-14 (runs 1–3); 2026-10-15 (run 5 controlled experiment; runs 1–4 re-executed with the storage helper)
+- Execution date (UTC): 2026-10-14 (runs 1–3); 2026-10-15 (run 5 controlled experiment; the run 4 VMs and the run 3 VMCR2011 re-executed with the storage helper)
 - Executed by: development agent on the project host
 - Roadmap step: section 12, R6, required action 1 of `R6-01` (real VMware VMs imported and started)
 - Related: `R6-01-vmware-import.md` (parser, hostile inputs, mapping, conversion, journal, IPC, UI), ADR-0030, ADR-0027, `R6-02-lsi-driver-spike.md` (the storage helper)
-- Overall outcome: complete — every real VM of the host that the importer accepts was imported and started: one Linux VM to the session entry, one suspended VM correctly refused, the Windows Vista LSI Logic VM to the desktop with the automatic storage driver preparation, the Mint 14-level chain to the session entry, and the legacy-BIOS NVMe VM imported and started (the SeaBIOS/NVMe combination of the 2026-10-14 run is resolved by the plan rule of §Run 5)
+- Overall outcome: complete — every real VM of the host that the importer accepts was imported and started: one Linux VM to the session entry, one suspended VM correctly refused, the Windows Vista LSI Logic VM to the desktop with the automatic storage driver preparation, Linux Mint (a disk in 13 extents, no snapshots) to the desktop, and the legacy-BIOS NVMe VM imported and started (the SeaBIOS/NVMe combination of the 2026-10-14 run is resolved by the plan rule of §Run 5)
 
 ## Purpose
 
 `R6-01` verified the import pipeline with test-made fixtures and left the real-VM item open ("real VMware VMs not executed"). This file records the execution of real VMware VMs of the host through the same pipeline: preview, import with the real `qemu-img`, verification that the source folder is byte-identical and the converted disk is content-identical to the source, start under WHPX, console observation, stop, orphan and audit checks.
 
-What this file does NOT demonstrate: that a session is reached after the login (no guest credentials were used or needed); that the `StorageDriverPreparation` path makes an LSI Logic Windows guest boot (not implemented; `R6-02`); anything about VMs that the importer correctly refuses for other reasons (covered by `R6-01` fixtures).
+What this file does NOT demonstrate: that a session is reached after the login (no guest credentials were used or needed); anything about VMs that the importer correctly refuses for other reasons (covered by `R6-01` fixtures).
 
 ## Environment
 
@@ -88,15 +88,22 @@ The source VM (`D:\VMCR2011`, read-only): `guestOS = "windows9"`, 4 vCPU, 4096 M
 | 4 | **Finding — legacy BIOS + NVMe is an unbootable combination**: the mapping (Windows 10 x86, SeaBIOS, NVMe kept as on the source) produces a VM that SeaBIOS cannot boot: it never reads the MBR from the NVMe disk ("could not read the boot disk" → "No bootable device"). The disk content is faithful (`qemu-img compare` against the source chain), so the failure is the firmware/device combination, not the conversion. Upstream SeaBIOS has NVMe support with known limits (64-bit BAR mapping over 4 GiB; de-configured in some distro builds; the prebuilt `bios-256k.bin` of QEMU 11.1.0 shows the failure above) | verified (failure mode), root cause of the SeaBIOS/NVMe failure not isolated (controlled IDE-vs-NVMe experiment pending, §Required actions) |
 | 5 | **Product gap**: the importer accepts the combination at the preview (no refusal, no warning); a refusal or a firm warning ("this VM's firmware cannot boot from its NVMe disk in LightVM: convert it to UEFI in VMware, or to a SATA disk, and import again") is required before R6 is complete | open (proposed decision, §Required actions) |
 
-### Run 4 — Windows Vista (LSI Logic), Mint (14-level chain)
+### Run 4 — Windows Vista (LSI Logic), Mint (13-extent disk)
 
-Not executed in the 2026-10-14 run (it died during the Vista import, 20:33 local; no catalog left, no `qemu-img` residue). Re-executed on 2026-10-15 after the NVMe/BIOS decision, with the storage helper enabled (§Run 5 for the experiment that settled that decision).
+Not executed in the 2026-10-14 run (it died during the Vista import, 20:33 local; no catalog left, no `qemu-img` residue). Re-executed on 2026-10-15 after the NVMe/BIOS decision, with the storage helper enabled (§Run 5 for the experiment that settled that decision). The records of the Mint and VMCR2011 re-execution (`run-2026-10-15b/vmware-real-results.txt`, one test process, 4244.87 s, 1 passed):
+
+```
+Mint | preview=ok: guest=OtherLinuxX86_64 firmware=Bios controller=LsiLogic levels=0 virtual=53687091200 bytes prep=false warnings=[VcpusLowered, TopologyChanged, ControllerReplaced] required=45223576494 free=Some(277078654976) | imported=Mint imported | source_unchanged=Some(true) | content_identical=None | running_after=Some("1.7854323s") | desktop_after=Some("14.8937181s") | console_after=None | stop_after=None | final_frame=None | stopped=true | note=; storage driver enabled in the converted disk
+VMCR2011 | preview=ok: guest=Windows10 firmware=Bios controller=Nvme levels=1 virtual=64424509440 bytes prep=true warnings=[StorageDriverEnabled] required=50346590208 free=Some(232335024128) | imported=VMCR2011 imported | source_unchanged=Some(true) | content_identical=None | running_after=Some("2.2846364s") | desktop_after=None | console_after=None | stop_after=None | final_frame=Some("1024x768 lit=9312/786432 colours=136") | stopped=true | note=storage driver preparation needed for boot (ADR-0030); storage driver enabled in the converted disk
+```
+
+(`content_identical` is computed only while the imported row still carries the preparation flag; a Linux row never carries it, and the prepared Windows disk differs from the source by design. The source folder is hash-compared in every record: `source_unchanged=true`.)
 
 | # | Item | Outcome |
 | --- | --- | --- |
 | 6 | **Windows Vista x86, LSI Logic** (`D:\CerantolaVM`, two-level chain; folder read-only): preview, conversion, then the automatic storage driver preparation of `R6-02` on the converted copy (storage helper: `SYSTEM` hive found on `/dev/vda1`, `msahci` `Start`=0 and the `CriticalDeviceDatabase` entry for `PCI#VEN_8086&DEV_2922&CC_010601` imported, "operation SUCCEEDED"), start on AHCI, **Windows running with the activation dialog after 28 s** (`vista-run-2026-10-15T1258/Windows Vista-VS2010-desktop.png`; Windows reports "this copy of Windows is not genuine": the hardware change asks for activation, a licensing matter of the user), graceful stop | verified (the test process then exited with code `0xffffffff` after the stop, without a panic message: cause not determined, the records file of this run was not written) |
-| 7 | **Linux Mint, 14-level snapshot chain** (`D:\VM\Mint`): import and start, **desktop after 15 s** (`run-2026-10-15b/Mint-desktop.png`), graceful stop | verified (the run was then stopped by the host's memory pressure handling before the records file was written) |
-| 8 | **VMCR2011 (Windows 10 x86, NVMe, legacy BIOS)** after the plan rule of §Run 5: not re-executed through the product; in the §Run 5 experiment the same disk on AHCI is read by SeaBIOS and Windows starts, then the guest resets itself in early boot and the vCPU leaves WHPX with exit code 4 | **not verified**: the firmware/controller problem is solved, the guest does not reach the desktop under WHPX (open, see §Run 5) |
+| 7 | **Linux Mint, a disk in 13 extents (no snapshots, `levels=0`)** (`D:\VM\Mint`): the `.vmx` disk is a two-giB-extent descriptor over 13 sparse extent files (not a snapshot chain); import (vCPUs and topology clamped to the host limits: `VcpusLowered`, `TopologyChanged`; the LSI Logic disk to virtio: `ControllerReplaced`), start, **graphical desktop after 15 s** (1280x800, 810 colours, `run-2026-10-15b/Mint-desktop.png`), stop escalated to QMP quit in 21 s | verified (record: `desktop_after=14.89 s`, `source_unchanged=true`, `stopped=true`) |
+| 8 | **VMCR2011 (Windows 10 x86, NVMe, legacy BIOS)** after the plan rule of §Run 5, re-executed through the product (2026-10-15, `run-2026-10-15b`): import on the plan's AHCI controller (NVMe → the profile's controller, `levels=1` two-level chain flattened), the automatic storage driver preparation (the helper found the Windows installation on `/dev/vda2` and imported the guest's own `storahci` service: 1 value, 0 new keys — the driver was already enabled, the step verified idempotent), start, the screen reaches the Windows boot frames and then freezes (the frames of 61–600 s are byte-identical), **no session entry in 10 min** (final frame 1024x768, 136 colours), stop escalated to QMP quit in 24 s: the guest never acknowledged the ACPI power button from the frozen state, as in the §Run 5 experiment where the same early-boot guest reset leaves the VM in the `paused` state (the vCPU leaves WHPX with exit code 4) | **not verified (open)**: the firmware/controller problem is solved (SeaBIOS reads the disk, Windows starts), the guest does not reach the desktop under WHPX (see §Run 5) |
 
 ### Run 5 — Controlled experiment: legacy BIOS + NVMe (2026-10-15)
 
@@ -121,7 +128,7 @@ Two distinct things in B and D, neither a failure of the conversion:
 
 - No guest credentials were used: "reached the session entry" means the login prompt or the desktop was shown; what happens after the login is not exercised.
 - The guest outcome is recorded, not asserted (except the expected session entry of the run's reference Linux VM); a VM that does not boot is evidence about the guest/hardware, recorded as such.
-- The VMCR2011 record is from a run that was interrupted after it: the formal record line (preview fields) will be regenerated by the re-execution; the boot evidence (run output + final frame) is as quoted.
+- The VMCR2011 boot evidence of Run 3 (run output + final frame) is from the interrupted run of 2026-10-14; its formal record line was written by the re-execution of 2026-10-15 (`run-2026-10-15b/vmware-real-results.txt`, item 8).
 - One run per VM set shares a single catalog under the system temp; the test removes its catalog at the end of the test. After the interrupted run no catalog was found (cause unverified); the per-VM PNGs and the run log remain as the evidence of the interrupted part.
 
 ## Required actions
