@@ -342,6 +342,11 @@ pub enum Request {
         /// Capabilities the agent would like (a hint for the user).
         #[serde(default)]
         requested_capabilities: CapabilitySet,
+        /// Network endpoints (names of the VM's allowlist) the agent would
+        /// like with `network.endpoints` (a hint for the user; at most
+        /// [`crate::MAX_NETWORK_ENDPOINTS`] names kept).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        requested_endpoints: Vec<String>,
     },
     /// Waits for the user's decision on a session request of this
     /// connection (`pairing` role only). Long: the reply arrives when the
@@ -801,6 +806,11 @@ pub struct SessionApproval {
     /// Hand input control of the VM to the agent at once.
     #[serde(default)]
     pub give_input: bool,
+    /// Network endpoints of the VM granted with `network.endpoints`
+    /// (names of [`crate::VmConfig::endpoints`]; required non-empty with
+    /// that capability, empty without it). ADR-0033.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub network_endpoints: Vec<String>,
 }
 
 /// Owner of the input of a VM: the user or one agent session, never both.
@@ -834,6 +844,9 @@ pub struct SessionRequestInfo {
     pub requested_vms: Vec<VmId>,
     /// Capabilities requested (hint).
     pub requested_capabilities: CapabilitySet,
+    /// Network endpoints requested (hint, plain text).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requested_endpoints: Vec<String>,
     /// Code shown to the agent and in the app.
     pub verification_code: String,
     /// Instant of the request.
@@ -874,6 +887,9 @@ pub struct SessionInfo {
     pub termination: Option<TerminationCause>,
     /// Granted capabilities.
     pub capabilities: CapabilitySet,
+    /// Granted network endpoints (`network.endpoints`, ADR-0033).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub network_endpoints: Vec<String>,
     /// Granted quotas.
     pub quotas: Quotas,
     /// Consumption.
@@ -905,6 +921,23 @@ pub struct AgentVmView {
     pub geometry: Option<DisplayGeometry>,
     /// `true` if this session owns the input of the VM.
     pub input_owner: bool,
+    /// Network of the VM for this session (ADR-0033): the granted
+    /// endpoints with the address and port to use inside the guest. Empty
+    /// = the VM runs without network for this session.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub network_endpoints: Vec<AgentEndpointView>,
+}
+
+/// A granted network endpoint as the agent sees it: what to use inside the
+/// guest (never the host side).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AgentEndpointView {
+    /// DNS name inside the guest.
+    pub name: String,
+    /// Virtual address inside the guest.
+    pub virtual_ip: std::net::Ipv4Addr,
+    /// TCP port.
+    pub port: u16,
 }
 
 /// Outcome of a session request, in [`ServiceEvent::SessionRequestClosed`].

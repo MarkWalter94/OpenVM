@@ -38,6 +38,17 @@
         }
       ]
     },
+    "network": {
+      "description": "Network details (`network_*` events).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/NetworkAudit"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "operation_id": {
       "description": "Operation involved.",
       "anyOf": [
@@ -363,6 +374,26 @@
           "description": "Rename or new description of a user snapshot (ADR-0032; never the\ntexts).",
           "type": "string",
           "const": "snapshot_update"
+        },
+        {
+          "description": "Network of a run set up (ADR-0033): `network.mode`, and for the\nendpoint allowlist one event per endpoint with the host address it\nwas resolved to at the start (`failed` if it could not be resolved:\nthat endpoint refuses every connection).",
+          "type": "string",
+          "const": "network_setup"
+        },
+        {
+          "description": "A guest connection through the endpoint allowlist ended (ADR-0033):\nendpoint, addresses and byte counts, never the content.",
+          "type": "string",
+          "const": "network_connection"
+        },
+        {
+          "description": "A guest connection attempt refused by the endpoint allowlist\n(`denied`; the first ones of each run, later ones only counted).",
+          "type": "string",
+          "const": "network_denied"
+        },
+        {
+          "description": "The endpoints allowed on a running VM changed (session started or\nended, revocation, expiry, Emergency Stop): connections to endpoints\nno longer allowed were reset.",
+          "type": "string",
+          "const": "network_policy"
         }
       ]
     },
@@ -453,6 +484,11 @@
           "description": "Authorized LightVM events and QEMU logs.",
           "type": "string",
           "const": "vm.logs"
+        },
+        {
+          "description": "Network endpoints of the VM's allowlist (ADR-0033, ADR-0034): the\ngrant lists which ones ([`Grant::network_endpoints`]). Without it\nthe session's VM runs without network.",
+          "type": "string",
+          "const": "network.endpoints"
         }
       ]
     },
@@ -510,6 +546,65 @@
           "const": "unauthenticated"
         }
       ]
+    },
+    "NetworkAudit": {
+      "description": "Network details of a `network_*` audit event (ADR-0033). Addresses and\ncounts only: never data carried by the connection.",
+      "type": "object",
+      "properties": {
+        "bytes_from_guest": {
+          "description": "Bytes from the guest to the endpoint.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "bytes_to_guest": {
+          "description": "Bytes from the endpoint to the guest.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "destination": {
+          "description": "Destination inside the guest network (`10.0.2.101:1433`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "endpoint": {
+          "description": "Endpoint name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "description": "Network mode of the run (`offline`, `nat`, `endpoints`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "description": "How it ended or why it was refused (`closed`, `revoked`,\n`not_allowed`...), or the allowed endpoints for `network_policy`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "target": {
+          "description": "Host address the connection was opened to (or the endpoint\nresolved to).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
     },
     "OperationId": {
       "description": "OperationId: version 7 UUID, lowercase with hyphens.",

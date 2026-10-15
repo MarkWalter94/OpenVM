@@ -4331,6 +4331,7 @@ mod tests {
             state,
             termination: None,
             capabilities: [lightvm_proto::Capability::VmInput].into(),
+            network_endpoints: Vec::new(),
             quotas: lightvm_proto::ipc::AGENT_DEFAULT_QUOTAS,
             usage: Default::default(),
             created_at: UtcTimestamp::from_unix_millis(1_791_709_920_000).unwrap(),
@@ -4398,6 +4399,7 @@ mod tests {
             purpose: "Check the editor".into(),
             requested_vms: vec![vm],
             requested_capabilities: Default::default(),
+            requested_endpoints: Vec::new(),
             verification_code: "482-913".into(),
             requested_at: UtcTimestamp::now(),
             expires_at: UtcTimestamp::now(),
@@ -4412,6 +4414,7 @@ mod tests {
             quotas: None,
             lease_ms: None,
             give_input: true,
+            network_endpoints: Vec::new(),
         };
         assert!(l.send(ServiceCommand::ApproveSession {
             request_id: 3,
@@ -4521,6 +4524,7 @@ mod tests {
             vm_config_revision: 1,
             policy_revision: lightvm_proto::PolicyRevision(1),
             capabilities: Default::default(),
+            network_endpoints: Vec::new(),
             quotas: lightvm_proto::ipc::AGENT_DEFAULT_QUOTAS,
             expires_at: t,
             versions: ReportVersions::default(),

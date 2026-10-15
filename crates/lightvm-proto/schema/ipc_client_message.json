@@ -481,6 +481,11 @@
           "description": "Authorized LightVM events and QEMU logs.",
           "type": "string",
           "const": "vm.logs"
+        },
+        {
+          "description": "Network endpoints of the VM's allowlist (ADR-0033, ADR-0034): the\ngrant lists which ones ([`Grant::network_endpoints`]). Without it\nthe session's VM runs without network.",
+          "type": "string",
+          "const": "network.endpoints"
         }
       ]
     },
@@ -894,13 +899,56 @@
         }
       ]
     },
+    "NetworkEndpoint": {
+      "description": "An endpoint of the allowlist (ADR-0033), approved by the user in the VM\nsettings: inside the guest `name` (DNS) or `virtual_ip`, port `port`;\non the host side the TCP service `host:port`. Only TCP is carried.",
+      "type": "object",
+      "properties": {
+        "host": {
+          "description": "Host name or IP address of the real service, resolved by the\nsupervisor when the run starts (the address used is recorded).",
+          "type": "string"
+        },
+        "name": {
+          "description": "Name the guest uses (DNS host name syntax, no wildcard; compared\nwithout regard to case). Also resolves as `name.lightvm.internal`.",
+          "type": "string"
+        },
+        "port": {
+          "description": "TCP port, the same inside the guest and on the host (1..=65535).",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "virtual_ip": {
+          "description": "Virtual address in the guest network\n([`FIRST_ENDPOINT_IP`]..=[`LAST_ENDPOINT_IP`]).",
+          "type": "string",
+          "format": "ipv4"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "host",
+        "port",
+        "virtual_ip"
+      ]
+    },
     "NetworkProfile": {
-      "description": "Network profile. In the MVP the only allowed value is `offline` (ADR-0004): no\nguest NIC, default network devices excluded, no forwarding.",
+      "description": "Network mode of a VM (ADR-0033). `offline` stays the default (ADR-0004):\nno guest NIC, default network devices excluded, no forwarding.",
       "oneOf": [
         {
           "description": "No NIC.",
           "type": "string",
           "const": "offline"
+        },
+        {
+          "description": "QEMU user-mode network (like VMware NAT): the guest reaches the host,\nthe LAN and the Internet. Manual use only: a run started while an\nagent session targets the VM gets the endpoint allowlist (when the\nsession was granted `network.endpoints`) or no NIC, and a session is\nrefused on a VM running with NAT.",
+          "type": "string",
+          "const": "nat"
+        },
+        {
+          "description": "Endpoint allowlist: the guest NIC is attached to the supervisor's\nown network, where only the endpoints of [`VmConfig::endpoints`]\nanswer (each a virtual address and port mapped to one approved\n`host:port`). In manual use every endpoint of the VM is allowed; in\nan agent session only those of the grant.",
+          "type": "string",
+          "const": "endpoints"
         }
       ]
     },
@@ -1690,6 +1738,13 @@
               },
               "uniqueItems": true
             },
+            "requested_endpoints": {
+              "description": "Network endpoints (names of the VM's allowlist) the agent would\nlike with `network.endpoints` (a hint for the user; at most\n[`crate::MAX_NETWORK_ENDPOINTS`] names kept).",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
             "requested_vms": {
               "description": "VMs the agent would like (a hint for the user).",
               "type": "array",
@@ -2229,6 +2284,13 @@
           "default": null,
           "minimum": 0
         },
+        "network_endpoints": {
+          "description": "Network endpoints of the VM granted with `network.endpoints`\n(names of [`crate::VmConfig::endpoints`]; required non-empty with\nthat capability, empty without it). ADR-0033.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "quotas": {
           "description": "Quotas; `None` = [`AGENT_DEFAULT_QUOTAS`].",
           "anyOf": [
@@ -2451,6 +2513,13 @@
           "format": "uint64",
           "minimum": 0
         },
+        "endpoints": {
+          "description": "Endpoints of the endpoint allowlist (ADR-0033), approved by the\nuser; used by the `endpoints` mode and grantable to agent sessions\n(`network.endpoints`). Kept when the mode is another one.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NetworkEndpoint"
+          }
+        },
         "firmware": {
           "description": "Firmware; must be one of [`GuestOs::allowed_firmware`].",
           "$ref": "#/$defs/Firmware",
@@ -2501,7 +2570,7 @@
           "$ref": "#/$defs/VmName"
         },
         "network": {
-          "description": "Network profile; in the MVP only `offline`.",
+          "description": "Network mode (ADR-0033); `offline` by default.",
           "$ref": "#/$defs/NetworkProfile",
           "default": "offline"
         },

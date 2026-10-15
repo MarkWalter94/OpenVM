@@ -98,6 +98,13 @@
       "description": "Declared guest OS.",
       "$ref": "#/$defs/GuestOs"
     },
+    "network_endpoints": {
+      "description": "Granted network endpoints (`network.endpoints`, ADR-0033).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
     "objective": {
       "description": "Objective (purpose declared by the agent and approved by the user).",
       "type": "string"
@@ -313,6 +320,11 @@
           "description": "Authorized LightVM events and QEMU logs.",
           "type": "string",
           "const": "vm.logs"
+        },
+        {
+          "description": "Network endpoints of the VM's allowlist (ADR-0033, ADR-0034): the\ngrant lists which ones ([`Grant::network_endpoints`]). Without it\nthe session's VM runs without network.",
+          "type": "string",
+          "const": "network.endpoints"
         }
       ]
     },
@@ -415,6 +427,65 @@
           "const": "windows11_arm64"
         }
       ]
+    },
+    "NetworkAudit": {
+      "description": "Network details of a `network_*` audit event (ADR-0033). Addresses and\ncounts only: never data carried by the connection.",
+      "type": "object",
+      "properties": {
+        "bytes_from_guest": {
+          "description": "Bytes from the guest to the endpoint.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "bytes_to_guest": {
+          "description": "Bytes from the endpoint to the guest.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "destination": {
+          "description": "Destination inside the guest network (`10.0.2.101:1433`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "endpoint": {
+          "description": "Endpoint name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "description": "Network mode of the run (`offline`, `nat`, `endpoints`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "description": "How it ended or why it was refused (`closed`, `revoked`,\n`not_allowed`...), or the allowed endpoints for `network_policy`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "target": {
+          "description": "Host address the connection was opened to (or the endpoint\nresolved to).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
     },
     "OperationId": {
       "description": "OperationId: version 7 UUID, lowercase with hyphens.",
@@ -810,6 +881,29 @@
           "required": [
             "kind",
             "claimed_outcome"
+          ]
+        },
+        {
+          "description": "Network event of the session's VM (ADR-0033): a connection through\nthe endpoint allowlist ended, an attempt was refused, or the run's\nnetwork was set up (`kind` of the audit: `network_setup`,\n`network_connection`, `network_denied`, `network_policy`).",
+          "type": "object",
+          "properties": {
+            "action": {
+              "description": "Audit action name.",
+              "type": "string"
+            },
+            "detail": {
+              "description": "Details (addresses and counts, never content).",
+              "$ref": "#/$defs/NetworkAudit"
+            },
+            "kind": {
+              "type": "string",
+              "const": "network"
+            }
+          },
+          "required": [
+            "kind",
+            "action",
+            "detail"
           ]
         },
         {

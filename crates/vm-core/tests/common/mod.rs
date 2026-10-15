@@ -217,6 +217,8 @@ pub struct FakeBackend {
     pub calls: Vec<Call>,
     pub fail_next: Option<PublicError>,
     pub geometry: Option<DisplayGeometry>,
+    /// Network mode of each start (ADR-0033).
+    pub networks: Vec<NetworkProfile>,
 }
 
 impl FakeBackend {
@@ -238,6 +240,7 @@ impl VmBackend for FakeBackend {
         run_id: RunId,
         media: &[VerifiedMedia],
     ) -> Result<(), PublicError> {
+        self.networks.push(vm.config.network);
         self.calls.push(Call::Start(
             vm.id,
             run_id,
@@ -439,6 +442,7 @@ impl Harness {
             memory_mib: 4096,
             disk_gib: 40,
             network: NetworkProfile::Offline,
+            endpoints: Vec::new(),
             install_media: media,
             data_media: None,
             firmware: Firmware::Uefi,
@@ -501,6 +505,7 @@ impl Harness {
             quotas: Quotas::UNBOUNDED,
             expires_at: UtcTimestamp::from_unix_millis(self.clock.0.get() + 3_600_000).unwrap(),
             lease_millis: 10_000,
+            network_endpoints: Default::default(),
         };
         let (grant, _lease) = self
             .core
@@ -560,4 +565,4 @@ impl Harness {
     }
 }
 
-pub const ALL_CAPS: [Capability; 10] = Capability::ALL;
+pub const ALL_CAPS: [Capability; 11] = Capability::ALL;

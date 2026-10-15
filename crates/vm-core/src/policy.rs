@@ -78,7 +78,8 @@ pub fn host_layer(host: &HostCapacity) -> PolicyLayer {
             | Capability::VmStatus
             | Capability::VmStop
             | Capability::VmReset
-            | Capability::VmLogs => true,
+            | Capability::VmLogs
+            | Capability::NetworkEndpoints => true,
         })
         .collect();
     PolicyLayer {

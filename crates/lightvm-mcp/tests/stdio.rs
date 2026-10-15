@@ -230,6 +230,7 @@ fn approval(vm: VmId, caps: CapabilitySet, give_input: bool) -> SessionApproval 
         quotas: None,
         lease_ms: None,
         give_input,
+        network_endpoints: Vec::new(),
     }
 }
 
@@ -389,13 +390,18 @@ async fn session(
     let p = pairing_file(u, svc).await;
     let mut m = Mcp::spawn(Some(&p));
     m.initialize("2025-11-25");
-    let r = m.ok("session_request", json!({"purpose": "F5 protocol test"}));
+    let r = m.ok(
+        "session_request",
+        json!({"purpose": "F5 protocol test", "network_endpoints": ["sql.lan"]}),
+    );
     assert_eq!(r["state"], "pending");
     let code = r["verification_code"].as_str().unwrap().to_owned();
     let req = match ok(u, Request::ListSessionRequests).await {
         ResponseBody::SessionRequests { requests } => requests.into_iter().next().unwrap(),
         other => panic!("{other:?}"),
     };
+    // ADR-0033: the endpoints the client asks for reach the app as a hint.
+    assert_eq!(req.requested_endpoints, ["sql.lan"]);
     assert_eq!(
         req.verification_code, code,
         "same code in the app and the client"

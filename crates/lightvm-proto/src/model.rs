@@ -266,8 +266,8 @@ pub struct DetectedGuest {
     pub edition: Option<Label>,
 }
 
-/// Network profile. In the MVP the only allowed value is `offline` (ADR-0004): no
-/// guest NIC, default network devices excluded, no forwarding.
+/// Network mode of a VM (ADR-0033). `offline` stays the default (ADR-0004):
+/// no guest NIC, default network devices excluded, no forwarding.
 #[derive(
     Clone,
     Copy,
@@ -287,6 +287,180 @@ pub enum NetworkProfile {
     /// No NIC.
     #[default]
     Offline,
+    /// QEMU user-mode network (like VMware NAT): the guest reaches the host,
+    /// the LAN and the Internet. Manual use only: a run started while an
+    /// agent session targets the VM gets the endpoint allowlist (when the
+    /// session was granted `network.endpoints`) or no NIC, and a session is
+    /// refused on a VM running with NAT.
+    Nat,
+    /// Endpoint allowlist: the guest NIC is attached to the supervisor's
+    /// own network, where only the endpoints of [`VmConfig::endpoints`]
+    /// answer (each a virtual address and port mapped to one approved
+    /// `host:port`). In manual use every endpoint of the VM is allowed; in
+    /// an agent session only those of the grant.
+    Endpoints,
+}
+
+impl NetworkProfile {
+    /// Whether the guest has a NIC.
+    #[must_use]
+    pub const fn has_nic(self) -> bool {
+        !matches!(self, NetworkProfile::Offline)
+    }
+}
+
+/// Endpoints a VM can have at most.
+pub const MAX_NETWORK_ENDPOINTS: usize = 32;
+/// First virtual address assigned to an endpoint (guest network
+/// `10.0.2.0/24`; `.2` gateway, `.3` DNS, `.15` guest).
+pub const FIRST_ENDPOINT_IP: std::net::Ipv4Addr = std::net::Ipv4Addr::new(10, 0, 2, 100);
+/// Last virtual address assignable to an endpoint.
+pub const LAST_ENDPOINT_IP: std::net::Ipv4Addr = std::net::Ipv4Addr::new(10, 0, 2, 254);
+/// Longest endpoint name or host name.
+pub const MAX_ENDPOINT_NAME_CHARS: usize = 253;
+
+/// An endpoint of the allowlist (ADR-0033), approved by the user in the VM
+/// settings: inside the guest `name` (DNS) or `virtual_ip`, port `port`;
+/// on the host side the TCP service `host:port`. Only TCP is carried.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkEndpoint {
+    /// Name the guest uses (DNS host name syntax, no wildcard; compared
+    /// without regard to case). Also resolves as `name.lightvm.internal`.
+    pub name: String,
+    /// Host name or IP address of the real service, resolved by the
+    /// supervisor when the run starts (the address used is recorded).
+    pub host: String,
+    /// TCP port, the same inside the guest and on the host (1..=65535).
+    pub port: u16,
+    /// Virtual address in the guest network
+    /// ([`FIRST_ENDPOINT_IP`]..=[`LAST_ENDPOINT_IP`]).
+    pub virtual_ip: std::net::Ipv4Addr,
+}
+
+/// Checks a name of the DNS host syntax (labels of letters, digits and `-`).
+fn check_dns_name(what: &str, n: &str) -> Result<(), crate::PublicError> {
+    let invalid = |m: String| crate::PublicError::invalid_argument(format!("{what}: {m}"));
+    let n = n.strip_suffix('.').unwrap_or(n);
+    if n.is_empty() || n.len() > MAX_ENDPOINT_NAME_CHARS {
+        return Err(invalid(format!(
+            "must have 1..={MAX_ENDPOINT_NAME_CHARS} characters"
+        )));
+    }
+    if n.contains('*') {
+        return Err(invalid("wildcards are not allowed".into()));
+    }
+    for label in n.split('.') {
+        if label.is_empty()
+            || label.len() > 63
+            || label.starts_with('-')
+            || label.ends_with('-')
+            || !label
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        {
+            return Err(invalid(format!(
+                "`{label}` is not a valid label (letters, digits and `-`, 1..=63 characters)"
+            )));
+        }
+    }
+    Ok(())
+}
+
+impl NetworkEndpoint {
+    /// Normalized name (lower case, no trailing dot).
+    #[must_use]
+    pub fn key(&self) -> String {
+        let n = self.name.strip_suffix('.').unwrap_or(&self.name);
+        n.to_ascii_lowercase()
+    }
+
+    /// Structural checks of one endpoint.
+    pub fn validate(&self) -> Result<(), crate::PublicError> {
+        let invalid = crate::PublicError::invalid_argument;
+        check_dns_name("endpoint name", &self.name)?;
+        let key = self.key();
+        if key
+            .split('.')
+            .all(|l| l.bytes().all(|b| b.is_ascii_digit()))
+        {
+            return Err(invalid("endpoint name: cannot be a numeric address"));
+        }
+        if key == "lightvm.internal" || key.ends_with(".lightvm.internal") {
+            return Err(invalid(
+                "endpoint name: must not end with `lightvm.internal` (added by LightVM)",
+            ));
+        }
+        let host = self.host.trim();
+        if host != self.host {
+            return Err(invalid("endpoint host: no leading or trailing spaces"));
+        }
+        if host.contains('*') {
+            return Err(invalid("endpoint host: wildcards are not allowed"));
+        }
+        if host.parse::<std::net::IpAddr>().is_err() {
+            check_dns_name("endpoint host", host)?;
+        } else if host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_unspecified() || ip.is_multicast())
+        {
+            return Err(invalid(
+                "endpoint host: an unspecified or multicast address is not a service",
+            ));
+        }
+        if self.port == 0 {
+            return Err(invalid("endpoint port must be 1..=65535"));
+        }
+        if !(FIRST_ENDPOINT_IP..=LAST_ENDPOINT_IP).contains(&self.virtual_ip) {
+            return Err(crate::PublicError::invalid_argument(format!(
+                "endpoint virtual address must be in {FIRST_ENDPOINT_IP}..={LAST_ENDPOINT_IP}"
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Checks the endpoint list of a VM: each endpoint, at most
+/// [`MAX_NETWORK_ENDPOINTS`], names unique (case-insensitive), virtual
+/// `address:port` unique; the endpoint allowlist mode needs at least one.
+pub fn validate_network(
+    mode: NetworkProfile,
+    endpoints: &[NetworkEndpoint],
+) -> Result<(), crate::PublicError> {
+    let invalid = crate::PublicError::invalid_argument;
+    if endpoints.len() > MAX_NETWORK_ENDPOINTS {
+        return Err(invalid(format!(
+            "at most {MAX_NETWORK_ENDPOINTS} network endpoints"
+        )));
+    }
+    let mut names = std::collections::BTreeSet::new();
+    let mut addrs = std::collections::BTreeSet::new();
+    for e in endpoints {
+        e.validate()?;
+        if !names.insert(e.key()) {
+            return Err(invalid(format!("endpoint name `{}` repeated", e.name)));
+        }
+        if !addrs.insert((e.virtual_ip, e.port)) {
+            return Err(invalid(format!(
+                "virtual endpoint {}:{} repeated",
+                e.virtual_ip, e.port
+            )));
+        }
+    }
+    if mode == NetworkProfile::Endpoints && endpoints.is_empty() {
+        return Err(crate::PublicError::invalid_argument(
+            "the endpoint allowlist mode needs at least one endpoint",
+        ));
+    }
+    Ok(())
+}
+
+/// Next free virtual address for a new endpoint (the settings assign it).
+#[must_use]
+pub fn next_endpoint_ip(endpoints: &[NetworkEndpoint]) -> Option<std::net::Ipv4Addr> {
+    (u32::from(FIRST_ENDPOINT_IP)..=u32::from(LAST_ENDPOINT_IP))
+        .map(std::net::Ipv4Addr::from)
+        .find(|ip| !endpoints.iter().any(|e| e.virtual_ip == *ip))
 }
 
 /// Guest firmware. Linux guests use UEFI with managed NVRAM state (ROADMAP 8,
@@ -338,9 +512,14 @@ pub struct VmConfig {
     pub memory_mib: u64,
     /// Virtual size of the main QCOW2 disk in GiB.
     pub disk_gib: u64,
-    /// Network profile; in the MVP only `offline`.
+    /// Network mode (ADR-0033); `offline` by default.
     #[serde(default)]
     pub network: NetworkProfile,
+    /// Endpoints of the endpoint allowlist (ADR-0033), approved by the
+    /// user; used by the `endpoints` mode and grantable to agent sessions
+    /// (`network.endpoints`). Kept when the mode is another one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub endpoints: Vec<NetworkEndpoint>,
     /// Installation media from the media registry (kind `install_iso`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub install_media: Option<MediaId>,

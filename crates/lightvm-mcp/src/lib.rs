@@ -52,8 +52,8 @@ use lightvm_proto::{
 
 use crate::ipc::{CallError, Ipc};
 use crate::tools::{
-    BaselinesOut, Button, DeclareOut, DeclareParams, EndOut, HelpOut, HelpParams, InputOut,
-    LogsOut, LogsParams, MouseClickParams, MouseMoveParams, NoParams, OperationOut,
+    BaselinesOut, Button, DeclareOut, DeclareParams, EndOut, EndpointOut, HelpOut, HelpParams,
+    InputOut, LogsOut, LogsParams, MouseClickParams, MouseMoveParams, NoParams, OperationOut,
     OperationParams, Phase, PressParams, ReportOut, ReportParams, RestoreOut, RestoreParams, Scale,
     ScreenshotOut, ScreenshotParams, SessionOut, SessionRequestParams, SessionStatusParams,
     SnapshotOut, SnapshotParams, ToolDef, TypeOut, TypeParams, VmListOut, VmOut, VmParams,
@@ -547,6 +547,14 @@ impl Adapter {
         );
         drop(pairing);
         let all: CapabilitySet = Capability::ALL.into_iter().collect();
+        let endpoints: Vec<String> = p
+            .network_endpoints
+            .unwrap_or_default()
+            .into_iter()
+            .map(|n| n.trim().to_owned())
+            .filter(|n| !n.is_empty() && n.len() <= 253)
+            .take(32)
+            .collect();
         let reply = ipc
             .call(
                 Request::RequestSession {
@@ -554,6 +562,7 @@ impl Adapter {
                     purpose: purpose.to_owned(),
                     requested_vms: Vec::new(),
                     requested_capabilities: all,
+                    requested_endpoints: endpoints,
                 },
                 T_SHORT,
             )
@@ -748,6 +757,16 @@ impl Adapter {
             run_id: v.run_id,
             display: v.geometry,
             input_owner: v.input_owner,
+            network: (!v.network_endpoints.is_empty()).then(|| {
+                v.network_endpoints
+                    .into_iter()
+                    .map(|e| EndpointOut {
+                        name: e.name,
+                        address: e.virtual_ip.to_string(),
+                        port: e.port,
+                    })
+                    .collect()
+            }),
         }
     }
 

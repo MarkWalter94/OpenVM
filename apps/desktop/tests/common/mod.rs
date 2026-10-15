@@ -138,6 +138,7 @@ pub(crate) fn vm(n: u8, name: &str, state: VmState) -> VmSummary {
             memory_mib: 4096,
             disk_gib: 32,
             network: lightvm_proto::NetworkProfile::Offline,
+            endpoints: Vec::new(),
             install_media: None,
             data_media: None,
             firmware: lightvm_proto::Firmware::Uefi,
@@ -379,6 +380,7 @@ pub(crate) fn session_request(id: u64, client: &str) -> lightvm_proto::ipc::Sess
             Capability::VmReset,
         ]
         .into(),
+        requested_endpoints: Vec::new(),
         verification_code: "482-913".into(),
         requested_at: at(-48),
         expires_at: at(252),
@@ -409,6 +411,7 @@ pub(crate) fn session(
             Capability::VmInput,
         ]
         .into(),
+        network_endpoints: Vec::new(),
         quotas: lightvm_proto::ipc::AGENT_DEFAULT_QUOTAS,
         usage: lightvm_proto::ipc::SessionUsage {
             operations: 12,
@@ -501,6 +504,7 @@ pub(crate) fn report(
             Capability::VmInput,
         ]
         .into(),
+        network_endpoints: Vec::new(),
         quotas: lightvm_proto::ipc::AGENT_DEFAULT_QUOTAS,
         expires_at: at(52 * 60),
         versions: ReportVersions {
@@ -613,6 +617,7 @@ pub(crate) fn vmware_preview_lsilogic() -> lightvm_proto::ipc::VmwareImportPrevi
             memory_mib: 4096,
             disk_gib: 60,
             network: NetworkProfile::Offline,
+            endpoints: Vec::new(),
             install_media: None,
             data_media: None,
             firmware: Firmware::Bios,

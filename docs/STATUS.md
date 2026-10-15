@@ -174,6 +174,20 @@ Started on 2026-10-14 at the owner's request (ROADMAP 12, R6, in parallel; not a
 | Real guests (Windows and Linux) reverted to an earlier snapshot boot normally | — | not verified (no guest installed for this feature) |
 | A running take with the guest file systems flushed first (LightVM Tools, ADR-0031) | — | not implemented |
 
+## R6 work: guest network (ADR-0033)
+
+Started on 2026-10-15 at the owner's request (ROADMAP 12, R6; declared exception to section 7.2 item 2). Three network modes per VM in **Edit** → **Network**: **Offline** (default, unchanged), **NAT** for manual use (`-netdev user` with the profile's inbox-driver NIC: `e1000`, `rtl8139` for XP, none for Windows on ARM), and the **endpoint allowlist**: the NIC on `-netdev stream` to the supervisor's own network (`crates/guest-net`, smoltcp 0.14.0) where only the endpoints the user lists answer (name and virtual address inside the guest, one TCP service on the host or LAN each; one host connection per guest connection; DHCP without router; DNS for the allowed names only; nothing else). Agent sessions never get NAT: they get the endpoints granted with `network.endpoints` (ADR-0034) or no network; the allowed set follows the sessions, revocation resets the connections, and a run never widens after a session. Network set-up, connections (bytes, no content), refusals and changes are audited and recorded in the session reports. `guestfwd` was not used: R6-04 §1 showed it is one shared host connection. Evidence: `docs/verification/R6-06-guest-network.md`.
+
+| Item | Evidence | Declared outcome |
+| --- | --- | --- |
+| Stack: DHCP, DNS allow/deny, per-connection TCP proxy, refusals, revocation, limits, records | `guest-net` unit tests and `tests/stack.rs` | verified in simulation/test |
+| Core, service, MCP, UI: modes, capability, NAT refused under sessions, allowed set following sessions, audit and reports, settings and approval | `vm-core` `tests/network.rs`, `lightvm-service` `tests/network.rs`, `lightvm-mcp` `tests/stdio.rs`, `lightvm-desktop` `tests/vm_settings_ui.rs`, `tests/agents_ui.rs` | verified in simulation/test |
+| Allowlist with a real Linux guest (stack level): by name and by virtual address, concurrent connections with their own data, 16 MiB both ways; host ports, LAN, Internet, UDP DNS, IPv6 unreachable; revocation | `guest-net` `tests/real_guest.rs` (`--ignored`), R6-06 §3 | verified on hardware (Windows, WHPX) |
+| NAT with a real Linux guest (stack level) | R6-06 §4 | verified on hardware (Windows, WHPX): host and Internet reached |
+| Product command lines (NAT, supervisor network) under WHPX, post-start check | `qemu-backend` `tests/real_qemu.rs::real_network_modes`, R6-06 §5 | verified on hardware (Windows, WHPX) |
+| End to end through the product (agent session, Ubuntu live desktop) | `lightvm-service` `tests/f4_real.rs::e2e_real_qemu_network_endpoints`, R6-06 §6 | partial: grant, attached stack, allowed set, audit with the session and revocation verified on hardware; guest traffic through a product-started stack not observed (guest UI automation at 2 GiB on a shared host) |
+| Windows guest client reaching a WCF service and SQL Server through the allowlist (the real case) | — | not verified |
+
 ## R2c work: Windows guests
 
 Started on 2026-10-12 at the owner's request (ADR-0027); it does not change the MVP scope or any exit criterion, and R2c is not closed by it.

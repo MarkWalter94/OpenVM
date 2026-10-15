@@ -163,6 +163,8 @@ pub mod names {
     pub(crate) const STDERR: &str = "qemu.stderr.log";
     /// swtpm control socket (private directory, ADR-0028).
     pub const TPM_SOCKET: &str = "tpm.sock";
+    /// `-netdev stream` socket of the supervisor network (ADR-0033).
+    pub const NET_SOCKET: &str = "net.sock";
     pub(crate) const SWTPM_LOG: &str = "swtpm.log";
     pub(crate) const SWTPM_STDOUT: &str = "swtpm.stdout.log";
     pub(crate) const SWTPM_STDERR: &str = "swtpm.stderr.log";

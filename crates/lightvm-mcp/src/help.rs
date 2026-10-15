@@ -98,8 +98,12 @@ runs out, calls are refused with `resource_limit` or the session closes.
 const LIMITS: &str = "\
 # Limits
 
-- **Network**: the VM has no network adapter. Nothing can be downloaded or reached from inside \
-the guest.
+- **Network**: by default the VM has no network adapter. If the user granted network \
+endpoints (`network.endpoints`, requested with `session_request`), the guest reaches only \
+those: each is a name and a virtual address with one TCP port (`vm_status` lists them), mapped \
+by LightVM to one service the user approved. Nothing else is reachable: no Internet, no LAN, \
+no other host service, no UDP except the name lookups of the granted names, no IPv6. \
+Everything sent to a granted endpoint reaches that service.
 - **Files and clipboard**: there is no file transfer, shared folder or clipboard between the \
 client and the VM. Content reaches the guest only as typed keystrokes; output is visible only \
 in screenshots.
@@ -153,7 +157,9 @@ result also reports the current session state.",
     (
         "session_request",
         "## session_request\nRequests a session from the user. Parameters: `purpose` \
-(1-512 characters, shown to the user as the objective). Result: `state: pending`, \
+(1-512 characters, shown to the user as the objective), optional `network_endpoints` (names \
+of the VM's network endpoints the client would like, for example `[\"sql.lan\"]`; the user \
+decides). Result: `state: pending`, \
 `verification_code` (the same code the LightVM app shows next to the request), \
 `request_expires_at`. Requires a pairing written by the app (see topic `session`).",
     ),
@@ -188,7 +194,8 @@ every other VM tool.",
         "## vm_status\nState of one VM (`vm.status`). Parameters: `vm_id`. Result: `state` \
 (`stopped`, `starting`, `running`, `stopping`, `failed`, `recovering`), `run_id` of the current \
 run, `display` (width and height in pixels), `input_owner` (true when the session holds \
-keyboard and mouse).",
+keyboard and mouse), `network` (granted endpoints: `name`, `address`, `port` to use inside the \
+guest; absent when the VM has no network for the session).",
     ),
     (
         "vm_start",

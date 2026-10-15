@@ -52,6 +52,11 @@
       "description": "Authorized LightVM events and QEMU logs.",
       "type": "string",
       "const": "vm.logs"
+    },
+    {
+      "description": "Network endpoints of the VM's allowlist (ADR-0033, ADR-0034): the\ngrant lists which ones ([`Grant::network_endpoints`]). Without it\nthe session's VM runs without network.",
+      "type": "string",
+      "const": "network.endpoints"
     }
   ]
 }

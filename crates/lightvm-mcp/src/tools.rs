@@ -48,6 +48,12 @@ pub struct SessionRequestParams {
     /// (plain text, 1..=512 characters).
     #[schemars(length(min = 1, max = 512))]
     pub purpose: String,
+    /// Network endpoints of the VM the client would like (names chosen by
+    /// the user in the VM settings, for example `sql.lan`; at most 32). A
+    /// hint for the user, who grants them or not (`network.endpoints`).
+    #[serde(default)]
+    #[schemars(length(max = 32))]
+    pub network_endpoints: Option<Vec<String>>,
 }
 
 /// `session_status`.
@@ -319,6 +325,22 @@ pub struct VmOut {
     pub display: Option<DisplayGeometry>,
     /// `true` if this session owns the VM's mouse and keyboard.
     pub input_owner: bool,
+    /// Network endpoints granted to the session (ADR-0033): name and
+    /// address to use inside the guest. Empty: the VM has no network for
+    /// this session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network: Option<Vec<EndpointOut>>,
+}
+
+/// A granted network endpoint, as used inside the guest.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct EndpointOut {
+    /// DNS name inside the guest.
+    pub name: String,
+    /// Virtual IPv4 address inside the guest.
+    pub address: String,
+    /// TCP port.
+    pub port: u16,
 }
 
 /// `vm_list`.

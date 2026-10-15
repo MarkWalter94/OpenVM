@@ -226,6 +226,33 @@
         "at"
       ]
     },
+    "AgentEndpointView": {
+      "description": "A granted network endpoint as the agent sees it: what to use inside the\nguest (never the host side).",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "DNS name inside the guest.",
+          "type": "string"
+        },
+        "port": {
+          "description": "TCP port.",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "virtual_ip": {
+          "description": "Virtual address inside the guest.",
+          "type": "string",
+          "format": "ipv4"
+        }
+      },
+      "required": [
+        "name",
+        "virtual_ip",
+        "port"
+      ]
+    },
     "AgentVmView": {
       "description": "A VM as seen by an agent session (no host details).",
       "type": "object",
@@ -248,6 +275,13 @@
         "name": {
           "description": "Name.",
           "$ref": "#/$defs/VmName"
+        },
+        "network_endpoints": {
+          "description": "Network of the VM for this session (ADR-0033): the granted\nendpoints with the address and port to use inside the guest. Empty\n= the VM runs without network for this session.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AgentEndpointView"
+          }
         },
         "run_id": {
           "description": "Current run.",
@@ -485,6 +519,11 @@
           "description": "Authorized LightVM events and QEMU logs.",
           "type": "string",
           "const": "vm.logs"
+        },
+        {
+          "description": "Network endpoints of the VM's allowlist (ADR-0033, ADR-0034): the\ngrant lists which ones ([`Grant::network_endpoints`]). Without it\nthe session's VM runs without network.",
+          "type": "string",
+          "const": "network.endpoints"
         }
       ]
     },
@@ -814,6 +853,14 @@
         "id": {
           "description": "Identifier.",
           "$ref": "#/$defs/GrantId"
+        },
+        "network_endpoints": {
+          "description": "Network endpoints of the VM the session may use (names as in the VM\nsettings, normalized to lower case), with\n[`Capability::NetworkEndpoints`]; empty otherwise (ADR-0033).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
         },
         "policy_revision": {
           "description": "Revision of the policy the grant was issued with.",
@@ -1310,13 +1357,115 @@
         "approved_at"
       ]
     },
+    "NetworkAudit": {
+      "description": "Network details of a `network_*` audit event (ADR-0033). Addresses and\ncounts only: never data carried by the connection.",
+      "type": "object",
+      "properties": {
+        "bytes_from_guest": {
+          "description": "Bytes from the guest to the endpoint.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "bytes_to_guest": {
+          "description": "Bytes from the endpoint to the guest.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "destination": {
+          "description": "Destination inside the guest network (`10.0.2.101:1433`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "endpoint": {
+          "description": "Endpoint name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "description": "Network mode of the run (`offline`, `nat`, `endpoints`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "description": "How it ended or why it was refused (`closed`, `revoked`,\n`not_allowed`...), or the allowed endpoints for `network_policy`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "target": {
+          "description": "Host address the connection was opened to (or the endpoint\nresolved to).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "NetworkEndpoint": {
+      "description": "An endpoint of the allowlist (ADR-0033), approved by the user in the VM\nsettings: inside the guest `name` (DNS) or `virtual_ip`, port `port`;\non the host side the TCP service `host:port`. Only TCP is carried.",
+      "type": "object",
+      "properties": {
+        "host": {
+          "description": "Host name or IP address of the real service, resolved by the\nsupervisor when the run starts (the address used is recorded).",
+          "type": "string"
+        },
+        "name": {
+          "description": "Name the guest uses (DNS host name syntax, no wildcard; compared\nwithout regard to case). Also resolves as `name.lightvm.internal`.",
+          "type": "string"
+        },
+        "port": {
+          "description": "TCP port, the same inside the guest and on the host (1..=65535).",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "virtual_ip": {
+          "description": "Virtual address in the guest network\n([`FIRST_ENDPOINT_IP`]..=[`LAST_ENDPOINT_IP`]).",
+          "type": "string",
+          "format": "ipv4"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "host",
+        "port",
+        "virtual_ip"
+      ]
+    },
     "NetworkProfile": {
-      "description": "Network profile. In the MVP the only allowed value is `offline` (ADR-0004): no\nguest NIC, default network devices excluded, no forwarding.",
+      "description": "Network mode of a VM (ADR-0033). `offline` stays the default (ADR-0004):\nno guest NIC, default network devices excluded, no forwarding.",
       "oneOf": [
         {
           "description": "No NIC.",
           "type": "string",
           "const": "offline"
+        },
+        {
+          "description": "QEMU user-mode network (like VMware NAT): the guest reaches the host,\nthe LAN and the Internet. Manual use only: a run started while an\nagent session targets the VM gets the endpoint allowlist (when the\nsession was granted `network.endpoints`) or no NIC, and a session is\nrefused on a VM running with NAT.",
+          "type": "string",
+          "const": "nat"
+        },
+        {
+          "description": "Endpoint allowlist: the guest NIC is attached to the supervisor's\nown network, where only the endpoints of [`VmConfig::endpoints`]\nanswer (each a virtual address and port mapped to one approved\n`host:port`). In manual use every endpoint of the VM is allowed; in\nan agent session only those of the grant.",
+          "type": "string",
+          "const": "endpoints"
         }
       ]
     },
@@ -2140,6 +2289,29 @@
           "required": [
             "kind",
             "claimed_outcome"
+          ]
+        },
+        {
+          "description": "Network event of the session's VM (ADR-0033): a connection through\nthe endpoint allowlist ended, an attempt was refused, or the run's\nnetwork was set up (`kind` of the audit: `network_setup`,\n`network_connection`, `network_denied`, `network_policy`).",
+          "type": "object",
+          "properties": {
+            "action": {
+              "description": "Audit action name.",
+              "type": "string"
+            },
+            "detail": {
+              "description": "Details (addresses and counts, never content).",
+              "$ref": "#/$defs/NetworkAudit"
+            },
+            "kind": {
+              "type": "string",
+              "const": "network"
+            }
+          },
+          "required": [
+            "kind",
+            "action",
+            "detail"
           ]
         },
         {
@@ -3967,6 +4139,13 @@
           "description": "Expiry of the current lease.",
           "$ref": "#/$defs/UtcTimestamp"
         },
+        "network_endpoints": {
+          "description": "Granted network endpoints (`network.endpoints`, ADR-0033).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "purpose": {
           "description": "Purpose declared by the agent (plain text).",
           "type": "string"
@@ -4115,6 +4294,13 @@
         "guest_os": {
           "description": "Declared guest OS.",
           "$ref": "#/$defs/GuestOs"
+        },
+        "network_endpoints": {
+          "description": "Granted network endpoints (`network.endpoints`, ADR-0033).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         },
         "objective": {
           "description": "Objective (purpose declared by the agent and approved by the user).",
@@ -4387,6 +4573,13 @@
             "$ref": "#/$defs/Capability"
           },
           "uniqueItems": true
+        },
+        "requested_endpoints": {
+          "description": "Network endpoints requested (hint, plain text).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         },
         "requested_vms": {
           "description": "VMs requested (hint).",
@@ -4969,6 +5162,13 @@
           "format": "uint64",
           "minimum": 0
         },
+        "endpoints": {
+          "description": "Endpoints of the endpoint allowlist (ADR-0033), approved by the\nuser; used by the `endpoints` mode and grantable to agent sessions\n(`network.endpoints`). Kept when the mode is another one.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NetworkEndpoint"
+          }
+        },
         "firmware": {
           "description": "Firmware; must be one of [`GuestOs::allowed_firmware`].",
           "$ref": "#/$defs/Firmware",
@@ -5019,7 +5219,7 @@
           "$ref": "#/$defs/VmName"
         },
         "network": {
-          "description": "Network profile; in the MVP only `offline`.",
+          "description": "Network mode (ADR-0033); `offline` by default.",
           "$ref": "#/$defs/NetworkProfile",
           "default": "offline"
         },

@@ -309,6 +309,7 @@ pub fn plan(
         memory_mib,
         disk_gib,
         network: NetworkProfile::Offline,
+        endpoints: Vec::new(),
         install_media: None,
         data_media: None,
         firmware: insp.firmware,

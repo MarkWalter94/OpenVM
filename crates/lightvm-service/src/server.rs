@@ -1558,6 +1558,7 @@ async fn dispatch(
             purpose,
             requested_vms,
             requested_capabilities,
+            requested_endpoints,
         } => {
             return Dispatch::Reply(request_session(
                 shared,
@@ -1567,6 +1568,7 @@ async fn dispatch(
                 &purpose,
                 requested_vms,
                 requested_capabilities,
+                requested_endpoints,
             ));
         }
         Request::AwaitSession { request_id } => {
@@ -1815,6 +1817,7 @@ async fn supervisor_call(
 }
 
 /// `request_session` (agent): new pending request with its verification code.
+#[allow(clippy::too_many_arguments)]
 fn request_session(
     shared: &Arc<Shared>,
     connection_id: u64,
@@ -1823,6 +1826,7 @@ fn request_session(
     purpose: &str,
     requested_vms: Vec<lightvm_proto::VmId>,
     requested_capabilities: lightvm_proto::CapabilitySet,
+    requested_endpoints: Vec<String>,
 ) -> Result<ResponseBody, ReplyError> {
     match shared.agents.open_request(
         connection_id,
@@ -1831,6 +1835,7 @@ fn request_session(
         purpose,
         requested_vms,
         requested_capabilities,
+        requested_endpoints,
     ) {
         Ok((info, closed)) => {
             shared.report_closed(closed);
@@ -1938,9 +1943,16 @@ async fn approve_session(
         shared.agents.abort_approval(request_id);
         return Err(op_error(ErrorCode::InvalidArgument, "expiry out of range"));
     };
+    // ADR-0033: `network.endpoints` without any endpoint grants nothing
+    // (the VM runs without network for the session): the capability is
+    // dropped rather than recorded empty.
+    let mut capabilities = approval.capabilities.clone();
+    if approval.network_endpoints.is_empty() {
+        capabilities.remove(&Capability::NetworkEndpoints);
+    }
     let new = NewSession {
         vm_id: approval.vm_id,
-        capabilities: approval.capabilities.clone(),
+        capabilities,
         quotas,
         expires_at,
         lease_ms,
@@ -1949,6 +1961,11 @@ async fn approve_session(
         connection_id: info.connection_id,
         client_name: info.client_name.clone(),
         purpose: info.purpose.clone(),
+        network_endpoints: approval
+            .network_endpoints
+            .iter()
+            .map(|n| n.trim_end_matches('.').to_ascii_lowercase())
+            .collect(),
     };
     b.fill(0);
     let r = supervisor_call(
@@ -1986,6 +2003,7 @@ async fn approve_session(
         state: SessionState::Active,
         termination: None,
         capabilities: grant.capabilities.clone(),
+        network_endpoints: grant.network_endpoints.iter().cloned().collect(),
         quotas: grant.quotas,
         usage: SessionUsage::default(),
         created_at: lease.renewed_at,

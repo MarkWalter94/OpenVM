@@ -1427,6 +1427,7 @@ impl SupervisorThread {
             objective: info.purpose.clone(),
             started_at: info.created_at,
             capabilities: c.grant.capabilities.clone(),
+            network_endpoints: c.grant.network_endpoints.iter().cloned().collect(),
             quotas: c.grant.quotas,
             expires_at: c.grant.expires_at,
             policy_revision: c.grant.policy_revision,
@@ -1745,6 +1746,11 @@ impl SupervisorThread {
         }
         for (vm_id, owner) in self.engine.input_owner_changes() {
             let _ = self.events.send(ServiceEvent::InputOwner { vm_id, owner });
+        }
+        // ADR-0033: allowed endpoints follow the sessions; connections and
+        // refusals of the endpoint allowlist go to the audit and reports.
+        for r in self.engine.sync_network() {
+            self.reports.network(r.vm_id, r.action, &r.detail);
         }
         self.vms_with_process
             .store(self.engine.vms_with_process(), Ordering::SeqCst);

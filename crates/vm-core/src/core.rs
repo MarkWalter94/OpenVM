@@ -29,10 +29,11 @@ use lightvm_proto::{
     Actor, Admission, AuditAction, AuditEvent, AuditOutcome, BackendObservation, Caller,
     Capability, DisplayGeometry, EffectivePolicy, ErrorCode, FileIdentity, Grant, GuestOs,
     HostCapacity, InputEvent, Label, Lease, MediaEntry, MediaId, MediaKind, MediaLocation,
-    MediaRecord, OperationId, OperationKind, OperationRecord, OperationStatus, PolicyLayer,
-    PolicyRevision, PublicError, ResourceLimits, RevocationReport, RunEndReason, RunId, RunRecord,
-    Screenshot, SessionId, SessionState, SessionToken, Sha256Digest, TerminationCause,
-    UtcTimestamp, VmAction, VmConfig, VmId, VmName, VmRecord, VmRequest, VmState,
+    MediaRecord, NetworkAudit, NetworkProfile, OperationId, OperationKind, OperationRecord,
+    OperationStatus, PolicyLayer, PolicyRevision, PublicError, ResourceLimits, RevocationReport,
+    RunEndReason, RunId, RunRecord, Screenshot, SessionId, SessionState, SessionToken,
+    Sha256Digest, TerminationCause, UtcTimestamp, VmAction, VmConfig, VmId, VmName, VmRecord,
+    VmRequest, VmState,
 };
 
 use crate::media::{check_media_kind, verify_media};
@@ -237,6 +238,8 @@ struct VmRuntime {
     pending_end: Option<RunEndReason>,
     /// Long storage operation in progress (F3), outside the queue.
     storage_op: Option<StorageOp>,
+    /// Network mode of the current run (ADR-0033), decided at its start.
+    run_network: Option<NetworkProfile>,
 }
 
 /// Storage operation in progress on a VM (baseline creation or restore):
@@ -261,6 +264,7 @@ impl VmRuntime {
             history_order: VecDeque::new(),
             pending_end: None,
             storage_op: None,
+            run_network: None,
         }
     }
 
@@ -347,6 +351,7 @@ struct Ev {
     capability: Option<Capability>,
     error: Option<ErrorCode>,
     termination: Option<TerminationCause>,
+    network: Option<NetworkAudit>,
 }
 
 /// Supervisor core, generic over the ports.
@@ -485,6 +490,7 @@ where
             capability: ev.capability,
             error: ev.error,
             termination: ev.termination,
+            network: ev.network,
         };
         let r = self.audit.append(&event);
         if r.is_err() {
@@ -1866,6 +1872,7 @@ where
         let reason = rt.pending_end.take().unwrap_or(default_reason);
         let run = rt.run_id.take();
         rt.geometry = None;
+        rt.run_network = None;
         let queued: Vec<Pending> = rt.queue.drain(..).collect();
         if rt.state == VmState::Running && final_state == VmState::Stopped {
             self.set_state(vm_id, VmState::Stopping);
@@ -1950,11 +1957,14 @@ where
                     self.discard(vm_id, p, err.code);
                     continue;
                 }
-                let vm = self
+                let mut vm = self
                     .vms
                     .get(&vm_id)
                     .map(|rt| rt.record.clone())
                     .ok_or_else(|| PublicError::not_found("VM does not exist"))?;
+                // ADR-0033: the network of this run. The backend builds the
+                // NIC from the mode of the plan, not from the settings.
+                vm.config.network = self.start_network(vm_id, &vm.config);
                 let mut media = Vec::new();
                 let mut missing = false;
                 for id in [vm.config.install_media, vm.config.data_media]
@@ -1991,6 +2001,7 @@ where
                 if let Some(rt) = self.vms.get_mut(&vm_id) {
                     rt.run_id = Some(run);
                     rt.geometry = None;
+                    rt.run_network = Some(vm.config.network);
                 }
                 self.set_state(vm_id, VmState::Starting);
                 start = Some(StartPlan { vm, media });
@@ -2914,6 +2925,14 @@ where
                 if !self.vms.contains_key(vm) {
                     return Err(PublicError::not_found("allowlist VM does not exist"));
                 }
+                self.check_session_network(*vm, &spec)?;
+            }
+            if !spec.capabilities.contains(&Capability::NetworkEndpoints)
+                && !spec.network_endpoints.is_empty()
+            {
+                return Err(PublicError::invalid_argument(
+                    "network endpoints granted without the network.endpoints capability",
+                ));
             }
             Ok(())
         })();
@@ -2922,6 +2941,12 @@ where
         }
         let session_id = self.ids.session_id();
         let lease = Lease::new(session_id, now, spec.lease_millis)?;
+        // `network.endpoints` without any endpoint grants nothing: not
+        // recorded (ADR-0033).
+        let mut spec = spec;
+        if spec.network_endpoints.is_empty() {
+            spec.capabilities.remove(&Capability::NetworkEndpoints);
+        }
         let grant = Grant {
             id: self.ids.grant_id(),
             session_id,
@@ -2930,6 +2955,7 @@ where
             expires_at: spec.expires_at,
             quotas: spec.quotas,
             policy_revision: self.revision,
+            network_endpoints: spec.network_endpoints,
         };
         self.sessions
             .insert(session_id, token, grant.clone(), lease, now);
@@ -2943,6 +2969,131 @@ where
             },
         );
         Ok((grant, lease))
+    }
+
+    /// ADR-0033 checks of a session on `vm_id`: a VM running with NAT
+    /// refuses the session (no hidden change while it runs: stop it first);
+    /// granted endpoints must be endpoints of the VM (the capability
+    /// without any endpoint is dropped by [`Self::create_session`]).
+    fn check_session_network(&self, vm_id: VmId, spec: &SessionSpec) -> Result<(), PublicError> {
+        let Some(rt) = self.vms.get(&vm_id) else {
+            return Ok(());
+        };
+        if rt.run_network == Some(NetworkProfile::Nat) {
+            return Err(PublicError::state_conflict(
+                "the VM is running with NAT networking, which agent sessions cannot use: stop the VM first (its next start uses the endpoint allowlist of the session, or no network)",
+            )
+            .with_detail("reason", "nat_running"));
+        }
+        if spec.capabilities.contains(&Capability::NetworkEndpoints) {
+            let known: std::collections::BTreeSet<String> = rt
+                .record
+                .config
+                .endpoints
+                .iter()
+                .map(lightvm_proto::NetworkEndpoint::key)
+                .collect();
+            if let Some(unknown) = spec.network_endpoints.iter().find(|n| !known.contains(*n)) {
+                return Err(PublicError::invalid_argument(format!(
+                    "`{unknown}` is not a network endpoint of the VM"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Network mode of a run of `vm_id` starting now (ADR-0033): the VM's
+    /// mode in manual use; while an agent session targets the VM, the
+    /// endpoint allowlist if a live session was granted
+    /// `network.endpoints` and the VM has endpoints, otherwise no network
+    /// (NAT is never given to a run under an agent session).
+    fn start_network(&self, vm_id: VmId, config: &VmConfig) -> NetworkProfile {
+        if config.network == NetworkProfile::Offline {
+            return NetworkProfile::Offline;
+        }
+        let sessions = self.sessions.live_for_vm(vm_id);
+        if sessions.is_empty() {
+            return config.network;
+        }
+        let granted = sessions.iter().any(|s| {
+            self.sessions.get(*s).is_some_and(|s| {
+                s.grant.capabilities.contains(&Capability::NetworkEndpoints)
+                    && !s.grant.network_endpoints.is_empty()
+            })
+        });
+        if granted && !config.endpoints.is_empty() {
+            NetworkProfile::Endpoints
+        } else {
+            NetworkProfile::Offline
+        }
+    }
+
+    /// Network mode of the VM's current run (`None` without a run).
+    #[must_use]
+    pub fn run_network(&self, vm_id: VmId) -> Option<NetworkProfile> {
+        self.vms.get(&vm_id).and_then(|rt| rt.run_network)
+    }
+
+    /// Endpoint names allowed now on the VM's network (ADR-0033): every
+    /// endpoint of the VM in manual use; the union of the endpoints granted
+    /// to the live sessions targeting it otherwise. `tainted` = an agent
+    /// session targeted the current run before: nothing is allowed until
+    /// the next start (no widening after a session ends).
+    #[must_use]
+    pub fn allowed_endpoints(
+        &self,
+        vm_id: VmId,
+        tainted: bool,
+    ) -> std::collections::BTreeSet<String> {
+        let Some(rt) = self.vms.get(&vm_id) else {
+            return std::collections::BTreeSet::new();
+        };
+        let sessions = self.sessions.live_for_vm(vm_id);
+        if sessions.is_empty() {
+            if tainted {
+                return std::collections::BTreeSet::new();
+            }
+            return rt
+                .record
+                .config
+                .endpoints
+                .iter()
+                .map(lightvm_proto::NetworkEndpoint::key)
+                .collect();
+        }
+        sessions
+            .iter()
+            .filter_map(|s| self.sessions.get(*s))
+            .filter(|s| s.grant.capabilities.contains(&Capability::NetworkEndpoints))
+            .flat_map(|s| s.grant.network_endpoints.iter().cloned())
+            .collect()
+    }
+
+    /// Records a network audit event of a run (ADR-0033): set-up, a
+    /// connection that ended, a refused attempt, a change of the allowed
+    /// endpoints. The actor is the system; the session is the one targeting
+    /// the VM, if any.
+    pub fn record_network(
+        &mut self,
+        vm_id: VmId,
+        run_id: Option<RunId>,
+        session_id: Option<SessionId>,
+        action: AuditAction,
+        outcome: AuditOutcome,
+        detail: NetworkAudit,
+    ) {
+        self.emit_after(
+            Actor::System,
+            action,
+            outcome,
+            Ev {
+                vm_id: Some(vm_id),
+                run_id,
+                session_id,
+                network: Some(detail),
+                ..Ev::default()
+            },
+        );
     }
 
     /// Renews the lease (checked by the supervisor, not by the client).

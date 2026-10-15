@@ -353,6 +353,46 @@ impl PointerDevice {
 /// Id of the USB controller of the USB pointer profiles.
 const USB_CONTROLLER_ID: &str = "usb0";
 
+/// Emulated network adapter of a profile (ADR-0033): one the guest has an
+/// inbox driver for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum NicModel {
+    /// Intel 82540EM (`e1000`): Linux, Windows Vista and later.
+    E1000,
+    /// Realtek RTL8139 (`rtl8139`): Windows XP.
+    Rtl8139,
+}
+
+impl NicModel {
+    /// QEMU device name.
+    pub fn qemu_name(self) -> &'static str {
+        match self {
+            Self::E1000 => "e1000",
+            Self::Rtl8139 => "rtl8139",
+        }
+    }
+}
+
+/// MAC address of the guest NIC (the one the supervisor's network expects).
+pub const GUEST_MAC: &str = "52:54:00:12:34:56";
+
+/// Network of a run (ADR-0033). The mode comes from the core: NAT only in
+/// manual use, the supervisor's network for the endpoint allowlist.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum GuestNetwork {
+    /// No NIC (`-nic none`, ADR-0004).
+    #[default]
+    None,
+    /// QEMU user-mode network (`-netdev user`): host, LAN and Internet.
+    Nat,
+    /// `-netdev stream` server on `net.sock` in the private directory: the
+    /// supervisor connects and runs the endpoint allowlist (`guest-net`).
+    Supervisor,
+}
+
+/// Id of the netdev of the guest NIC.
+const NETDEV_ID: &str = "net0";
+
 /// Hardware profile of a VM (ADR-0027): one of the closed set of
 /// combinations of the contract table, obtainable only through
 /// [`DeviceProfile::for_guest`] or the associated constants.
@@ -366,6 +406,7 @@ pub struct DeviceProfile {
     cdrom: CdromBus,
     tpm: bool,
     cpu: CpuPolicy,
+    nic: Option<NicModel>,
 }
 
 impl DeviceProfile {
@@ -379,6 +420,7 @@ impl DeviceProfile {
         cdrom: CdromBus::Ide,
         tpm: false,
         cpu: CpuPolicy::Nominal,
+        nic: Some(NicModel::E1000),
     };
     /// Windows 8.1 / 10 with UEFI: q35, AHCI, VGA, xHCI tablet.
     pub const WINDOWS_UEFI: Self = Self {
@@ -390,6 +432,7 @@ impl DeviceProfile {
         cdrom: CdromBus::Ide,
         tpm: false,
         cpu: CpuPolicy::Nominal,
+        nic: Some(NicModel::E1000),
     };
     /// Windows 8.1 / 10 with legacy BIOS: q35, SeaBIOS, AHCI, VGA, xHCI tablet.
     pub const WINDOWS_BIOS: Self = Self {
@@ -401,6 +444,7 @@ impl DeviceProfile {
         cdrom: CdromBus::Ide,
         tpm: false,
         cpu: CpuPolicy::Nominal,
+        nic: Some(NicModel::E1000),
     };
     /// Windows Vista / 7: q35, SeaBIOS, AHCI, VGA, UHCI tablet.
     pub const WINDOWS_VISTA_7: Self = Self {
@@ -412,6 +456,7 @@ impl DeviceProfile {
         cdrom: CdromBus::Ide,
         tpm: false,
         cpu: CpuPolicy::Nominal,
+        nic: Some(NicModel::E1000),
     };
     /// Windows XP: i440fx, SeaBIOS, PIIX IDE, VGA, UHCI tablet.
     pub const WINDOWS_XP: Self = Self {
@@ -423,6 +468,9 @@ impl DeviceProfile {
         cdrom: CdromBus::Ide,
         tpm: false,
         cpu: CpuPolicy::Nominal,
+        // XP ships a Realtek RTL8139 driver and no driver for the Intel
+        // 82540EM (`e1000`), which Vista and later include (ADR-0033).
+        nic: Some(NicModel::Rtl8139),
     };
 
     /// Windows 11 ARM64 (ADR-0028): `virt` + GICv3, project edk2 with Secure
@@ -437,6 +485,7 @@ impl DeviceProfile {
         cdrom: CdromBus::UsbBot,
         tpm: true,
         cpu: CpuPolicy::Host,
+        nic: None,
     };
 
     /// Every profile, in the order of the contract table.
@@ -573,6 +622,12 @@ impl DeviceProfile {
     /// CPU model policy.
     pub fn cpu_policy(&self) -> CpuPolicy {
         self.cpu
+    }
+
+    /// Network adapter of the profile, `None` if the profile has no network
+    /// (Windows on ARM: no inbox driver for the emulated adapters).
+    pub fn nic(&self) -> Option<NicModel> {
+        self.nic
     }
 
     /// Chipset family the machine type must belong to.
@@ -846,6 +901,8 @@ pub struct VmLaunchSpec {
     pub data_media: Option<MediaId>,
     /// Job Object limits (CPU cap, job memory), ADR-0017.
     pub limits: crate::process::JobLimits,
+    /// Network of the run (ADR-0033).
+    pub network: GuestNetwork,
 }
 
 /// QEMU command ready to spawn.
@@ -872,6 +929,9 @@ pub struct QemuCommand {
     pub limits: crate::process::JobLimits,
     /// swtpm to start in the run's container before QEMU (TPM profiles).
     pub tpm: Option<TpmCommand>,
+    /// `-netdev stream` socket the supervisor connects to
+    /// ([`GuestNetwork::Supervisor`]).
+    pub net_socket: Option<ManagedPath>,
 }
 
 /// swtpm process of a run (ADR-0028): TPM 2.0 with a per-VM state directory
@@ -1121,7 +1181,39 @@ impl VmLaunchSpec {
             let iso = paths.media(media)?;
             push_cdrom(&mut a, proto, "cd-data", &iso, profile, 1, None);
         }
-        a.opt("-nic", "none");
+        let net_socket = match self.network {
+            GuestNetwork::None => {
+                a.opt("-nic", "none");
+                None
+            }
+            GuestNetwork::Nat | GuestNetwork::Supervisor => {
+                let nic = profile.nic().ok_or_else(|| BackendError::Unsupported {
+                    what: "a network adapter for this guest".into(),
+                    hint: "the hardware profile has no network adapter (ADR-0033)".into(),
+                })?;
+                let socket = if self.network == GuestNetwork::Supervisor {
+                    let s = private_dir.join_file(names::NET_SOCKET)?;
+                    s.check_socket_len("net_socket")?;
+                    a.opt(
+                        "-netdev",
+                        format!(
+                            "stream,id={NETDEV_ID},server=on,addr.type=unix,addr.path={}",
+                            s.qemu_value()
+                        ),
+                    );
+                    Some(s)
+                } else {
+                    // No `hostfwd`, no `guestfwd`, no SMB share: plain NAT.
+                    a.opt("-netdev", format!("user,id={NETDEV_ID}"));
+                    None
+                };
+                a.opt(
+                    "-device",
+                    format!("{},netdev={NETDEV_ID},mac={GUEST_MAC}", nic.qemu_name()),
+                );
+                socket
+            }
+        };
         a.opt("-device", profile.display().qemu_name());
         if !usb_first {
             push_input(&mut a, profile);
@@ -1184,6 +1276,7 @@ impl VmLaunchSpec {
             private_dir,
             limits: self.limits,
             tpm,
+            net_socket,
         })
     }
 }
@@ -1299,6 +1392,7 @@ pub fn build_probe_command(
         private_dir,
         limits: crate::process::JobLimits::default(),
         tpm: None,
+        net_socket: None,
     })
 }
 
@@ -1431,6 +1525,7 @@ pub(crate) mod tests {
             install_media: Some(media_ubuntu()),
             data_media: None,
             limits: crate::process::JobLimits::default(),
+            network: GuestNetwork::None,
         }
     }
 
@@ -1493,10 +1588,14 @@ pub(crate) mod tests {
                 "serial",
                 "tpmdev",
                 "ppi",
+                "netdev",
+                "mac",
             ]),
         );
         t.insert("-chardev", Some(&["id", "path"]));
         t.insert("-tpmdev", Some(&["id", "chardev"]));
+        // ADR-0033: user (NAT) or stream to the private directory only.
+        t.insert("-netdev", Some(&["id", "server", "addr.type", "addr.path"]));
         // Path value, checked separately.
         t.insert("-bios", None);
         t.insert("-nic", None);
@@ -1528,6 +1627,8 @@ pub(crate) mod tests {
         "mptsas1068",
         "scsi-hd",
         "vmware-svga",
+        "e1000",
+        "rtl8139",
     ];
     /// Allowed first part (type) of the options that have one.
     fn typed_option(opt: &str) -> Option<&'static [&'static str]> {
@@ -1535,6 +1636,7 @@ pub(crate) mod tests {
             "-device" => Some(DEVICES),
             "-chardev" => Some(&["socket"]),
             "-tpmdev" => Some(&["emulator"]),
+            "-netdev" => Some(&["user", "stream"]),
             _ => None,
         }
     }
@@ -1558,6 +1660,8 @@ pub(crate) mod tests {
         let mut i = 0;
         let mut seen_nodefaults = false;
         let mut seen_nic_none = false;
+        let mut netdevs = 0usize;
+        let mut nics = 0usize;
         let mut seen_bios = false;
         let mut seen_pflash = false;
         let mut accel = String::new();
@@ -1612,8 +1716,10 @@ pub(crate) mod tests {
                 }
                 Some(allowed) => {
                     let mut parts = val.split(',');
+                    let mut kind = "";
                     if let Some(types) = typed_option(opt) {
                         let dev = parts.next().unwrap_or_default();
+                        kind = dev;
                         if !types.contains(&dev) {
                             return Err(format!("{opt} type not allowed {dev:?}"));
                         }
@@ -1633,6 +1739,25 @@ pub(crate) mod tests {
                         if !allowed.contains(&k) {
                             return Err(format!("{opt}: key not allowed {k:?}"));
                         }
+                        if opt == "-netdev" && k == "server" && v != "on" {
+                            return Err(format!("-netdev server={v}"));
+                        }
+                        if opt == "-netdev" && k == "addr.type" && v != "unix" {
+                            return Err(format!("-netdev addr.type={v}"));
+                        }
+                        let is_nic = opt == "-device" && (kind == "e1000" || kind == "rtl8139");
+                        if (k == "netdev" || k == "mac") && !is_nic {
+                            return Err(format!("{opt}: {k} on {kind:?}"));
+                        }
+                        if k == "netdev" && v != "net0" {
+                            return Err(format!("netdev={v}"));
+                        }
+                        if k == "mac" {
+                            if v != GUEST_MAC {
+                                return Err(format!("mac {v}"));
+                            }
+                            continue;
+                        }
                         if k == "file.driver" && v != "file" {
                             return Err(format!("protocol not allowed {v:?}"));
                         }
@@ -1645,7 +1770,8 @@ pub(crate) mod tests {
                         let colon_ok = k == "filename"
                             || k == "file.filename"
                             || k == "unix"
-                            || (opt == "-chardev" && k == "path");
+                            || (opt == "-chardev" && k == "path")
+                            || (opt == "-netdev" && k == "addr.path");
                         let extra = if colon_ok {
                             path_has_separators(v)
                         } else {
@@ -1656,12 +1782,15 @@ pub(crate) mod tests {
                         }
                         seen_pflash |= opt == "-machine" && k.starts_with("pflash");
                     }
+                    netdevs += usize::from(opt == "-netdev");
+                    nics += usize::from(opt == "-device" && (kind == "e1000" || kind == "rtl8139"));
                 }
             }
             i += 2;
         }
-        if !seen_nodefaults || !seen_nic_none {
-            return Err("-nodefaults or -nic none missing".into());
+        // Either no NIC at all or exactly one netdev (ADR-0033).
+        if !seen_nodefaults || (seen_nic_none == (netdevs > 0)) || netdevs > 1 || nics != netdevs {
+            return Err("-nodefaults, or exactly one of -nic none and one -netdev, missing".into());
         }
         if seen_bios && seen_pflash {
             return Err("-bios together with pflash firmware".into());
@@ -1677,6 +1806,76 @@ pub(crate) mod tests {
             .iter()
             .map(|a| a.to_str().unwrap().to_owned())
             .collect()
+    }
+
+    /// ADR-0033: the three network modes on every profile.
+    #[test]
+    fn network_command_lines() {
+        for profile in DeviceProfile::ALL {
+            for net in [
+                GuestNetwork::None,
+                GuestNetwork::Nat,
+                GuestNetwork::Supervisor,
+            ] {
+                let mut s = spec_for(profile);
+                s.network = net;
+                let r = s.build(&FakePaths::for_profile(&profile));
+                let Some(nic) = profile.nic() else {
+                    if net == GuestNetwork::None {
+                        audit_args(&r.unwrap().args).unwrap();
+                    } else {
+                        assert!(r.is_err(), "no NIC on {profile:?}");
+                    }
+                    continue;
+                };
+                let cmd = r.unwrap();
+                audit_args(&cmd.args).unwrap_or_else(|e| panic!("{profile:?} {net:?}: {e}"));
+                let joined = strs(&cmd).join(" ");
+                let device = format!("-device {},netdev=net0,mac={GUEST_MAC}", nic.qemu_name());
+                match net {
+                    GuestNetwork::None => {
+                        assert!(joined.contains("-nic none"));
+                        assert!(!joined.contains("-netdev"));
+                        assert!(cmd.net_socket.is_none());
+                    }
+                    GuestNetwork::Nat => {
+                        assert!(joined.contains("-netdev user,id=net0 "), "{joined}");
+                        assert!(joined.contains(&device));
+                        assert!(!joined.contains("-nic none"));
+                        for forbidden in ["hostfwd", "guestfwd", "smb", "restrict"] {
+                            assert!(!joined.contains(forbidden), "{forbidden}");
+                        }
+                        assert!(cmd.net_socket.is_none());
+                    }
+                    GuestNetwork::Supervisor => {
+                        let sock = cmd.net_socket.as_ref().unwrap();
+                        assert!(sock.as_path().starts_with(cmd.private_dir.as_path()));
+                        assert!(joined.contains(&format!(
+                            "-netdev stream,id=net0,server=on,addr.type=unix,addr.path={}",
+                            sock.qemu_value()
+                        )));
+                        assert!(joined.contains(&device));
+                    }
+                }
+            }
+        }
+        assert_eq!(DeviceProfile::WINDOWS_XP.nic(), Some(NicModel::Rtl8139));
+        assert_eq!(DeviceProfile::WINDOWS_VISTA_7.nic(), Some(NicModel::E1000));
+        assert_eq!(DeviceProfile::LINUX.nic(), Some(NicModel::E1000));
+        assert_eq!(DeviceProfile::WINDOWS11_ARM64.nic(), None);
+        // The audit refuses anything else on the network side.
+        let mut s = spec();
+        s.network = GuestNetwork::Nat;
+        let mut args = s.build(&FakePaths::new()).unwrap().args;
+        let i = args.iter().position(|a| a == "-netdev").unwrap();
+        for bad in [
+            "user,id=net0,hostfwd=tcp::2222-:22",
+            "tap,id=net0",
+            "stream,id=net0,server=off,addr.type=inet,addr.host=127.0.0.1,addr.port=1",
+        ] {
+            args[i + 1] = bad.into();
+            assert!(audit_args(&args).is_err(), "{bad}");
+        }
     }
 
     #[test]

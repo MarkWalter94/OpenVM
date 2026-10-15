@@ -20,6 +20,14 @@
       "description": "Identifier.",
       "$ref": "#/$defs/GrantId"
     },
+    "network_endpoints": {
+      "description": "Network endpoints of the VM the session may use (names as in the VM\nsettings, normalized to lower case), with\n[`Capability::NetworkEndpoints`]; empty otherwise (ADR-0033).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
     "policy_revision": {
       "description": "Revision of the policy the grant was issued with.",
       "$ref": "#/$defs/PolicyRevision"
@@ -103,6 +111,11 @@
           "description": "Authorized LightVM events and QEMU logs.",
           "type": "string",
           "const": "vm.logs"
+        },
+        {
+          "description": "Network endpoints of the VM's allowlist (ADR-0033, ADR-0034): the\ngrant lists which ones ([`Grant::network_endpoints`]). Without it\nthe session's VM runs without network.",
+          "type": "string",
+          "const": "network.endpoints"
         }
       ]
     },

@@ -250,6 +250,7 @@ fn request_is_approved_with_the_code_one_vm_and_the_chosen_limits() {
         quotas: Some(lightvm_desktop::agents::QuotaPreset::Small.quotas()),
         lease_ms: Some(5_000),
         give_input: true,
+        network_endpoints: Vec::new(),
     };
     assert_eq!(
         actions(&hs),
@@ -291,6 +292,71 @@ fn request_is_approved_with_the_code_one_vm_and_the_chosen_limits() {
     h.get_by_label(
         "12 of 10,000 operations \u{b7} 340 of 200,000 input events \u{b7} 4 of 2,000 screenshots",
     );
+}
+
+/// ADR-0033: the endpoints of the chosen VM are offered unticked; ticking
+/// one grants `network.endpoints` with exactly that endpoint; the request's
+/// hint is shown; a NAT VM that runs is flagged.
+#[test]
+fn network_endpoints_are_granted_only_when_ticked() {
+    let mut s = with_request(true);
+    s.agents.requests[0].requested_endpoints = vec!["sql.lan".into()];
+    s.vms[0].config.network = lightvm_proto::NetworkProfile::Endpoints;
+    s.vms[0].config.endpoints = vec![
+        lightvm_proto::NetworkEndpoint {
+            name: "sql.lan".into(),
+            host: "sqlserver.corp.example".into(),
+            port: 1433,
+            virtual_ip: std::net::Ipv4Addr::new(10, 0, 2, 100),
+        },
+        lightvm_proto::NetworkEndpoint {
+            name: "wcf".into(),
+            host: "127.0.0.1".into(),
+            port: 8733,
+            virtual_ip: std::net::Ipv4Addr::new(10, 0, 2, 101),
+        },
+    ];
+    let (a1, hs) = app(s);
+    let mut h = harness(a1);
+    goto(&mut h, Section::Agents);
+    h.get_by_label_contains("Network endpoints asked for: sql.lan.");
+    click(&mut h, &format!("Review the request of {CLIENT}"));
+    let sql = "sql.lan \u{2192} sqlserver.corp.example:1433 (inside the guest 10.0.2.100:1433)";
+    let wcf = "wcf \u{2192} 127.0.0.1:8733 (inside the guest 10.0.2.101:8733)";
+    assert!(!checked(&h, sql), "never ticked by default");
+    assert!(!checked(&h, wcf));
+    tap(&mut h, sql);
+    h.get_by_label("An allowed endpoint receives whatever the guest sends to it.");
+    tap(&mut h, "The agent shows the code 482-913");
+    h.run_steps(4);
+    click(&mut h, &format!("Approve the session of {CLIENT}"));
+    let sent: Vec<SessionApproval> = actions(&hs)
+        .into_iter()
+        .filter_map(|c| match c {
+            ServiceCommand::ApproveSession { approval, .. } => Some(approval),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sent.len(), 1);
+    assert!(sent[0].capabilities.contains(&Capability::NetworkEndpoints));
+    assert_eq!(sent[0].network_endpoints, ["sql.lan"]);
+
+    // Another VM without endpoints: nothing to tick, no capability.
+    let mut s = with_request(true);
+    s.vms[0].config.network = lightvm_proto::NetworkProfile::Nat;
+    s.vms[0].config.endpoints = vec![lightvm_proto::NetworkEndpoint {
+        name: "sql.lan".into(),
+        host: "127.0.0.1".into(),
+        port: 1433,
+        virtual_ip: std::net::Ipv4Addr::new(10, 0, 2, 100),
+    }];
+    let (a2, _hs) = app(s);
+    let mut h = harness(a2);
+    goto(&mut h, Section::Agents);
+    click(&mut h, &format!("Review the request of {CLIENT}"));
+    h.get_by_label_contains("This VM is running with NAT networking");
+    tap(&mut h, "ubuntu-dev");
+    h.get_by_label_contains("This VM has no network endpoints");
 }
 
 #[test]
@@ -572,8 +638,8 @@ fn session_page_shows_objective_limits_and_events() {
     );
     s.agents
         .record(at(-60), None, "Agent access turned on".into());
-    let (app, _hs) = app(s);
-    let mut h = harness(app);
+    let (a2, _hs) = app(s);
+    let mut h = harness(a2);
     goto(&mut h, Section::Agents);
     click(&mut h, &format!("Details of the session of {CLIENT}"));
     h.get_by_label("Session \u{b7} claude-desktop");

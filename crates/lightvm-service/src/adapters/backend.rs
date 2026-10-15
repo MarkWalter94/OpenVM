@@ -98,7 +98,7 @@ use std::time::Duration;
 use lightvm_proto::ipc::{StopReason, VcpuHalt};
 use lightvm_proto::{
     AuditOutcome, BackendObservation, DisplayGeometry, ErrorCode, HostCapacity, InputEvent,
-    MediaId, PublicError, RunId, Screenshot, VmId, VmRecord,
+    MediaId, NetworkProfile, PublicError, RunId, Screenshot, VmId, VmRecord,
 };
 use qemu_backend::cmdline::{DiskFormat, DiskSpec};
 use qemu_backend::probe::{
@@ -107,8 +107,9 @@ use qemu_backend::probe::{
 };
 use qemu_backend::{
     Accelerator, BackendError, CpuModel, CpuPolicy, DeviceProfile, ExitCause, FirmwareKind,
-    HostCapabilities, JobLimits, MachineType, ManagedPath, ManagedPaths, ProcessState, QemuRun,
-    RunConfig, ShutdownPolicy, VcpuFaultEvent, VmLaunchSpec, boot_prompt, image, prepare,
+    GuestNetwork, HostCapabilities, JobLimits, MachineType, ManagedPath, ManagedPaths,
+    ProcessState, QemuRun, RunConfig, ShutdownPolicy, VcpuFaultEvent, VmLaunchSpec, boot_prompt,
+    image, prepare,
 };
 use vm_core::media::VerifiedMedia;
 use vm_core::ports::VmBackend;
@@ -652,6 +653,8 @@ pub fn probe(setup: QemuSetup) -> Result<(QemuHost, QemuVmBackend, HostCapacity)
         image_tool,
         last_shots: BTreeMap::new(),
         boot_keys: BTreeMap::new(),
+        nets: BTreeMap::new(),
+        net_records: Vec::new(),
     };
     Ok((host, backend, capacity))
 }
@@ -1024,6 +1027,10 @@ pub struct QemuVmBackend {
     /// (`qemu_backend::boot_prompt`), per VM; aborted when the run is
     /// released.
     boot_keys: BTreeMap<VmId, tokio::task::JoinHandle<()>>,
+    /// Supervisor network of the runs on the endpoint allowlist (ADR-0033).
+    nets: BTreeMap<VmId, super::network::NetRun>,
+    /// Network records of runs already released, not yet taken.
+    net_records: Vec<crate::engine::NetworkRecord>,
 }
 
 /// Route of a graceful stop task that ended.
@@ -1219,6 +1226,12 @@ impl QemuVmBackend {
     /// private directory.
     fn release(&mut self, vm_id: VmId) {
         lock(&self.registry).remove(&vm_id);
+        // ADR-0033: the run's network ends with it (proxied connections
+        // reset, records kept for the audit).
+        if let Some(mut n) = self.nets.remove(&vm_id) {
+            let r = n.stop(vm_id);
+            self.net_records.extend(r);
+        }
         if let Some(task) = self.boot_keys.remove(&vm_id) {
             task.abort();
         }
@@ -1609,6 +1622,11 @@ impl VmBackend for QemuVmBackend {
             install_media: vm.config.install_media,
             data_media: vm.config.data_media,
             limits: job_limits(&vm.config, logical_cpus()),
+            network: match vm.config.network {
+                NetworkProfile::Offline => GuestNetwork::None,
+                NetworkProfile::Nat => GuestNetwork::Nat,
+                NetworkProfile::Endpoints => GuestNetwork::Supervisor,
+            },
         };
         // Windows UEFI media on a disk without an installed system: the CD
         // prompt is answered by the backend (read before QEMU opens the disk;
@@ -1646,6 +1664,15 @@ impl VmBackend for QemuVmBackend {
                 );
             });
             self.boot_keys.insert(vm.id, task);
+        }
+        // ADR-0033: the network of the run (the plan's mode, decided by the
+        // core); for the endpoint allowlist the supervisor's stack attaches
+        // to QEMU's netdev socket, with nothing allowed until the engine
+        // applies the allowed endpoints.
+        let (net, records) = super::network::setup(vm, run_id, run.net_socket());
+        self.net_records.extend(records);
+        if let Some(n) = net {
+            self.nets.insert(vm.id, n);
         }
         lock(&self.registry).insert(vm.id, (run_id, run.emergency_stop_handle()));
         self.runs.insert(vm.id, Arc::new(run));
@@ -1890,6 +1917,26 @@ impl BackendPort for QemuVmBackend {
                     .map(move |ev| auto_reset_record(*vm_id, run_id, &ev))
             })
             .collect()
+    }
+
+    fn set_network_allowed(
+        &mut self,
+        vm_id: VmId,
+        run_id: RunId,
+        allowed: &BTreeSet<String>,
+    ) -> bool {
+        match self.nets.get_mut(&vm_id) {
+            Some(n) if n.run_id == run_id => n.set_allowed(allowed),
+            _ => false,
+        }
+    }
+
+    fn take_network_records(&mut self) -> Vec<crate::engine::NetworkRecord> {
+        let mut out = std::mem::take(&mut self.net_records);
+        for (vm_id, n) in &self.nets {
+            out.extend(n.take(*vm_id));
+        }
+        out
     }
 
     fn display_socket(&self, vm_id: VmId, run_id: RunId) -> Option<PathBuf> {
