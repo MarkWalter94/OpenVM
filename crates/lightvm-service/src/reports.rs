@@ -579,6 +579,32 @@ impl ReportStore {
         }
     }
 
+    /// A network event of a VM (ADR-0033): recorded in the live reports of
+    /// that VM.
+    pub(crate) fn network(
+        &mut self,
+        vm_id: VmId,
+        action: lightvm_proto::AuditAction,
+        detail: &lightvm_proto::NetworkAudit,
+    ) {
+        let now = UtcTimestamp::now();
+        let action = name_of(&action);
+        for l in self.live.values_mut() {
+            if l.report.vm_id != vm_id || l.report.state == SessionState::Terminated {
+                continue;
+            }
+            Self::push(
+                &mut l.report,
+                now,
+                ReportEventBody::Network {
+                    action: action.clone(),
+                    detail: detail.clone(),
+                },
+            );
+            l.dirty = true;
+        }
+    }
+
     fn finish(r: &mut SessionReport, cause: TerminationCause, at: UtcTimestamp) {
         r.state = SessionState::Terminated;
         r.termination = Some(cause);

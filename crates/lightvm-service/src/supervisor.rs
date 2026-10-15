@@ -1747,6 +1747,11 @@ impl SupervisorThread {
         for (vm_id, owner) in self.engine.input_owner_changes() {
             let _ = self.events.send(ServiceEvent::InputOwner { vm_id, owner });
         }
+        // ADR-0033: allowed endpoints follow the sessions; connections and
+        // refusals of the endpoint allowlist go to the audit and reports.
+        for r in self.engine.sync_network() {
+            self.reports.network(r.vm_id, r.action, &r.detail);
+        }
         self.vms_with_process
             .store(self.engine.vms_with_process(), Ordering::SeqCst);
     }

@@ -28,7 +28,7 @@ path = "src/bin/lightvm-ipc-probe.rs"
 # `qemu-backend` stays in the supervisor only (ADR-0024).
 [features]
 default = ["supervisor"]
-supervisor = ["dep:guest-detect", "dep:lightvm-fixture", "dep:png", "dep:qemu-backend", "dep:sha2", "dep:socket2", "dep:vm-core", "dep:vm-storage", "dep:vmware-import"]
+supervisor = ["dep:guest-detect", "dep:guest-net", "dep:lightvm-fixture", "dep:png", "dep:qemu-backend", "dep:sha2", "dep:socket2", "dep:vm-core", "dep:vm-storage", "dep:vmware-import"]
 
 # Exact versions and lockfile (ROADMAP 6.3); no git dependencies.
 [dependencies]
@@ -36,6 +36,8 @@ getrandom = { version = "=0.4.3", features = ["std"] }
 # Guest OS detection on the managed copy of an installation ISO at import
 # (ADR-0027).
 guest-detect = { path = "../guest-detect", optional = true }
+# Supervisor network of the endpoint allowlist (ADR-0033).
+guest-net = { path = "../guest-net", optional = true }
 lightvm-proto = { path = "../lightvm-proto" }
 # F5: ADR-0019 pixel verifier run on the stored screenshots of a session
 # report (`verify_session`), and PNG decoding for it (same version as
@@ -136,4 +138,8 @@ required-features = ["supervisor"]
 
 [[test]]
 name = "vmware_import_real"
+required-features = ["supervisor"]
+
+[[test]]
+name = "network"
 required-features = ["supervisor"]

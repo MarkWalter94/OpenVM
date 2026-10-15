@@ -457,7 +457,7 @@ impl Stack {
     fn poll(&mut self) {
         let now = self.now();
         self.iface.poll(now, &mut self.dev, &mut self.sockets);
-        let out: Vec<Vec<u8>> = self.dev.tx.drain(..).collect();
+        let out = std::mem::take(&mut self.dev.tx);
         for f in out {
             self.send_frame(f);
         }

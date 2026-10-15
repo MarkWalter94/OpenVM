@@ -380,6 +380,7 @@ fn real_snapshot_running_qmp() {
         install_media: None,
         data_media: None,
         limits: qemu_backend::JobLimits::default(),
+        network: qemu_backend::GuestNetwork::None,
     };
     let t0 = Instant::now();
     let run = rt

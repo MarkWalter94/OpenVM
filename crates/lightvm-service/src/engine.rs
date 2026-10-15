@@ -308,6 +308,13 @@ pub trait VmEngine: Send + 'static {
     fn input_owner_changes(&mut self) -> Vec<(VmId, InputOwner)> {
         Vec::new()
     }
+    /// ADR-0033: brings the allowed endpoints of every running VM on the
+    /// endpoint allowlist in line with its sessions (connections to
+    /// endpoints no longer allowed are reset), audits the network records
+    /// of the backend and returns them for the session reports.
+    fn sync_network(&mut self) -> Vec<NetworkRecord> {
+        Vec::new()
+    }
     /// Audit of a session lifecycle step decided by the service.
     /// Facts of a VM for a session report (F5): name, configuration and
     /// revision, current baseline, current run.
@@ -1095,6 +1102,22 @@ pub trait BackendPort: VmBackend + Send + 'static {
     fn guest_support(&self) -> vm_core::resources::GuestSupport {
         lightvm_proto::GuestOs::runs_on_this_host_with
     }
+    /// ADR-0033: sets the endpoints allowed on the run's network (names
+    /// normalized). `true` if the set changed (the first call of a run
+    /// included).
+    fn set_network_allowed(
+        &mut self,
+        _vm_id: VmId,
+        _run_id: RunId,
+        _allowed: &BTreeSet<String>,
+    ) -> bool {
+        false
+    }
+    /// ADR-0033: network records of the runs since the last call (set-up,
+    /// connections that ended, refused attempts).
+    fn take_network_records(&mut self) -> Vec<NetworkRecord> {
+        Vec::new()
+    }
     /// Display socket of the run (QEMU `vnc.sock`), if the backend has one.
     fn display_socket(&self, _vm_id: VmId, _run_id: RunId) -> Option<PathBuf> {
         None
@@ -1269,6 +1292,26 @@ where
     /// Storage operations of agent sessions in progress (F5): operation →
     /// session, to record the baselines a session created.
     agent_storage: BTreeMap<OperationId, SessionId>,
+    /// Runs an agent session targeted (ADR-0033): their network never
+    /// widens again after the session ends.
+    net_tainted: BTreeMap<VmId, RunId>,
+}
+
+/// A network event of a run (ADR-0033), audited by the engine and recorded
+/// in the reports of the sessions of the VM.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetworkRecord {
+    /// VM.
+    pub vm_id: VmId,
+    /// Run.
+    pub run_id: RunId,
+    /// `network_setup`, `network_connection`, `network_denied` or
+    /// `network_policy`.
+    pub action: AuditAction,
+    /// Outcome.
+    pub outcome: AuditOutcome,
+    /// Details.
+    pub detail: lightvm_proto::NetworkAudit,
 }
 
 /// Service-side data of an agent session.
@@ -1368,6 +1411,7 @@ where
             last_owners: BTreeMap::new(),
             gate: None,
             gate_reports: BTreeMap::new(),
+            net_tainted: BTreeMap::new(),
             agent_storage: BTreeMap::new(),
         };
         let _ = e.state_changes();
@@ -3000,6 +3044,58 @@ where
             if *state == SessionState::Terminated {
                 self.shots.remove(id);
             }
+        }
+        out
+    }
+
+    fn sync_network(&mut self) -> Vec<NetworkRecord> {
+        let mut out = Vec::new();
+        let runs: Vec<(VmId, RunId)> = self
+            .current_runs()
+            .into_iter()
+            .filter_map(|(vm, run)| run.map(|r| (vm, r)))
+            .collect();
+        self.net_tainted
+            .retain(|vm, run| runs.iter().any(|(v, r)| v == vm && r == run));
+        for (vm_id, run_id) in runs {
+            if self.core.run_network(vm_id) != Some(lightvm_proto::NetworkProfile::Endpoints) {
+                continue;
+            }
+            let sessions = self.core.sessions().live_for_vm(vm_id);
+            if !sessions.is_empty() {
+                self.net_tainted.insert(vm_id, run_id);
+            }
+            let tainted = self.net_tainted.get(&vm_id) == Some(&run_id);
+            let allowed = self.core.allowed_endpoints(vm_id, tainted);
+            if self.backend.set_network_allowed(vm_id, run_id, &allowed) {
+                let list: Vec<&str> = allowed.iter().map(String::as_str).collect();
+                out.push(NetworkRecord {
+                    vm_id,
+                    run_id,
+                    action: AuditAction::NetworkPolicy,
+                    outcome: AuditOutcome::Succeeded,
+                    detail: lightvm_proto::NetworkAudit {
+                        reason: Some(if list.is_empty() {
+                            "allowed: none".to_owned()
+                        } else {
+                            format!("allowed: {}", list.join(", "))
+                        }),
+                        ..lightvm_proto::NetworkAudit::default()
+                    },
+                });
+            }
+        }
+        out.extend(self.backend.take_network_records());
+        for r in &out {
+            let session = self.core.sessions().live_for_vm(r.vm_id).first().copied();
+            self.core.record_network(
+                r.vm_id,
+                Some(r.run_id),
+                session,
+                r.action,
+                r.outcome,
+                r.detail.clone(),
+            );
         }
         out
     }

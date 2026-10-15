@@ -101,11 +101,9 @@ fn decoy() -> (u16, Arc<AtomicU32>) {
     let count = Arc::new(AtomicU32::new(0));
     let c2 = count.clone();
     std::thread::spawn(move || {
-        for s in l.incoming() {
-            if let Ok(mut s) = s {
-                c2.fetch_add(1, Ordering::SeqCst);
-                let _ = s.write_all(b"HOST-SERVICE-REACHED\n");
-            }
+        for mut s in l.incoming().flatten() {
+            c2.fetch_add(1, Ordering::SeqCst);
+            let _ = s.write_all(b"HOST-SERVICE-REACHED\n");
         }
     });
     (port, count)

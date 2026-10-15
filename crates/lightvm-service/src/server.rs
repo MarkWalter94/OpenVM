@@ -1817,6 +1817,7 @@ async fn supervisor_call(
 }
 
 /// `request_session` (agent): new pending request with its verification code.
+#[allow(clippy::too_many_arguments)]
 fn request_session(
     shared: &Arc<Shared>,
     connection_id: u64,

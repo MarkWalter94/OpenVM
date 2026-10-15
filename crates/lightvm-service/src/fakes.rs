@@ -860,7 +860,16 @@ pub struct FakeVmBackend {
     /// internal snapshot is applied to the fake disk
     /// `vms/<vm_id>/primary.qcow2` ([`snapshot_disk`]); `None` = unsupported.
     pub snapshot_root: Option<PathBuf>,
+    /// ADR-0033: allowed endpoints applied per VM on the endpoint allowlist
+    /// (run, last set; `None` = not applied yet).
+    pub net_allowed: NetAllowed,
+    /// ADR-0033: network records to report, injected by the test.
+    pub net_records: Arc<Mutex<Vec<crate::engine::NetworkRecord>>>,
 }
+
+/// Allowed endpoints applied per VM by [`FakeVmBackend`].
+pub type NetAllowed =
+    Arc<Mutex<BTreeMap<VmId, (RunId, Option<std::collections::BTreeSet<String>>)>>>;
 
 /// Outcomes of background graceful stops injected by a test.
 pub type StopResults = Arc<Mutex<Vec<(VmId, Result<(), PublicError>)>>>;
@@ -889,6 +898,18 @@ impl VmBackend for FakeVmBackend {
                 if disks.is_some() { ":overlay" } else { "" }
             ),
         );
+        push(
+            &self.calls,
+            format!("vm_network:{:?}", vm.config.network).to_lowercase(),
+        );
+        if vm.config.network == NetworkProfile::Endpoints {
+            self.net_allowed
+                .lock()
+                .unwrap()
+                .insert(vm.id, (run_id, None));
+        } else {
+            self.net_allowed.lock().unwrap().remove(&vm.id);
+        }
         Ok(())
     }
     fn shutdown(&mut self, vm_id: VmId, run_id: RunId) -> Result<(), PublicError> {
@@ -971,6 +992,31 @@ impl BackendPort for FakeVmBackend {
     }
     fn image_tool(&self) -> Option<Arc<dyn ImageTool>> {
         self.image_tool.clone().map(|t| t as Arc<dyn ImageTool>)
+    }
+    fn set_network_allowed(
+        &mut self,
+        vm_id: VmId,
+        run_id: RunId,
+        allowed: &std::collections::BTreeSet<String>,
+    ) -> bool {
+        let mut m = self.net_allowed.lock().unwrap();
+        match m.get_mut(&vm_id) {
+            Some((run, last)) if *run == run_id && last.as_ref() != Some(allowed) => {
+                *last = Some(allowed.clone());
+                push(
+                    &self.calls,
+                    format!(
+                        "net_allowed:{}",
+                        allowed.iter().cloned().collect::<Vec<_>>().join(",")
+                    ),
+                );
+                true
+            }
+            _ => false,
+        }
+    }
+    fn take_network_records(&mut self) -> Vec<crate::engine::NetworkRecord> {
+        std::mem::take(&mut *self.net_records.lock().unwrap())
     }
     fn set_start_disks(&mut self, vm_id: VmId, run_id: RunId, disks: StartDisks) {
         push(&self.calls, "vm_start_disks");

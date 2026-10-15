@@ -185,6 +185,7 @@ impl AgentRegistry {
     }
 
     /// New pending request of a connection.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn open_request(
         &self,
         connection_id: ConnectionId,

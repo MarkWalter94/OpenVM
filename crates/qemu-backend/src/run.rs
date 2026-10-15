@@ -38,7 +38,7 @@ use crate::boot_prompt::{
     BOOT_PROMPT_INTERVAL, BOOT_PROMPT_KEY, BOOT_PROMPT_WINDOW, BootKeyEnd, BootKeyReport,
     press_boot_prompt_key,
 };
-use crate::cmdline::{FirmwareKind, QemuCommand, TpmCommand, VmLaunchSpec};
+use crate::cmdline::{FirmwareKind, GuestNetwork, QemuCommand, TpmCommand, VmLaunchSpec};
 use crate::error::{BackendError, Result};
 use crate::input::{PressedInput, validate_events};
 use crate::paths::{ManagedPath, ManagedPaths};
@@ -582,6 +582,39 @@ pub fn check_no_nic(info_network: &str, pci_network: &[PciNetworkDevice]) -> Res
     Ok(())
 }
 
+/// Check of the network of a run (ADR-0033) on the data of `info network`
+/// and `query-pci`: no NIC for [`GuestNetwork::None`]; otherwise exactly one
+/// PCI network device, one NIC front end and one back end of the expected
+/// type (`user` for NAT, `stream` for the supervisor's network) and nothing
+/// else.
+pub fn check_network(
+    expected: GuestNetwork,
+    info_network: &str,
+    pci_network: &[PciNetworkDevice],
+) -> Result<()> {
+    let backend = match expected {
+        GuestNetwork::None => return check_no_nic(info_network, pci_network),
+        GuestNetwork::Nat => "type=user",
+        GuestNetwork::Supervisor => "type=stream",
+    };
+    let types: Vec<&str> = info_network
+        .split(['\n', ','])
+        .map(str::trim)
+        .filter(|t| t.starts_with("type="))
+        .collect();
+    let ok = pci_network.len() == 1
+        && types.len() == 2
+        && types.contains(&"type=nic")
+        && types.contains(&backend);
+    if !ok {
+        return Err(BackendError::UnexpectedNetwork(format!(
+            "expected one NIC on {backend}: info network={:?}, network-class PCI={pci_network:?}",
+            info_network.trim()
+        )));
+    }
+    Ok(())
+}
+
 /// A VM run.
 #[derive(Debug)]
 pub struct QemuRun {
@@ -651,7 +684,13 @@ impl QemuRun {
         }
         caps.machine(spec.machine.as_str())?;
         caps.check_cpu(&spec.cpu)?;
-        let missing = caps.missing_devices(&spec.profile);
+        let mut missing = caps.missing_devices(&spec.profile);
+        if spec.network != GuestNetwork::None
+            && let Some(nic) = spec.profile.nic()
+            && !caps.devices.contains(nic.qemu_name())
+        {
+            missing.push(nic.qemu_name());
+        }
         if !missing.is_empty() {
             return Err(BackendError::Unsupported {
                 what: format!("devices {}", missing.join(", ")),
@@ -787,8 +826,15 @@ impl QemuRun {
                 },
             ));
         }
-        self.verify_no_nic().await?;
+        let info = self.qmp.network_diagnostics().await?;
+        let pci = self.qmp.pci_network_devices().await?;
+        check_network(spec.network, &info, &pci)?;
         Ok(acc)
+    }
+
+    /// `-netdev stream` socket of the supervisor network, if the run has one.
+    pub fn net_socket(&self) -> Option<&std::path::Path> {
+        self.command.net_socket.as_ref().map(ManagedPath::as_path)
     }
 
     /// Verifies that the guest has no network interfaces: empty `info network`
@@ -1396,6 +1442,18 @@ mod tests {
             description: "Ethernet controller".into(),
         }];
         assert!(check_no_nic("", &pci).is_err());
+        // ADR-0033: one NIC on the expected back end, nothing else.
+        let nat = "e1000.0: index=0,type=nic,model=e1000,macaddr=52:54:00:12:34:56\r\n \\ net0: index=0,type=user,net=10.0.2.0,restrict=off\r\n";
+        let stream = "e1000.0: index=0,type=nic,model=e1000,macaddr=52:54:00:12:34:56\r\n \\ net0: index=0,type=stream,listening\r\n";
+        assert!(check_network(GuestNetwork::Nat, nat, &pci).is_ok());
+        assert!(check_network(GuestNetwork::Supervisor, stream, &pci).is_ok());
+        assert!(check_network(GuestNetwork::Supervisor, nat, &pci).is_err());
+        assert!(check_network(GuestNetwork::Nat, stream, &pci).is_err());
+        assert!(check_network(GuestNetwork::Nat, nat, &[]).is_err());
+        assert!(check_network(GuestNetwork::None, nat, &pci).is_err());
+        assert!(check_network(GuestNetwork::None, "", &[]).is_ok());
+        let two = format!("{nat}hub0port1: index=0,type=user,net=10.0.3.0\r\n");
+        assert!(check_network(GuestNetwork::Nat, &two, &pci).is_err());
     }
 
     #[test]

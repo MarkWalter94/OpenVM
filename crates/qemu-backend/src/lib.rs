@@ -80,8 +80,8 @@ pub mod vcpu_fault;
 
 pub use cmdline::{
     Accelerator, CdromBus, CpuModel, CpuPolicy, DeviceProfile, DiskBus, DiskFormat, DiskSpec,
-    DisplayDevice, FirmwareKind, MachineFamily, MachineType, PointerDevice, ProbeFirmware,
-    ProbeTarget, QemuCommand, TpmCommand, VmLaunchSpec,
+    DisplayDevice, FirmwareKind, GUEST_MAC, GuestNetwork, MachineFamily, MachineType, NicModel,
+    PointerDevice, ProbeFirmware, ProbeTarget, QemuCommand, TpmCommand, VmLaunchSpec,
 };
 pub use error::BackendError;
 pub use paths::{ManagedPath, ManagedPaths};

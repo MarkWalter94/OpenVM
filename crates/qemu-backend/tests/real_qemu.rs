@@ -319,6 +319,7 @@ fn spec(caps: &HostCapabilities, paths: &LabPaths, run_id: RunId) -> VmLaunchSpe
         install_media: Some(paths.iso_id),
         data_media: None,
         limits: qemu_backend::JobLimits::default(),
+        network: qemu_backend::GuestNetwork::None,
     }
 }
 
@@ -1660,6 +1661,7 @@ fn real_windows_hardware_profiles() {
             install_media: Some(paths.iso_id),
             data_media: None,
             limits: qemu_backend::JobLimits::default(),
+            network: qemu_backend::GuestNetwork::None,
         };
         let t0 = Instant::now();
         let run = rt
