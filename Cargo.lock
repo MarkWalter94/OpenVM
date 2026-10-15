@@ -2137,6 +2137,7 @@ version = "0.0.0"
 dependencies = [
  "getrandom 0.4.3",
  "guest-detect",
+ "guest-net",
  "interprocess",
  "lightvm-fixture",
  "lightvm-proto",
