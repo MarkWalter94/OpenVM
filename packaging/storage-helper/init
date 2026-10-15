@@ -1,0 +1,156 @@
+#!/bin/busybox sh
+# LightVM storage-driver preparation helper (ADR-0030), /init of the
+# initramfs built by build.py.
+#
+# Booted headless by the LightVM supervisor (QEMU, -kernel/-initrd, no
+# network) with ONE disk attached on virtio-blk: the converted copy of an
+# imported Windows guest (never the VMware source). It mounts the Windows
+# volume with ntfs-3g, imports the job .reg into the offline SYSTEM hive with
+# chntpw `reged`, exports the keys the job names for the supervisor to verify,
+# unmounts and powers off.
+#
+# Inputs (QEMU fw_cfg, written by the supervisor):
+#   opt/org.lightvm/prep.keys  key paths below CurrentControlSet to export,
+#                              one per line (required)
+#   opt/org.lightvm/prep.reg   REGEDIT4 file to import (optional: without it
+#                              the volume is mounted read-only and only the
+#                              export runs)
+# In prep.reg `HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\` is replaced by
+# the guest's current (and default, if different) ControlSetNNN.
+#
+# Output on the serial console, one record per line:
+#   LIGHTVM-PREP INFO <text>
+#   LIGHTVM-PREP X <line of a reged export>   (every exported line prefixed)
+#   LIGHTVM-PREP CS <ControlSetNNN>           (export section start)
+#   LIGHTVM-PREP RESULT ok
+#   LIGHTVM-PREP RESULT error <code> <text>
+# then the VM powers off.
+
+/bin/busybox --install -s /bin
+export PATH=/bin:/usr/bin
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t devtmpfs dev /dev 2>/dev/null
+mkdir -p /tmp /mnt
+
+say() { echo "LIGHTVM-PREP $*"; }
+off() { sync; sleep 1; poweroff -f; sleep 30; }
+fail() {
+    umount /mnt 2>/dev/null
+    say "RESULT error $*"
+    off
+}
+
+for m in virtio_blk fuse qemu_fw_cfg; do
+    insmod "/lib/modules/$m.ko" || fail module "module $m not loaded"
+done
+
+FW=/sys/firmware/qemu_fw_cfg/by_name/opt/org.lightvm
+i=0
+while [ ! -b /dev/vda ] || [ ! -e "$FW/prep.keys/raw" ]; do
+    i=$((i + 1))
+    [ "$i" -gt 100 ] && fail no_disk "disk or job not found"
+    sleep 0.1
+done
+cat "$FW/prep.keys/raw" | tr -d '\r' > /tmp/keys
+MODE=ro
+if [ -e "$FW/prep.reg/raw" ]; then
+    cat "$FW/prep.reg/raw" > /tmp/job.reg
+    MODE=rw
+fi
+say "INFO mode $MODE"
+
+# Case-insensitive lookup of one path component: echoes the entry.
+ci() {
+    for e in "$1"/* ; do
+        n=${e##*/}
+        if [ "$(echo "$n" | tr 'A-Z' 'a-z')" = "$2" ]; then
+            echo "$e"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Partitions (or the whole disk without a partition table).
+parts=""
+for p in /sys/block/vda/vda*; do
+    [ -e "$p" ] && parts="$parts /dev/${p##*/}"
+done
+[ -n "$parts" ] || parts=/dev/vda
+
+found=""
+rel=""
+for d in $parts; do
+    ntfs-3g -o ro "$d" /mnt 2>/dev/null || continue
+    if w=$(ci /mnt windows) && s=$(ci "$w" system32) && c=$(ci "$s" config) && h=$(ci "$c" system) && [ -f "$h" ]; then
+        found="$found $d"
+        rel=${h#/mnt/}
+        say "INFO windows on $d: $rel"
+    fi
+    umount /mnt || fail umount "volume $d not unmounted"
+done
+set -- $found
+[ "$#" -eq 0 ] && fail no_windows "no Windows installation found on the disk"
+[ "$#" -gt 1 ] && fail several_windows "more than one Windows installation on the disk"
+dev=$1
+
+if [ "$MODE" = rw ]; then
+    # norecover: an NTFS volume not cleanly unmounted is refused, not reset.
+    ntfs-3g -o rw,norecover "$dev" /mnt 2>/tmp/mount.err
+    rc=$?
+    case $rc in
+        0) ;;
+        14) fail hibernated "Windows is hibernated or uses Fast Startup" ;;
+        15) fail unclean "the Windows volume was not shut down cleanly" ;;
+        *) fail mount_failed "ntfs-3g exit $rc: $(head -c 200 /tmp/mount.err | tr '\n' ' ')" ;;
+    esac
+else
+    ntfs-3g -o ro "$dev" /mnt 2>/tmp/mount.err || fail mount_failed "read-only mount"
+fi
+HIVE=/mnt/$rel
+
+[ "$(head -c 4 "$HIVE")" = regf ] || fail not_a_hive "SYSTEM is not a registry hive"
+set -- $(od -An -tu4 -j4 -N8 "$HIVE")
+say "INFO hive sequence $1 $2"
+[ "$1" = "$2" ] || fail hive_dirty "the SYSTEM hive was not written back cleanly (sequence $1/$2)"
+
+ROOT='HKEY_LOCAL_MACHINE\SYSTEM'
+reged -x "$HIVE" "$ROOT" '\Select' /tmp/select.reg > /tmp/reged.out 2>&1 ||
+    fail no_select "Select key not readable"
+sets=""
+for v in Current Default; do
+    n=$(tr -d '\r' < /tmp/select.reg | sed -n "s/^\"$v\"=dword:0*\([0-9a-fA-F]*\)\$/\1/p" | head -n 1)
+    [ -n "$n" ] || fail no_select "Select\\$v missing"
+    cs=$(printf 'ControlSet%03d' $((0x$n)))
+    case " $sets " in *" $cs "*) ;; *) sets="$sets $cs" ;; esac
+done
+say "INFO control sets$sets"
+
+for cs in $sets; do
+    if [ "$MODE" = rw ]; then
+        sed "s/\\\\CurrentControlSet\\\\/\\\\$cs\\\\/g; s/\\\\CurrentControlSet\\]/\\\\$cs]/g" /tmp/job.reg > /tmp/job-$cs.reg
+        reged -I -C "$HIVE" "$ROOT" /tmp/job-$cs.reg > /tmp/import.out 2>&1
+        rc=$?
+        sed 's/^/LIGHTVM-PREP INFO reged: /' /tmp/import.out | tail -n 20
+        # reged exits 0 after a commit; any other status is a failure.
+        [ "$rc" -eq 0 ] || fail import_failed "reged import into $cs exit $rc"
+    fi
+    say "CS $cs"
+    while IFS= read -r k; do
+        [ -n "$k" ] || continue
+        rm -f /tmp/e.reg
+        if reged -x "$HIVE" "$ROOT" "\\$cs\\$k" /tmp/e.reg > /tmp/export.out 2>&1 && [ -f /tmp/e.reg ]; then
+            tr -d '\r' < /tmp/e.reg | sed 's/^/LIGHTVM-PREP X /'
+        else
+            say "MISSING $k"
+        fi
+    done < /tmp/keys
+done
+
+set -- $(od -An -tu4 -j4 -N8 "$HIVE")
+[ "$1" = "$2" ] || fail hive_dirty "the SYSTEM hive is inconsistent after the edit (sequence $1/$2)"
+sync
+umount /mnt || fail umount "the Windows volume was not unmounted"
+say "RESULT ok"
+off
