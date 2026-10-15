@@ -1,0 +1,25 @@
+﻿[package]
+name = "guest-net"
+description = "LightVM: supervisor-owned guest network stack for the endpoint allowlist (ADR-0033)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Exact versions and lockfile (ROADMAP 6.3); no git dependencies.
+[dependencies]
+# User-mode TCP/IP stack that terminates the guest's TCP (0BSD, ADR-0033):
+# Ethernet + IPv4 + TCP only; no IPv6, no UDP/DHCP/DNS sockets (DHCP and DNS
+# are answered by this crate on the raw frames).
+smoltcp = { version = "=0.14.0", default-features = false, features = ["std", "medium-ethernet", "proto-ipv4", "socket-tcp", "auto-icmp-echo-reply"] }
+# AF_UNIX stream to QEMU's `-netdev stream` (same crate and version as
+# qemu-backend and lightvm-service).
+socket2 = { version = "=0.6.5", features = ["all"] }
+tokio = { version = "=1.53.2", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+
+[dev-dependencies]
+smoltcp = { version = "=0.14.0", default-features = false, features = ["std", "medium-ethernet", "proto-ipv4", "proto-dhcpv4", "socket-tcp", "socket-udp", "socket-dhcpv4"] }
+
+[lints]
+workspace = true
