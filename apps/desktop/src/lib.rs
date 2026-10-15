@@ -54,6 +54,7 @@ pub mod render;
 pub mod reports;
 pub mod service;
 pub mod settings;
+pub mod snapshots;
 pub mod theme;
 pub mod vm_settings;
 pub mod vmware_import;
@@ -62,10 +63,13 @@ pub mod wizard;
 use console::{ConsoleAction, LiveConsole};
 use dashboard::{Confirm, DashboardAction};
 use lightvm_proto::ipc::InputOwner;
-use lightvm_proto::{BaselineId, Label, MediaKind, RunId, SessionId, UtcTimestamp, VmId, VmState};
+use lightvm_proto::{
+    BaselineId, Label, MediaKind, RunId, SessionId, SnapshotId, UtcTimestamp, VmId, VmState,
+};
 use render::RenderingInfo;
 use service::{
-    BaselineOp, RequestStatus, Service, ServiceCommand, ServiceConfig, ServiceState, Supervisor,
+    BaselineOp, RequestStatus, Service, ServiceCommand, ServiceConfig, ServiceState, SnapshotOp,
+    Supervisor,
 };
 use settings::{SupervisorAction, SupervisorUiState, UiSettings};
 
@@ -303,6 +307,81 @@ struct BaselineDialog {
     focus: bool,
 }
 
+/// Snapshot action to confirm (ADR-0032).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SnapshotConfirm {
+    /// New snapshot: the name and description the user types.
+    Take { name: String, description: String },
+    /// Revert: the VM must be off; `vm_running` (at the opening) decides
+    /// whether the confirmation offers to shut it down normally first and to
+    /// snapshot the current state before it.
+    Revert {
+        id: SnapshotId,
+        label: String,
+        vm_running: bool,
+        /// "Shut down first" checkbox (VM running only).
+        shut_down: bool,
+        /// "Take a snapshot of the current state first" checkbox.
+        snapshot_current: bool,
+    },
+    /// Deletion.
+    Delete { id: SnapshotId, label: String },
+    /// New name and description: the current values, edited in place.
+    Rename {
+        id: SnapshotId,
+        name: String,
+        description: String,
+    },
+}
+
+impl SnapshotConfirm {
+    /// The request recorded by the supervisor state is this one.
+    fn matches(&self, op: &SnapshotOp) -> bool {
+        match (self, op) {
+            (Self::Take { .. }, SnapshotOp::Take) => true,
+            (Self::Revert { id, .. }, SnapshotOp::Revert(i))
+            | (Self::Delete { id, .. }, SnapshotOp::Delete(i))
+            | (Self::Rename { id, .. }, SnapshotOp::Rename(i)) => id == i,
+            _ => false,
+        }
+    }
+}
+
+/// Wait in the dialog for a take or revert to show up as running on the VM;
+/// then the dialog closes and the progress is on the page (the Emergency
+/// Stop must stay reachable).
+const SNAPSHOT_DIALOG_WAIT: Duration = Duration::from_secs(2);
+
+/// Snapshot confirmation dialog open.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SnapshotDialog {
+    vm_id: VmId,
+    name: String,
+    kind: SnapshotConfirm,
+    /// The action was sent, at this instant.
+    sent: Option<Instant>,
+    focus: bool,
+}
+
+/// A revert of a running VM in progress (ADR-0032): the offered snapshot of
+/// the current state and/or the orderly shutdown must finish before the
+/// revert is sent (it needs the VM off).
+struct RevertFlow {
+    vm_id: VmId,
+    snapshot_id: SnapshotId,
+    /// What the flow is waiting for.
+    waiting: RevertWaiting,
+}
+
+/// What a [`RevertFlow`] is waiting for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RevertWaiting {
+    /// The offered snapshot of the current state (offered while the VM ran).
+    Take,
+    /// The orderly shutdown of the VM.
+    Stop,
+}
+
 /// Revocation of an agent session to confirm.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RevokeDialog {
@@ -477,6 +556,14 @@ pub struct LightVmApp {
     media_dialog: Option<media_library::DeleteDialog>,
     /// Creation or restore sent by this UI: VM and instant (elapsed time).
     baseline_sent: Option<(VmId, Instant)>,
+    /// VM whose Snapshots page is open (ADR-0032).
+    snapshots_vm: Option<VmId>,
+    snapshot_dialog: Option<SnapshotDialog>,
+    /// Take or revert sent by this UI: VM and instant (elapsed time).
+    snapshot_sent: Option<(VmId, Instant)>,
+    /// A revert of a running VM in progress: snapshot of the current state
+    /// and/or orderly shutdown before the revert itself.
+    snapshot_revert_flow: Option<RevertFlow>,
     /// Agent session whose page is open (F4).
     agent_session: Option<SessionId>,
     /// Approval form of a session request.
@@ -561,6 +648,10 @@ impl LightVmApp {
             baseline_dialog: None,
             media_dialog: None,
             baseline_sent: None,
+            snapshots_vm: None,
+            snapshot_dialog: None,
+            snapshot_sent: None,
+            snapshot_revert_flow: None,
             agent_session: None,
             approve_form: None,
             revoke_dialog: None,
@@ -780,6 +871,9 @@ impl LightVmApp {
         self.dialog = None;
         self.baselines_vm = None;
         self.baseline_dialog = None;
+        self.snapshots_vm = None;
+        self.snapshot_dialog = None;
+        self.snapshot_revert_flow = None;
         self.media_dialog = None;
         self.agent_session = None;
         self.approve_form = None;
@@ -1075,6 +1169,7 @@ impl LightVmApp {
     pub fn dialog_open(&self) -> bool {
         self.dialog.is_some()
             || self.baseline_dialog.is_some()
+            || self.snapshot_dialog.is_some()
             || self.media_dialog.is_some()
             || self.revoke_dialog.is_some()
             || self.pairing_dialog.is_some()
@@ -1100,6 +1195,11 @@ impl LightVmApp {
     /// VM whose Baselines page is open, if any.
     pub fn baselines_vm(&self) -> Option<VmId> {
         self.baselines_vm
+    }
+
+    /// VM whose Snapshots page is open, if any.
+    pub fn snapshots_vm(&self) -> Option<VmId> {
+        self.snapshots_vm
     }
 
     /// Fixes the instant used for the generated baseline labels (tests and
@@ -1259,6 +1359,7 @@ impl LightVmApp {
 
         self.confirm_dialog_ui(ui);
         self.baseline_dialog_ui(ui);
+        self.snapshot_dialog_ui(ui);
         self.media_dialog_ui(ui);
         self.revoke_dialog_ui(ui);
         self.pairing_dialog_ui(ui);
@@ -1295,6 +1396,7 @@ impl LightVmApp {
                         if s == Section::Dashboard && self.section == s {
                             // Back to the VM list from a VM's page.
                             self.baselines_vm = None;
+                            self.snapshots_vm = None;
                         }
                         if s == Section::Agents && self.section == s {
                             self.agent_session = None;
@@ -2164,6 +2266,11 @@ impl LightVmApp {
         let state = srv.state();
         let active = alive && state.connected;
 
+        // The advance of a running-VM revert is not lost by leaving the
+        // Snapshots page (it keeps watching the offered snapshot, the
+        // orderly stop, then the revert).
+        self.snapshot_revert_flow_step(&state);
+
         if self.wizard.is_some() {
             self.wizard_page(ui, &state, active);
             return;
@@ -2174,6 +2281,10 @@ impl LightVmApp {
         }
         if let Some(vm_id) = self.baselines_vm {
             self.baselines_page(ui, &state, vm_id, active);
+            return;
+        }
+        if let Some(vm_id) = self.snapshots_vm {
+            self.snapshots_page(ui, &state, vm_id, active);
             return;
         }
 
@@ -2198,6 +2309,11 @@ impl LightVmApp {
                 self.vm_edit = None;
                 self.baselines_vm = Some(id);
                 self.send(ServiceCommand::ListBaselines(id));
+            }
+            Some(DashboardAction::Snapshots(id)) => {
+                self.vm_edit = None;
+                self.snapshots_vm = Some(id);
+                self.send(ServiceCommand::ListSnapshots(id));
             }
             Some(DashboardAction::Edit(id)) => {
                 self.vm_edit = state.vm(id).map(|v| {
@@ -2327,6 +2443,438 @@ impl LightVmApp {
                 }
             }
             None => {}
+        }
+    }
+
+    /// The advance of a revert of a running VM (ADR-0032): the offered
+    /// snapshot of the current state, then the orderly shutdown, then the
+    /// revert itself (it needs the VM off). Runs on every page of the
+    /// Dashboard section, so it is not lost by leaving the page.
+    fn snapshot_revert_flow_step(&mut self, state: &ServiceState) {
+        let Some(f) = &mut self.snapshot_revert_flow else {
+            return;
+        };
+        let vm_id = f.vm_id;
+        match f.waiting {
+            RevertWaiting::Take => {
+                let done = state
+                    .snapshot
+                    .as_ref()
+                    .filter(|r| r.vm_id == vm_id && matches!(r.op, SnapshotOp::Take));
+                match done.map(|r| &r.status) {
+                    Some(RequestStatus::Done(_)) => {
+                        f.waiting = RevertWaiting::Stop;
+                        self.send(ServiceCommand::Stop(vm_id));
+                    }
+                    // The snapshot was not taken: the failure is shown on
+                    // the page; the VM still runs, the flow stops.
+                    Some(RequestStatus::Failed(_)) => self.snapshot_revert_flow = None,
+                    _ => {}
+                }
+            }
+            RevertWaiting::Stop => {
+                if state.vm(vm_id).is_some_and(|v| v.state == VmState::Stopped) {
+                    let snapshot_id = f.snapshot_id;
+                    self.snapshot_sent = Some((vm_id, Instant::now()));
+                    self.send(ServiceCommand::RevertSnapshot { vm_id, snapshot_id });
+                    self.snapshot_revert_flow = None;
+                }
+            }
+        }
+    }
+
+    fn snapshots_page(
+        &mut self,
+        ui: &mut egui::Ui,
+        state: &ServiceState,
+        vm_id: VmId,
+        active: bool,
+    ) {
+        let Some(vm) = state.vm(vm_id) else {
+            // Deleted meanwhile.
+            self.snapshots_vm = None;
+            return;
+        };
+        let request = state.snapshot.as_ref().filter(|r| r.vm_id == vm_id);
+        let any_pending = state
+            .snapshot
+            .as_ref()
+            .is_some_and(|r| r.status.is_pending());
+        let running = vm
+            .baselines
+            .operation
+            .as_ref()
+            .is_some_and(snapshots::is_snapshot_op)
+            || request
+                .is_some_and(|r| r.status.is_pending() && !matches!(r.op, SnapshotOp::Rename(_)));
+        if !running && !any_pending && self.snapshot_revert_flow.is_none() {
+            self.snapshot_sent = None;
+        }
+        let elapsed = self
+            .snapshot_sent
+            .filter(|(id, _)| *id == vm_id && running)
+            .map(|(_, t)| t.elapsed());
+        if running || self.snapshot_revert_flow.is_some() {
+            // Elapsed time and the advance of the revert flow, without
+            // polling faster than once a second.
+            ui.ctx().request_repaint_after(Duration::from_secs(1));
+        }
+        let list = state.snapshots.get(&vm_id);
+        let env = snapshots::SnapshotsEnv {
+            vm,
+            list,
+            request,
+            any_pending,
+            active,
+            available: dashboard::baselines_available(state),
+            elapsed,
+        };
+        let open = |kind| SnapshotDialog {
+            vm_id,
+            name: vm.name.as_str().to_owned(),
+            kind,
+            sent: None,
+            focus: true,
+        };
+        let find = |id: SnapshotId| {
+            list.and_then(|l| l.tree.as_ref())
+                .and_then(|t| t.snapshots.iter().find(|s| s.snapshot_id == id))
+        };
+        match snapshots::snapshots_ui(ui, &env) {
+            Some(snapshots::SnapshotAction::Back) => self.snapshots_vm = None,
+            Some(snapshots::SnapshotAction::EmergencyStop) => {
+                self.send(ServiceCommand::EmergencyStop);
+            }
+            Some(snapshots::SnapshotAction::Refresh) => {
+                self.send(ServiceCommand::Refresh);
+                self.send(ServiceCommand::ListSnapshots(vm_id));
+            }
+            Some(snapshots::SnapshotAction::Take) => {
+                let items = list
+                    .and_then(|l| l.tree.as_ref())
+                    .map_or(&[][..], |t| t.snapshots.as_slice());
+                let label = snapshots::auto_label(items, self.now());
+                self.snapshot_dialog = Some(open(SnapshotConfirm::Take {
+                    name: label.as_str().to_owned(),
+                    description: String::new(),
+                }));
+            }
+            Some(snapshots::SnapshotAction::Revert(id)) => {
+                if let Some(s) = find(id) {
+                    self.snapshot_dialog = Some(open(SnapshotConfirm::Revert {
+                        id,
+                        label: s.name.as_str().to_owned(),
+                        vm_running: vm.state == VmState::Running,
+                        shut_down: false,
+                        snapshot_current: false,
+                    }));
+                }
+            }
+            Some(snapshots::SnapshotAction::Delete(id)) => {
+                if let Some(s) = find(id) {
+                    self.snapshot_dialog = Some(open(SnapshotConfirm::Delete {
+                        id,
+                        label: s.name.as_str().to_owned(),
+                    }));
+                }
+            }
+            Some(snapshots::SnapshotAction::Rename(id)) => {
+                if let Some(s) = find(id) {
+                    self.snapshot_dialog = Some(open(SnapshotConfirm::Rename {
+                        id,
+                        name: s.name.as_str().to_owned(),
+                        description: s.description.clone(),
+                    }));
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// Confirmation of a snapshot take, revert, deletion or rename
+    /// (ADR-0032); for a revert of a running VM, the offer to shut it down
+    /// normally first and to take a snapshot of the current state before it.
+    fn snapshot_dialog_ui(&mut self, ui: &egui::Ui) {
+        let now_ts = self.now();
+        let Some(d) = &mut self.snapshot_dialog else {
+            return;
+        };
+        let state = self.service.as_ref().map(|s| s.state()).unwrap_or_default();
+        let vm = state.vm(d.vm_id);
+        let list = state.snapshots.get(&d.vm_id);
+        // The label of the offered snapshot of the current state (the
+        // running-VM revert), computed without the dialog borrowed.
+        let keep_label = list
+            .and_then(|l| l.tree.as_ref())
+            .map(|t| snapshots::auto_label(&t.snapshots, now_ts));
+        let request = state
+            .snapshot
+            .as_ref()
+            .filter(|r| r.vm_id == d.vm_id && d.kind.matches(&r.op));
+        let long = !matches!(d.kind, SnapshotConfirm::Rename { .. });
+        let mut error = None;
+        let mut pending = false;
+        if let Some(sent) = d.sent {
+            match request.map(|r| (&r.op, &r.status)) {
+                Some((_, RequestStatus::Pending)) => {
+                    let started = vm.is_some_and(|v| {
+                        v.baselines
+                            .operation
+                            .as_ref()
+                            .is_some_and(snapshots::is_snapshot_op)
+                    });
+                    if long && (started || sent.elapsed() >= SNAPSHOT_DIALOG_WAIT) {
+                        // Running: the progress is on the page.
+                        self.snapshot_dialog = None;
+                        return;
+                    }
+                    pending = true;
+                    ui.ctx().request_repaint_after(Duration::from_millis(250));
+                }
+                Some((_, RequestStatus::Done(_))) => {
+                    self.snapshot_dialog = None;
+                    return;
+                }
+                Some((op, RequestStatus::Failed(f))) => {
+                    error = Some(snapshots::error_text(op, f));
+                }
+                _ => {}
+            }
+        }
+        let other_pending = d.sent.is_none()
+            && state
+                .snapshot
+                .as_ref()
+                .is_some_and(|r| r.status.is_pending());
+        let exists = |id: &SnapshotId| {
+            list.and_then(|l| l.tree.as_ref())
+                .and_then(|t| t.snapshots.iter().find(|s| &s.snapshot_id == id))
+        };
+        let refusal = match (vm, &d.kind) {
+            (None, _) => Some("The VM no longer exists."),
+            (Some(v), _) if v.baselines.operation.is_some() && !pending => {
+                Some("A storage operation is already in progress on this VM.")
+            }
+            _ if other_pending => Some("Another snapshot operation is in progress."),
+            (
+                _,
+                SnapshotConfirm::Revert { id, .. }
+                | SnapshotConfirm::Delete { id, .. }
+                | SnapshotConfirm::Rename { id, .. },
+            ) if exists(id).is_none() => Some("This snapshot no longer exists."),
+            _ => None,
+        };
+        if error.is_none() && !pending {
+            error = refusal.map(str::to_owned);
+        }
+        let name = &d.name;
+        let running_now = vm.is_some_and(|v| v.state == VmState::Running);
+        let spec: Option<dialogs::ConfirmSpec> = match &d.kind {
+            SnapshotConfirm::Take { .. } => Some(dialogs::ConfirmSpec {
+                title: format!("Take a snapshot of \u{201c}{name}\u{201d}?"),
+                body: if running_now {
+                    "The VM is running: the disk is snapshotted exactly as the guest left it, like a power cut at that instant (crash-consistent), with a thumbnail of the screen. No memory is saved: reverting to it later restarts the guest from that disk state with a normal boot."
+                        .to_owned()
+                } else {
+                    "The VM's disk state is saved exactly as it is, with a copy of the UEFI variables. No memory is saved: reverting to it later restarts the guest from that disk state with a normal boot."
+                        .to_owned()
+                },
+                confirm: "Take snapshot".into(),
+                destructive: false,
+            }),
+            SnapshotConfirm::Revert { label, .. } => Some(dialogs::ConfirmSpec {
+                title: format!("Revert to \u{201c}{label}\u{201d}?"),
+                body: format!(
+                    "The current state of \u{201c}{name}\u{201d} is discarded: everything written to the disk since \u{201c}{label}\u{201d} and the UEFI variables changed after it are lost. No memory is ever saved by a snapshot: the guest starts from the saved disk state with a normal boot. Other snapshots are kept.\n\nThis cannot be undone."
+                ),
+                confirm: if running_now {
+                    "Shut down and revert".into()
+                } else {
+                    "Discard and revert".into()
+                },
+                destructive: true,
+            }),
+            SnapshotConfirm::Delete { label, .. } => Some(dialogs::ConfirmSpec {
+                title: format!("Delete snapshot \u{201c}{label}\u{201d}?"),
+                body: "It is removed from the VM's disk. The other snapshots keep their state; the snapshot the VM's current state descends from stays usable. This cannot be undone."
+                    .to_owned(),
+                confirm: "Delete snapshot".into(),
+                destructive: true,
+            }),
+            SnapshotConfirm::Rename { .. } => Some(dialogs::ConfirmSpec {
+                title: format!("Rename snapshot of \u{201c}{name}\u{201d}?"),
+                body: "A new name and description. Nothing changes on the disk.".to_owned(),
+                confirm: "Save".into(),
+                destructive: false,
+            }),
+        };
+        let Some(spec) = spec else { return };
+        let mut ready = true;
+        let content = |ui: &mut egui::Ui, enabled: bool| {
+            ui.add_space(10.0);
+            match &mut d.kind {
+                SnapshotConfirm::Take { name, description }
+                | SnapshotConfirm::Rename {
+                    name, description, ..
+                } => {
+                    ui.label(egui::RichText::new("Name").color(theme::Palette::of(ui).text_weak));
+                    ui.add_enabled(
+                        enabled,
+                        egui::TextEdit::singleline(name).desired_width(360.0),
+                    );
+                    ui.label(
+                        egui::RichText::new("Description (optional)")
+                            .color(theme::Palette::of(ui).text_weak),
+                    );
+                    ui.add_enabled(
+                        enabled,
+                        egui::TextEdit::multiline(description)
+                            .desired_width(360.0)
+                            .desired_rows(2),
+                    );
+                    ready = Label::parse(name.trim()).is_ok()
+                        && lightvm_proto::ipc::validate_snapshot_description(description).is_ok();
+                }
+                SnapshotConfirm::Revert {
+                    shut_down,
+                    snapshot_current,
+                    ..
+                } if running_now => {
+                    ui.label(
+                        egui::RichText::new("The VM is running, so first:")
+                            .color(theme::Palette::of(ui).text_weak),
+                    );
+                    ui.add_enabled(
+                        enabled,
+                        egui::Checkbox::new(
+                            shut_down,
+                            format!("Shut down \u{201c}{name}\u{201d} normally first (a revert needs the VM off)"),
+                        ),
+                    );
+                    if let Some(keep) = &keep_label {
+                        ui.add_enabled(
+                            enabled,
+                            egui::Checkbox::new(
+                                snapshot_current,
+                                format!(
+                                    "Before that, take a snapshot of the current state (\u{201c}{}\u{201d})",
+                                    keep.as_str()
+                                ),
+                            ),
+                        );
+                    }
+                    ready = *shut_down;
+                }
+                _ => {}
+            }
+            ready
+        };
+        let focus = std::mem::replace(&mut d.focus, false);
+        let choice = dialogs::confirm_custom(
+            ui,
+            "lightvm_snapshot_dialog",
+            &spec,
+            pending,
+            error.as_deref(),
+            focus,
+            content,
+        );
+        match choice {
+            Some(dialogs::Choice::Cancel) => self.snapshot_dialog = None,
+            Some(dialogs::Choice::Confirm) if refusal.is_none() => {
+                let vm_id = d.vm_id;
+                let now = Instant::now();
+                match &d.kind {
+                    SnapshotConfirm::Take { name, description } => {
+                        let Ok(name) = Label::parse(name.trim()) else {
+                            return;
+                        };
+                        let description = description.clone();
+                        d.sent = Some(now);
+                        self.snapshot_sent = Some((vm_id, now));
+                        self.send(ServiceCommand::TakeSnapshot {
+                            vm_id,
+                            name,
+                            description,
+                        });
+                    }
+                    SnapshotConfirm::Revert {
+                        id,
+                        label,
+                        vm_running,
+                        snapshot_current,
+                        ..
+                    } => {
+                        let id = *id;
+                        let label = label.clone();
+                        let running = *vm_running;
+                        let snapshot_current = *snapshot_current;
+                        if running {
+                            // The dialog closes: the flow (offered snapshot,
+                            // orderly stop, then the revert) runs on the page.
+                            if snapshot_current {
+                                let keep = keep_label
+                                    .clone()
+                                    .unwrap_or_else(|| snapshots::auto_label(&[], now_ts));
+                                self.send(ServiceCommand::TakeSnapshot {
+                                    vm_id,
+                                    name: keep,
+                                    description: format!(
+                                        "Before the revert to \u{201c}{label}\u{201d}"
+                                    ),
+                                });
+                                self.snapshot_revert_flow = Some(RevertFlow {
+                                    vm_id,
+                                    snapshot_id: id,
+                                    waiting: RevertWaiting::Take,
+                                });
+                            } else {
+                                self.send(ServiceCommand::Stop(vm_id));
+                                self.snapshot_revert_flow = Some(RevertFlow {
+                                    vm_id,
+                                    snapshot_id: id,
+                                    waiting: RevertWaiting::Stop,
+                                });
+                            }
+                            self.snapshot_dialog = None;
+                            return;
+                        }
+                        d.sent = Some(now);
+                        self.snapshot_sent = Some((vm_id, now));
+                        self.send(ServiceCommand::RevertSnapshot {
+                            vm_id,
+                            snapshot_id: id,
+                        });
+                    }
+                    SnapshotConfirm::Delete { id, .. } => {
+                        let id = *id;
+                        d.sent = Some(now);
+                        self.send(ServiceCommand::DeleteSnapshot {
+                            vm_id,
+                            snapshot_id: id,
+                        });
+                    }
+                    SnapshotConfirm::Rename {
+                        id,
+                        name,
+                        description,
+                    } => {
+                        let id = *id;
+                        let Ok(name) = Label::parse(name.trim()) else {
+                            return;
+                        };
+                        let description = description.clone();
+                        d.sent = Some(now);
+                        self.send(ServiceCommand::RenameSnapshot {
+                            vm_id,
+                            snapshot_id: id,
+                            name,
+                            description,
+                        });
+                    }
+                }
+            }
+            _ => {}
         }
     }
 

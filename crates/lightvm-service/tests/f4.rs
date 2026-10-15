@@ -1468,6 +1468,13 @@ async fn request_role_matrix() {
             | Request::CreateBaseline { .. }
             | Request::RestoreBaseline { .. }
             | Request::DeleteBaseline { .. }
+            | Request::ListSnapshots { .. }
+            | Request::TakeSnapshot { .. }
+            | Request::RevertSnapshot { .. }
+            | Request::DeleteSnapshot { .. }
+            | Request::UpdateSnapshot { .. }
+            | Request::GetSnapshotThumbnail { .. }
+            | Request::PromoteSnapshot { .. }
             | Request::GetAgentAccess
             | Request::SetAgentAccess { .. }
             | Request::ListSessionRequests
@@ -1500,6 +1507,7 @@ async fn request_role_matrix() {
         token: lightvm_proto::SessionToken::from_bytes([1; 32]),
     };
     let baseline = lightvm_proto::BaselineId::from_unix_millis(1_760_000_000_000, [2; 10]);
+    let snapshot = lightvm_proto::SnapshotId::from_unix_millis(1_760_000_000_000, [4; 10]);
     let label = lightvm_proto::Label::parse("x").unwrap();
     let all = vec![
         Request::Ping,
@@ -1559,6 +1567,36 @@ async fn request_role_matrix() {
         Request::DeleteBaseline {
             vm_id: vm,
             baseline_id: baseline,
+        },
+        // ADR-0032: user snapshots are UI-only.
+        Request::ListSnapshots { vm_id: vm },
+        Request::TakeSnapshot {
+            vm_id: vm,
+            name: label.clone(),
+            description: String::new(),
+        },
+        Request::RevertSnapshot {
+            vm_id: vm,
+            snapshot_id: snapshot,
+        },
+        Request::DeleteSnapshot {
+            vm_id: vm,
+            snapshot_id: snapshot,
+        },
+        Request::UpdateSnapshot {
+            vm_id: vm,
+            snapshot_id: snapshot,
+            name: label.clone(),
+            description: String::new(),
+        },
+        Request::GetSnapshotThumbnail {
+            vm_id: vm,
+            snapshot_id: snapshot,
+        },
+        Request::PromoteSnapshot {
+            vm_id: vm,
+            snapshot_id: snapshot,
+            label: label.clone(),
         },
         Request::RequestSession {
             client_name: "x".into(),

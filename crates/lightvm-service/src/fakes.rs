@@ -252,6 +252,171 @@ pub struct FakeImageTool {
     /// Free bytes reported for the catalog volume (budget tests); `None` =
     /// the real free space when `vmdk_tool` is set.
     pub free_bytes: Option<u64>,
+    /// User snapshot tests (ADR-0032): while set, `internal_snapshot`
+    /// fails without touching the disk.
+    pub snapshot_fail: Arc<std::sync::atomic::AtomicBool>,
+    /// Delay of `internal_snapshot`, polled for cancellation every 10 ms.
+    pub snapshot_delay: std::time::Duration,
+}
+
+/// Fake disk with internal snapshots for the user snapshot tests
+/// (ADR-0032), without `qemu-img`: a minimal QCOW2 v3 image whose snapshot
+/// table and L1 tables are real (the catalog settles snapshot operations by
+/// reading them), the guest content after [`SNAP_DISK_DATA`] and the content
+/// of each snapshot in a sidecar file `<disk>.<tag>`. A guest write
+/// changes the content and points the active L1 table to a new cluster, as
+/// a copy on write would.
+pub mod snapshot_disk {
+    use std::path::{Path, PathBuf};
+
+    use lightvm_proto::PublicError;
+
+    use crate::engine::DiskSnapshotAction;
+
+    /// Offset of the guest content.
+    pub const SNAP_DISK_DATA: usize = 0x60000;
+    const MAGIC: [u8; 4] = [0x51, 0x46, 0x49, 0xfb];
+    const SIZE: u64 = 32 << 30;
+
+    struct Disk {
+        active: u64,
+        snaps: Vec<(String, u64)>,
+        content: Vec<u8>,
+    }
+
+    fn err(what: &str) -> PublicError {
+        PublicError::infrastructure(format!("fake snapshot disk: {what}"))
+    }
+
+    fn be64(b: &[u8], o: usize) -> u64 {
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[o..o + 8]);
+        u64::from_be_bytes(a)
+    }
+
+    fn load(path: &Path) -> Result<Disk, PublicError> {
+        let raw = std::fs::read(path).map_err(|_| err("read"))?;
+        let info = vm_storage::qcow2_read_info(path).map_err(|_| err("not a fake disk"))?;
+        let l1 = |off: u64| be64(&raw, usize::try_from(off).unwrap_or(0));
+        Ok(Disk {
+            active: l1(info.l1_offset),
+            snaps: info
+                .snapshots
+                .iter()
+                .map(|s| (s.name.clone(), l1(s.l1_offset)))
+                .collect(),
+            content: raw.get(SNAP_DISK_DATA..).unwrap_or_default().to_vec(),
+        })
+    }
+
+    fn save(path: &Path, d: &Disk) -> Result<(), PublicError> {
+        let mut img = vec![0u8; SNAP_DISK_DATA];
+        img[0..4].copy_from_slice(&MAGIC);
+        img[4..8].copy_from_slice(&3u32.to_be_bytes());
+        img[20..24].copy_from_slice(&16u32.to_be_bytes());
+        img[24..32].copy_from_slice(&SIZE.to_be_bytes());
+        img[36..40].copy_from_slice(&1u32.to_be_bytes());
+        img[40..48].copy_from_slice(&0x10000u64.to_be_bytes());
+        img[60..64].copy_from_slice(&u32::try_from(d.snaps.len()).unwrap_or(0).to_be_bytes());
+        img[64..72].copy_from_slice(&0x20000u64.to_be_bytes());
+        img[100..104].copy_from_slice(&104u32.to_be_bytes());
+        img[0x10000..0x10008].copy_from_slice(&d.active.to_be_bytes());
+        let mut pos = 0x20000usize;
+        for (k, (name, l1)) in d.snaps.iter().enumerate() {
+            let l1_off = 0x30000 + k * 8;
+            if l1_off + 8 > 0x40000 || pos + 64 + name.len() > 0x30000 {
+                return Err(err("too many snapshots"));
+            }
+            img[l1_off..l1_off + 8].copy_from_slice(&l1.to_be_bytes());
+            let id = format!("{}", k + 1);
+            img[pos..pos + 8].copy_from_slice(&(l1_off as u64).to_be_bytes());
+            img[pos + 8..pos + 12].copy_from_slice(&1u32.to_be_bytes());
+            img[pos + 12..pos + 14].copy_from_slice(&(id.len() as u16).to_be_bytes());
+            img[pos + 14..pos + 16].copy_from_slice(&(name.len() as u16).to_be_bytes());
+            img[pos + 36..pos + 40].copy_from_slice(&16u32.to_be_bytes());
+            img[pos + 48..pos + 56].copy_from_slice(&SIZE.to_be_bytes());
+            let ids = pos + 56;
+            img[ids..ids + id.len()].copy_from_slice(id.as_bytes());
+            let ns = ids + id.len();
+            img[ns..ns + name.len()].copy_from_slice(name.as_bytes());
+            pos = (ns + name.len()).div_ceil(8) * 8;
+        }
+        img.extend_from_slice(&d.content);
+        std::fs::write(path, img).map_err(|_| err("write"))
+    }
+
+    fn sidecar(path: &Path, tag: &str) -> PathBuf {
+        let mut p = path.as_os_str().to_owned();
+        p.push(format!(".{tag}"));
+        PathBuf::from(p)
+    }
+
+    /// New fake disk with `content`.
+    pub fn create(path: &Path, content: &[u8]) -> Result<(), PublicError> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|_| err("directory"))?;
+        }
+        save(
+            path,
+            &Disk {
+                active: 0x10_0000,
+                snaps: Vec::new(),
+                content: content.to_vec(),
+            },
+        )
+    }
+
+    /// Guest content of the disk.
+    pub fn content(path: &Path) -> Result<Vec<u8>, PublicError> {
+        Ok(load(path)?.content)
+    }
+
+    /// The guest writes `content`.
+    pub fn guest_write(path: &Path, content: &[u8]) -> Result<(), PublicError> {
+        let mut d = load(path)?;
+        d.active += 0x10000;
+        d.content = content.to_vec();
+        save(path, &d)
+    }
+
+    /// Names of the internal snapshots.
+    pub fn tags(path: &Path) -> Result<Vec<String>, PublicError> {
+        Ok(load(path)?.snaps.into_iter().map(|(n, _)| n).collect())
+    }
+
+    /// `qemu-img snapshot -c/-a/-d` (and the QMP equivalents).
+    pub fn apply(path: &Path, action: DiskSnapshotAction, tag: &str) -> Result<(), PublicError> {
+        let mut d = load(path)?;
+        let side = sidecar(path, tag);
+        match action {
+            DiskSnapshotAction::Create => {
+                if d.snaps.iter().any(|(n, _)| n == tag) {
+                    return Err(err("duplicate tag"));
+                }
+                std::fs::write(&side, &d.content).map_err(|_| err("sidecar"))?;
+                d.snaps.push((tag.to_owned(), d.active));
+            }
+            DiskSnapshotAction::Apply => {
+                let l1 = d
+                    .snaps
+                    .iter()
+                    .find(|(n, _)| n == tag)
+                    .map(|(_, l)| *l)
+                    .ok_or_else(|| err("snapshot not found"))?;
+                d.content = std::fs::read(&side).map_err(|_| err("sidecar"))?;
+                d.active = l1;
+            }
+            DiskSnapshotAction::Delete => {
+                let before = d.snaps.len();
+                d.snaps.retain(|(n, _)| n != tag);
+                if d.snaps.len() == before {
+                    return Err(err("snapshot not found"));
+                }
+                let _ = std::fs::remove_file(&side);
+            }
+        }
+        save(path, &d)
+    }
 }
 
 /// Minimal QCOW2 v3 header with an optional backing reference (format
@@ -391,6 +556,44 @@ impl ImageTool for FakeImageTool {
         push(&self.calls, "create_overlay");
         std::fs::write(dst, fake_qcow2(Some(backing_ref), b""))
             .map_err(|_| PublicError::infrastructure("fake overlay"))
+    }
+    fn internal_snapshot(
+        &self,
+        disk: &Path,
+        action: crate::engine::DiskSnapshotAction,
+        tag: &str,
+        cancel: &dyn Fn() -> bool,
+    ) -> Result<(), PublicError> {
+        push(&self.calls, format!("snapshot_{action:?}").to_lowercase());
+        let t0 = std::time::Instant::now();
+        while t0.elapsed() < self.snapshot_delay {
+            if cancel() {
+                return Err(PublicError::state_conflict("operation cancelled"));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        if cancel() {
+            return Err(PublicError::state_conflict("operation cancelled"));
+        }
+        if self.snapshot_fail.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(PublicError::infrastructure("qemu-img snapshot failed"));
+        }
+        snapshot_disk::apply(disk, action, tag)
+    }
+    fn convert_snapshot(
+        &self,
+        src: &Path,
+        tag: &str,
+        dst: &Path,
+        _cancel: &dyn Fn() -> bool,
+    ) -> Result<(), PublicError> {
+        push(&self.calls, "convert_snapshot");
+        let mut side = src.as_os_str().to_owned();
+        side.push(format!(".{tag}"));
+        let content = std::fs::read(PathBuf::from(side))
+            .map_err(|_| PublicError::infrastructure("fake snapshot content"))?;
+        std::fs::write(dst, fake_qcow2(None, &content))
+            .map_err(|_| PublicError::infrastructure("fake convert"))
     }
 }
 
@@ -614,6 +817,10 @@ pub struct FakeVmBackend {
     pub vcpu_halts: Arc<Mutex<BTreeMap<VmId, lightvm_proto::ipc::VcpuHalt>>>,
     /// Automatic resets to report, injected by the test.
     pub auto_resets: Arc<Mutex<Vec<crate::engine::AutoReset>>>,
+    /// Catalog root for snapshots of running VMs (ADR-0032): the "QMP"
+    /// internal snapshot is applied to the fake disk
+    /// `vms/<vm_id>/primary.qcow2` ([`snapshot_disk`]); `None` = unsupported.
+    pub snapshot_root: Option<PathBuf>,
 }
 
 /// Outcomes of background graceful stops injected by a test.
@@ -770,6 +977,39 @@ impl BackendPort for FakeVmBackend {
             "C:\\lightvm\\qemu\\qemu-system-x86_64.exe: fake run {run_id} started\n\
              qemu-system-x86_64.exe: warning: C:\\Users\\someone\\catalog\\vms\\disk.qcow2 opened\n"
         ))
+    }
+    fn snapshot_disk(&mut self, vm_id: VmId, _run_id: RunId, tag: &str) -> Result<(), PublicError> {
+        push(&self.calls, "vm_snapshot_disk");
+        let root = self
+            .snapshot_root
+            .clone()
+            .ok_or_else(|| PublicError::unsupported("no snapshots in this fake"))?;
+        let disk = root
+            .join("vms")
+            .join(vm_id.to_string())
+            .join("primary.qcow2");
+        snapshot_disk::apply(&disk, crate::engine::DiskSnapshotAction::Create, tag)
+    }
+    fn delete_disk_snapshot(
+        &mut self,
+        vm_id: VmId,
+        _run_id: RunId,
+        tag: &str,
+    ) -> Result<(), PublicError> {
+        push(&self.calls, "vm_delete_disk_snapshot");
+        let root = self
+            .snapshot_root
+            .clone()
+            .ok_or_else(|| PublicError::unsupported("no snapshots in this fake"))?;
+        let disk = root
+            .join("vms")
+            .join(vm_id.to_string())
+            .join("primary.qcow2");
+        snapshot_disk::apply(&disk, crate::engine::DiskSnapshotAction::Delete, tag)
+    }
+    fn snapshot_thumbnail(&mut self, _vm_id: VmId, _run_id: RunId) -> Option<Vec<u8>> {
+        push(&self.calls, "vm_snapshot_thumbnail");
+        Some(b"\x89PNG fake thumbnail".to_vec())
     }
     fn take_screenshot(&mut self, vm_id: VmId, run_id: RunId) -> Option<(Screenshot, Vec<u8>)> {
         let (meta, png) = self.last_shots.remove(&vm_id)?;

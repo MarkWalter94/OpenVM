@@ -119,6 +119,10 @@ name = "f5_reports"
 required-features = ["supervisor"]
 
 [[test]]
+name = "user_snapshots"
+required-features = ["supervisor"]
+
+[[test]]
 name = "windows_guests"
 required-features = ["supervisor"]
 

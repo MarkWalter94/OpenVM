@@ -21,7 +21,7 @@ use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 
 use crate::error::{PathRejection, Result, StorageError};
-use crate::ids::{BaselineId, DiskId, FirmwareId, MediaId, RunId, VmId};
+use crate::ids::{BaselineId, DiskId, FirmwareId, MediaId, RunId, SnapshotId, VmId};
 use crate::paths::{ManagedPath, is_link, resolve_checked};
 use crate::time::UtcMillis;
 
@@ -238,6 +238,20 @@ impl CatalogLayout {
     /// backing reference LightVM ever writes: one level, fixed shape.
     pub fn overlay_backing_ref(b: &BaselineId) -> String {
         format!("../base/{b}/disk.qcow2")
+    }
+    /// `vms/<vm_id>/snapshots/<snapshot_id>`: files of a user snapshot
+    /// (ADR-0032): copy of the UEFI variables and thumbnail. The disk state
+    /// is an internal snapshot of the VM's own disk.
+    pub fn snapshot_dir(vm: &VmId, s: &SnapshotId) -> ManagedPath {
+        mp(format!("vms/{vm}/snapshots/{s}"))
+    }
+    /// `vms/<vm_id>/snapshots/<snapshot_id>/vars.fd` (read-only).
+    pub fn snapshot_vars(vm: &VmId, s: &SnapshotId) -> ManagedPath {
+        mp(format!("vms/{vm}/snapshots/{s}/vars.fd"))
+    }
+    /// `vms/<vm_id>/snapshots/<snapshot_id>/thumb.png` (read-only).
+    pub fn snapshot_thumbnail(vm: &VmId, s: &SnapshotId) -> ManagedPath {
+        mp(format!("vms/{vm}/snapshots/{s}/thumb.png"))
     }
     /// `runs/<run_id>/artifacts`.
     pub fn run_artifacts(run: &RunId) -> ManagedPath {

@@ -1463,6 +1463,21 @@
           "description": "Emergency Stop (priority path, outside the queue).",
           "type": "string",
           "const": "emergency_stop"
+        },
+        {
+          "description": "User snapshot taken, VM off or running (ADR-0032; outside the queue).",
+          "type": "string",
+          "const": "user_snapshot"
+        },
+        {
+          "description": "Revert to a user snapshot with the VM off (ADR-0032; outside the\nqueue).",
+          "type": "string",
+          "const": "user_snapshot_revert"
+        },
+        {
+          "description": "Deletion of a user snapshot (ADR-0032; outside the queue).",
+          "type": "string",
+          "const": "user_snapshot_delete"
         }
       ]
     },
@@ -2645,6 +2660,125 @@
           ]
         },
         {
+          "description": "Response to `list_snapshots`.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "snapshots"
+            },
+            "tree": {
+              "description": "Snapshot tree.",
+              "$ref": "#/$defs/SnapshotTree"
+            },
+            "vm_id": {
+              "description": "VM.",
+              "$ref": "#/$defs/VmId"
+            }
+          },
+          "required": [
+            "kind",
+            "vm_id",
+            "tree"
+          ]
+        },
+        {
+          "description": "Response to `take_snapshot` and `update_snapshot`.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "snapshot"
+            },
+            "snapshot": {
+              "description": "The snapshot.",
+              "$ref": "#/$defs/SnapshotSummary"
+            }
+          },
+          "required": [
+            "kind",
+            "snapshot"
+          ]
+        },
+        {
+          "description": "Response to `revert_snapshot`: the VM is now at the snapshot.",
+          "type": "object",
+          "properties": {
+            "config_revision": {
+              "description": "Configuration revision after the revert.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "snapshot_reverted"
+            },
+            "snapshot_id": {
+              "description": "Snapshot reverted to.",
+              "$ref": "#/$defs/SnapshotId"
+            },
+            "vm_id": {
+              "description": "VM.",
+              "$ref": "#/$defs/VmId"
+            }
+          },
+          "required": [
+            "kind",
+            "vm_id",
+            "snapshot_id",
+            "config_revision"
+          ]
+        },
+        {
+          "description": "Response to `delete_snapshot`.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "snapshot_deleted"
+            },
+            "snapshot_id": {
+              "description": "Deleted snapshot.",
+              "$ref": "#/$defs/SnapshotId"
+            },
+            "vm_id": {
+              "description": "VM.",
+              "$ref": "#/$defs/VmId"
+            }
+          },
+          "required": [
+            "kind",
+            "vm_id",
+            "snapshot_id"
+          ]
+        },
+        {
+          "description": "Response to `get_snapshot_thumbnail`.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "snapshot_thumbnail"
+            },
+            "png_base64": {
+              "description": "PNG, standard base64 with padding; `None` if none was kept.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "snapshot_id": {
+              "description": "Snapshot.",
+              "$ref": "#/$defs/SnapshotId"
+            }
+          },
+          "required": [
+            "kind",
+            "snapshot_id"
+          ]
+        },
+        {
           "description": "Response to `request_session`.",
           "type": "object",
           "properties": {
@@ -3565,6 +3699,24 @@
           ]
         },
         {
+          "description": "The user snapshots of a VM changed (taken, reverted, deleted,\nrenamed, operation started or ended): re-read `list_snapshots`\n(ADR-0032).",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "snapshots_changed"
+            },
+            "vm_id": {
+              "description": "VM.",
+              "$ref": "#/$defs/VmId"
+            }
+          },
+          "required": [
+            "kind",
+            "vm_id"
+          ]
+        },
+        {
           "description": "Events lost because the client was too slow.",
           "type": "object",
           "properties": {
@@ -4340,6 +4492,136 @@
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
     },
+    "SnapshotId": {
+      "description": "SnapshotId: version 7 UUID, lowercase with hyphens.",
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "SnapshotSummary": {
+      "description": "User snapshot of a VM (ADR-0032), for the snapshot manager.",
+      "type": "object",
+      "properties": {
+        "clean_shutdown": {
+          "description": "The VM was off after an observed clean guest shutdown (or had never\nrun) when the snapshot was taken: it can become a verified baseline.",
+          "type": "boolean"
+        },
+        "config_revision": {
+          "description": "VM configuration revision when the snapshot was taken.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "created_at": {
+          "description": "Creation instant.",
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "description": {
+          "description": "Description given by the user (may be empty).",
+          "type": "string",
+          "default": ""
+        },
+        "disk_gib": {
+          "description": "Disk size of the VM at that moment (GiB), from the saved\nconfiguration.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "files_bytes": {
+          "description": "Bytes of the snapshot's own files on the host (UEFI variables and\nthumbnail). The disk clusters the snapshot keeps live inside the VM's\ndisk and are counted in the VM's disk usage.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "firmware_saved": {
+          "description": "The snapshot carries a copy of the UEFI variables.",
+          "type": "boolean"
+        },
+        "has_thumbnail": {
+          "description": "A thumbnail of the screen is available\n([`Request::GetSnapshotThumbnail`]).",
+          "type": "boolean"
+        },
+        "name": {
+          "description": "Name given by the user.",
+          "$ref": "#/$defs/Label"
+        },
+        "parent": {
+          "description": "Snapshot this one descends from; `None` = a root of the tree.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SnapshotId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "snapshot_id": {
+          "description": "Snapshot.",
+          "$ref": "#/$defs/SnapshotId"
+        },
+        "taken_while_running": {
+          "description": "Taken while the VM ran: the disk state is like after a power cut at\nthat instant (crash-consistent); `false` = taken with the VM off.",
+          "type": "boolean"
+        },
+        "vm_id": {
+          "description": "Owning VM.",
+          "$ref": "#/$defs/VmId"
+        }
+      },
+      "required": [
+        "snapshot_id",
+        "vm_id",
+        "name",
+        "created_at",
+        "taken_while_running",
+        "clean_shutdown",
+        "firmware_saved",
+        "has_thumbnail",
+        "disk_gib",
+        "config_revision",
+        "files_bytes"
+      ]
+    },
+    "SnapshotTree": {
+      "description": "User snapshots of a VM as a tree, in [`ResponseBody::Snapshots`].",
+      "type": "object",
+      "properties": {
+        "available": {
+          "description": "Snapshots are available for this VM now (it runs on its own disk);\notherwise `unavailable_reason` says why.",
+          "type": "boolean"
+        },
+        "current": {
+          "description": "Snapshot the current state descends from (\"you are here\"): the last\none taken or reverted to; `None` if the current state descends from\nno snapshot.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SnapshotId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "snapshots": {
+          "description": "Snapshots, oldest first; parents always before their children.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/SnapshotSummary"
+          }
+        },
+        "unavailable_reason": {
+          "description": "Why snapshots cannot be taken or reverted now (agent session on the\nVM, VM on an overlay of a baseline, TPM guest...), for the UI.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "available"
+      ]
+    },
     "StartPhase": {
       "description": "Phase of a start before the VM process exists.",
       "oneOf": [
@@ -4419,6 +4701,21 @@
           "description": "`restore_baseline`.",
           "type": "string",
           "const": "restore_baseline"
+        },
+        {
+          "description": "`take_snapshot` (ADR-0032).",
+          "type": "string",
+          "const": "take_snapshot"
+        },
+        {
+          "description": "`revert_snapshot` (ADR-0032).",
+          "type": "string",
+          "const": "revert_snapshot"
+        },
+        {
+          "description": "`delete_snapshot` (ADR-0032). (`promote_snapshot` shows as\n`create_baseline`.)",
+          "type": "string",
+          "const": "delete_snapshot"
         }
       ]
     },
@@ -4816,6 +5113,30 @@
         "created_at"
       ]
     },
+    "VmSnapshots": {
+      "description": "User snapshot facts of a VM, in [`VmSummary`] (ADR-0032).",
+      "type": "object",
+      "properties": {
+        "count": {
+          "description": "Number of user snapshots.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
+        "current": {
+          "description": "Snapshot the current state descends from (\"you are here\"), if any.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SnapshotId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
     "VmState": {
       "description": "Lifecycle state of a VM.",
       "oneOf": [
@@ -4897,6 +5218,13 @@
               "type": "null"
             }
           ]
+        },
+        "snapshots": {
+          "description": "User snapshots of the VM (ADR-0032). Additive field: older clients\nignore it.",
+          "$ref": "#/$defs/VmSnapshots",
+          "default": {
+            "count": 0
+          }
         },
         "start": {
           "description": "Sub-status of a start in progress (state `starting`): verification of\nthe approved media and of the baseline before QEMU is launched\n(ADR-0008, ADR-0025). Absent outside a start, and for a start with\nnothing to verify. Additive field: older clients ignore it.",

@@ -55,8 +55,8 @@ use lightvm_proto::ipc::{
 };
 use lightvm_proto::{
     Actor, Admission, BaselineId, Caller, DisplayAdapter, Label, MediaId, MediaKind,
-    OperationStatus, PublicError, ReplyError, RunId, TerminationCause, VmConfig, VmId, VmName,
-    VmRequest,
+    OperationStatus, PublicError, ReplyError, RunId, SnapshotId, TerminationCause, VmConfig, VmId,
+    VmName, VmRequest,
 };
 use tokio::sync::{OwnedSemaphorePermit, broadcast, oneshot, watch};
 
@@ -163,6 +163,36 @@ pub(crate) enum SupervisorRequest {
         vm_id: VmId,
         baseline_id: BaselineId,
     },
+    /// User snapshots (UI, ADR-0032).
+    ListSnapshots(VmId),
+    TakeSnapshot {
+        vm_id: VmId,
+        name: Label,
+        description: String,
+    },
+    RevertSnapshot {
+        vm_id: VmId,
+        snapshot_id: SnapshotId,
+    },
+    DeleteSnapshot {
+        vm_id: VmId,
+        snapshot_id: SnapshotId,
+    },
+    UpdateSnapshot {
+        vm_id: VmId,
+        snapshot_id: SnapshotId,
+        name: Label,
+        description: String,
+    },
+    SnapshotThumbnail {
+        vm_id: VmId,
+        snapshot_id: SnapshotId,
+    },
+    PromoteSnapshot {
+        vm_id: VmId,
+        snapshot_id: SnapshotId,
+        label: Label,
+    },
     /// Session approved in the app (F4).
     CreateSession(Box<NewSession>),
     ListSessions,
@@ -262,6 +292,11 @@ impl SupervisorRequest {
                 | Self::CreateBaseline { .. }
                 | Self::RestoreBaseline { .. }
                 | Self::DeleteBaseline { .. }
+                | Self::TakeSnapshot { .. }
+                | Self::RevertSnapshot { .. }
+                | Self::DeleteSnapshot { .. }
+                | Self::UpdateSnapshot { .. }
+                | Self::PromoteSnapshot { .. }
                 | Self::CreateSession(_)
                 | Self::SetInputOwner { .. }
                 | Self::ImportVmware { .. }
@@ -310,6 +345,36 @@ impl SupervisorRequest {
             Self::RestoreBaseline { vm_id, baseline_id } => Some(Ok(BaselineRequest::Restore {
                 vm_id: *vm_id,
                 baseline_id: *baseline_id,
+            })),
+            Self::TakeSnapshot {
+                vm_id,
+                name,
+                description,
+            } => Some(Ok(BaselineRequest::TakeSnapshot {
+                vm_id: *vm_id,
+                name: name.clone(),
+                description: description.clone(),
+            })),
+            Self::RevertSnapshot { vm_id, snapshot_id } => {
+                Some(Ok(BaselineRequest::RevertSnapshot {
+                    vm_id: *vm_id,
+                    snapshot_id: *snapshot_id,
+                }))
+            }
+            Self::DeleteSnapshot { vm_id, snapshot_id } => {
+                Some(Ok(BaselineRequest::DeleteSnapshot {
+                    vm_id: *vm_id,
+                    snapshot_id: *snapshot_id,
+                }))
+            }
+            Self::PromoteSnapshot {
+                vm_id,
+                snapshot_id,
+                label,
+            } => Some(Ok(BaselineRequest::PromoteSnapshot {
+                vm_id: *vm_id,
+                snapshot_id: *snapshot_id,
+                label: label.clone(),
             })),
             _ => None,
         }
@@ -844,9 +909,25 @@ impl SupervisorThread {
                         BaselineOutcome::Restored { vm_id, baseline_id } => {
                             ResponseBody::BaselineRestored { vm_id, baseline_id }
                         }
+                        BaselineOutcome::SnapshotTaken(snapshot) => {
+                            ResponseBody::Snapshot { snapshot }
+                        }
+                        BaselineOutcome::SnapshotReverted {
+                            vm_id,
+                            snapshot_id,
+                            record,
+                        } => ResponseBody::SnapshotReverted {
+                            vm_id,
+                            snapshot_id,
+                            config_revision: record.config_revision,
+                        },
+                        BaselineOutcome::SnapshotDeleted { vm_id, snapshot_id } => {
+                            ResponseBody::SnapshotDeleted { vm_id, snapshot_id }
+                        }
                     })
                 };
                 let _ = self.events.send(ServiceEvent::BaselinesChanged { vm_id });
+                let _ = self.events.send(ServiceEvent::SnapshotsChanged { vm_id });
                 if let Some(reply) = slot.take() {
                     let _ = reply.send(res.map_err(ReplyError::Operational));
                 }
@@ -1749,6 +1830,7 @@ impl SupervisorThread {
             }
         };
         let _ = self.events.send(ServiceEvent::BaselinesChanged { vm_id });
+        let _ = self.events.send(ServiceEvent::SnapshotsChanged { vm_id });
         let tx = self.self_tx.clone();
         // The worker owns the job: if the thread cannot start, the work
         // runs here (blocking) so that the operation still ends.
@@ -2052,9 +2134,38 @@ impl SupervisorThread {
             }
             // Served by `start_storage_job` (reply after the work).
             SupervisorRequest::CreateBaseline { .. }
-            | SupervisorRequest::RestoreBaseline { .. } => Err(PublicError::infrastructure(
-                "baseline operation not dispatched",
+            | SupervisorRequest::RestoreBaseline { .. }
+            | SupervisorRequest::TakeSnapshot { .. }
+            | SupervisorRequest::RevertSnapshot { .. }
+            | SupervisorRequest::DeleteSnapshot { .. }
+            | SupervisorRequest::PromoteSnapshot { .. } => Err(PublicError::infrastructure(
+                "storage operation not dispatched",
             )),
+            SupervisorRequest::ListSnapshots(vm_id) => self
+                .engine
+                .list_snapshots(who()?, vm_id)
+                .map(|tree| ResponseBody::Snapshots { vm_id, tree }),
+            SupervisorRequest::UpdateSnapshot {
+                vm_id,
+                snapshot_id,
+                name,
+                description,
+            } => {
+                let r = self
+                    .engine
+                    .update_snapshot(who()?, vm_id, snapshot_id, name, description);
+                if r.is_ok() {
+                    let _ = self.events.send(ServiceEvent::SnapshotsChanged { vm_id });
+                }
+                r.map(|snapshot| ResponseBody::Snapshot { snapshot })
+            }
+            SupervisorRequest::SnapshotThumbnail { vm_id, snapshot_id } => self
+                .engine
+                .snapshot_thumbnail(who()?, vm_id, snapshot_id)
+                .map(|png| ResponseBody::SnapshotThumbnail {
+                    snapshot_id,
+                    png_base64: png.map(|p| lightvm_proto::ipc::base64_encode(&p)),
+                }),
             SupervisorRequest::CreateSession(new) => {
                 who()?;
                 // The token goes back to the service only to be delivered to

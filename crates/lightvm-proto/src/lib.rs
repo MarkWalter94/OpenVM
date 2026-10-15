@@ -34,7 +34,9 @@ mod time;
 
 pub use audit::{AuditAction, AuditEvent, AuditOutcome};
 pub use error::{ErrorCode, ProtocolError, ProtocolErrorCode, PublicError, ReplyError};
-pub use ids::{BaselineId, GrantId, IdParseError, MediaId, OperationId, RunId, SessionId, VmId};
+pub use ids::{
+    BaselineId, GrantId, IdParseError, MediaId, OperationId, RunId, SessionId, SnapshotId, VmId,
+};
 pub use input::{
     ABS_AXIS_MAX, InputBatch, InputEvent, KeyAction, MAX_INPUT_EVENTS_PER_REQUEST, MouseButton,
     PointerButton, PointerMove,

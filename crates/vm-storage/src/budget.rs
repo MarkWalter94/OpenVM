@@ -45,6 +45,10 @@ pub struct StorageUsage {
     pub media: u64,
     /// Database and auxiliary files (catalog total only).
     pub metadata: u64,
+    /// Files of the user snapshots (UEFI variables and thumbnails,
+    /// ADR-0032); their disk clusters live inside the VM's disk.
+    #[serde(default)]
+    pub snapshots: u64,
 }
 
 impl StorageUsage {
@@ -59,6 +63,7 @@ impl StorageUsage {
             self.logs,
             self.media,
             self.metadata,
+            self.snapshots,
         ]
         .iter()
         .fold(0u64, |a, b| a.saturating_add(*b))
@@ -201,6 +206,10 @@ impl Catalog {
             )?,
             media: 0,
             metadata: 0,
+            snapshots: sum(
+                "SELECT coalesce(sum(vars_bytes + thumbnail_bytes),0) FROM snapshots
+                 WHERE (?1 IS NULL OR vm_id = ?1)",
+            )?,
         };
         if vm.is_none() {
             let media: i64 = self

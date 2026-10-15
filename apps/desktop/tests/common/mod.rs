@@ -147,6 +147,7 @@ pub(crate) fn vm(n: u8, name: &str, state: VmState) -> VmSummary {
         config_revision: 3,
         disk_used_bytes: Some(5_637_144_576),
         baselines: Default::default(),
+        snapshots: Default::default(),
         start: Default::default(),
         vcpu_halt: None,
     }
@@ -262,6 +263,67 @@ pub(crate) fn deterministic_frame(w: usize, h: usize) -> egui::ColorImage {
 
 pub(crate) fn baseline_id(n: u8) -> lightvm_proto::BaselineId {
     lightvm_proto::BaselineId::from_unix_millis(1_760_000_300_000 + u64::from(n), [n; 10])
+}
+
+pub(crate) fn snapshot_id(n: u8) -> lightvm_proto::SnapshotId {
+    lightvm_proto::SnapshotId::from_unix_millis(1_760_000_500_000 + u64::from(n), [n; 10])
+}
+
+/// User snapshot `n` of VM `vm` (ADR-0032): `name`, on top of `parent`
+/// (`None` = a root), taken `running`/`clean`, 16 GiB disk, 1 MiB of own
+/// files, created 2026-10-10 00:00 UTC plus `n` hours.
+pub(crate) fn snapshot(
+    n: u8,
+    vm: u8,
+    name: &str,
+    parent: Option<lightvm_proto::SnapshotId>,
+    running: bool,
+    clean: bool,
+) -> lightvm_proto::ipc::SnapshotSummary {
+    lightvm_proto::ipc::SnapshotSummary {
+        snapshot_id: snapshot_id(n),
+        vm_id: vm_id(vm),
+        parent,
+        name: Label::parse(name).unwrap(),
+        description: String::new(),
+        created_at: UtcTimestamp::from_unix_millis(1_791_619_200_000 + i64::from(n) * 3_600_000)
+            .unwrap(),
+        taken_while_running: running,
+        clean_shutdown: clean,
+        firmware_saved: true,
+        has_thumbnail: running,
+        disk_gib: 16,
+        config_revision: 3,
+        files_bytes: 1 << 20,
+    }
+}
+
+/// Snapshot tree of VM `vm` with the given snapshots, oldest first; the
+/// current state descends from `current` (`None` = never taken).
+pub(crate) fn snapshot_tree(
+    vm: u8,
+    current: Option<lightvm_proto::SnapshotId>,
+    snapshots: Vec<lightvm_proto::ipc::SnapshotSummary>,
+) -> lightvm_proto::ipc::SnapshotTree {
+    let _ = vm;
+    lightvm_proto::ipc::SnapshotTree {
+        snapshots,
+        current,
+        available: true,
+        unavailable_reason: None,
+    }
+}
+
+/// Snapshots of VM 1 as last read: two snapshots, the current state an
+/// overlay of the second.
+pub(crate) fn snapshots_list() -> lightvm_desktop::service::SnapshotList {
+    let a = snapshot(1, 1, "Clean install", None, false, true);
+    let b = snapshot(2, 1, "Before the update", Some(snapshot_id(1)), true, false);
+    lightvm_desktop::service::SnapshotList {
+        loaded: true,
+        tree: Some(snapshot_tree(1, Some(snapshot_id(2)), vec![a, b])),
+        error: None,
+    }
 }
 
 /// Verified baseline of VM `vm`, not current, not in use: 3 GiB on the

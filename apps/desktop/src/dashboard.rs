@@ -7,7 +7,7 @@ use egui::WidgetType;
 use lightvm_proto::ipc::{StartPhase, StartProgress, VcpuHalt, VcpuHaltReason, VmSummary};
 use lightvm_proto::{GuestOs, VmId, VmState};
 
-use crate::service::{BaselineList, ServiceCommand, ServiceState};
+use crate::service::{BaselineList, ServiceCommand, ServiceState, SnapshotList};
 use crate::theme::{self, Tone};
 
 /// Description under the Dashboard title.
@@ -89,6 +89,8 @@ pub enum DashboardAction {
     Edit(VmId),
     /// Open the Baselines page of a VM (F3).
     Baselines(VmId),
+    /// Open the Snapshots page of a VM (ADR-0032).
+    Snapshots(VmId),
     /// Ask a confirmation.
     Confirm(Confirm),
     /// Open Settings, where the QEMU folder is chosen.
@@ -254,14 +256,14 @@ fn vm_row(
     ui: &mut egui::Ui,
     v: &VmSummary,
     active: bool,
-    baselines: (Option<&BaselineList>, bool),
+    baselines: (Option<&BaselineList>, Option<&SnapshotList>, bool),
     no_qemu: Option<&str>,
     choice: &mut Option<DashboardAction>,
 ) {
     let p = theme::Palette::of(ui);
     let name = v.name.as_str();
     let (state_text, tone) = vm_state(v.state);
-    let (list, baselines_available) = baselines;
+    let (list, snapshots, baselines_available) = baselines;
     // A baseline operation in progress: the VM is busy.
     let busy = v.baselines.operation;
     let busy_hover = "A baseline operation is in progress on this VM";
@@ -313,7 +315,14 @@ fn vm_row(
                         ui.label(egui::RichText::new(&text).small().color(p.text));
                     });
                 }
-                if let Some(line) = crate::baselines::dashboard_line(v, list) {
+                let mut line = crate::baselines::dashboard_line(v, list);
+                if let Some(s) = crate::snapshots::dashboard_line(v, snapshots) {
+                    line = Some(match line {
+                        Some(l) => format!("{l} \u{b7} {s}"),
+                        None => s,
+                    });
+                }
+                if let Some(line) = line {
                     ui.add(
                         egui::Label::new(egui::RichText::new(line).small().color(p.text_weak))
                             .wrap(),
@@ -409,6 +418,22 @@ fn vm_row(
                         );
                         if b.clicked() {
                             *choice = Some(DashboardAction::Baselines(v.vm_id));
+                        }
+                        let s = ui
+                            .add_enabled(baselines_available, egui::Button::new("Snapshots\u{2026}"))
+                            .on_hover_text(
+                                "Named points of the disk, as in VMware: take, revert to, delete; no memory is saved",
+                            )
+                            .on_disabled_hover_text(
+                                "Not available: the supervisor has no QEMU disk image tool",
+                            );
+                        theme::accessible_name(
+                            &s,
+                            WidgetType::Button,
+                            &format!("Snapshots of {name}"),
+                        );
+                        if s.clicked() {
+                            *choice = Some(DashboardAction::Snapshots(v.vm_id));
                         }
                         ui.separator();
                         let delete = ui
@@ -613,7 +638,11 @@ pub fn dashboard_with_qemu_ui(
             if i > 0 {
                 theme::divider(ui);
             }
-            let baselines = (state.baselines.get(&v.vm_id), baselines_available(state));
+            let baselines = (
+                state.baselines.get(&v.vm_id),
+                state.snapshots.get(&v.vm_id),
+                baselines_available(state),
+            );
             ui.push_id(v.vm_id, |ui| {
                 vm_row(ui, v, active, baselines, no_qemu, &mut choice)
             });

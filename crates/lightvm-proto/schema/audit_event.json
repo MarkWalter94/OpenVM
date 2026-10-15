@@ -343,6 +343,26 @@
           "description": "Import of a VMware VM by conversion (user only, ADR-0030): denied\n(checks of the `.vmx` and its disks, limits), failed (conversion,\ncancellation) or succeeded (VM created with its converted disk).\nNever the path of the source files.",
           "type": "string",
           "const": "vm_import"
+        },
+        {
+          "description": "User snapshot taken (ADR-0032, user only): with the VM off, or while\nit runs (disk state only, like a power cut at that instant).",
+          "type": "string",
+          "const": "snapshot_take"
+        },
+        {
+          "description": "Revert of a VM to a user snapshot with the VM off (ADR-0032): disk,\nfirmware state and configuration of the snapshot.",
+          "type": "string",
+          "const": "snapshot_revert"
+        },
+        {
+          "description": "Deletion of a user snapshot (ADR-0032); its children keep their\nstate and move to its parent.",
+          "type": "string",
+          "const": "snapshot_delete"
+        },
+        {
+          "description": "Rename or new description of a user snapshot (ADR-0032; never the\ntexts).",
+          "type": "string",
+          "const": "snapshot_update"
         }
       ]
     },

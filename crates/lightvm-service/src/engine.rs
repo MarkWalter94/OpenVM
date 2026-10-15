@@ -45,15 +45,16 @@ use std::sync::Arc;
 
 use lightvm_proto::ipc::{
     AgentCall, AgentVmView, BaselineSummary, InputOwner, ResponseBody, SCREENSHOT_CHUNK_BYTES,
-    SessionInfo, StorageOperation, VcpuHalt, VmBaselines, VmSummary,
+    SessionInfo, SnapshotSummary, SnapshotTree, StorageOperation, VcpuHalt, VmBaselines,
+    VmSnapshots, VmSummary,
 };
 use lightvm_proto::{
     Actor, Admission, AuditAction, AuditOutcome, BackendObservation, BaselineId, Caller,
     Capability, DisplayGeometry, ErrorCode, Grant, HostCapacity, InputEvent, Label, Lease,
     MediaEntry, MediaId, MediaKind, MediaRecord, OperationId, OperationKind, OperationRecord,
     OperationStatus, PolicyLayer, PublicError, ResourceLimits, RevocationReport, RunId, Screenshot,
-    SessionId, SessionState, SessionToken, TerminationCause, VmAction, VmConfig, VmId, VmRecord,
-    VmRequest, VmState,
+    SessionId, SessionState, SessionToken, SnapshotId, TerminationCause, VmAction, VmConfig, VmId,
+    VmRecord, VmRequest, VmState,
 };
 use vm_core::ports::{AuditSink, CatalogStore, IdGenerator, VmBackend};
 use vm_core::{Core, CoreConfig, DispatchOutcome, VmStatus};
@@ -198,6 +199,35 @@ pub trait VmEngine: Send + 'static {
         _baseline_id: BaselineId,
     ) -> Result<(), PublicError> {
         Err(PublicError::unsupported("baselines not available"))
+    }
+    /// User snapshots of a VM as a tree (UI only, ADR-0032). Take, revert,
+    /// delete and promote are storage jobs ([`Self::begin_baseline_job`]).
+    fn list_snapshots(
+        &mut self,
+        _caller: &Caller,
+        _vm_id: VmId,
+    ) -> Result<SnapshotTree, PublicError> {
+        Err(PublicError::unsupported("snapshots not available"))
+    }
+    /// New name and description of a user snapshot (UI only).
+    fn update_snapshot(
+        &mut self,
+        _caller: &Caller,
+        _vm_id: VmId,
+        _snapshot_id: SnapshotId,
+        _name: Label,
+        _description: String,
+    ) -> Result<SnapshotSummary, PublicError> {
+        Err(PublicError::unsupported("snapshots not available"))
+    }
+    /// Thumbnail PNG of a user snapshot, if one was kept (UI only).
+    fn snapshot_thumbnail(
+        &mut self,
+        _caller: &Caller,
+        _vm_id: VmId,
+        _snapshot_id: SnapshotId,
+    ) -> Result<Option<Vec<u8>>, PublicError> {
+        Ok(None)
     }
     /// `true`: the file checks of a start (media and baseline hashes) are
     /// left to the caller as [`StartJob`]s ([`Self::take_start_jobs`]) and
@@ -497,6 +527,68 @@ pub trait ImageTool: Send + Sync + std::fmt::Debug + 'static {
     fn free_bytes(&self, _dir: &Path) -> Option<u64> {
         None
     }
+    /// `qemu-img snapshot -c/-a/-d <tag>` on the VM's own disk with the VM
+    /// off (ADR-0032).
+    fn internal_snapshot(
+        &self,
+        _disk: &Path,
+        _action: DiskSnapshotAction,
+        _tag: &str,
+        _cancel: &dyn Fn() -> bool,
+    ) -> Result<(), PublicError> {
+        Err(PublicError::unsupported(
+            "snapshots not available on this backend",
+        ))
+    }
+    /// Standalone copy of the internal snapshot `tag` of `src` into the new
+    /// file `dst` (promotion of a snapshot to a baseline, ADR-0032).
+    fn convert_snapshot(
+        &self,
+        _src: &Path,
+        _tag: &str,
+        _dst: &Path,
+        _cancel: &dyn Fn() -> bool,
+    ) -> Result<(), PublicError> {
+        Err(PublicError::unsupported(
+            "snapshots not available on this backend",
+        ))
+    }
+}
+
+/// Internal snapshot operation on a disk with the VM off (ADR-0032).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiskSnapshotAction {
+    /// New internal snapshot of the current state.
+    Create,
+    /// The current state becomes the snapshot's.
+    Apply,
+    /// Removal of the snapshot.
+    Delete,
+}
+
+/// Wraps the result of a snapshot's disk operation for the finishing step
+/// (ADR-0032).
+pub type SnapshotFinish = Box<dyn FnOnce(Result<(), PublicError>) -> Box<dyn Any + Send> + Send>;
+
+/// First step of a user snapshot operation on the catalog (ADR-0032): the
+/// journal intent is recorded; the disk operation on `disk` with `tag` is
+/// then done by the engine (QMP while the VM runs, `qemu-img` on a worker
+/// with the VM off) and its result handed to `finish`, whose output goes to
+/// [`BaselinePort::finish_storage_job`] or
+/// [`BaselinePort::abort_storage_job`] (both settle from the disk).
+pub struct SnapshotStep {
+    /// The VM's own disk.
+    pub disk: PathBuf,
+    /// Name of the internal snapshot in the disk.
+    pub tag: String,
+    /// Wraps the result of the disk operation for the finishing step.
+    pub finish: SnapshotFinish,
+}
+
+impl std::fmt::Debug for SnapshotStep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SnapshotStep({})", self.tag)
+    }
 }
 
 /// Catalog side of a VMware import (ADR-0030): journal intent `import_vm`,
@@ -586,21 +678,61 @@ pub enum BaselineRequest {
         /// Baseline.
         baseline_id: BaselineId,
     },
+    /// `take_snapshot` (ADR-0032).
+    TakeSnapshot {
+        /// VM.
+        vm_id: VmId,
+        /// Name.
+        name: Label,
+        /// Description.
+        description: String,
+    },
+    /// `revert_snapshot` (ADR-0032).
+    RevertSnapshot {
+        /// VM.
+        vm_id: VmId,
+        /// Snapshot.
+        snapshot_id: SnapshotId,
+    },
+    /// `delete_snapshot` (ADR-0032).
+    DeleteSnapshot {
+        /// VM.
+        vm_id: VmId,
+        /// Snapshot.
+        snapshot_id: SnapshotId,
+    },
+    /// `promote_snapshot` (ADR-0032): a baseline from a snapshot taken off.
+    PromoteSnapshot {
+        /// VM.
+        vm_id: VmId,
+        /// Snapshot.
+        snapshot_id: SnapshotId,
+        /// Label of the new baseline.
+        label: Label,
+    },
 }
 
 impl BaselineRequest {
     /// VM of the request.
     pub fn vm_id(&self) -> VmId {
         match self {
-            Self::Create { vm_id, .. } | Self::Restore { vm_id, .. } => *vm_id,
+            Self::Create { vm_id, .. }
+            | Self::Restore { vm_id, .. }
+            | Self::TakeSnapshot { vm_id, .. }
+            | Self::RevertSnapshot { vm_id, .. }
+            | Self::DeleteSnapshot { vm_id, .. }
+            | Self::PromoteSnapshot { vm_id, .. } => *vm_id,
         }
     }
 
     /// Kind of the core operation.
     pub fn kind(&self) -> OperationKind {
         match self {
-            Self::Create { .. } => OperationKind::Snapshot,
+            Self::Create { .. } | Self::PromoteSnapshot { .. } => OperationKind::Snapshot,
             Self::Restore { .. } => OperationKind::Restore,
+            Self::TakeSnapshot { .. } => OperationKind::UserSnapshot,
+            Self::RevertSnapshot { .. } => OperationKind::UserSnapshotRevert,
+            Self::DeleteSnapshot { .. } => OperationKind::UserSnapshotDelete,
         }
     }
 }
@@ -669,6 +801,25 @@ pub enum BaselineOutcome {
         /// Baseline.
         baseline_id: BaselineId,
     },
+    /// User snapshot taken (ADR-0032).
+    SnapshotTaken(SnapshotSummary),
+    /// VM reverted to a user snapshot: `record` is the VM's new record (the
+    /// snapshot's configuration, new revision).
+    SnapshotReverted {
+        /// VM.
+        vm_id: VmId,
+        /// Snapshot.
+        snapshot_id: SnapshotId,
+        /// New record of the VM.
+        record: Box<VmRecord>,
+    },
+    /// User snapshot deleted.
+    SnapshotDeleted {
+        /// VM.
+        vm_id: VmId,
+        /// Snapshot.
+        snapshot_id: SnapshotId,
+    },
 }
 
 /// Baselines on a catalog (F3). The defaults describe a catalog without
@@ -711,9 +862,14 @@ pub trait BaselinePort {
     ) -> Result<BaselineOutcome, PublicError> {
         Err(PublicError::unsupported("baselines not available"))
     }
-    /// Discards the result of a work.
-    fn abort_storage_job(&mut self, _done: Box<dyn Any + Send>) -> Result<(), PublicError> {
-        Ok(())
+    /// Discards the result of a work. A user snapshot operation is settled
+    /// from the disk instead: `Some` when its disk operation had completed
+    /// and the result is kept.
+    fn abort_storage_job(
+        &mut self,
+        _done: Box<dyn Any + Send>,
+    ) -> Result<Option<BaselineOutcome>, PublicError> {
+        Ok(None)
     }
     /// Deletes a baseline with its files.
     fn delete_baseline(&mut self, _vm: VmId, _baseline: BaselineId) -> Result<(), PublicError> {
@@ -729,6 +885,96 @@ pub trait BaselinePort {
     }
     /// Records whether a run ended with an observed clean guest shutdown.
     fn record_exit(&self, _run: RunId, _clean: bool) {}
+
+    // ----- user snapshots (ADR-0032) ---------------------------------------
+    // Settled by `finish_storage_job` / `abort_storage_job` like the
+    // baseline jobs; the defaults describe a catalog without snapshots.
+
+    /// Snapshot tree of a VM (`available` and the reason filled by the
+    /// catalog's own checks: overlay of a baseline, no disk yet, TPM).
+    fn snapshot_tree(&self, _vm: &VmRecord) -> Result<SnapshotTree, PublicError> {
+        Ok(SnapshotTree {
+            available: false,
+            unavailable_reason: Some("snapshots not available on this catalog".into()),
+            ..SnapshotTree::default()
+        })
+    }
+    /// Snapshot facts of a VM for [`VmSummary`].
+    fn snapshot_facts(&self, _vm: VmId) -> VmSnapshots {
+        VmSnapshots::default()
+    }
+    /// Configuration saved with a snapshot, and whether it was taken while
+    /// the VM ran.
+    fn snapshot_config(
+        &self,
+        _vm: VmId,
+        _snapshot: SnapshotId,
+    ) -> Result<(VmConfig, bool), PublicError> {
+        Err(PublicError::unsupported("snapshots not available"))
+    }
+    /// First step of a take: budget and free space, journal intent, copy of
+    /// the UEFI variables (the run's file while running) and thumbnail.
+    fn begin_take_snapshot(
+        &mut self,
+        _vm: &VmRecord,
+        _name: &Label,
+        _description: &str,
+        _running: bool,
+        _thumbnail: Option<Vec<u8>>,
+        _reserve_bytes: u64,
+    ) -> Result<SnapshotStep, PublicError> {
+        Err(PublicError::unsupported("snapshots not available"))
+    }
+    /// First step of a revert (VM off): journal intent with the new record
+    /// of the VM (`record`, computed by the core), copy of the snapshot's
+    /// UEFI variables.
+    fn begin_revert_snapshot(
+        &mut self,
+        _vm: &VmRecord,
+        _snapshot: SnapshotId,
+        _record: VmRecord,
+    ) -> Result<SnapshotStep, PublicError> {
+        Err(PublicError::unsupported("snapshots not available"))
+    }
+    /// First step of a deletion.
+    fn begin_delete_snapshot(
+        &mut self,
+        _vm: &VmRecord,
+        _snapshot: SnapshotId,
+    ) -> Result<SnapshotStep, PublicError> {
+        Err(PublicError::unsupported("snapshots not available"))
+    }
+    /// New name and description.
+    fn update_snapshot(
+        &mut self,
+        _vm: VmId,
+        _snapshot: SnapshotId,
+        _name: &Label,
+        _description: &str,
+    ) -> Result<SnapshotSummary, PublicError> {
+        Err(PublicError::unsupported("snapshots not available"))
+    }
+    /// Thumbnail PNG of a snapshot, if one was kept.
+    fn snapshot_thumbnail(
+        &self,
+        _vm: VmId,
+        _snapshot: SnapshotId,
+    ) -> Result<Option<Vec<u8>>, PublicError> {
+        Ok(None)
+    }
+    /// First step of the promotion of a snapshot taken off to a baseline
+    /// (ADR-0005 rules): as [`Self::begin_create_baseline`] with the
+    /// snapshot's disk state, UEFI variables and configuration.
+    fn begin_promote_snapshot(
+        &mut self,
+        _vm: &VmRecord,
+        _snapshot: SnapshotId,
+        _label: &Label,
+        _tool: Arc<dyn ImageTool>,
+        _cancel: CancelCheck,
+    ) -> Result<StorageWork, PublicError> {
+        Err(PublicError::unsupported("snapshots not available"))
+    }
 }
 
 /// Worker step of a media import (open, checks, hash: ADR-0029, nothing is
@@ -849,6 +1095,33 @@ pub trait BackendPort: VmBackend + Send + 'static {
         None
     }
 
+    /// Disk-only internal snapshot `tag` of the running VM's own disk (QMP
+    /// `blockdev-snapshot-internal-sync`, ADR-0032).
+    fn snapshot_disk(
+        &mut self,
+        _vm_id: VmId,
+        _run_id: RunId,
+        _tag: &str,
+    ) -> Result<(), PublicError> {
+        Err(PublicError::unsupported(
+            "snapshots of a running VM not available on this backend",
+        ))
+    }
+    /// Deletion of the internal snapshot `tag` of the running VM's disk.
+    fn delete_disk_snapshot(
+        &mut self,
+        _vm_id: VmId,
+        _run_id: RunId,
+        _tag: &str,
+    ) -> Result<(), PublicError> {
+        Err(PublicError::unsupported(
+            "snapshots of a running VM not available on this backend",
+        ))
+    }
+    /// Small PNG of the screen of a running VM for a snapshot thumbnail.
+    fn snapshot_thumbnail(&mut self, _vm_id: VmId, _run_id: RunId) -> Option<Vec<u8>> {
+        None
+    }
     fn take_screenshot(&mut self, _vm_id: VmId, _run_id: RunId) -> Option<(Screenshot, Vec<u8>)> {
         None
     }
@@ -913,6 +1186,9 @@ fn summary(s: VmStatus, disk_used_bytes: Option<u64>, mut baselines: VmBaselines
     baselines.operation = match s.storage_operation {
         Some(OperationKind::Snapshot) => Some(StorageOperation::CreateBaseline),
         Some(OperationKind::Restore) => Some(StorageOperation::RestoreBaseline),
+        Some(OperationKind::UserSnapshot) => Some(StorageOperation::TakeSnapshot),
+        Some(OperationKind::UserSnapshotRevert) => Some(StorageOperation::RevertSnapshot),
+        Some(OperationKind::UserSnapshotDelete) => Some(StorageOperation::DeleteSnapshot),
         _ => None,
     };
     VmSummary {
@@ -924,6 +1200,7 @@ fn summary(s: VmStatus, disk_used_bytes: Option<u64>, mut baselines: VmBaselines
         config_revision: s.config_revision,
         disk_used_bytes,
         baselines,
+        snapshots: VmSnapshots::default(),
         start: None,
         vcpu_halt: None,
     }
@@ -1225,7 +1502,9 @@ where
             (VmState::Running, Some(run)) => self.backend.vcpu_halt(s.vm_id, run),
             _ => None,
         };
+        let snapshots = self.core.store().snapshot_facts(s.vm_id);
         let mut out = summary(s, used, baselines);
+        out.snapshots = snapshots;
         out.start = start;
         out.vcpu_halt = vcpu_halt;
         out
@@ -1619,6 +1898,128 @@ where
     }
 }
 
+impl<S, A, B, M> CoreEngine<S, A, B, M>
+where
+    S: CatalogStore + MediaImportPort + BaselinePort + VmImportPort + Send + 'static,
+    A: AuditSink + Send + 'static,
+    B: BackendPort,
+    M: MediaGuardPort + Send + 'static,
+{
+    /// User snapshot take, revert or delete (ADR-0032): core checks (user
+    /// only, no agent session on the VM, VM off, or running for take and
+    /// delete), journal intent on the catalog, then the disk operation:
+    /// while the VM runs it is done here through QMP (the guest is paused
+    /// by QEMU for its duration) and the returned work only hands the result
+    /// over; with the VM off the work runs `qemu-img` on the worker. Either
+    /// way the catalog settles it from the disk when the work comes back.
+    fn begin_snapshot_job(
+        &mut self,
+        caller: &Caller,
+        req: BaselineRequest,
+        tool: Option<Arc<dyn ImageTool>>,
+        cancel: CancelCheck,
+    ) -> Result<StorageJob, PublicError> {
+        let vm_id = req.vm_id();
+        let kind = req.kind();
+        if let BaselineRequest::TakeSnapshot { description, .. } = &req {
+            lightvm_proto::ipc::validate_snapshot_description(description).map_err(|m| {
+                PublicError::invalid_argument(m).with_detail("field", "description")
+            })?;
+        }
+        // A revert gives the VM the snapshot's configuration: computed (and
+        // checked against the current limits) before anything is written.
+        let reverted = match &req {
+            BaselineRequest::RevertSnapshot { snapshot_id, .. }
+                if matches!(caller, Caller::User) =>
+            {
+                let (config, _) = self.core.store().snapshot_config(vm_id, *snapshot_id)?;
+                Some(self.core.reverted_record(vm_id, config)?)
+            }
+            _ => None,
+        };
+        let reserve = self
+            .core
+            .config()
+            .host
+            .reserved_storage_gib
+            .saturating_mul(1 << 30);
+        // The thumbnail of a running VM is taken before the operation.
+        let thumbnail = match (&req, self.core.vm_status(&Caller::User, vm_id)) {
+            (BaselineRequest::TakeSnapshot { .. }, Ok(st))
+                if st.state == VmState::Running && matches!(caller, Caller::User) =>
+            {
+                st.run_id
+                    .and_then(|run| self.backend.snapshot_thumbnail(vm_id, run))
+            }
+            _ => None,
+        };
+        let backend = &mut self.backend;
+        let (operation_id, work) =
+            self.core
+                .begin_snapshot_operation(caller, vm_id, kind, |store, vm, run| {
+                    let step = match &req {
+                        BaselineRequest::TakeSnapshot {
+                            name, description, ..
+                        } => store.begin_take_snapshot(
+                            vm,
+                            name,
+                            description,
+                            run.is_some(),
+                            thumbnail,
+                            reserve,
+                        )?,
+                        BaselineRequest::RevertSnapshot { snapshot_id, .. } => {
+                            let record = reverted.ok_or_else(|| {
+                                PublicError::infrastructure("reverted configuration missing")
+                            })?;
+                            store.begin_revert_snapshot(vm, *snapshot_id, record)?
+                        }
+                        BaselineRequest::DeleteSnapshot { snapshot_id, .. } => {
+                            store.begin_delete_snapshot(vm, *snapshot_id)?
+                        }
+                        _ => return Err(PublicError::invalid_argument("not a snapshot operation")),
+                    };
+                    let SnapshotStep { disk, tag, finish } = step;
+                    let work: StorageWork = match run {
+                        Some(run) => {
+                            let r = match &req {
+                                BaselineRequest::TakeSnapshot { .. } => {
+                                    backend.snapshot_disk(vm.id, run, &tag)
+                                }
+                                _ => backend.delete_disk_snapshot(vm.id, run, &tag),
+                            };
+                            Box::new(move || finish(r))
+                        }
+                        None => {
+                            let action = match &req {
+                                BaselineRequest::TakeSnapshot { .. } => DiskSnapshotAction::Create,
+                                BaselineRequest::RevertSnapshot { .. } => DiskSnapshotAction::Apply,
+                                _ => DiskSnapshotAction::Delete,
+                            };
+                            match tool {
+                                Some(tool) => Box::new(move || {
+                                    let c = || cancel();
+                                    finish(tool.internal_snapshot(&disk, action, &tag, &c))
+                                }),
+                                None => {
+                                    let e = PublicError::unsupported(
+                                        "snapshots need qemu-img: configure the QEMU folder",
+                                    );
+                                    Box::new(move || finish(Err(e)))
+                                }
+                            }
+                        }
+                    };
+                    Ok(work)
+                })?;
+        Ok(StorageJob {
+            vm_id,
+            operation_id,
+            work,
+        })
+    }
+}
+
 fn chunk_count(len: usize) -> u32 {
     u32::try_from(len.div_ceil(SCREENSHOT_CHUNK_BYTES as usize)).unwrap_or(u32::MAX)
 }
@@ -1936,6 +2337,21 @@ where
         let tool = self.backend.image_tool();
         let vm_id = req.vm_id();
         let kind = req.kind();
+        if matches!(
+            req,
+            BaselineRequest::TakeSnapshot { .. }
+                | BaselineRequest::RevertSnapshot { .. }
+                | BaselineRequest::DeleteSnapshot { .. }
+        ) {
+            return self.begin_snapshot_job(caller, req, tool, cancel);
+        }
+        if matches!(req, BaselineRequest::PromoteSnapshot { .. })
+            && matches!(caller, Caller::Agent { .. })
+        {
+            return Err(PublicError::permission_denied(
+                "snapshots are not available to agent sessions",
+            ));
+        }
         let (operation_id, work) =
             self.core
                 .begin_storage_operation(caller, vm_id, kind, |store, vm, _op| {
@@ -1951,6 +2367,10 @@ where
                         BaselineRequest::Restore { baseline_id, .. } => {
                             store.begin_restore_baseline(vm, *baseline_id, tool, cancel)
                         }
+                        BaselineRequest::PromoteSnapshot {
+                            snapshot_id, label, ..
+                        } => store.begin_promote_snapshot(vm, *snapshot_id, label, tool, cancel),
+                        _ => Err(PublicError::invalid_argument("not a baseline operation")),
                     }
                 })?;
         if let Caller::Agent { session_id, .. } = caller {
@@ -1970,10 +2390,17 @@ where
             result,
         } = done;
         let session = self.agent_storage.remove(&operation_id);
+        // A revert to a user snapshot gives the VM the snapshot's
+        // configuration: it becomes the core's record (ADR-0032).
         let r = self
             .core
-            .finish_storage_operation(vm_id, operation_id, |store| {
-                store.finish_storage_job(result)
+            .finish_snapshot_operation(vm_id, operation_id, |store| {
+                let outcome = store.finish_storage_job(result)?;
+                let record = match &outcome {
+                    BaselineOutcome::SnapshotReverted { record, .. } => Some((**record).clone()),
+                    _ => None,
+                };
+                Ok((outcome, record))
             });
         if let (Ok(BaselineOutcome::Created(b)), Some(s)) = (&r, session)
             && let Some(m) = self.session_meta.get_mut(&s)
@@ -1992,17 +2419,35 @@ where
         self.agent_storage.remove(&operation_id);
         let r = self
             .core
-            .finish_storage_operation(vm_id, operation_id, |store| {
-                if let Err(e) = store.abort_storage_job(result) {
-                    crate::diag!(
-                        "lightvm-service: cancelled baseline operation not rolled back: {e}"
-                    );
+            .finish_snapshot_operation(vm_id, operation_id, |store| {
+                match store.abort_storage_job(result) {
+                    Err(e) => {
+                        crate::diag!(
+                            "lightvm-service: cancelled storage operation not rolled back: {e}"
+                        );
+                        Err(reason)
+                    }
+                    Ok(None) => Err(reason),
+                    // A user snapshot operation is settled from the disk: a
+                    // disk operation that completed before the cancellation
+                    // is kept (and audited as succeeded).
+                    Ok(Some(outcome)) => {
+                        let record = match &outcome {
+                            BaselineOutcome::SnapshotReverted { record, .. } => {
+                                Some((**record).clone())
+                            }
+                            _ => None,
+                        };
+                        Ok((outcome, record))
+                    }
                 }
-                Err::<BaselineOutcome, _>(reason)
             });
         match r {
             Err(e) => e,
-            Ok(_) => PublicError::infrastructure("operation cancelled"),
+            Ok(_) => PublicError::state_conflict(
+                "operation cancelled after the disk operation had completed: its result is kept",
+            )
+            .with_detail("reason", "completed_before_cancel"),
         }
     }
 
@@ -2015,6 +2460,52 @@ where
         self.apply_observations();
         self.core.delete_baseline_with(caller, vm_id, |store| {
             store.delete_baseline(vm_id, baseline_id)
+        })
+    }
+
+    fn list_snapshots(
+        &mut self,
+        caller: &Caller,
+        vm_id: VmId,
+    ) -> Result<SnapshotTree, PublicError> {
+        self.apply_observations();
+        let reason = self.core.snapshot_unavailable_reason(vm_id);
+        let mut tree = self.core.snapshot_access(caller, vm_id, false, |store| {
+            let vm = store
+                .get_vm(vm_id)?
+                .ok_or_else(|| PublicError::not_found("VM does not exist"))?;
+            store.snapshot_tree(&vm)
+        })?;
+        if let Some(r) = reason {
+            tree.available = false;
+            tree.unavailable_reason = Some(r.to_owned());
+        }
+        Ok(tree)
+    }
+
+    fn update_snapshot(
+        &mut self,
+        caller: &Caller,
+        vm_id: VmId,
+        snapshot_id: SnapshotId,
+        name: Label,
+        description: String,
+    ) -> Result<SnapshotSummary, PublicError> {
+        lightvm_proto::ipc::validate_snapshot_description(&description)
+            .map_err(|m| PublicError::invalid_argument(m).with_detail("field", "description"))?;
+        self.core.snapshot_access(caller, vm_id, true, |store| {
+            store.update_snapshot(vm_id, snapshot_id, &name, &description)
+        })
+    }
+
+    fn snapshot_thumbnail(
+        &mut self,
+        caller: &Caller,
+        vm_id: VmId,
+        snapshot_id: SnapshotId,
+    ) -> Result<Option<Vec<u8>>, PublicError> {
+        self.core.snapshot_access(caller, vm_id, false, |store| {
+            store.snapshot_thumbnail(vm_id, snapshot_id)
         })
     }
 

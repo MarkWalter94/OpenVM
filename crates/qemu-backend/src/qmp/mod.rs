@@ -123,6 +123,8 @@ enum Cmd {
     Cont,
     Screendump { filename: String },
     InputSendEvent { events: Vec<Value> },
+    BlockdevSnapshotInternal { device: &'static str, name: String },
+    BlockdevSnapshotDeleteInternal { device: &'static str, name: String },
 }
 
 impl Cmd {
@@ -142,6 +144,8 @@ impl Cmd {
             Self::Cont => "cont",
             Self::Screendump { .. } => "screendump",
             Self::InputSendEvent { .. } => "input-send-event",
+            Self::BlockdevSnapshotInternal { .. } => "blockdev-snapshot-internal-sync",
+            Self::BlockdevSnapshotDeleteInternal { .. } => "blockdev-snapshot-delete-internal-sync",
         }
     }
 
@@ -152,6 +156,10 @@ impl Cmd {
             Self::HmpInfoNetwork => Some(json!({"command-line": "info network"})),
             Self::Screendump { filename } => Some(json!({"filename": filename, "format": "ppm"})),
             Self::InputSendEvent { events } => Some(json!({ "events": events })),
+            Self::BlockdevSnapshotInternal { device, name }
+            | Self::BlockdevSnapshotDeleteInternal { device, name } => {
+                Some(json!({"device": device, "name": name}))
+            }
             _ => None,
         }
     }
@@ -423,6 +431,45 @@ impl QmpClient {
             Ok(_) | Err(QmpError::Disconnected) => Ok(()),
             Err(e) => Err(e),
         }
+    }
+
+    /// `blockdev-snapshot-internal-sync` on the root node `device` (ADR-0032):
+    /// disk-only internal snapshot `name` of a running VM. `name` is chosen
+    /// by the supervisor (a snapshot identifier), never by a client.
+    pub(crate) async fn snapshot_internal(
+        &self,
+        device: &'static str,
+        name: &str,
+        timeout: Duration,
+    ) -> Result<(), QmpError> {
+        self.execute(
+            Cmd::BlockdevSnapshotInternal {
+                device,
+                name: name.to_owned(),
+            },
+            Some(timeout),
+        )
+        .await
+        .map(drop)
+    }
+
+    /// `blockdev-snapshot-delete-internal-sync` of the internal snapshot
+    /// `name` on the root node `device` (ADR-0032).
+    pub(crate) async fn snapshot_delete_internal(
+        &self,
+        device: &'static str,
+        name: &str,
+        timeout: Duration,
+    ) -> Result<(), QmpError> {
+        self.execute(
+            Cmd::BlockdevSnapshotDeleteInternal {
+                device,
+                name: name.to_owned(),
+            },
+            Some(timeout),
+        )
+        .await
+        .map(drop)
     }
 
     /// `cont`: starts the vCPUs after `-S` (used by the backend after the checks).
