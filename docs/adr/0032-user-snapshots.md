@@ -1,6 +1,6 @@
 # ADR-0032 — User snapshots in manual use (VMware-style snapshot manager, disk state)
 
-- Status: Accepted (2026-10-14): direction set; evidence pending
+- Status: Accepted (2026-10-14): implemented and verified in simulation/test, and the disk operations verified on hardware with real QEMU 11.1.0 / WHPX (`R6-03`, 2026-10-15); real guests pending
 - Date: 2026-10-14
 - Owner: project owner (decision); implementation recorded below
 
@@ -36,8 +36,8 @@ Facts on the first host (QEMU 11.1.0, WHPX), probed on 2026-10-14 with a scratch
 
 ## Required evidence
 
-- Take/revert/delete with the VM off and running, tree consistency, firmware state restored, interruption and crash recovery, budget accounting, refusal during an agent session.
-- Real guests: a Windows and a Linux guest reverted to an earlier snapshot boot normally. **Not verified.**
+- Take/revert/delete with the VM off and running, tree consistency, firmware state restored, interruption and crash recovery, refusal during an agent session: `docs/verification/R6-03-user-snapshots.md`, items 1–9 (simulation/test across the product, and the disk operations on real QEMU 11.1.0 / WHPX with the disk data restored). The budget and free-space check at the take reuses the baselines' verified mechanism (`F3-01`) and is explained in the UI (item 7); no snapshot-specific budget refusal test.
+- Real guests: a Windows and a Linux guest reverted to an earlier snapshot boot normally. **Not verified** (no guest installed for this feature; `R6-03` item 10).
 
 ## References
 

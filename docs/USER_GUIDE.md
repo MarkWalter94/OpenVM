@@ -1,6 +1,6 @@
 # LightVM user guide (alpha)
 
-This guide takes you from a Windows 11 PC to an Ubuntu virtual machine (VM) installed with LightVM, and back to it after you close and reopen the app. It covers the **experimental alpha** (roadmap phase F2): read [Known limitations](#14-known-limitations-of-the-alpha) before you start.
+This guide takes you from a Windows 11 PC to an Ubuntu virtual machine (VM) installed with LightVM, and back to it after you close and reopen the app. It covers the **experimental alpha** (roadmap phase F2): read [Known limitations](#15-known-limitations-of-the-alpha) before you start.
 
 Contents:
 
@@ -14,11 +14,12 @@ Contents:
 8. [After the installation](#8-after-the-installation)
 9. [Everyday use: stop, Emergency Stop, delete](#9-everyday-use-stop-emergency-stop-delete)
 10. [Baselines: save and restore the VM's disk](#10-baselines-save-and-restore-the-vms-disk)
-11. [Agent sessions](#11-agent-sessions)
-12. [Where your data lives](#12-where-your-data-lives)
-13. [Uninstall](#13-uninstall)
-14. [Known limitations of the alpha](#14-known-limitations-of-the-alpha)
-15. [Troubleshooting](#15-troubleshooting)
+11. [Snapshots: named points of the VM's disk](#11-snapshots-named-points-of-the-vms-disk)
+12. [Agent sessions](#12-agent-sessions)
+13. [Where your data lives](#13-where-your-data-lives)
+14. [Uninstall](#14-uninstall)
+15. [Known limitations of the alpha](#15-known-limitations-of-the-alpha)
+16. [Troubleshooting](#16-troubleshooting)
 
 ---
 
@@ -160,7 +161,7 @@ The alpha is distributed as a zip archive, `LightVM-<version>-windows-x64.zip`, 
 
    Options: `-Prefix <folder>` installs elsewhere; `-NoShortcut` skips the shortcut; `-AddToPath` adds the folder to your user `PATH` (off by default; the other entries are kept exactly as they are, including ones such as `%USERPROFILE%\bin`; new terminals see the change); `-Force` replaces an existing installation.
 
-3. The package contains: `lightvm-desktop.exe` (the app), `lightvm-service.exe` (the supervisor, started by the app; the two files must stay in the same folder), `lightvm-mcp.exe` (the MCP adapter that an AI client starts for agent sessions, section 11; it does nothing on its own), `README.md`, `USER_GUIDE.md` (this guide), `LICENSE.txt`, `THIRD-PARTY-LICENSES.txt`, `SBOM.cdx.json` (software bill of materials: every component built into the three programs, with versions, licences and hashes, CycloneDX format), `BUILDINFO.txt` (commit and toolchain of the build), `SHA256SUMS.txt`, `install.ps1`, `uninstall.ps1`. The package has no test or measurement options: the programs are built without them and the build checks that none is left.
+3. The package contains: `lightvm-desktop.exe` (the app), `lightvm-service.exe` (the supervisor, started by the app; the two files must stay in the same folder), `lightvm-mcp.exe` (the MCP adapter that an AI client starts for agent sessions, section 12; it does nothing on its own), `README.md`, `USER_GUIDE.md` (this guide), `LICENSE.txt`, `THIRD-PARTY-LICENSES.txt`, `SBOM.cdx.json` (software bill of materials: every component built into the three programs, with versions, licences and hashes, CycloneDX format), `BUILDINFO.txt` (commit and toolchain of the build), `SHA256SUMS.txt`, `install.ps1`, `uninstall.ps1`. The package has no test or measurement options: the programs are built without them and the build checks that none is left.
 
 If a `LightVM-<version>-windows-x64-setup.exe` (Inno Setup, per user) is published next to the zip, it installs the same files into the same folder with a normal wizard; verify its `.sha256` the same way. It is equally unsigned.
 
@@ -170,13 +171,13 @@ If a `LightVM-<version>-windows-x64-setup.exe` (Inno Setup, per user) is publish
 
 1. Start **LightVM** from the Start Menu.
    - On the first run, Windows SmartScreen may show *Windows protected your PC* because the app is not signed. If, and only if, you verified the checksum in section 3, choose **More info** → **Run anyway**.
-   - LightVM opens without a console window. Its diagnostic messages go to log files in `%LOCALAPPDATA%\LightVM\logs` (see [Troubleshooting](#14-troubleshooting)).
+   - LightVM opens without a console window. Its diagnostic messages go to log files in `%LOCALAPPDATA%\LightVM\logs` (see [Troubleshooting](#16-troubleshooting)).
 2. LightVM opens on the **Dashboard**. If you installed QEMU with option A, B or C of section 2, LightVM has already found it (section 2.3). Otherwise the Dashboard shows the notice *QEMU was not found: VMs cannot start. Choose the QEMU folder in Settings → QEMU distribution, then restart the supervisor.*, every VM's **Start** button is disabled with the same reason, and **Open Settings** under the notice leads to step 3.
 3. Open **Settings** (left navigation). In the **Supervisor** section:
    - **QEMU distribution** shows the folder in use. *(found automatically)* after it means LightVM found it by itself: nothing to do. *not set: VMs cannot be started* means it found none: **Browse…** → select the QEMU folder from section 2 (the one that contains `qemu-system-x86_64.exe`). A folder chosen here takes precedence over the one found automatically.
-   - **VM catalog** shows where VMs are stored (default `%LOCALAPPDATA%\LightVM\catalog`). Leave the default unless you need another drive. **Browse…** and **Default** only switch LightVM to another catalog folder: VMs already created stay in the old one. To take them along use **Move catalog…** (section 12.1).
+   - **VM catalog** shows where VMs are stored (default `%LOCALAPPDATA%\LightVM\catalog`). Leave the default unless you need another drive. **Browse…** and **Default** only switch LightVM to another catalog folder: VMs already created stay in the old one. To take them along use **Move catalog…** (section 13.1).
    - Press **Apply and restart the supervisor** (or **Start the supervisor** if it is not running).
-4. Back on the **Dashboard**, the supervisor card at the top (**Supervisor · PID …**) shows the connection state, **Backend**, **Acceleration** and **If the UI closes**. **Acceleration** must read `whpx`; *not detected* means VMs cannot use the hardware accelerator. **Settings** → **Host capacity** → **Hardware acceleration** says the same. If it does not work, see [Troubleshooting](#14-troubleshooting).
+4. Back on the **Dashboard**, the supervisor card at the top (**Supervisor · PID …**) shows the connection state, **Backend**, **Acceleration** and **If the UI closes**. **Acceleration** must read `whpx`; *not detected* means VMs cannot use the hardware accelerator. **Settings** → **Host capacity** → **Hardware acceleration** says the same. If it does not work, see [Troubleshooting](#16-troubleshooting).
 
 Also in **Settings**: **Appearance** → **Theme** (**Dark**, the default, or **Light**); **Console** → **Guest keyboard layout** and the list of **Console shortcuts**; **If LightVM closes unexpectedly** (what happens to running VMs if the app crashes; the default, **Terminate the VMs immediately**, stops them).
 
@@ -443,7 +444,43 @@ If an operation is refused, the page says why in plain words, for example:
 
 ---
 
-## 11. Agent sessions
+## 11. Snapshots: named points of the VM's disk
+
+A **snapshot** is a named point of the VM's **disk**, as in VMware: take one any time (the VM off or running), revert to it, delete it, and the other snapshots are kept. The snapshots of a VM form a **tree**: the parent of a snapshot is the snapshot its disk state descended from (the last one taken or reverted to), and the page shows where you are now.
+
+**A snapshot never saves memory (RAM).** It holds the disk state, a copy of the UEFI variables (when the VM has UEFI firmware) and the VM's configuration at that moment. Reverting to a snapshot restarts the guest from the saved disk state with a **normal boot**: it is not a return to the exact instant of the take. A snapshot taken **while the VM runs** is like a **power cut at that instant**: the disk is saved exactly as the guest left it (crash-consistent; a guest program that had data not yet written to disk loses it), and a thumbnail of the screen is kept with the snapshot.
+
+Open it from the Dashboard: **More** → **Snapshots…** on the VM's row. (If the item is disabled, the supervisor has no QEMU disk image tool: check the QEMU folder in **Settings**.) The page shows:
+
+- a summary: the **VM state**, **You are here** (*the state descends from "…"*, or — when no snapshot was ever taken or reverted to), the number of snapshots with the space of their own files, and **Memory: never saved**;
+- the list of snapshots, oldest first, each with its tree indent (↳, *taken on "…"* on hover), its name and badges:
+
+| Badge | Meaning |
+| --- | --- |
+| **You are here** | The VM's current state descends from this snapshot (it is the last one taken or reverted to). |
+| **While running** | Taken while the VM ran: like a power cut at that instant, the disk is crash-consistent. |
+| **Clean** | Taken with the VM off, after an observed clean shutdown of the guest (or before any run). |
+| **Firmware saved** | A copy of the UEFI variables is kept with the snapshot. |
+
+Each row also shows its creation time (UTC), its description, the VM's disk size and the space the snapshot's own files take. The same facts appear in one line under the VM's row on the Dashboard (for example *2 snapshots · you are here: "Snapshot 1 · 2026-10-15 10:12 UTC"*).
+
+**Take a snapshot.** Press **Take snapshot…**: the dialog shows the name LightVM gives it (*Snapshot N · date and time UTC*) and an optional description; **Take snapshot** starts the operation. With the VM off, LightVM saves the disk state exactly as it is, with a copy of the UEFI variables. With the VM running, the disk is snapshotted exactly as the guest left it (as above), with a thumbnail of the screen. The page shows *Taking the snapshot…* with the elapsed time; meanwhile the VM cannot be started or changed (its **Start** button is disabled and its row shows *Taking snapshot*). There is no time limit and no Cancel button: only the **Emergency Stop** (top right) cancels the operation, and then nothing is changed.
+
+**Revert to a snapshot.** A revert needs the VM **off**. With the VM stopped, press **Revert to…** on a snapshot and confirm with **Discard and revert**: the current state is **discarded** — everything written to the disk after the snapshot, and the UEFI variables changed after it, are lost — and replaced by the saved state; other snapshots are kept. **This cannot be undone.** To keep the current state, take a snapshot of it first. The next **Start** boots the guest from the saved disk state with a normal boot.
+
+If the VM is **running** when you press **Revert to…**, the dialog says *The VM is running, so first:* and the confirm button reads **Shut down and revert**. Tick **Shut down "…" normally first (a revert needs the VM off)** — LightVM never forces the VM off behind your back — and, if you want to keep the current state, **Before that, take a snapshot of the current state ("Snapshot N · …")**. Then the page shows the flow: the snapshot of the current state is taken, the VM is shut down normally, and the revert is applied. If the snapshot of the current state fails, the VM keeps running and the revert does not happen.
+
+**Delete a snapshot.** Press **Delete…** and confirm with **Delete snapshot**: it is removed from the VM's disk; the other snapshots keep their state, and the snapshot the VM's current state descends from stays usable. **This cannot be undone.**
+
+**Rename a snapshot.** **Rename…** changes only the name and the description: nothing changes on the disk.
+
+During a snapshot operation the VM's row and the page show *Taking snapshot*, *Reverting snapshot* or *Deleting snapshot*. If an operation is refused, the page says why in plain words (for example *the VM is running, it must be stopped* for a revert, *not enough free space on the catalog drive*, *it would exceed the VM's storage budget*).
+
+Snapshots are a manual feature: agent sessions never take, revert or delete them, and none happens while an agent session uses the VM. Deleting the VM deletes its snapshots too.
+
+---
+
+## 12. Agent sessions
 
 An **agent session** lets an AI agent (for example an MCP client running on this PC) look at and use **one** VM, for a limited time, with the actions you allow. Nothing happens without you: the agent can only *ask*, and you approve or deny in LightVM. Open the **Agents** page from the side bar.
 
@@ -474,7 +511,7 @@ Then tick **The agent shows the code …** (after comparing it) and press **Appr
 - **Take control** / **Give control**: keyboard and mouse belong either to you or to the agent, never both. While the agent has them, the console shows *Input controlled by the agent …* and nothing you type or click is sent to the VM; **Take control** gives them back at once (keys the agent was holding are released).
 - **Revoke…**: ends the session at once after a confirmation; the agent's connection is closed and it needs a new approval to come back. Actions it already sent may still complete. The VM keeps running.
 - **Emergency Stop**: stops **all** VMs and ends every session immediately. It stays clickable even while a dialog is open.
-- **Details**: the session page with the stated objective, the state and its controls, the session report (see below) and the session events this app saw while it was open (request, start, pause, keyboard handover, end). Every action of the agent is also recorded in the audit log (section 12).
+- **Details**: the session page with the stated objective, the state and its controls, the session report (see below) and the session events this app saw while it was open (request, start, pause, keyboard handover, end). Every action of the agent is also recorded in the audit log (section 13).
 
 **Giving an agent its task.** The adapter carries its own reference documentation: its `help` tool describes how sessions work (request, verification code, approval), every tool with its parameters, key names, error codes and the limits below, so the agent does not need any other documentation. It only describes and never gives the agent instructions: what to do is decided by your prompt alone. With Claude Code, for example, register the adapter once:
 
@@ -517,7 +554,7 @@ On the report page:
 
 ---
 
-## 12. Where your data lives
+## 13. Where your data lives
 
 | What | Where |
 | --- | --- |
@@ -531,9 +568,9 @@ On the report page:
 
 `%LOCALAPPDATA%` is usually `C:\Users\<you>\AppData\Local`. Do not edit or move files in the catalog by hand while LightVM is running; LightVM keeps a journal to recover from interruptions, but manual changes are not supported. To back up VMs, close LightVM and copy the whole catalog folder.
 
-The catalog folder holds everything about your VMs: `catalog.sqlite3` (the database), `media\` (copies of images imported by earlier versions; ISOs imported now are used where they are and are not in the catalog), `vms\<VM id>\` (disk `primary.qcow2`, baselines in `base\`, overlays in `overlays\`, UEFI variables in `firmware\`, TPM state in `tpm\`), `runs\`, `sessions\` (agent session reports) and `tmp\`.
+The catalog folder holds everything about your VMs: `catalog.sqlite3` (the database), `media\` (copies of images imported by earlier versions; ISOs imported now are used where they are and are not in the catalog), `vms\<VM id>\` (disk `primary.qcow2`, baselines in `base\`, overlays in `overlays\`, UEFI variables in `firmware\`, TPM state in `tpm\`, snapshots in `snapshots\` — their UEFI variables copy and thumbnail; the snapshot's disk state is inside the disk file itself), `runs\`, `sessions\` (agent session reports) and `tmp\`.
 
-### 12.1 Move the VMs to another folder or drive
+### 13.1 Move the VMs to another folder or drive
 
 **Settings** → **Supervisor** → **VM catalog** → **Move catalog…** moves the whole catalog, with every VM, disk, baseline, image copy and session report, and makes LightVM use the new folder. ISOs used where they are (section 9.1) are outside the catalog: they are not moved or copied, and the VMs keep using them from their place.
 
@@ -549,7 +586,7 @@ Without the app (for example with LightVM started with `--catalog`), close Light
 
 ---
 
-## 13. Uninstall
+## 14. Uninstall
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Programs\LightVM\uninstall.ps1"
@@ -563,7 +600,7 @@ If you used the setup `.exe`, uninstall from **Settings → Apps → Installed a
 
 ---
 
-## 14. Known limitations of the alpha
+## 15. Known limitations of the alpha
 
 - **Experimental software.** Phase F2 "alpha manuale"; not a release. Feasibility items of phase F0 are still open (physical keyboard test P-4, second-user test on Windows P-5, see `docs/STATUS.md`).
 - **Windows 11 x64 only**, tested on a single PC (`docs/COMPATIBILITY.md`). Linux and macOS are not supported (the macOS build in CI only checks portability).
@@ -575,14 +612,14 @@ If you used the setup `.exe`, uninstall from **Settings → Apps → Installed a
 - **CPU model**: the VM uses a generic CPU model, not the host's (`-cpu host` does not boot on the test PC), so some guest software may run slower or detect fewer CPU features.
 - **One reference guest**: Ubuntu 26.04.1 LTS Desktop. Other guests are not tested. Windows XP, Vista, 7, 8.1 and 10 VMs can be created (section 6.1); the project has started Windows Setup from Vista 32-bit and Windows 10 images but has not completed an installation yet; Windows Vista 64-bit does not run on Windows PCs; Windows 8 and 11 are not supported.
 - **Importing VMware VMs** (section 6.3) is not verified with real VMware VMs yet; Windows VMs on LSI Logic SCSI disks need a manual preparation in VMware before the import.
-- Baselines are taken **with the VM off** only: no snapshot of a running VM, no RAM state (section 10). Baseline labels are generated by LightVM and cannot be renamed. Only one baseline operation at a time across all VMs.
-- Agent sessions (section 11): the MCP adapter `lightvm-mcp.exe` is included, but it has been verified only with a scripted test client: no real AI client (LLM) has been run against it yet, so client setup details may change. One agent session at a time; sessions never survive a restart of LightVM.
-- No console window: diagnostic messages are only in the log files (section 12).
+- Baselines are taken **with the VM off** only (section 10). Snapshots (section 11) can be taken with the VM running, but a snapshot **never saves memory**: it holds the disk state only, and a snapshot taken while the VM runs is crash-consistent, like a power cut at that instant. Baseline labels are generated by LightVM and cannot be renamed. Only one baseline or snapshot operation at a time across all VMs.
+- Agent sessions (section 12): the MCP adapter `lightvm-mcp.exe` is included, but it has been verified only with a scripted test client: no real AI client (LLM) has been run against it yet, so client setup details may change. One agent session at a time; sessions never survive a restart of LightVM.
+- No console window: diagnostic messages are only in the log files (section 13).
 - Remote Desktop (RDP) sessions are not verified.
 
 ---
 
-## 15. Troubleshooting
+## 16. Troubleshooting
 
 | Symptom | Cause and fix |
 | --- | --- |

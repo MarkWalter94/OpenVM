@@ -1,6 +1,6 @@
 # Project status
 
-Last updated: 2026-10-14
+Last updated: 2026-10-15
 
 Operational document required by section 17 of `docs/ROADMAP.md`: current phase, impediments and progress. **This file does not change the Definition of Done (section 11), the scope or the exit criteria.** A status reported here does not count as verification: the evidence is in `docs/verification/`.
 
@@ -159,6 +159,20 @@ Started on 2026-10-14 at the owner's request (ROADMAP 12, R6, in parallel; not a
 | UI: entry, picker, preview with warnings, name, display choice, progress, cancel, errors | `lightvm-desktop` `tests/vmware_import_ui.rs`, snapshots | verified in simulation/test |
 | LSI Logic Windows guests: automatic offline enablement of the storage driver | ADR-0030 (spike pending) | not implemented: warning and manual preparation (`USER_GUIDE.md` §6.3) |
 | Real VMware VMs (Windows with PVSCSI, LSI Logic and SATA; Linux) imported and started to the desktop | `docs/verification/R6-01b-vmware-import-real.md` | partial: one Linux VM to the session entry (source unchanged, content identical, no orphans, audit), one suspended VM correctly refused; a legacy-BIOS VM with an NVMe disk imports but SeaBIOS cannot boot it (product gap: the combination is accepted without warning); Vista and Mint outstanding |
+
+## R6 work: user snapshots (ADR-0032)
+
+Started on 2026-10-14 at the owner's request (ROADMAP 12, R6, in parallel; not a v1.0 requirement). **More** → **Snapshots…** on a VM's row opens the snapshot manager: named points of the VM's disk, as in VMware (tree with "you are here", revert to any, delete without losing the others). A snapshot holds the **disk state only** (QCOW2 internal snapshot of the managed disk, plus a copy of the UEFI variables and the configuration): it never saves memory, and a running snapshot is shown as *like a power cut at that instant* (crash-consistent, with a screen thumbnail). Reverting needs the VM off and the UI offers to shut it down normally first, and to take a snapshot of the current state before it. Operations are journaled and serialized like the baselines (schema 10, `0010_user_snapshots.sql`), counted by the storage budget (ADR-0017), and refused to agent sessions (ADR-0031 manual-use feature). Evidence: `docs/verification/R6-03-user-snapshots.md`.
+
+| Item | Evidence | Declared outcome |
+| --- | --- | --- |
+| Storage: journaled take/revert/delete, tree and "you are here", settle-from-disk after a crash at every step, failed or cancelled operations change nothing, deletions and refusals | `vm-storage` `tests/snapshots.rs` | verified in simulation/test |
+| Core and backend: user only (agents refused and audited), revert off only, the `qemu-img snapshot -c/-a/-d` command, the QMP `blockdev-snapshot-internal-sync` / `-delete` path, tag validation | `vm-core` `tests/user_snapshots.rs`; `qemu-backend` library tests | verified in simulation/test |
+| Through the IPC: take off and running, delete running, revert off only, rename; failed tool and cancellation consistent; promote/restore refused with snapshots | `lightvm-service` `tests/user_snapshots.rs` | verified in simulation/test |
+| UI: page, tree, take dialog, running-VM revert flow (orderly shutdown first, offered snapshot of the current state), refusals, progress, one operation at a time | `lightvm-desktop` `tests/snapshots_ui.rs`, snapshots | verified in simulation/test |
+| Disk operations on real QEMU 11.1.0: off (the exact `qemu-img` command) and running (QMP, WHPX), the data restored byte by byte after every apply | `qemu-backend` `tests/real_snapshots.rs` (`--ignored`, lab), `docs/verification/R6-03-user-snapshots.md` items 8–9 | verified on hardware (Windows, WHPX) |
+| Real guests (Windows and Linux) reverted to an earlier snapshot boot normally | — | not verified (no guest installed for this feature) |
+| A running take with the guest file systems flushed first (LightVM Tools, ADR-0031) | — | not implemented |
 
 ## R2c work: Windows guests
 
