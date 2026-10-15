@@ -22,7 +22,7 @@ The project owner requires the integration users know from VMware: shared folder
 
 **Drag and drop.** Host to guest: files dropped on the console are transferred by the tools into a guest folder (the drop target when the guest supports it, the desktop otherwise). Guest to host: files dragged out of the console are transferred to the host drop target. Size and count limits; progress and cancellation.
 
-**USB.** The user attaches a host USB device to a running VM from the console. Method chosen by a spike: `usb-redir` with a redirection helper using the UsbDk filter driver (dynamic capture, device returned to the host on detach), or `usb-host` with libusb (needs a WinUSB driver bound to the device). Installing a host driver needs administrator rights once and is the user's explicit choice. Controller per profile: EHCI for guests without xHCI drivers (XP, Vista, 7), xHCI otherwise.
+**USB.** The user attaches a host USB device to a running VM from the console. Method (owner decision 2026-10-15, after the `R6-04` spike): **`usb-redir` with the UsbDk filter driver** — a redirection helper built on usbredir and libusb with the UsbDk backend captures the device only while it is attached and returns it to the host on detach, as in VMware; QEMU receives it through a `usb-redir` device on a private chardev socket. UsbDk (Red Hat, signed) is installed once by the user with administrator rights, an explicit choice in the app; LightVM never installs drivers silently. `usb-host` with a WinUSB driver bound per device (verified in `R6-04`) is not adopted: the device stays unusable on the host until the original driver is restored. Controller per profile: EHCI for guests without xHCI drivers (XP, Vista, 7), xHCI otherwise.
 
 ## Required evidence
 

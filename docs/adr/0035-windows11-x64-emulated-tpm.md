@@ -1,6 +1,6 @@
 # ADR-0035 — Windows 11 x64 guest on Windows hosts with an emulated TPM 2.0 and Secure Boot
 
-- Status: Accepted (2026-10-15): direction set; feasibility spike pending
+- Status: Accepted (2026-10-15): direction set; project-built QEMU decided after the R6-05 spike
 - Date: 2026-10-15
 - Owner: project owner (decision); implementation recorded below
 
@@ -22,3 +22,11 @@ Windows 11 x64 requires UEFI with Secure Boot and TPM 2.0. ADR-0027 profiles sto
 ## References
 
 Roadmap, sections 5, 12 (R2c, R6); ADR-0027, ADR-0028.
+
+## Decision after the feasibility spike (2026-10-15, `R6-05`)
+
+The spike found that no upstream QEMU build for Windows can have a TPM (`meson.build` requires a POSIX host for `CONFIG_TPM`; the emulator backend passes the data channel with `SCM_RIGHTS`, unavailable on Windows), and that the Secure Boot OVMF shipped with QEMU requires SMM, which WHPX does not provide. `swtpm`/`libtpms` 0.10.2 build unpatched with Cygwin and work over loopback TCP. The project owner chose:
+
+- **A project-built QEMU for Windows** for the Windows 11 x64 profile: pinned upstream sources plus a minimal patch set that enables `CONFIG_TPM` on Windows and replaces the descriptor-passing data channel of the `emulator` backend with a second socket (`swtpm --server type=tcp` or a named pipe), with a per-run credential/port protection; reproducible build recipe in the repository, binaries hash-approved like the upstream build (this amends ADR-0010 for this profile only; the other profiles keep the upstream build).
+- **Project-built OVMF with Secure Boot and without SMM** (`SECURE_BOOT_ENABLE=TRUE`, `SMM_REQUIRE=FALSE`), Microsoft keys enrolled in the per-VM variable store, as for ADR-0028. Declared limit: without SMM the variable store is writable by code running in the guest kernel, so Secure Boot protects against unsigned boot components, not against a guest already compromised at ring 0.
+- `swtpm` built with Cygwin from pinned, signature-verified sources; the Cygwin runtime DLLs shipped with it (licences inventoried).
