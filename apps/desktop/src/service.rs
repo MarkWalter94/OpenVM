@@ -37,7 +37,8 @@ use lightvm_proto::DisplayAdapter;
 use lightvm_proto::ipc::{
     BaselineSummary, ConsoleTicket, InputOwner, ParentLossPolicy, Request, ResponseBody,
     ServerMessage, ServiceEvent, SessionApproval, SessionInfo, SessionRequestId,
-    SessionRequestInfo, SessionRequestOutcome, VmSummary, VmwareImportPhase, VmwareImportPreview,
+    SessionRequestInfo, SessionRequestOutcome, SnapshotTree, VmSummary, VmwareImportPhase,
+    VmwareImportPreview,
 };
 use lightvm_proto::report::{
     ReportEvent, ReportFormat, SessionReport, SessionReportSummary, SessionVerifier,
@@ -45,8 +46,8 @@ use lightvm_proto::report::{
 use lightvm_proto::{
     BaselineId, ErrorCode, HostCapacity, InputBatch, InputEvent, KeyAction, Label, MediaId,
     MediaKind, MediaRecord, MouseButton, OperationId, OperationStatus, PointerButton, ReplyError,
-    RunId, SessionId, SessionState, Sha256Digest, TerminationCause, TestOutcome, UtcTimestamp,
-    VmAction, VmConfig, VmId, VmName, VmRecord, VmRequest,
+    RunId, SessionId, SessionState, Sha256Digest, SnapshotId, TerminationCause, TestOutcome,
+    UtcTimestamp, VmAction, VmConfig, VmId, VmName, VmRecord, VmRequest,
 };
 use lightvm_service::client::Client;
 use lightvm_service::credential::Credential;
@@ -281,6 +282,42 @@ pub struct BaselineRequest {
     pub op: BaselineOp,
     /// Outcome.
     pub status: RequestStatus<BaselineId>,
+}
+
+/// Snapshots of a VM known to the UI (ADR-0032).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SnapshotList {
+    /// The tree was received at least once.
+    pub loaded: bool,
+    /// The tree, as last read.
+    pub tree: Option<SnapshotTree>,
+    /// Last read error, if any.
+    pub error: Option<Failure>,
+}
+
+/// Snapshot operation requested by the UI (ADR-0032).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SnapshotOp {
+    /// New snapshot (name and description in the request).
+    Take,
+    /// Revert to a snapshot (VM off).
+    Revert(SnapshotId),
+    /// Deletion of a snapshot.
+    Delete(SnapshotId),
+    /// New name and description of a snapshot.
+    Rename(SnapshotId),
+}
+
+/// Last snapshot operation requested by the UI and its outcome (on
+/// success, the snapshot concerned).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SnapshotRequest {
+    /// VM.
+    pub vm_id: VmId,
+    /// Operation.
+    pub op: SnapshotOp,
+    /// Outcome.
+    pub status: RequestStatus<SnapshotId>,
 }
 
 /// Control of the agent sessions requested by the UI (F4).
@@ -743,6 +780,10 @@ pub struct ServiceState {
     pub baselines: BTreeMap<VmId, BaselineList>,
     /// Last baseline operation (creation, restore, deletion).
     pub baseline: Option<BaselineRequest>,
+    /// Snapshots per VM, as last read (ADR-0032).
+    pub snapshots: BTreeMap<VmId, SnapshotList>,
+    /// Last snapshot operation (take, revert, delete, rename).
+    pub snapshot: Option<SnapshotRequest>,
     /// Agent access and sessions (F4).
     pub agents: AgentState,
     /// Session reports (F5).
@@ -874,6 +915,42 @@ pub enum ServiceCommand {
         vm_id: VmId,
         /// Baseline.
         baseline_id: BaselineId,
+    },
+    /// Re-reads the snapshots of a VM (ADR-0032).
+    ListSnapshots(VmId),
+    /// Takes a snapshot of a VM, off or running (long: storage lane).
+    TakeSnapshot {
+        /// VM.
+        vm_id: VmId,
+        /// Name given by the user.
+        name: Label,
+        /// Description given by the user.
+        description: String,
+    },
+    /// Reverts a VM to a snapshot (VM off; long: storage lane).
+    RevertSnapshot {
+        /// VM.
+        vm_id: VmId,
+        /// Snapshot.
+        snapshot_id: SnapshotId,
+    },
+    /// Deletes a snapshot (VM off or running; long: storage lane).
+    DeleteSnapshot {
+        /// VM.
+        vm_id: VmId,
+        /// Snapshot.
+        snapshot_id: SnapshotId,
+    },
+    /// New name and description of a snapshot.
+    RenameSnapshot {
+        /// VM.
+        vm_id: VmId,
+        /// Snapshot.
+        snapshot_id: SnapshotId,
+        /// New name.
+        name: Label,
+        /// New description.
+        description: String,
     },
     /// Re-reads the agent access switch (F4).
     GetAgentAccess,
@@ -1027,6 +1104,23 @@ impl ServiceCommand {
             }
             _ => None,
         }
+    }
+
+    /// Snapshot operation of the command, if it is one (list excluded).
+    pub fn snapshot_op(&self) -> Option<(VmId, SnapshotOp)> {
+        Some(match self {
+            Self::TakeSnapshot { vm_id, .. } => (*vm_id, SnapshotOp::Take),
+            Self::RevertSnapshot { vm_id, snapshot_id } => {
+                (*vm_id, SnapshotOp::Revert(*snapshot_id))
+            }
+            Self::DeleteSnapshot { vm_id, snapshot_id } => {
+                (*vm_id, SnapshotOp::Delete(*snapshot_id))
+            }
+            Self::RenameSnapshot {
+                vm_id, snapshot_id, ..
+            } => (*vm_id, SnapshotOp::Rename(*snapshot_id)),
+            _ => return None,
+        })
     }
 }
 
@@ -1420,6 +1514,12 @@ pub fn mark_pending(
                     op,
                     status: RequestStatus::Pending,
                 });
+            } else if let Some((vm_id, op)) = c.snapshot_op() {
+                s.snapshot = Some(SnapshotRequest {
+                    vm_id,
+                    op,
+                    status: RequestStatus::Pending,
+                });
             } else if let Some(op) = c.agent_op() {
                 s.agents.control = Some(AgentControl {
                     op,
@@ -1446,6 +1546,9 @@ fn fail_pending(s: &mut ServiceState, why: &str) {
         fail(&mut r.status, why);
     }
     if let Some(r) = &mut s.baseline {
+        fail(&mut r.status, why);
+    }
+    if let Some(r) = &mut s.snapshot {
         fail(&mut r.status, why);
     }
     if let Some(r) = &mut s.agents.approval {
@@ -1483,6 +1586,9 @@ fn mark_failed(s: &mut ServiceState, c: &ServiceCommand, f: Failure) {
         ServiceCommand::Input(_) => s.input_error = Some(f.message),
         ServiceCommand::ListBaselines(vm_id) => {
             s.baselines.entry(*vm_id).or_default().error = Some(f);
+        }
+        ServiceCommand::ListSnapshots(vm_id) => {
+            s.snapshots.entry(*vm_id).or_default().error = Some(f);
         }
         ServiceCommand::GetAgentAccess
         | ServiceCommand::ListSessionRequests
@@ -1530,6 +1636,15 @@ fn mark_failed(s: &mut ServiceState, c: &ServiceCommand, f: Failure) {
         c if c.agent_op().is_some() => {
             if let Some(op) = c.agent_op() {
                 s.agents.control = Some(AgentControl {
+                    op,
+                    status: RequestStatus::Failed(f),
+                });
+            }
+        }
+        c if c.snapshot_op().is_some() => {
+            if let Some((vm_id, op)) = c.snapshot_op() {
+                s.snapshot = Some(SnapshotRequest {
+                    vm_id,
                     op,
                     status: RequestStatus::Failed(f),
                 });
@@ -1749,6 +1864,13 @@ async fn ipc_loop(
                     ev_lanes.queue(ServiceCommand::Refresh);
                     ev_lanes.queue(ServiceCommand::ListBaselines(vm_id));
                 }
+                Ok(Ok(ServiceEvent::SnapshotsChanged { vm_id })) => {
+                    // Snapshot taken, reverted to, renamed or deleted: the
+                    // VM summary (operation, count, "you are here") and the
+                    // tree are re-read.
+                    ev_lanes.queue(ServiceCommand::Refresh);
+                    ev_lanes.queue(ServiceCommand::ListSnapshots(vm_id));
+                }
                 Ok(Ok(ServiceEvent::VmwareImportProgress { phase, percent })) => {
                     ev_lanes.update(|s| {
                         // Only while this UI waits for an import: a late
@@ -1808,9 +1930,14 @@ async fn ipc_loop(
                     let _ = slow_tx.send(c);
                 }
                 // A VMware import converts a whole disk: like a baseline,
-                // the reply arrives when it ends, without timeout.
+                // the reply arrives when it ends, without timeout. A
+                // snapshot operation (take, revert, delete) is the same:
+                // a disk operation the supervisor settles before replying.
                 ServiceCommand::CreateBaseline { .. }
                 | ServiceCommand::RestoreBaseline { .. }
+                | ServiceCommand::TakeSnapshot { .. }
+                | ServiceCommand::RevertSnapshot { .. }
+                | ServiceCommand::DeleteSnapshot { .. }
                 | ServiceCommand::ImportVmware { .. } => {
                     let _ = storage_tx.send(c);
                 }
@@ -2094,25 +2221,38 @@ async fn execute(c: &mut Client, lanes: &Lanes, command: ServiceCommand) -> Resu
                     result: ResponseBody::VmList { vms },
                     ..
                 } => {
-                    // Baselines not read yet, or changed since: re-read, so
-                    // the Dashboard can name the baseline a VM is on.
-                    let stale: Vec<VmId> = {
+                    // Baselines and snapshots not read yet, or changed
+                    // since: re-read, so the Dashboard can name the
+                    // baseline a VM is on and the snapshots it has.
+                    let stale = {
                         let mut s = lock(state);
                         s.vms = vms;
-                        s.vms
-                            .iter()
-                            .filter(|v| {
-                                let count = v.baselines.count as usize;
-                                (count > 0 || v.baselines.current.is_some())
-                                    && s.baselines
-                                        .get(&v.vm_id)
-                                        .is_none_or(|l| !l.loaded || l.items.len() != count)
-                            })
-                            .map(|v| v.vm_id)
-                            .collect()
+                        let mut stale = Vec::new();
+                        for v in s.vms.iter() {
+                            let count = v.baselines.count as usize;
+                            if (count > 0 || v.baselines.current.is_some())
+                                && s.baselines
+                                    .get(&v.vm_id)
+                                    .is_none_or(|l| !l.loaded || l.items.len() != count)
+                            {
+                                stale.push(Some(ServiceCommand::ListBaselines(v.vm_id)));
+                            }
+                            let count = v.snapshots.count as usize;
+                            if (count > 0 || v.snapshots.current.is_some())
+                                && s.snapshots.get(&v.vm_id).is_none_or(|l| {
+                                    !l.loaded
+                                        || l.tree
+                                            .as_ref()
+                                            .is_none_or(|t| t.snapshots.len() != count)
+                                })
+                            {
+                                stale.push(Some(ServiceCommand::ListSnapshots(v.vm_id)));
+                            }
+                        }
+                        stale
                     };
-                    for vm_id in stale {
-                        lanes.queue(ServiceCommand::ListBaselines(vm_id));
+                    for c in stale.into_iter().flatten() {
+                        lanes.queue(c);
                     }
                     Ok(())
                 }
@@ -2465,6 +2605,147 @@ async fn execute(c: &mut Client, lanes: &Lanes, command: ServiceCommand) -> Resu
                     Ok(())
                 }
                 m => Err(context("baseline deletion", failure(&m))),
+            }
+        }
+        ServiceCommand::ListSnapshots(vm_id) => {
+            match request(c, Request::ListSnapshots { vm_id }).await? {
+                ServerMessage::Response {
+                    result: ResponseBody::Snapshots { tree, .. },
+                    ..
+                } => {
+                    lock(state).snapshots.insert(
+                        vm_id,
+                        SnapshotList {
+                            loaded: true,
+                            tree: Some(tree),
+                            error: None,
+                        },
+                    );
+                    Ok(())
+                }
+                m => Err(context("snapshots", failure(&m))),
+            }
+        }
+        ServiceCommand::TakeSnapshot {
+            vm_id,
+            name,
+            description,
+        } => {
+            let body = Request::TakeSnapshot {
+                vm_id,
+                name,
+                description,
+            };
+            match request(c, body).await? {
+                ServerMessage::Response {
+                    result: ResponseBody::Snapshot { snapshot },
+                    ..
+                } => {
+                    snapshot_done(
+                        lanes,
+                        vm_id,
+                        SnapshotOp::Take,
+                        snapshot.snapshot_id,
+                        format!("snapshot taken: {}", snapshot.name.as_str()),
+                    );
+                    Ok(())
+                }
+                m => Err(context("snapshot", failure(&m))),
+            }
+        }
+        ServiceCommand::RevertSnapshot { vm_id, snapshot_id } => {
+            let label = snapshot_label(state, vm_id, snapshot_id);
+            match request(c, Request::RevertSnapshot { vm_id, snapshot_id }).await? {
+                ServerMessage::Response {
+                    result: ResponseBody::SnapshotReverted { .. },
+                    ..
+                } => {
+                    snapshot_done(
+                        lanes,
+                        vm_id,
+                        SnapshotOp::Revert(snapshot_id),
+                        snapshot_id,
+                        format!("reverted to: {label}"),
+                    );
+                    Ok(())
+                }
+                m => Err(context("revert", failure(&m))),
+            }
+        }
+        ServiceCommand::DeleteSnapshot { vm_id, snapshot_id } => {
+            let label = snapshot_label(state, vm_id, snapshot_id);
+            match request(c, Request::DeleteSnapshot { vm_id, snapshot_id }).await? {
+                ServerMessage::Response {
+                    result: ResponseBody::SnapshotDeleted { .. },
+                    ..
+                } => {
+                    if let Some(t) = lock(state)
+                        .snapshots
+                        .get_mut(&vm_id)
+                        .and_then(|l| l.tree.as_mut())
+                    {
+                        t.snapshots.retain(|s| s.snapshot_id != snapshot_id);
+                        t.snapshots.iter_mut().for_each(|s| {
+                            if s.parent == Some(snapshot_id) {
+                                s.parent = None;
+                            }
+                        });
+                        if t.current == Some(snapshot_id) {
+                            t.current = None;
+                        }
+                    }
+                    snapshot_done(
+                        lanes,
+                        vm_id,
+                        SnapshotOp::Delete(snapshot_id),
+                        snapshot_id,
+                        format!("snapshot deleted: {label}"),
+                    );
+                    Ok(())
+                }
+                m => Err(context("snapshot deletion", failure(&m))),
+            }
+        }
+        ServiceCommand::RenameSnapshot {
+            vm_id,
+            snapshot_id,
+            name,
+            description,
+        } => {
+            let body = Request::UpdateSnapshot {
+                vm_id,
+                snapshot_id,
+                name,
+                description,
+            };
+            match request(c, body).await? {
+                ServerMessage::Response {
+                    result: ResponseBody::Snapshot { snapshot },
+                    ..
+                } => {
+                    if let Some(s) = lock(state)
+                        .snapshots
+                        .get_mut(&vm_id)
+                        .and_then(|l| l.tree.as_mut())
+                        .and_then(|t| {
+                            t.snapshots
+                                .iter_mut()
+                                .find(|s| s.snapshot_id == snapshot.snapshot_id)
+                        })
+                    {
+                        s.name = snapshot.name.clone();
+                        s.description = snapshot.description.clone();
+                    }
+                    snapshot_done(
+                        lanes,
+                        vm_id,
+                        SnapshotOp::Rename(snapshot_id),
+                        snapshot.snapshot_id,
+                        format!("snapshot renamed: {}", snapshot.name.as_str()),
+                    );
+                    Ok(())
+                }
+                m => Err(context("snapshot rename", failure(&m))),
             }
         }
         ServiceCommand::GetAgentAccess => match request(c, Request::GetAgentAccess).await? {
@@ -3060,6 +3341,31 @@ fn baseline_done(lanes: &Lanes, vm_id: VmId, op: BaselineOp, id: BaselineId, out
     });
     lanes.queue(ServiceCommand::Refresh);
     lanes.queue(ServiceCommand::ListBaselines(vm_id));
+}
+
+/// Name of a known snapshot, for the outcome line.
+fn snapshot_label(state: &Mutex<ServiceState>, vm_id: VmId, id: SnapshotId) -> String {
+    lock(state)
+        .snapshots
+        .get(&vm_id)
+        .and_then(|l| l.tree.as_ref())
+        .and_then(|t| t.snapshots.iter().find(|s| s.snapshot_id == id))
+        .map_or_else(|| "snapshot".into(), |s| s.name.as_str().to_owned())
+}
+
+/// Records a successful snapshot operation and re-reads the VM list and the
+/// snapshots (queued: the storage lane does not wait for them).
+fn snapshot_done(lanes: &Lanes, vm_id: VmId, op: SnapshotOp, id: SnapshotId, outcome: String) {
+    lanes.update(|s| {
+        s.snapshot = Some(SnapshotRequest {
+            vm_id,
+            op,
+            status: RequestStatus::Done(id),
+        });
+        s.last_outcome = Some(outcome);
+    });
+    lanes.queue(ServiceCommand::Refresh);
+    lanes.queue(ServiceCommand::ListSnapshots(vm_id));
 }
 
 /// Re-reads the list after a successful change: a failure is reported in
