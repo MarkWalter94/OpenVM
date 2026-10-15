@@ -122,6 +122,7 @@ impl VmChanges {
 /// 2 vCPU, 2048 MiB, 16 GiB disk, offline profile, UEFI, default limits.
 pub fn default_config(name: &str) -> Result<VmConfig, String> {
     Ok(VmConfig {
+        tools: Default::default(),
         name: lightvm_proto::VmName::parse(name)
             .map_err(|e| format!("invalid VM name \"{name}\": {e}"))?,
         guest_os: lightvm_proto::GuestOs::UbuntuLtsX86_64,
@@ -489,6 +490,8 @@ pub fn vm_settings_ui(
             theme::divider(ui);
             network_ui(ui, c, &mut m.ports);
             theme::divider(ui);
+            tools_ui(ui, &mut c.tools);
+            theme::divider(ui);
             group_caption(ui, "Execution limits, enforced by the supervisor");
             let l = &mut c.limits;
             theme::row(
@@ -580,12 +583,80 @@ pub fn vm_settings_ui(
     outcome
 }
 
+/// Explicit host integration; folders are selected by the user, never an agent.
+fn tools_ui(ui: &mut egui::Ui, tools: &mut lightvm_proto::ToolsConfig) {
+    group_caption(ui, "LightVM Tools");
+    ui.checkbox(&mut tools.enabled, "Enable LightVM Tools for this VM");
+    ui.label("Install the guest component from the LIGHTVM_TOOLS CD. Agent access requires a separate session approval.");
+    ui.add_enabled_ui(tools.enabled, |ui| {
+        ui.checkbox(&mut tools.clipboard, "Allow clipboard text");
+        ui.checkbox(
+            &mut tools.files_transfer,
+            "Allow transfers to guest inbox and from guest outbox",
+        );
+        ui.checkbox(
+            &mut tools.ui_inspect,
+            "Allow inspection of guest application controls",
+        );
+        ui.add_enabled(
+            tools.ui_inspect,
+            egui::Checkbox::new(
+                &mut tools.ui_act,
+                "Allow actions on guest application controls",
+            ),
+        );
+        if !tools.ui_inspect {
+            tools.ui_act = false;
+        }
+        ui.label("Shared host folders (read-only unless Write is ticked)");
+        let mut remove = None;
+        for (i, share) in tools.shares.iter_mut().enumerate() {
+            ui.push_id(i, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut share.name)
+                            .hint_text("Share name")
+                            .desired_width(120.0),
+                    );
+                    ui.label(&share.root);
+                    ui.checkbox(&mut share.writable, "Write");
+                    if ui.button("Remove").clicked() {
+                        remove = Some(i);
+                    }
+                });
+            });
+        }
+        if let Some(i) = remove {
+            tools.shares.remove(i);
+        }
+        if tools.shares.len() < 32
+            && ui.button("Add shared folder…").clicked()
+            && let Some(mut picker) = crate::native_folder_picker()
+            && let Some(folder) = picker("Choose a host folder to share with this VM")
+        {
+            let name = (1..=1000)
+                .map(|n| format!("Share{n}"))
+                .find(|n| !tools.shares.iter().any(|s| s.name.eq_ignore_ascii_case(n)))
+                .unwrap_or_else(|| "Share".into());
+            tools.shares.push(lightvm_proto::ToolShare {
+                name,
+                root: folder.to_string_lossy().into_owned(),
+                writable: false,
+            });
+        }
+        if let Err(e) = tools.validate() {
+            theme::notice(ui, &e.message, Tone::Warning);
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn cfg() -> VmConfig {
         VmConfig {
+            tools: Default::default(),
             name: lightvm_proto::VmName::parse("test").unwrap(),
             guest_os: lightvm_proto::GuestOs::UbuntuLtsX86_64,
             vcpus: 2,

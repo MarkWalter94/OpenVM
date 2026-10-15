@@ -310,6 +310,41 @@
         "input_owner"
       ]
     },
+    "AuditOutcome": {
+      "description": "Recorded outcome.",
+      "oneOf": [
+        {
+          "description": "Accepted (queued).",
+          "type": "string",
+          "const": "accepted"
+        },
+        {
+          "description": "Forwarded to the backend.",
+          "type": "string",
+          "const": "forwarded"
+        },
+        {
+          "description": "Completed.",
+          "type": "string",
+          "const": "succeeded"
+        },
+        {
+          "description": "Failed.",
+          "type": "string",
+          "const": "failed"
+        },
+        {
+          "description": "Denied: no effect.",
+          "type": "string",
+          "const": "denied"
+        },
+        {
+          "description": "Discarded before forwarding: no effect.",
+          "type": "string",
+          "const": "discarded"
+        }
+      ]
+    },
     "BaselineId": {
       "description": "BaselineId: version 7 UUID, lowercase with hyphens.",
       "type": "string",
@@ -470,6 +505,18 @@
     "Capability": {
       "description": "Authorizable action on a VM. Serialized names follow the MCP catalog\n(ROADMAP 9); `vm.input` covers mouse and keyboard.",
       "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "share.read",
+            "share.write",
+            "clipboard",
+            "files.transfer",
+            "usb",
+            "ui.inspect",
+            "ui.act"
+          ]
+        },
         {
           "description": "List filtered by the grant.",
           "type": "string",
@@ -873,6 +920,9 @@
         "session_id": {
           "description": "Session it is bound to.",
           "$ref": "#/$defs/SessionId"
+        },
+        "tools": {
+          "$ref": "#/$defs/ToolGrant"
         },
         "vm_allowlist": {
           "description": "Allowed VMs (explicit allowlist; empty = no VM).",
@@ -2315,6 +2365,31 @@
           ]
         },
         {
+          "description": "Tools metadata, never file contents or clipboard/UI values.",
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string"
+            },
+            "detail": {
+              "$ref": "#/$defs/ToolAudit"
+            },
+            "kind": {
+              "type": "string",
+              "const": "tools"
+            },
+            "outcome": {
+              "$ref": "#/$defs/AuditOutcome"
+            }
+          },
+          "required": [
+            "kind",
+            "action",
+            "outcome",
+            "detail"
+          ]
+        },
+        {
           "description": "Service note (plain text).",
           "type": "object",
           "properties": {
@@ -2397,6 +2472,22 @@
     "ResponseBody": {
       "description": "Results of the operations.",
       "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "guest_tools"
+            },
+            "reply": {
+              "$ref": "#/$defs/ToolReply"
+            }
+          },
+          "required": [
+            "kind",
+            "reply"
+          ]
+        },
         {
           "description": "Response to `ping`.",
           "type": "object",
@@ -4173,6 +4264,10 @@
             }
           ]
         },
+        "tools": {
+          "description": "Named Tools resources granted to this session.",
+          "$ref": "#/$defs/ToolGrant"
+        },
         "usage": {
           "description": "Consumption.",
           "$ref": "#/$defs/SessionUsage"
@@ -4378,6 +4473,10 @@
               "type": "null"
             }
           ]
+        },
+        "tools": {
+          "description": "Named Tools resources authorized for this session.",
+          "$ref": "#/$defs/ToolGrant"
         },
         "verdicts": {
           "description": "Verdicts in order (the last one is the current outcome).",
@@ -5012,6 +5111,400 @@
         }
       ]
     },
+    "ToolAudit": {
+      "type": "object",
+      "properties": {
+        "bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "feature": {
+          "type": "string"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "share": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "feature"
+      ]
+    },
+    "ToolFileEntry": {
+      "description": "Directory entry: names and metadata, never host paths.",
+      "type": "object",
+      "properties": {
+        "directory": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        },
+        "size": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "directory",
+        "size"
+      ]
+    },
+    "ToolFileReply": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "entries": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ToolFileEntry"
+              }
+            },
+            "result": {
+              "type": "string",
+              "const": "entries"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "result",
+            "entries"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "data": {
+              "type": "string"
+            },
+            "eof": {
+              "type": "boolean"
+            },
+            "offset": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "result": {
+              "type": "string",
+              "const": "data"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "result",
+            "offset",
+            "data",
+            "eof"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "result": {
+              "type": "string",
+              "const": "transfer"
+            },
+            "transfer": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "result",
+            "transfer"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "result": {
+              "type": "string",
+              "const": "ok"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "result"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "result": {
+              "type": "string",
+              "const": "error"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "result",
+            "code"
+          ]
+        }
+      ]
+    },
+    "ToolGrant": {
+      "description": "Named subsets granted by the user. Booleans in `shares` denote write\npermission; feature capabilities remain independently required.",
+      "type": "object",
+      "properties": {
+        "shares": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "boolean"
+          }
+        },
+        "usb_devices": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "ToolReply": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "result": {
+              "type": "string",
+              "const": "ok"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "result"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "result": {
+              "type": "string",
+              "const": "clipboard"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "result",
+            "text"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "nodes": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ToolUiNode"
+              }
+            },
+            "result": {
+              "type": "string",
+              "const": "tree"
+            },
+            "tree": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "truncated": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "result",
+            "tree",
+            "nodes",
+            "truncated"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "reply": {
+              "$ref": "#/$defs/ToolFileReply"
+            },
+            "result": {
+              "type": "string",
+              "const": "file"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "result",
+            "reply"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "result": {
+              "type": "string",
+              "const": "error"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "result",
+            "code"
+          ]
+        }
+      ]
+    },
+    "ToolShare": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "root": {
+          "description": "Host folder chosen explicitly in the user UI. Never sent to agents\nor the guest; the supervisor opens it without following links.",
+          "type": "string"
+        },
+        "writable": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "root"
+      ]
+    },
+    "ToolUiNode": {
+      "type": "object",
+      "properties": {
+        "automation_id": {
+          "type": "string"
+        },
+        "control_type": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "focused": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "name": {
+          "type": "string"
+        },
+        "parent": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "rect": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "maxItems": 4,
+          "minItems": 4
+        },
+        "value": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "control_type",
+        "name",
+        "automation_id",
+        "enabled",
+        "focused",
+        "rect"
+      ]
+    },
+    "ToolsConfig": {
+      "type": "object",
+      "properties": {
+        "clipboard": {
+          "type": "boolean",
+          "default": false
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "files_transfer": {
+          "type": "boolean",
+          "default": false
+        },
+        "shares": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ToolShare"
+          }
+        },
+        "ui_act": {
+          "type": "boolean",
+          "default": false
+        },
+        "ui_inspect": {
+          "type": "boolean",
+          "default": false
+        },
+        "usb_devices": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
     "UtcTimestamp": {
       "description": "RFC 3339 UTC instant with Z suffix, millisecond precision.",
       "type": "string",
@@ -5142,7 +5635,7 @@
       }
     },
     "VmConfig": {
-      "description": "VM configuration requested by the user. No field is a path or\na QEMU option: media are referenced by [`MediaId`] of the approved registry.",
+      "description": "VM configuration requested by the user. Media reference the approved\nregistry. Tools share roots are explicit user-approved folder settings\n(ADR-0031); no agent request or QEMU option is interpreted as a host path.",
       "type": "object",
       "properties": {
         "data_media": {
@@ -5222,6 +5715,10 @@
           "description": "Network mode (ADR-0033); `offline` by default.",
           "$ref": "#/$defs/NetworkProfile",
           "default": "offline"
+        },
+        "tools": {
+          "description": "Off by default. User-only settings for host integration.",
+          "$ref": "#/$defs/ToolsConfig"
         },
         "vcpus": {
           "description": "Number of vCPUs (not a CPU percentage limit: ROADMAP 7.2).",

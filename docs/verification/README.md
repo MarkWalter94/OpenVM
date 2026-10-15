@@ -67,6 +67,7 @@ Examples: `F0-01-toolchain-eframe.md`, `F0-02-qemu-whpx-qmp.md`, `F1-04-start-st
 | `R6-01b-vmware-import-real.md` | R6 (real VMware VMs, continuation of `R6-01`) | every real VM of the host executed: the suspended VM refused, Debian 12 to the session entry, Windows Vista (LSI Logic) and Linux Mint to the desktop (the Vista with the automatic storage driver preparation); the legacy-BIOS NVMe Windows 10 VM boots but the guest resets itself in early boot under WHPX (open) | complete |
 | `R6-02-lsi-driver-spike.md` | R6 (offline storage-driver preparation for LSI Logic Windows guests) | decided, implemented and verified on the real Windows Vista guest: the storage helper enables the guest's own driver in the converted copy (stop 0x7B unprepared, desktop prepared) | complete |
 | `R6-06-guest-network.md` | R6 (guest network: NAT in manual use, endpoint allowlist, `network.endpoints`; ADR-0033) | partial: stack, core, service, MCP and UI verified in test; allowlist and NAT with a real Linux guest at the QEMU level and product command lines under WHPX verified on hardware; product end to end without guest traffic; Windows guest with WCF and SQL Server not verified | complete |
+| `R6-07-lightvm-tools.md` | R6 (Tools foundation and product wiring, ADR-0031/0034/0036) | partial: guest components, settings/grants, isolated channels, MCP/UI RPC, audit and recovery journal; local tests and cross-build checks, no real guest qualification | paused for commit/push; Tools, Windows 11 x64 and R1 remain open |
 
 ## Template
 

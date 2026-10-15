@@ -40,6 +40,9 @@
       "description": "Session it is bound to.",
       "$ref": "#/$defs/SessionId"
     },
+    "tools": {
+      "$ref": "#/$defs/ToolGrant"
+    },
     "vm_allowlist": {
       "description": "Allowed VMs (explicit allowlist; empty = no VM).",
       "type": "array",
@@ -62,6 +65,18 @@
     "Capability": {
       "description": "Authorizable action on a VM. Serialized names follow the MCP catalog\n(ROADMAP 9); `vm.input` covers mouse and keyboard.",
       "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "share.read",
+            "share.write",
+            "clipboard",
+            "files.transfer",
+            "usb",
+            "ui.inspect",
+            "ui.act"
+          ]
+        },
         {
           "description": "List filtered by the grant.",
           "type": "string",
@@ -179,6 +194,26 @@
       "type": "string",
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "ToolGrant": {
+      "description": "Named subsets granted by the user. Booleans in `shares` denote write\npermission; feature capabilities remain independently required.",
+      "type": "object",
+      "properties": {
+        "shares": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "boolean"
+          }
+        },
+        "usb_devices": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
     },
     "UtcTimestamp": {
       "description": "RFC 3339 UTC instant with Z suffix, millisecond precision.",

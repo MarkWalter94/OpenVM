@@ -107,6 +107,8 @@ pub trait Backend: Send + 'static {
 
 /// Priority stop path.
 pub trait EmergencyStop: Send + Sync + 'static {
+    /// Revoke run-owned integrations before the normal supervisor queue.
+    fn suspend_tools(&self, _vm_id: Option<VmId>) {}
     /// Terminates the process tree with OS primitives without waiting for QMP.
     /// Must return only after observing the end of the processes or a timeout.
     fn emergency_stop_all(&self) -> EmergencyOutcome;
@@ -126,6 +128,11 @@ pub use lightvm_proto::ipc::ParentLossPolicy;
 /// Requests served by the supervisor thread.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SupervisorRequest {
+    GuestTools {
+        vm_id: VmId,
+        run_id: RunId,
+        call: lightvm_proto::ToolCall,
+    },
     Ping,
     GetCapabilities,
     ListVms,
@@ -606,7 +613,9 @@ impl SupervisorThread {
         let mut next_observe = Instant::now() + OBSERVE_INTERVAL;
         loop {
             let wait = next_observe.saturating_duration_since(Instant::now());
-            self.resume.mark();
+            // Check jumps that happened while the previous command was
+            // served too; marking first would erase that evidence.
+            self.check_resume();
             let received = rx.recv_timeout(wait);
             // Before serving anything and before the expiry check: a host
             // resume ends the agent sessions first (ROADMAP 7.3).
@@ -1420,6 +1429,7 @@ impl SupervisorThread {
             lightvm_proto::Sha256Digest::from_bytes(sha2::Sha256::digest(&bytes).into())
         };
         self.reports.open(OpenReport {
+            tools: c.grant.tools.clone(),
             session_id: info.session_id,
             vm_id: info.vm_id,
             vm_name: ctx.name,
@@ -1749,6 +1759,9 @@ impl SupervisorThread {
         }
         // ADR-0033: allowed endpoints follow the sessions; connections and
         // refusals of the endpoint allowlist go to the audit and reports.
+        for r in self.engine.sync_tools() {
+            self.reports.tools(&r);
+        }
         for r in self.engine.sync_network() {
             self.reports.network(r.vm_id, r.action, &r.detail);
         }
@@ -2081,6 +2094,14 @@ impl SupervisorThread {
                 .engine
                 .vm_status(who()?, vm_id)
                 .map(|vm| ResponseBody::Vm { vm }),
+            SupervisorRequest::GuestTools {
+                vm_id,
+                run_id,
+                call,
+            } => self
+                .engine
+                .tools_call(who()?, vm_id, run_id, call)
+                .map(|reply| ResponseBody::GuestTools { reply }),
             SupervisorRequest::CreateVm(config) => self
                 .engine
                 .create_vm(who()?, *config)

@@ -80,7 +80,9 @@ pub const MAX_PENDING_RECORDS: usize = 10_000;
 /// gateway, the DNS server or the broadcast address).
 #[must_use]
 pub fn is_virtual_ip(ip: Ipv4Addr) -> bool {
-    (FIRST_VIRTUAL_IP..=LAST_VIRTUAL_IP).contains(&ip)
+    // .99 is reserved for the authenticated Tools channel. Public VM
+    // endpoints still start at .100 (lightvm-proto validation).
+    ip == Ipv4Addr::new(10, 0, 2, 99) || (FIRST_VIRTUAL_IP..=LAST_VIRTUAL_IP).contains(&ip)
 }
 
 /// An approved endpoint with its host address already resolved.
@@ -108,6 +110,8 @@ impl EndpointSpec {
 /// Configuration of a stack.
 #[derive(Clone, Debug)]
 pub struct NetConfig {
+    /// Tools beside NAT must not replace the guest's Internet DNS server.
+    pub advertise_dns: bool,
     /// Endpoints of the VM (resolved). The allowed subset is given
     /// separately and can change at run time.
     pub endpoints: Vec<EndpointSpec>,
@@ -126,6 +130,7 @@ impl NetConfig {
     #[must_use]
     pub fn new(endpoints: Vec<EndpointSpec>) -> Self {
         Self {
+            advertise_dns: true,
             endpoints,
             max_connections: DEFAULT_MAX_CONNECTIONS,
             max_bytes_per_second: None,

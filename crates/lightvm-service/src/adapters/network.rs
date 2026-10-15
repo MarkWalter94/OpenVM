@@ -37,6 +37,8 @@ pub(crate) struct NetRun {
     pub(crate) stack: Option<NetStack>,
     /// Allowed set last applied (`None` = never set).
     pub(crate) applied: Option<BTreeSet<String>>,
+    /// Reserved, authenticated channels; never grantable as public endpoints.
+    pub(crate) internal: BTreeSet<String>,
 }
 
 impl NetRun {
@@ -48,7 +50,7 @@ impl NetRun {
         if self.applied.as_ref() == Some(allowed) {
             return false;
         }
-        s.set_allowed(allowed.iter().cloned());
+        s.set_allowed(allowed.iter().cloned().chain(self.internal.iter().cloned()));
         self.applied = Some(allowed.clone());
         true
     }
@@ -130,6 +132,7 @@ pub(crate) fn setup(
     vm: &VmRecord,
     run_id: RunId,
     socket: Option<&Path>,
+    tools: Option<&crate::tools::ToolsRun>,
 ) -> (Option<NetRun>, Vec<NetworkRecord>) {
     let mode = vm.config.network;
     let mut recs = vec![setup_record(
@@ -141,11 +144,16 @@ pub(crate) fn setup(
             ..NetworkAudit::default()
         },
     )];
-    if mode != NetworkProfile::Endpoints {
+    if mode != NetworkProfile::Endpoints && tools.is_none() {
         return (None, recs);
     }
     let mut specs = Vec::new();
-    for e in &vm.config.endpoints {
+    for e in vm
+        .config
+        .endpoints
+        .iter()
+        .filter(|_| mode == NetworkProfile::Endpoints)
+    {
         let r = resolve(&e.host, e.port);
         recs.push(endpoint_record(vm.id, run_id, e, &r));
         if let Ok(target) = r {
@@ -157,14 +165,21 @@ pub(crate) fn setup(
             });
         }
     }
+    let internal = if let Some(t) = tools {
+        specs.extend(t.endpoints());
+        crate::tools::ToolsRun::allowed_endpoints()
+    } else {
+        BTreeSet::new()
+    };
     let stack = socket
         .ok_or_else(|| "the run has no network socket".to_owned())
         .and_then(|p| connect(p).map_err(|e| format!("network socket: {e}")))
         .and_then(|s| guest_net::transport::attach(s).map_err(|e| e.to_string()))
         .and_then(|link| {
             let mut cfg = NetConfig::new(specs);
+            cfg.advertise_dns = mode == NetworkProfile::Endpoints;
             cfg.max_connections = MAX_CONNECTIONS;
-            NetStack::start(cfg, link, Vec::<String>::new()).map_err(|e| e.to_string())
+            NetStack::start(cfg, link, internal.clone()).map_err(|e| e.to_string())
         });
     match stack {
         Ok(s) => (
@@ -172,6 +187,7 @@ pub(crate) fn setup(
                 run_id,
                 stack: Some(s),
                 applied: None,
+                internal,
             }),
             recs,
         ),
@@ -192,6 +208,7 @@ pub(crate) fn setup(
                     run_id,
                     stack: None,
                     applied: None,
+                    internal,
                 }),
                 recs,
             )

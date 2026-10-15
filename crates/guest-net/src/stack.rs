@@ -600,7 +600,7 @@ impl Stack {
         let Some(kind) = dhcp::reply_type(&m) else {
             return;
         };
-        let reply = dhcp::build_reply(&m, kind);
+        let reply = dhcp::build_reply_with_dns(&m, kind, self.cfg.advertise_dns);
         let f = frame::udp_frame(
             [0xff; 6],
             SocketAddrV4::new(GATEWAY_IP, 67),

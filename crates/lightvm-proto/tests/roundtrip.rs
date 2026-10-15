@@ -23,6 +23,7 @@ fn vm(n: u8) -> VmId {
 
 fn sample_config() -> VmConfig {
     VmConfig {
+        tools: Default::default(),
         name: VmName::parse("ubuntu-lts 24.04").unwrap(),
         guest_os: GuestOs::UbuntuLtsX86_64,
         vcpus: 2,
@@ -226,6 +227,7 @@ fn models_roundtrip() {
     });
     rt(&ResourceLimits::MVP_DEFAULT);
     rt(&AuditEvent {
+        tools: None,
         seq: 1,
         at: ts(1),
         actor: Actor::User,
@@ -331,6 +333,7 @@ fn network_endpoint_validation() {
 fn session_types_roundtrip() {
     let sid = SessionId::from_unix_millis(1, [1; 10]);
     let grant = Grant {
+        tools: Default::default(),
         id: GrantId::from_unix_millis(1, [2; 10]),
         session_id: sid,
         vm_allowlist: BTreeSet::from([vm(1)]),
@@ -376,6 +379,13 @@ fn session_types_roundtrip() {
     assert_eq!(
         caps,
         [
+            "share.read",
+            "share.write",
+            "clipboard",
+            "files.transfer",
+            "usb",
+            "ui.inspect",
+            "ui.act",
             "vm.list",
             "vm.status",
             "vm.start",

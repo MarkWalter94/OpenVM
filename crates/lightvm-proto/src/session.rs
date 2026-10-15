@@ -50,11 +50,46 @@ pub enum Capability {
     /// the session's VM runs without network.
     #[serde(rename = "network.endpoints")]
     NetworkEndpoints,
+    #[serde(rename = "share.read")]
+    ShareRead,
+    #[serde(rename = "share.write")]
+    ShareWrite,
+    #[serde(rename = "clipboard")]
+    Clipboard,
+    #[serde(rename = "files.transfer")]
+    FilesTransfer,
+    #[serde(rename = "usb")]
+    Usb,
+    #[serde(rename = "ui.inspect")]
+    UiInspect,
+    #[serde(rename = "ui.act")]
+    UiAct,
 }
 
 impl Capability {
+    /// VM controls available before optional guest integrations.
+    pub const VM_CONTROLS: [Capability; 11] = [
+        Self::VmList,
+        Self::VmStatus,
+        Self::VmStart,
+        Self::VmStop,
+        Self::VmReset,
+        Self::VmScreenshot,
+        Self::VmInput,
+        Self::VmSnapshot,
+        Self::VmRestore,
+        Self::VmLogs,
+        Self::NetworkEndpoints,
+    ];
     /// All capabilities.
-    pub const ALL: [Capability; 11] = [
+    pub const ALL: [Capability; 18] = [
+        Capability::ShareRead,
+        Capability::ShareWrite,
+        Capability::Clipboard,
+        Capability::FilesTransfer,
+        Capability::Usb,
+        Capability::UiInspect,
+        Capability::UiAct,
         Capability::VmList,
         Capability::VmStatus,
         Capability::VmStart,
@@ -83,6 +118,13 @@ impl Capability {
             Capability::VmRestore => "vm.restore",
             Capability::VmLogs => "vm.logs",
             Capability::NetworkEndpoints => "network.endpoints",
+            Capability::ShareRead => "share.read",
+            Capability::ShareWrite => "share.write",
+            Capability::Clipboard => "clipboard",
+            Capability::FilesTransfer => "files.transfer",
+            Capability::Usb => "usb",
+            Capability::UiInspect => "ui.inspect",
+            Capability::UiAct => "ui.act",
         }
     }
 
@@ -97,6 +139,24 @@ impl Capability {
                 | Capability::VmInput
                 | Capability::VmSnapshot
                 | Capability::VmRestore
+                | Capability::ShareWrite
+                | Capability::Clipboard
+                | Capability::FilesTransfer
+                | Capability::Usb
+                | Capability::UiAct
+        )
+    }
+
+    pub const fn is_integration(self) -> bool {
+        matches!(
+            self,
+            Self::ShareRead
+                | Self::ShareWrite
+                | Self::Clipboard
+                | Self::FilesTransfer
+                | Self::Usb
+                | Self::UiInspect
+                | Self::UiAct
         )
     }
 }
@@ -217,6 +277,8 @@ pub struct EffectivePolicy {
 /// Grant issued by the supervisor after the user's approval in the app (ROADMAP 9).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Grant {
+    #[serde(default, skip_serializing_if = "crate::ToolGrant::is_empty")]
+    pub tools: crate::ToolGrant,
     /// Identifier.
     pub id: GrantId,
     /// Session it is bound to.

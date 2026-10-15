@@ -219,11 +219,12 @@ async fn pairing_file(u: &mut Client, svc: &Svc) -> PathBuf {
 }
 
 fn all_caps() -> CapabilitySet {
-    Capability::ALL.into_iter().collect()
+    Capability::VM_CONTROLS.into_iter().collect()
 }
 
 fn approval(vm: VmId, caps: CapabilitySet, give_input: bool) -> SessionApproval {
     SessionApproval {
+        tools: Default::default(),
         vm_id: vm,
         capabilities: caps,
         duration_s: 3600,

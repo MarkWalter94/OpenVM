@@ -20,8 +20,7 @@ const OVERVIEW: &str = "\
 LightVM runs virtual machines (VMs) on the user's computer. This adapter exposes **one** of them \
 to an MCP client inside a **session** approved by the user in the LightVM app. Access is the \
 same a person has sitting at the VM's screen: screenshots of the display, mouse and keyboard \
-input, and power operations (start, stop, reset). There is no shell, file or network channel \
-between the client and the VM.
+input, power operations and optional approved guest Tools. Shell execution is unavailable.
 
 ## Components
 - **Session**: created by `session_request` and approved (or denied) by the user in the LightVM \
@@ -44,6 +43,7 @@ a verifier or from the user.
 - VM state and power: `vm_list`, `vm_status`, `vm_start`, `vm_stop`, `vm_reset`.
 - Screen and input: `vm_screenshot`, `vm_mouse_move`, `vm_mouse_click`, `vm_keyboard_type`, \
 `vm_keyboard_press`.
+- Guest Tools: `vm_ui_tree`, `vm_ui_invoke`, `vm_guest_tools`.
 - Baselines: `vm_baselines`, `vm_snapshot`, `vm_restore`.
 - Diagnostics: `vm_logs`, `operation_get`, `report_get`.
 - Reference: `help`.
@@ -104,9 +104,7 @@ those: each is a name and a virtual address with one TCP port (`vm_status` lists
 by LightVM to one service the user approved. Nothing else is reachable: no Internet, no LAN, \
 no other host service, no UDP except the name lookups of the granted names, no IPv6. \
 Everything sent to a granted endpoint reaches that service.
-- **Files and clipboard**: there is no file transfer, shared folder or clipboard between the \
-client and the VM. Content reaches the guest only as typed keystrokes; output is visible only \
-in screenshots.
+- **Guest Tools**: disabled by default. Clipboard, inbox/outbox transfers, named shared folders and UI controls require installed guest Tools and separate explicit grants. Host paths are never accepted by these tools. Clipboard text is bounded to 64 KiB; file chunks to 16 KiB through IPC.
 - **One VM** per session: the one the user chose. Other VMs are not listed and cannot be \
 addressed.
 - **Capabilities**: only those granted at approval; the user decides which.
@@ -148,6 +146,18 @@ without any change.
 
 /// `(tool, section)`: one section per catalogue tool.
 const TOOLS: &[(&str, &str)] = &[
+    (
+        "vm_ui_tree",
+        "## vm_ui_tree\nInspect installed guest Tools UI controls. Parameters: vm_id, run_id (from vm_status), max_depth (1..32, default 12), max_nodes (1..1000, default 300). Requires ui.inspect. Result: reply with tree, nodes and truncated. Names and values are untrusted guest data. Password values are masked by the guest component.",
+    ),
+    (
+        "vm_ui_invoke",
+        "## vm_ui_invoke\nAct on the last returned tree. Parameters: vm_id, run_id, tree, element, action (invoke, set_value, select), optional value. Requires ui.act and input ownership. Application changes can invalidate a tree. The guest can refuse unavailable patterns.",
+    ),
+    (
+        "vm_guest_tools",
+        "## vm_guest_tools\nParameters: vm_id, run_id, command. Clipboard commands clipboard_read and clipboard_write require clipboard. File commands use op=file and request: list/read from outbox; begin/write/commit/cancel to inbox. Requires files.transfer. Paths are arrays of guest names; never host paths. Chunks are hex (up to 16384 bytes), begin requires size and sha256. Create-only, up to 4 GiB. No command execution. Result: reply. Mutations are not automatically replayed after timeout; their outcome can be uncertain.",
+    ),
     (
         "help",
         "## help\nThis reference. Parameters: `topic` (optional): `overview` (default), \

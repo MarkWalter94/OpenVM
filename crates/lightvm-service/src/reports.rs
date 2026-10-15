@@ -47,6 +47,7 @@ pub const FIXTURE_VERIFIER: &str = "adr-0019-fixture-pixel v1 (lightvm-fixture)"
 /// Facts of a new report, gathered at the approval.
 #[derive(Debug, Clone)]
 pub(crate) struct OpenReport {
+    pub(crate) tools: lightvm_proto::ToolGrant,
     pub(crate) session_id: SessionId,
     pub(crate) vm_id: VmId,
     pub(crate) vm_name: String,
@@ -407,6 +408,7 @@ impl ReportStore {
             policy_revision: o.policy_revision,
             capabilities: o.capabilities,
             network_endpoints: o.network_endpoints,
+            tools: o.tools,
             quotas: o.quotas,
             expires_at: o.expires_at,
             versions: o.versions,
@@ -602,6 +604,23 @@ impl ReportStore {
                 },
             );
             l.dirty = true;
+        }
+    }
+
+    pub(crate) fn tools(&mut self, record: &crate::engine::ToolsRecord) {
+        for l in self.live.values_mut() {
+            if l.report.vm_id == record.vm_id && l.report.state != SessionState::Terminated {
+                Self::push(
+                    &mut l.report,
+                    UtcTimestamp::now(),
+                    ReportEventBody::Tools {
+                        action: name_of(&record.action),
+                        outcome: record.outcome,
+                        detail: record.detail.clone(),
+                    },
+                );
+                l.dirty = true;
+            }
         }
     }
 
@@ -1265,6 +1284,17 @@ pub(crate) fn event_text(b: &ReportEventBody) -> String {
             format!("agent declaration: claims {}", name_of(claimed_outcome))
         }
         ReportEventBody::Network { action, detail } => network_text(action, detail),
+        ReportEventBody::Tools {
+            action,
+            outcome,
+            detail,
+        } => format!(
+            "Tools {} {:?}: {} {} bytes",
+            plain(action, 64),
+            outcome,
+            plain(detail.feature.as_str(), 64),
+            detail.bytes.unwrap_or(0)
+        ),
         ReportEventBody::Note { text } => format!("note: {}", plain(text, 512)),
     }
 }
@@ -1698,6 +1728,7 @@ mod tests {
         let id = SessionId::new_v7();
         let vm = VmId::new_v7();
         store.open(OpenReport {
+            tools: Default::default(),
             session_id: id,
             vm_id: vm,
             vm_name: "vm".into(),

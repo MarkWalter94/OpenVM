@@ -357,6 +357,8 @@ const USB_CONTROLLER_ID: &str = "usb0";
 /// inbox driver for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NicModel {
+    /// Tools channel on ARM guests; needs the signed guest driver.
+    Virtio,
     /// Intel 82540EM (`e1000`): Linux, Windows Vista and later.
     E1000,
     /// Realtek RTL8139 (`rtl8139`): Windows XP.
@@ -367,6 +369,7 @@ impl NicModel {
     /// QEMU device name.
     pub fn qemu_name(self) -> &'static str {
         match self {
+            Self::Virtio => "virtio-net-pci",
             Self::E1000 => "e1000",
             Self::Rtl8139 => "rtl8139",
         }
@@ -385,6 +388,8 @@ pub enum GuestNetwork {
     None,
     /// QEMU user-mode network (`-netdev user`): host, LAN and Internet.
     Nat,
+    /// Manual NAT on 10.0.3/24 plus an isolated Tools NIC on 10.0.2/24.
+    NatTools,
     /// `-netdev stream` server on `net.sock` in the private directory: the
     /// supervisor connects and runs the endpoint allowlist (`guest-net`).
     Supervisor,
@@ -722,6 +727,7 @@ impl DeviceProfile {
     /// IDE CD.
     fn cdrom_location(&self, slot: u8) -> String {
         match self.machine_family {
+            MachineFamily::I440fx if slot == 3 => "bus=ide.0,unit=1".into(),
             MachineFamily::I440fx => format!("bus=ide.1,unit={slot}"),
             MachineFamily::Q35 | MachineFamily::Virt => format!("bus=ide.{slot}"),
         }
@@ -1181,17 +1187,27 @@ impl VmLaunchSpec {
             let iso = paths.media(media)?;
             push_cdrom(&mut a, proto, "cd-data", &iso, profile, 1, None);
         }
+        let tools_iso = paths.tools_iso(run)?;
+        if let Some(iso) = &tools_iso {
+            push_cdrom(&mut a, proto, "cd-tools", iso, profile, 3, None);
+        }
         let net_socket = match self.network {
             GuestNetwork::None => {
                 a.opt("-nic", "none");
                 None
             }
-            GuestNetwork::Nat | GuestNetwork::Supervisor => {
-                let nic = profile.nic().ok_or_else(|| BackendError::Unsupported {
-                    what: "a network adapter for this guest".into(),
-                    hint: "the hardware profile has no network adapter (ADR-0033)".into(),
-                })?;
-                let socket = if self.network == GuestNetwork::Supervisor {
+            GuestNetwork::Nat | GuestNetwork::Supervisor | GuestNetwork::NatTools => {
+                let nic = profile
+                    .nic()
+                    .or_else(|| tools_iso.as_ref().map(|_| NicModel::Virtio))
+                    .ok_or_else(|| BackendError::Unsupported {
+                        what: "a network adapter for this guest".into(),
+                        hint: "the hardware profile has no network adapter (ADR-0033)".into(),
+                    })?;
+                let socket = if matches!(
+                    self.network,
+                    GuestNetwork::Supervisor | GuestNetwork::NatTools
+                ) {
                     let s = private_dir.join_file(names::NET_SOCKET)?;
                     s.check_socket_len("net_socket")?;
                     a.opt(
@@ -1211,6 +1227,16 @@ impl VmLaunchSpec {
                     "-device",
                     format!("{},netdev={NETDEV_ID},mac={GUEST_MAC}", nic.qemu_name()),
                 );
+                if self.network == GuestNetwork::NatTools {
+                    a.opt(
+                        "-netdev",
+                        "user,id=nat0,net=10.0.3.0/24,dhcpstart=10.0.3.15",
+                    );
+                    a.opt(
+                        "-device",
+                        format!("{},netdev=nat0,mac=52:54:00:12:34:57", nic.qemu_name()),
+                    );
+                }
                 socket
             }
         };
@@ -1847,7 +1873,7 @@ pub(crate) mod tests {
                         }
                         assert!(cmd.net_socket.is_none());
                     }
-                    GuestNetwork::Supervisor => {
+                    GuestNetwork::Supervisor | GuestNetwork::NatTools => {
                         let sock = cmd.net_socket.as_ref().unwrap();
                         assert!(sock.as_path().starts_with(cmd.private_dir.as_path()));
                         assert!(joined.contains(&format!(

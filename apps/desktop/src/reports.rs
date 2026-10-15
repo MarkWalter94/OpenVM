@@ -415,6 +415,16 @@ pub fn event_text(e: &ReportEventBody) -> String {
             }
             s
         }
+        ReportEventBody::Tools {
+            action,
+            outcome,
+            detail,
+        } => format!(
+            "Tools {action}: {outcome:?}; {} / {} ({} bytes)",
+            detail.feature,
+            detail.share.as_deref().unwrap_or("guest"),
+            detail.bytes.unwrap_or(0)
+        ),
         ReportEventBody::Note { text } => text.clone(),
     }
 }

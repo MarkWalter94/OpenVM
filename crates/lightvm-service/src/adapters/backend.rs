@@ -118,7 +118,18 @@ use vm_storage::CatalogLayout;
 use crate::engine::{AutoReset, BackendPort, GuardedMedia, ImageTool, StartDisks};
 use crate::supervisor::{Backend, EmergencyOutcome, EmergencyStop, ParentLossPolicy};
 
-type Registry = Arc<Mutex<BTreeMap<VmId, (RunId, qemu_backend::EmergencyStop)>>>;
+type Registry = Arc<
+    Mutex<
+        BTreeMap<
+            VmId,
+            (
+                RunId,
+                qemu_backend::EmergencyStop,
+                Option<crate::tools::Stop>,
+            ),
+        >,
+    >,
+>;
 
 /// Runs terminated by the priority path (Emergency Stop), marked before the
 /// termination: their exit belongs to the core's `after_emergency_stop`.
@@ -655,6 +666,8 @@ pub fn probe(setup: QemuSetup) -> Result<(QemuHost, QemuVmBackend, HostCapacity)
         boot_keys: BTreeMap::new(),
         nets: BTreeMap::new(),
         net_records: Vec::new(),
+        tools: BTreeMap::new(),
+        tools_records: Vec::new(),
     };
     Ok((host, backend, capacity))
 }
@@ -887,6 +900,7 @@ fn storage_helper(
 /// Paths of a run for `qemu-backend`, all decided by the service.
 #[derive(Debug)]
 struct RunPaths {
+    tools_iso: Option<ManagedPath>,
     run_id: RunId,
     qemu_system: ManagedPath,
     /// OVMF code (UEFI profiles only).
@@ -920,6 +934,10 @@ impl RunPaths {
 }
 
 impl ManagedPaths for RunPaths {
+    fn tools_iso(&self, run: &RunId) -> qemu_backend::error::Result<Option<ManagedPath>> {
+        self.check(run)?;
+        Ok(self.tools_iso.clone())
+    }
     fn qemu_system(&self) -> qemu_backend::error::Result<ManagedPath> {
         Ok(self.qemu_system.clone())
     }
@@ -949,7 +967,12 @@ impl ManagedPaths for RunPaths {
     }
     fn protected_readonly(&self, run: &RunId) -> qemu_backend::error::Result<Vec<ManagedPath>> {
         self.check(run)?;
-        Ok(self.readonly.clone())
+        Ok(self
+            .readonly
+            .iter()
+            .cloned()
+            .chain(self.tools_iso.iter().cloned())
+            .collect())
     }
     fn disk_backing(&self, run: &RunId) -> qemu_backend::error::Result<Option<ManagedPath>> {
         self.check(run)?;
@@ -1031,6 +1054,8 @@ pub struct QemuVmBackend {
     nets: BTreeMap<VmId, super::network::NetRun>,
     /// Network records of runs already released, not yet taken.
     net_records: Vec<crate::engine::NetworkRecord>,
+    tools: BTreeMap<VmId, crate::tools::ToolsRun>,
+    tools_records: Vec<crate::engine::ToolsRecord>,
 }
 
 /// Route of a graceful stop task that ended.
@@ -1225,6 +1250,17 @@ impl QemuVmBackend {
     /// Releases a terminated run: QMP, sockets, protected files, Job Object,
     /// private directory.
     fn release(&mut self, vm_id: VmId) {
+        if let Some(mut t) = self.tools.remove(&vm_id) {
+            t.stop_handle().close();
+            t.files.stop();
+            if let Some(run) = self.runs.get(&vm_id) {
+                self.tools_records.extend(
+                    t.records()
+                        .into_iter()
+                        .map(|r| crate::engine::ToolsRecord::file(vm_id, run.run_id(), r)),
+                );
+            }
+        }
         lock(&self.registry).remove(&vm_id);
         // ADR-0033: the run's network ends with it (proxied connections
         // reset, records kept for the audit).
@@ -1489,6 +1525,7 @@ impl QemuVmBackend {
                 readonly.push(ManagedPath::verify(bv.clone()).map_err(|e| public(&e))?);
             }
             return Ok(RunPaths {
+                tools_iso: None,
                 run_id,
                 qemu_system: self.caps.qemu_system.clone(),
                 firmware_code,
@@ -1527,6 +1564,7 @@ impl QemuVmBackend {
         };
         let disk = self.primary_disk(vm)?;
         Ok(RunPaths {
+            tools_iso: None,
             run_id,
             qemu_system: self.caps.qemu_system.clone(),
             firmware_code,
@@ -1604,7 +1642,34 @@ impl VmBackend for QemuVmBackend {
             .unwrap_or_default();
         // From here on every error path removes the private directory.
         let private_guard = PrivateDirGuard::new(self.private_dir_for(run_id));
-        let paths = self.prepare(vm, run_id, media, current.as_ref(), &profile)?;
+        let mut paths = self.prepare(vm, run_id, media, current.as_ref(), &profile)?;
+        let tools = if vm.config.tools.enabled {
+            let binaries = crate::tools::ToolsRun::load_binaries()?;
+            let journal = ManagedPath::verify(
+                self.setup
+                    .catalog_root
+                    .join("vms")
+                    .join(vm.id.to_string())
+                    .join("tools-journal"),
+            )
+            .map_err(|e| public(&e))?;
+            prepare::restrict_to_current_user(&journal).map_err(|e| public(&e))?;
+            let t = crate::tools::ToolsRun::start(
+                vm.id,
+                run_id,
+                &vm.config.tools,
+                paths.private_dir.as_path(),
+                journal.as_path(),
+                &binaries,
+            )?;
+            paths.tools_iso = Some(
+                ManagedPath::verify(paths.private_dir.as_path().join("tools.iso"))
+                    .map_err(|e| public(&e))?,
+            );
+            Some(t)
+        } else {
+            None
+        };
         let spec = VmLaunchSpec {
             run_id,
             machine,
@@ -1623,6 +1688,8 @@ impl VmBackend for QemuVmBackend {
             data_media: vm.config.data_media,
             limits: job_limits(&vm.config, logical_cpus()),
             network: match vm.config.network {
+                NetworkProfile::Offline if tools.is_some() => GuestNetwork::Supervisor,
+                NetworkProfile::Nat if tools.is_some() => GuestNetwork::NatTools,
                 NetworkProfile::Offline => GuestNetwork::None,
                 NetworkProfile::Nat => GuestNetwork::Nat,
                 NetworkProfile::Endpoints => GuestNetwork::Supervisor,
@@ -1669,12 +1736,22 @@ impl VmBackend for QemuVmBackend {
         // core); for the endpoint allowlist the supervisor's stack attaches
         // to QEMU's netdev socket, with nothing allowed until the engine
         // applies the allowed endpoints.
-        let (net, records) = super::network::setup(vm, run_id, run.net_socket());
+        let (net, records) = super::network::setup(vm, run_id, run.net_socket(), tools.as_ref());
         self.net_records.extend(records);
         if let Some(n) = net {
             self.nets.insert(vm.id, n);
         }
-        lock(&self.registry).insert(vm.id, (run_id, run.emergency_stop_handle()));
+        lock(&self.registry).insert(
+            vm.id,
+            (
+                run_id,
+                run.emergency_stop_handle(),
+                tools.as_ref().map(crate::tools::ToolsRun::stop_handle),
+            ),
+        );
+        if let Some(t) = tools {
+            self.tools.insert(vm.id, t);
+        }
         self.runs.insert(vm.id, Arc::new(run));
         self.private_dirs.insert(vm.id, private_guard.disarm());
         let mut held: Vec<Box<dyn Send>> = Vec::new();
@@ -1887,6 +1964,58 @@ fn remove_private_dir(dir: &Path) {
 }
 
 impl BackendPort for QemuVmBackend {
+    fn take_tools_records(&mut self) -> Vec<crate::engine::ToolsRecord> {
+        let mut records = std::mem::take(&mut self.tools_records);
+        for (vm, tools) in &self.tools {
+            if let Some(run) = self.runs.get(vm) {
+                records.extend(
+                    tools
+                        .records()
+                        .into_iter()
+                        .map(|r| crate::engine::ToolsRecord::file(*vm, run.run_id(), r)),
+                );
+            }
+        }
+        records
+    }
+
+    fn suspend_tools(&mut self, vm: VmId) {
+        if let Some(t) = self.tools.get(&vm) {
+            t.stop_handle().suspend();
+        }
+    }
+    fn set_tools_policy(&mut self, vm: VmId, run: RunId, policy: crate::tools::Policy) {
+        if self.runs.get(&vm).is_some_and(|r| r.run_id() == run)
+            && let Some(t) = self.tools.get_mut(&vm)
+        {
+            t.apply(policy);
+        }
+    }
+    fn tools_call(
+        &mut self,
+        vm: VmId,
+        run: RunId,
+        command: lightvm_tools::control::Command,
+    ) -> Result<lightvm_tools::control::Reply, PublicError> {
+        self.run(vm, run)?;
+        self.tools
+            .get(&vm)
+            .ok_or_else(|| PublicError::unsupported("Tools are disabled for this VM"))?
+            .control
+            .call(command)
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::PermissionDenied => {
+                    PublicError::permission_denied("Tools permission denied")
+                }
+                std::io::ErrorKind::NotConnected => {
+                    PublicError::state_conflict("LightVM Tools are not connected in the guest")
+                }
+                std::io::ErrorKind::TimedOut => {
+                    PublicError::infrastructure("guest Tools did not answer in time")
+                }
+                _ => PublicError::infrastructure("guest Tools request failed"),
+            })
+    }
     fn image_tool(&self) -> Option<Arc<dyn ImageTool>> {
         Some(self.image_tool.clone())
     }
@@ -2138,11 +2267,22 @@ struct QemuEmergency {
 }
 
 impl EmergencyStop for QemuEmergency {
+    fn suspend_tools(&self, vm_id: Option<VmId>) {
+        let stops: Vec<_> = lock(&self.registry)
+            .iter()
+            .filter(|(vm, _)| vm_id.is_none_or(|id| id == **vm))
+            .filter_map(|(_, (_, _, t))| t.clone())
+            .collect();
+        for t in stops {
+            t.suspend();
+        }
+    }
     fn emergency_stop_all(&self) -> EmergencyOutcome {
+        self.suspend_tools(None);
         // Copy of the handlers: the registry does not stay locked during the wait.
         let handles: Vec<(VmId, RunId, qemu_backend::EmergencyStop)> = lock(&self.registry)
             .iter()
-            .map(|(vm, (run, h))| (*vm, *run, h.clone()))
+            .map(|(vm, (run, h, _))| (*vm, *run, h.clone()))
             .collect();
         // Marked before terminating: the exits that follow belong to the
         // Emergency Stop, never to a graceful stop or an ordinary exit.
@@ -2475,6 +2615,7 @@ mod tests {
         let p = |n: &str| ManagedPath::verify(d.join(n)).unwrap();
         let run_id = RunId::new_v7();
         let paths = |uefi: bool| RunPaths {
+            tools_iso: None,
             run_id,
             qemu_system: p("qemu.exe"),
             firmware_code: uefi.then(|| p("code.fd")),

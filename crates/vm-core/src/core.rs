@@ -344,6 +344,7 @@ fn media_in_use(users: &[&str]) -> PublicError {
 /// Draft audit event (the core assigns `seq` and `at`).
 #[derive(Default)]
 struct Ev {
+    tools: Option<lightvm_proto::ToolAudit>,
     vm_id: Option<VmId>,
     run_id: Option<RunId>,
     operation_id: Option<OperationId>,
@@ -432,6 +433,97 @@ where
     pub fn sessions(&self) -> &SessionRegistry {
         &self.sessions
     }
+    pub fn current_run(&self, vm: VmId) -> Option<RunId> {
+        self.vms
+            .get(&vm)
+            .filter(|rt| rt.state.has_process())
+            .and_then(|rt| rt.run_id)
+    }
+
+    /// Effective Tools authority for a run. Once a session has targeted a
+    /// run, manual permissions are not restored until the next run.
+    pub fn tools_permissions(
+        &self,
+        vm: VmId,
+        manual: bool,
+    ) -> (
+        lightvm_proto::CapabilitySet,
+        lightvm_proto::ToolGrant,
+        Option<UtcTimestamp>,
+    ) {
+        let empty = || (Default::default(), Default::default(), None);
+        let Some(rt) = self.vms.get(&vm) else {
+            return empty();
+        };
+        let config = &rt.record.config.tools;
+        if !config.enabled {
+            return empty();
+        }
+        let now = self.clock.now();
+        let live = self.sessions.live_for_vm(vm);
+        if live.len() > 1 {
+            return empty();
+        }
+        if let Some(id) = live.first() {
+            let Some(s) = self.sessions.get(*id) else {
+                return empty();
+            };
+            if s.state != SessionState::Active || s.expiry_at(now).is_some() {
+                return empty();
+            }
+            let effective = effective_policy(
+                &self.config.global_policy,
+                &self.vm_layer(Some(vm)),
+                &s.grant.as_layer(),
+                &host_layer(&self.config.host),
+                self.revision,
+            );
+            let caps = effective
+                .capabilities
+                .into_iter()
+                .filter(|c| c.is_integration())
+                .collect();
+            return (
+                caps,
+                s.grant.tools.clone(),
+                Some(s.grant.expires_at.min(s.lease.expires_at)),
+            );
+        }
+        if !manual {
+            return empty();
+        }
+        let mut caps = lightvm_proto::CapabilitySet::new();
+        if !config.shares.is_empty() {
+            caps.insert(Capability::ShareRead);
+        }
+        if config.shares.iter().any(|s| s.writable) {
+            caps.insert(Capability::ShareWrite);
+        }
+        for (cap, configured) in [
+            (Capability::Clipboard, config.clipboard),
+            (Capability::FilesTransfer, config.files_transfer),
+            (Capability::UiInspect, config.ui_inspect),
+            (Capability::UiAct, config.ui_act),
+            (Capability::Usb, !config.usb_devices.is_empty()),
+        ] {
+            if configured {
+                caps.insert(cap);
+            }
+        }
+        caps.retain(|cap| self.authorize(&Caller::User, Some(vm), *cap, now).is_ok());
+        (
+            caps,
+            lightvm_proto::ToolGrant {
+                shares: config
+                    .shares
+                    .iter()
+                    .map(|s| (s.name.clone(), s.writable))
+                    .collect(),
+                usb_devices: config.usb_devices.clone(),
+            },
+            None,
+        )
+    }
     /// Current policy revision.
     pub fn policy_revision(&self) -> PolicyRevision {
         self.revision
@@ -491,6 +583,7 @@ where
             error: ev.error,
             termination: ev.termination,
             network: ev.network,
+            tools: ev.tools,
         };
         let r = self.audit.append(&event);
         if r.is_err() {
@@ -712,6 +805,68 @@ where
                     .with_detail("capability", capability.as_str()),
             )
         }
+    }
+
+    /// Checks immediately before/after forwarding a bounded guest Tools
+    /// call. UI actions obey the same input owner as mouse and keyboard.
+    pub fn authorize_tools(
+        &self,
+        caller: &Caller,
+        vm: VmId,
+        run: RunId,
+        capability: Capability,
+    ) -> Result<(), PublicError> {
+        if !capability.is_integration() {
+            return Err(PublicError::invalid_argument("not a Tools capability"));
+        }
+        self.authorize(caller, Some(vm), capability, self.clock.now())?;
+        let rt = self
+            .vms
+            .get(&vm)
+            .ok_or_else(|| PublicError::not_found("VM does not exist"))?;
+        if rt.run_id != Some(run) || rt.state != VmState::Running {
+            return Err(PublicError::state_conflict(
+                "Tools need the current running VM",
+            ));
+        }
+        if !rt.record.config.tools.enabled {
+            return Err(PublicError::unsupported("Tools are disabled for this VM"));
+        }
+        if capability == Capability::UiAct {
+            self.check_input_owner(caller, vm)?;
+        }
+        Ok(())
+    }
+
+    /// Admits one bounded Tools operation against session operation/input quotas.
+    pub fn admit_tools(
+        &mut self,
+        caller: &Caller,
+        vm: VmId,
+        run: RunId,
+        capability: Capability,
+    ) -> Result<(), PublicError> {
+        self.authorize_tools(caller, vm, run, capability)?;
+        let effective = self.authorize(caller, Some(vm), capability, self.clock.now())?;
+        if let Caller::Agent { session_id, .. } = caller {
+            let session = self
+                .sessions
+                .get_mut(*session_id)
+                .ok_or_else(|| PublicError::permission_denied("session unavailable"))?;
+            if session.usage.operations >= effective.quotas.max_operations
+                || (capability == Capability::UiAct
+                    && session.usage.input_events >= effective.quotas.max_input_events)
+            {
+                return Err(PublicError::resource_limit(
+                    "Tools operation quota exhausted",
+                ));
+            }
+            session.usage.operations = session.usage.operations.saturating_add(1);
+            if capability == Capability::UiAct {
+                session.usage.input_events = session.usage.input_events.saturating_add(1);
+            }
+        }
+        Ok(())
     }
 
     fn effective_limits(&self) -> ResourceLimits {
@@ -1378,6 +1533,12 @@ where
                 PublicError::state_conflict("configuration modified in the meantime")
                     .with_detail("revision", current.config_revision.to_string()),
             )
+        } else if config.tools != current.config.tools
+            && !self.sessions.live_for_vm(vm_id).is_empty()
+        {
+            Err(PublicError::state_conflict(
+                "end the agent sessions before changing Tools settings",
+            ))
         } else if config.disk_gib < current.config.disk_gib {
             Err(PublicError::invalid_argument(
                 "shrinking the disk is not supported: it can only be enlarged",
@@ -2926,6 +3087,11 @@ where
                     return Err(PublicError::not_found("allowlist VM does not exist"));
                 }
                 self.check_session_network(*vm, &spec)?;
+                self.vms[vm]
+                    .record
+                    .config
+                    .tools
+                    .validate_grant(&spec.capabilities, &spec.tools)?;
             }
             if !spec.capabilities.contains(&Capability::NetworkEndpoints)
                 && !spec.network_endpoints.is_empty()
@@ -2948,6 +3114,7 @@ where
             spec.capabilities.remove(&Capability::NetworkEndpoints);
         }
         let grant = Grant {
+            tools: spec.tools,
             id: self.ids.grant_id(),
             session_id,
             vm_allowlist: spec.vm_allowlist,
@@ -3091,6 +3258,34 @@ where
                 run_id,
                 session_id,
                 network: Some(detail),
+                ..Ev::default()
+            },
+        );
+    }
+
+    /// Records bounded Tools metadata without guest payloads.
+    pub fn record_tools(
+        &mut self,
+        actor: Actor,
+        vm: VmId,
+        run: RunId,
+        action: AuditAction,
+        outcome: AuditOutcome,
+        detail: lightvm_proto::ToolAudit,
+    ) {
+        let session_id = match actor {
+            Actor::Agent { session_id } => Some(session_id),
+            _ => None,
+        };
+        self.emit_after(
+            actor,
+            action,
+            outcome,
+            Ev {
+                vm_id: Some(vm),
+                run_id: Some(run),
+                session_id,
+                tools: Some(detail),
                 ..Ev::default()
             },
         );

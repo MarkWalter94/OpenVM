@@ -308,12 +308,16 @@ impl Shared {
     /// request in progress and its queued requests are abandoned at once
     /// (the pairing credential is kept: a new session needs a new approval).
     fn close_agent_connection(&self, connection_id: u64) {
+        if let Some(vm) = self.agents.connection_vm(connection_id) {
+            self.emergency.suspend_tools(Some(vm));
+        }
         if let Some(e) = lock(&self.conns).get(&connection_id) {
             let _ = e.revoke.send(true);
         }
     }
 
     fn close_all_agent_sessions(&self, reason: &str, cause: TerminationCause, stop: bool) {
+        self.emergency.suspend_tools(None);
         for conn in self.agents.terminate_all(cause, stop) {
             self.close_agent_connection(conn);
         }
@@ -1162,6 +1166,9 @@ async fn handle_connection(shared: Arc<Shared>, stream: BoxedStream, peer: PeerI
     // Agent connection lost: its pending request is withdrawn, its live
     // session ends and its VM is stopped (ROADMAP 7.3, client loss).
     if role == Role::Pairing {
+        if let Some(vm) = shared.agents.connection_vm(connection_id) {
+            shared.emergency.suspend_tools(Some(vm));
+        }
         let (withdrawn, live) = shared.agents.connection_closed(connection_id);
         if let Some(id) = withdrawn {
             shared.report_closed(vec![(id, SessionRequestOutcome::Withdrawn)]);
@@ -1405,6 +1412,15 @@ async fn dispatch(
         Request::GetCapabilities => SupervisorRequest::GetCapabilities,
         Request::ListVms => SupervisorRequest::ListVms,
         Request::VmStatus { vm_id } => SupervisorRequest::VmStatus(vm_id),
+        Request::GuestTools {
+            vm_id,
+            run_id,
+            call,
+        } => SupervisorRequest::GuestTools {
+            vm_id,
+            run_id,
+            call,
+        },
         Request::CreateVm { config } => SupervisorRequest::CreateVm(Box::new(config)),
         Request::UpdateVm {
             vm_id,
@@ -1605,6 +1621,9 @@ async fn dispatch(
         }
         Request::ListSessions => SupervisorRequest::ListSessions,
         Request::PauseSession { session_id } => {
+            if let Some(vm) = shared.agents.session_vm(session_id) {
+                shared.emergency.suspend_tools(Some(vm));
+            }
             // Gate first (priority): agent mutations refused from now on;
             // the core follows (sync before its next admission).
             if !shared.agents.pause(session_id) {
@@ -1635,6 +1654,9 @@ async fn dispatch(
             return Dispatch::Reply(r);
         }
         Request::RevokeSession { session_id } => {
+            if let Some(vm) = shared.agents.session_vm(session_id) {
+                shared.emergency.suspend_tools(Some(vm));
+            }
             // Point of revocation: the gate closes and the agent connection
             // closes before the core records the revocation.
             if let Some(conn) = shared.agents.revoke(session_id) {
@@ -1951,6 +1973,7 @@ async fn approve_session(
         capabilities.remove(&Capability::NetworkEndpoints);
     }
     let new = NewSession {
+        tools: approval.tools,
         vm_id: approval.vm_id,
         capabilities,
         quotas,
@@ -1995,6 +2018,7 @@ async fn approve_session(
         return Err(op_error(ErrorCode::InfrastructureError, "unexpected reply"));
     };
     let session = SessionInfo {
+        tools: grant.tools.clone(),
         session_id,
         vm_id: approval.vm_id,
         connection_id: Some(info.connection_id),

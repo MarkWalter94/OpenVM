@@ -63,6 +63,7 @@ struct Pending {
 
 #[derive(Debug)]
 struct Bound {
+    vm_id: Option<VmId>,
     connection_id: ConnectionId,
     gate: Gate,
 }
@@ -122,6 +123,18 @@ fn utc_after(d: Duration) -> UtcTimestamp {
 }
 
 impl AgentRegistry {
+    pub(crate) fn session_vm(&self, id: SessionId) -> Option<VmId> {
+        lock(&self.inner).sessions.get(&id).and_then(|b| b.vm_id)
+    }
+    pub(crate) fn connection_vm(&self, id: ConnectionId) -> Option<VmId> {
+        let inner = lock(&self.inner);
+        inner
+            .conns
+            .get(&id)
+            .and_then(|c| c.session)
+            .and_then(|s| inner.sessions.get(&s))
+            .and_then(|b| b.vm_id)
+    }
     /// Registry with the switch off and the given request lifetime.
     pub fn new(ttl: Duration) -> Self {
         Self {
@@ -347,6 +360,12 @@ impl AgentRegistry {
         inner.sessions.insert(
             session_id,
             Bound {
+                vm_id: match &granted {
+                    ResponseBody::SessionGranted { grant, .. } => {
+                        grant.vm_allowlist.first().copied()
+                    }
+                    _ => None,
+                },
                 connection_id: conn,
                 gate: Gate::Active,
             },

@@ -214,6 +214,7 @@ async fn network_vm(ui: &mut Client, mode: NetworkProfile) -> VmId {
 
 fn approval(vm: VmId, caps: &[Capability], endpoints: &[&str]) -> SessionApproval {
     SessionApproval {
+        tools: Default::default(),
         vm_id: vm,
         capabilities: caps.iter().copied().collect::<CapabilitySet>(),
         duration_s: 3600,

@@ -182,6 +182,10 @@
         }
       ]
     },
+    "tools": {
+      "description": "Named Tools resources authorized for this session.",
+      "$ref": "#/$defs/ToolGrant"
+    },
     "verdicts": {
       "description": "Verdicts in order (the last one is the current outcome).",
       "type": "array",
@@ -262,6 +266,41 @@
         "at"
       ]
     },
+    "AuditOutcome": {
+      "description": "Recorded outcome.",
+      "oneOf": [
+        {
+          "description": "Accepted (queued).",
+          "type": "string",
+          "const": "accepted"
+        },
+        {
+          "description": "Forwarded to the backend.",
+          "type": "string",
+          "const": "forwarded"
+        },
+        {
+          "description": "Completed.",
+          "type": "string",
+          "const": "succeeded"
+        },
+        {
+          "description": "Failed.",
+          "type": "string",
+          "const": "failed"
+        },
+        {
+          "description": "Denied: no effect.",
+          "type": "string",
+          "const": "denied"
+        },
+        {
+          "description": "Discarded before forwarding: no effect.",
+          "type": "string",
+          "const": "discarded"
+        }
+      ]
+    },
     "BaselineId": {
       "description": "BaselineId: version 7 UUID, lowercase with hyphens.",
       "type": "string",
@@ -271,6 +310,18 @@
     "Capability": {
       "description": "Authorizable action on a VM. Serialized names follow the MCP catalog\n(ROADMAP 9); `vm.input` covers mouse and keyboard.",
       "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "share.read",
+            "share.write",
+            "clipboard",
+            "files.transfer",
+            "usb",
+            "ui.inspect",
+            "ui.act"
+          ]
+        },
         {
           "description": "List filtered by the grant.",
           "type": "string",
@@ -907,6 +958,31 @@
           ]
         },
         {
+          "description": "Tools metadata, never file contents or clipboard/UI values.",
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string"
+            },
+            "detail": {
+              "$ref": "#/$defs/ToolAudit"
+            },
+            "kind": {
+              "type": "string",
+              "const": "tools"
+            },
+            "outcome": {
+              "$ref": "#/$defs/AuditOutcome"
+            }
+          },
+          "required": [
+            "kind",
+            "action",
+            "outcome",
+            "detail"
+          ]
+        },
+        {
           "description": "Service note (plain text).",
           "type": "object",
           "properties": {
@@ -1102,6 +1178,63 @@
           "const": "infrastructure_error"
         }
       ]
+    },
+    "ToolAudit": {
+      "type": "object",
+      "properties": {
+        "bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "feature": {
+          "type": "string"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "share": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "feature"
+      ]
+    },
+    "ToolGrant": {
+      "description": "Named subsets granted by the user. Booleans in `shares` denote write\npermission; feature capabilities remain independently required.",
+      "type": "object",
+      "properties": {
+        "shares": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "boolean"
+          }
+        },
+        "usb_devices": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
     },
     "UtcTimestamp": {
       "description": "RFC 3339 UTC instant with Z suffix, millisecond precision.",

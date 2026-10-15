@@ -479,6 +479,7 @@ impl Wizard {
     pub fn config(&self) -> Option<VmConfig> {
         let os = self.os.filter(|os| !self.media_refuses(*os))?;
         Some(VmConfig {
+            tools: Default::default(),
             name: VmName::parse(self.name.clone()).ok()?,
             guest_os: os,
             vcpus: self.vcpus,

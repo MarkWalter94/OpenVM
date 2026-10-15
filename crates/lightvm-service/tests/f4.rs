@@ -203,6 +203,7 @@ const AGENT_CAPS: [Capability; 7] = [
 
 fn approval(vm: VmId) -> SessionApproval {
     SessionApproval {
+        tools: Default::default(),
         vm_id: vm,
         capabilities: caps(&AGENT_CAPS),
         duration_s: 3600,
@@ -1501,7 +1502,8 @@ async fn request_role_matrix() {
             | Request::DeleteSessionReport { .. }
             | Request::PreviewVmwareImport { .. }
             | Request::ImportVmware { .. }
-            | Request::CancelVmwareImport => Who::Ui,
+            | Request::CancelVmwareImport
+            | Request::GuestTools { .. } => Who::Ui,
         }
     }
     let svc = start_svc("f4-roles", Opts::default()).await;

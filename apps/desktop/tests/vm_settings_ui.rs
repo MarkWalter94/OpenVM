@@ -20,6 +20,7 @@ struct Fixture {
 
 fn config() -> VmConfig {
     VmConfig {
+        tools: Default::default(),
         name: VmName::parse("ubuntu-test").unwrap(),
         guest_os: GuestOs::UbuntuLtsX86_64,
         vcpus: 2,

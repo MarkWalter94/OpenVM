@@ -203,6 +203,7 @@ fn vm_settings_and_open_vm_without_qemu() {
     let mut s = Service::start(&cfg, Arc::new(|| {})).expect("supervisor start");
     wait_for(&s, "connection", |s| s.state().connected);
     let vm = VmConfig {
+        tools: Default::default(),
         name: VmName::parse("from-command-line").unwrap(),
         guest_os: GuestOs::UbuntuLtsX86_64,
         vcpus: 2,
@@ -366,6 +367,7 @@ fn ui_role(qemu_dir: PathBuf) -> ! {
     let s = Service::start(&cfg, Arc::new(|| {})).expect("supervisor start");
     wait_for(&s, "connection", |s| s.state().connected);
     let vm = VmConfig {
+        tools: Default::default(),
         name: VmName::parse("p2-crash-ui").unwrap(),
         guest_os: GuestOs::UbuntuLtsX86_64,
         vcpus: 1,

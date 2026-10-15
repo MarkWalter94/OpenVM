@@ -52,12 +52,12 @@ use lightvm_proto::{
 
 use crate::ipc::{CallError, Ipc};
 use crate::tools::{
-    BaselinesOut, Button, DeclareOut, DeclareParams, EndOut, EndpointOut, HelpOut, HelpParams,
-    InputOut, LogsOut, LogsParams, MouseClickParams, MouseMoveParams, NoParams, OperationOut,
-    OperationParams, Phase, PressParams, ReportOut, ReportParams, RestoreOut, RestoreParams, Scale,
-    ScreenshotOut, ScreenshotParams, SessionOut, SessionRequestParams, SessionStatusParams,
-    SnapshotOut, SnapshotParams, ToolDef, TypeOut, TypeParams, VmListOut, VmOut, VmParams,
-    VmStopParams,
+    BaselinesOut, Button, DeclareOut, DeclareParams, EndOut, EndpointOut, GuestToolsOut,
+    GuestToolsParams, HelpOut, HelpParams, InputOut, LogsOut, LogsParams, MouseClickParams,
+    MouseMoveParams, NoParams, OperationOut, OperationParams, Phase, PressParams, ReportOut,
+    ReportParams, RestoreOut, RestoreParams, Scale, ScreenshotOut, ScreenshotParams, SessionOut,
+    SessionRequestParams, SessionStatusParams, SnapshotOut, SnapshotParams, ToolDef, TypeOut,
+    TypeParams, UiInvokeParams, UiTreeParams, VmListOut, VmOut, VmParams, VmStopParams,
 };
 
 /// Only accepted MCP revision (ROADMAP 9; ADR-0021).
@@ -1375,6 +1375,29 @@ impl Adapter {
         }
     }
 
+    async fn guest_tools(&self, p: GuestToolsParams) -> Result<Output, ToolError> {
+        let vm_id = vm_id(&p.vm_id)?;
+        let (ipc, auth, _) = self.active()?;
+        match self
+            .agent(
+                &ipc,
+                &auth,
+                AgentCall::GuestTools {
+                    vm_id,
+                    run_id: p.run_id,
+                    call: p.command,
+                },
+                Duration::from_secs(10),
+            )
+            .await?
+        {
+            ResponseBody::GuestTools { reply } => Ok(Output::Json(
+                serde_json::to_value(GuestToolsOut { reply }).map_err(|_| unexpected())?,
+            )),
+            _ => Err(unexpected()),
+        }
+    }
+
     async fn dispatch(&self, name: &str, args: Value) -> Result<Output, ToolError> {
         match name {
             "help" => self.help(&parse(args)?),
@@ -1416,6 +1439,33 @@ impl Adapter {
             "vm_restore" => self.restore(parse(args)?).await,
             "vm_baselines" => self.baselines(parse(args)?).await,
             "vm_logs" => self.logs(parse(args)?).await,
+            "vm_guest_tools" => self.guest_tools(parse(args)?).await,
+            "vm_ui_tree" => {
+                let p: UiTreeParams = parse(args)?;
+                self.guest_tools(GuestToolsParams {
+                    vm_id: p.vm_id,
+                    run_id: p.run_id,
+                    command: lightvm_proto::ToolCall::UiTree {
+                        max_depth: p.max_depth,
+                        max_nodes: p.max_nodes,
+                    },
+                })
+                .await
+            }
+            "vm_ui_invoke" => {
+                let p: UiInvokeParams = parse(args)?;
+                self.guest_tools(GuestToolsParams {
+                    vm_id: p.vm_id,
+                    run_id: p.run_id,
+                    command: lightvm_proto::ToolCall::UiInvoke {
+                        tree: p.tree,
+                        element: p.element,
+                        action: p.action,
+                        value: p.value,
+                    },
+                })
+                .await
+            }
             "operation_get" => self.operation(parse(args)?).await,
             "report_get" => self.report(parse(args)?).await,
             _ => Err(ToolError::invalid("unknown tool")),
@@ -1647,9 +1697,15 @@ mod tests {
             );
             assert_eq!(d.tool.input_schema.get("type"), Some(&json!("object")));
             assert_eq!(d.output["type"], json!("object"), "{}", d.tool.name);
-            // No path-like or QMP parameter anywhere.
+            // Host paths and QMP remain unavailable. The guest file API accepts
+            // validated component arrays and typed commands, not host paths.
             let s = serde_json::to_string(&d.tool.input_schema).unwrap();
-            for bad in ["path", "qmp", "command", "file"] {
+            let forbidden: &[&str] = if d.tool.name == "vm_guest_tools" {
+                &["host_path", "qmp", "shell", "executable"]
+            } else {
+                &["path", "qmp", "command", "file"]
+            };
+            for bad in forbidden {
                 assert!(
                     !s.contains(&format!("\"{bad}")),
                     "{} has {bad}",

@@ -70,6 +70,15 @@ pub type SubmitOutcome = (Admission, Option<OperationRecord>);
 
 /// VM operations served by the supervisor thread.
 pub trait VmEngine: Send + 'static {
+    fn tools_call(
+        &mut self,
+        _caller: &Caller,
+        _vm: VmId,
+        _run: RunId,
+        _call: lightvm_proto::ToolCall,
+    ) -> Result<lightvm_proto::ToolReply, PublicError> {
+        Err(PublicError::unsupported("guest Tools unavailable"))
+    }
     /// List of the VMs visible to the caller.
     fn list_vms(&mut self, caller: &Caller) -> Result<Vec<VmSummary>, PublicError>;
     /// Status of a VM.
@@ -315,6 +324,9 @@ pub trait VmEngine: Send + 'static {
     fn sync_network(&mut self) -> Vec<NetworkRecord> {
         Vec::new()
     }
+    fn sync_tools(&mut self) -> Vec<ToolsRecord> {
+        Vec::new()
+    }
     /// Audit of a session lifecycle step decided by the service.
     /// Facts of a VM for a session report (F5): name, configuration and
     /// revision, current baseline, current run.
@@ -431,6 +443,7 @@ pub trait SessionGate: Send + Sync + 'static {
 /// Session approved in the app, for [`VmEngine::create_session`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewSession {
+    pub tools: lightvm_proto::ToolGrant,
     /// The single VM of the grant.
     pub vm_id: VmId,
     /// Granted capabilities.
@@ -1081,9 +1094,59 @@ pub struct AutoReset {
     pub error: Option<ErrorCode>,
 }
 
+/// Bounded metadata emitted by a run-owned Tools channel.
+#[derive(Clone, Debug)]
+pub struct ToolsRecord {
+    pub vm_id: VmId,
+    pub run_id: RunId,
+    pub action: AuditAction,
+    pub outcome: AuditOutcome,
+    pub detail: lightvm_proto::ToolAudit,
+}
+impl ToolsRecord {
+    pub(crate) fn file(
+        vm_id: VmId,
+        run_id: RunId,
+        record: lightvm_tools::files::FileRecord,
+    ) -> Self {
+        Self {
+            vm_id,
+            run_id,
+            action: AuditAction::ToolsTransfer,
+            outcome: if record.outcome == "completed" {
+                AuditOutcome::Succeeded
+            } else {
+                AuditOutcome::Failed
+            },
+            detail: lightvm_proto::ToolAudit {
+                feature: "share.write".into(),
+                share: Some(record.share),
+                name: Some(record.path.components().join("/")),
+                bytes: Some(record.bytes),
+                reason: Some(format!("{}:{}", record.operation, record.outcome)),
+            },
+        }
+    }
+}
+
 /// VM backend as seen by the engine: the core's `VmBackend` port plus the
 /// asynchronous observations (process exit not requested by the core).
 pub trait BackendPort: VmBackend + Send + 'static {
+    fn take_tools_records(&mut self) -> Vec<ToolsRecord> {
+        Vec::new()
+    }
+    fn suspend_tools(&mut self, _vm: VmId) {}
+    fn set_tools_policy(&mut self, _vm: VmId, _run: RunId, _policy: crate::tools::Policy) {}
+    fn tools_call(
+        &mut self,
+        _vm: VmId,
+        _run: RunId,
+        _command: lightvm_tools::control::Command,
+    ) -> Result<lightvm_tools::control::Reply, PublicError> {
+        Err(PublicError::unsupported(
+            "guest Tools channel is not available",
+        ))
+    }
     /// Accumulated observations to apply to the core with `Core::observe`.
     fn drain_observations(&mut self) -> Vec<(VmId, BackendObservation)>;
     /// The guest of the run is stopped on a virtual CPU error and was not
@@ -1248,6 +1311,13 @@ fn summary(s: VmStatus, disk_used_bytes: Option<u64>, mut baselines: VmBaselines
     }
 }
 
+#[derive(Debug)]
+struct ToolTree {
+    run: RunId,
+    id: u64,
+    elements: BTreeSet<u32>,
+}
+
 /// Engine over `vm_core::Core` with the system clock and identifiers.
 pub struct CoreEngine<S, A, B, M>
 where
@@ -1295,6 +1365,7 @@ where
     /// Runs an agent session targeted (ADR-0033): their network never
     /// widens again after the session ends.
     net_tainted: BTreeMap<VmId, RunId>,
+    tool_trees: BTreeMap<(VmId, Option<SessionId>), ToolTree>,
 }
 
 /// A network event of a run (ADR-0033), audited by the engine and recorded
@@ -1412,6 +1483,7 @@ where
             gate: None,
             gate_reports: BTreeMap::new(),
             net_tainted: BTreeMap::new(),
+            tool_trees: BTreeMap::new(),
             agent_storage: BTreeMap::new(),
         };
         let _ = e.state_changes();
@@ -1805,6 +1877,7 @@ where
             .or_else(|| s.grant.vm_allowlist.iter().next().copied())?;
         let live = s.state != SessionState::Terminated;
         Some(SessionInfo {
+            tools: s.grant.tools.clone(),
             session_id: id,
             vm_id,
             connection_id: meta.filter(|_| live).map(|m| m.connection_id),
@@ -2133,6 +2206,118 @@ where
     B: BackendPort,
     M: MediaGuardPort + Send + 'static,
 {
+    fn tools_call(
+        &mut self,
+        caller: &Caller,
+        vm: VmId,
+        run: RunId,
+        call: lightvm_proto::ToolCall,
+    ) -> Result<lightvm_proto::ToolReply, PublicError> {
+        use lightvm_proto::{ToolCall, ToolReply};
+        self.apply_observations();
+        self.sync_gates();
+        let cap = call.capability();
+        let actor = caller.actor();
+        let detail = lightvm_proto::ToolAudit {
+            feature: cap.as_str().into(),
+            ..Default::default()
+        };
+        let result = (|| {
+            self.core.authorize_tools(caller, vm, run, cap)?;
+            let session = match caller {
+                Caller::Agent { session_id, .. } => Some(*session_id),
+                _ => None,
+            };
+            let key = (vm, session);
+            if let ToolCall::UiInvoke { tree, element, .. } = &call
+                && !self
+                    .tool_trees
+                    .get(&key)
+                    .is_some_and(|t| t.run == run && t.id == *tree && t.elements.contains(element))
+            {
+                return Err(PublicError::state_conflict(
+                    "UI element does not belong to the last returned tree",
+                ));
+            }
+            let tainted = self.net_tainted.get(&vm) == Some(&run);
+            let (capabilities, grant, expires) = self.core.tools_permissions(vm, !tainted);
+            self.backend.set_tools_policy(
+                vm,
+                run,
+                crate::tools::Policy {
+                    capabilities,
+                    grant,
+                    expires,
+                },
+            );
+            let command = lightvm_tools::control::Command::from(call.clone());
+            command.validate().map_err(|_| {
+                PublicError::invalid_argument("invalid Tools request or size limit")
+            })?;
+            self.core.admit_tools(caller, vm, run, cap)?;
+            self.core.record_tools(
+                actor,
+                vm,
+                run,
+                AuditAction::ToolsCall,
+                AuditOutcome::Accepted,
+                detail.clone(),
+            );
+            let mut reply = self.backend.tools_call(vm, run, command)?;
+            self.sync_gates();
+            self.core.authorize_tools(caller, vm, run, cap)?;
+            reply
+                .validate_for(&call)
+                .map_err(|_| PublicError::infrastructure("guest returned invalid Tools data"))?;
+            if let ToolReply::Error { code } = reply {
+                return Err(PublicError::unsupported(
+                    "guest Tools operation is unavailable or refused",
+                )
+                .with_detail("guest_code", code));
+            }
+            loop {
+                let size = serde_json::to_vec(&reply)
+                    .map_err(|_| PublicError::infrastructure("Tools reply encoding failed"))?
+                    .len();
+                if size <= 48 * 1024 {
+                    break;
+                }
+                match &mut reply {
+                    ToolReply::Tree {
+                        nodes, truncated, ..
+                    } if !nodes.is_empty() => {
+                        nodes.truncate(nodes.len().saturating_sub(1).min(nodes.len() * 3 / 4));
+                        *truncated = true;
+                    }
+                    _ => return Err(PublicError::resource_limit("Tools reply exceeds IPC limit")),
+                }
+            }
+            if let ToolReply::Tree { tree, nodes, .. } = &reply {
+                self.tool_trees.insert(
+                    key,
+                    ToolTree {
+                        run,
+                        id: *tree,
+                        elements: nodes.iter().map(|n| n.id).collect(),
+                    },
+                );
+            }
+            Ok(reply)
+        })();
+        self.core.record_tools(
+            actor,
+            vm,
+            run,
+            AuditAction::ToolsCall,
+            if result.is_ok() {
+                AuditOutcome::Succeeded
+            } else {
+                AuditOutcome::Denied
+            },
+            detail,
+        );
+        result
+    }
     fn list_vms(&mut self, caller: &Caller) -> Result<Vec<VmSummary>, PublicError> {
         self.apply_observations();
         let vms = self.core.list_vms(caller)?;
@@ -2625,7 +2810,11 @@ where
 
     fn create_session(&mut self, new: NewSession) -> Result<CreatedSession, PublicError> {
         self.apply_observations();
+        // Disconnect first; a refused approval may leave integrations off
+        // briefly, but can never leave manual shares open to a new agent.
+        self.backend.suspend_tools(new.vm_id);
         let spec = vm_core::session::SessionSpec {
+            tools: new.tools,
             vm_allowlist: [new.vm_id].into_iter().collect(),
             capabilities: new.capabilities,
             quotas: new.quotas,
@@ -2634,6 +2823,19 @@ where
             network_endpoints: new.network_endpoints,
         };
         let (grant, lease) = self.core.create_session(spec, new.token)?;
+        if let Some(run) = self.core.current_run(new.vm_id) {
+            self.net_tainted.insert(new.vm_id, run);
+            let (capabilities, grant, expires) = self.core.tools_permissions(new.vm_id, false);
+            self.backend.set_tools_policy(
+                new.vm_id,
+                run,
+                crate::tools::Policy {
+                    capabilities,
+                    grant,
+                    expires,
+                },
+            );
+        }
         let id = grant.session_id;
         let initial_baseline = self.core.store().baseline_facts(new.vm_id).current;
         self.session_meta.insert(
@@ -2766,6 +2968,13 @@ where
         let session_id = *session_id;
         self.sync_gates();
         match call {
+            AgentCall::GuestTools {
+                vm_id,
+                run_id,
+                call,
+            } => self
+                .tools_call(caller, vm_id, run_id, call)
+                .map(|reply| ResponseBody::GuestTools { reply }),
             AgentCall::ListVms => {
                 self.apply_observations();
                 let vms = self.core.list_vms(caller)?;
@@ -3048,6 +3257,37 @@ where
         out
     }
 
+    fn sync_tools(&mut self) -> Vec<ToolsRecord> {
+        let records = self.backend.take_tools_records();
+        for r in &records {
+            let actor = self
+                .core
+                .sessions()
+                .live_for_vm(r.vm_id)
+                .first()
+                .map_or(Actor::User, |id| Actor::Agent { session_id: *id });
+            self.core.record_tools(
+                actor,
+                r.vm_id,
+                r.run_id,
+                r.action,
+                r.outcome,
+                r.detail.clone(),
+            );
+        }
+        let runs = self.current_runs();
+        self.tool_trees.retain(|(vm, session), tree| {
+            runs.iter().any(|(v, r)| v == vm && *r == Some(tree.run))
+                && session.is_none_or(|s| {
+                    self.core
+                        .sessions()
+                        .get(s)
+                        .is_some_and(|s| s.state == SessionState::Active)
+                })
+        });
+        records
+    }
+
     fn sync_network(&mut self) -> Vec<NetworkRecord> {
         let mut out = Vec::new();
         let runs: Vec<(VmId, RunId)> = self
@@ -3058,14 +3298,24 @@ where
         self.net_tainted
             .retain(|vm, run| runs.iter().any(|(v, r)| v == vm && r == run));
         for (vm_id, run_id) in runs {
-            if self.core.run_network(vm_id) != Some(lightvm_proto::NetworkProfile::Endpoints) {
-                continue;
-            }
             let sessions = self.core.sessions().live_for_vm(vm_id);
             if !sessions.is_empty() {
                 self.net_tainted.insert(vm_id, run_id);
             }
             let tainted = self.net_tainted.get(&vm_id) == Some(&run_id);
+            let (capabilities, grant, expires) = self.core.tools_permissions(vm_id, !tainted);
+            self.backend.set_tools_policy(
+                vm_id,
+                run_id,
+                crate::tools::Policy {
+                    capabilities,
+                    grant,
+                    expires,
+                },
+            );
+            if self.core.run_network(vm_id) != Some(lightvm_proto::NetworkProfile::Endpoints) {
+                continue;
+            }
             let allowed = self.core.allowed_endpoints(vm_id, tainted);
             if self.backend.set_network_allowed(vm_id, run_id, &allowed) {
                 let list: Vec<&str> = allowed.iter().map(String::as_str).collect();

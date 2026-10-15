@@ -741,6 +741,8 @@ pub fn termination_text(c: TerminationCause) -> &'static str {
 /// State seen by the UI, updated by the IPC threads.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ServiceState {
+    /// Last explicit guest Tools operation (payload Debug is redacted).
+    pub tools: Option<(VmId, RunId, RequestStatus<lightvm_proto::ToolReply>)>,
     /// Connection state, readable.
     pub connection: String,
     /// Connection established and handshake succeeded.
@@ -823,6 +825,12 @@ impl ServiceState {
 /// Actions requested by the UI from the service.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ServiceCommand {
+    /// A bounded Tools operation for the current VM run.
+    GuestTools {
+        vm_id: VmId,
+        run_id: RunId,
+        call: lightvm_proto::ToolCall,
+    },
     /// Re-reads the VM list and the capabilities.
     Refresh,
     /// Creates a VM in the service's catalog (wizard).
@@ -1470,6 +1478,9 @@ pub fn mark_pending(
     c: &ServiceCommand,
 ) {
     match c {
+        ServiceCommand::GuestTools { vm_id, run_id, .. } => {
+            s.tools = Some((*vm_id, *run_id, RequestStatus::Pending))
+        }
         ServiceCommand::Create(_) => s.create = RequestStatus::Pending,
         ServiceCommand::ImportMedia { .. } => s.import = RequestStatus::Pending,
         ServiceCommand::DeleteMedia(_) => s.delete_media = RequestStatus::Pending,
@@ -1573,6 +1584,9 @@ fn fail_pending(s: &mut ServiceState, why: &str) {
 
 fn mark_failed(s: &mut ServiceState, c: &ServiceCommand, f: Failure) {
     match c {
+        ServiceCommand::GuestTools { vm_id, run_id, .. } => {
+            s.tools = Some((*vm_id, *run_id, RequestStatus::Failed(f)))
+        }
         ServiceCommand::Create(_) => s.create = RequestStatus::Failed(f),
         ServiceCommand::ImportMedia { .. } => s.import = RequestStatus::Failed(f),
         ServiceCommand::DeleteMedia(_) => s.delete_media = RequestStatus::Failed(f),
@@ -2203,6 +2217,32 @@ fn context(what: &str, f: Failure) -> Failure {
 async fn execute(c: &mut Client, lanes: &Lanes, command: ServiceCommand) -> Result<(), Failure> {
     let state = &*lanes.state;
     match command {
+        ServiceCommand::GuestTools {
+            vm_id,
+            run_id,
+            call,
+        } => {
+            match request(
+                c,
+                Request::GuestTools {
+                    vm_id,
+                    run_id,
+                    call,
+                },
+            )
+            .await?
+            {
+                ServerMessage::Response {
+                    result: ResponseBody::GuestTools { reply },
+                    ..
+                } => {
+                    lanes.update(|s| s.tools = Some((vm_id, run_id, RequestStatus::Done(reply))));
+                    Ok(())
+                }
+                m => Err(context("guest Tools", failure(&m))),
+            }
+        }
+
         ServiceCommand::Refresh => {
             let caps = request(c, Request::GetCapabilities).await?;
             if let ServerMessage::Response {
@@ -4323,6 +4363,7 @@ mod tests {
 
     fn session_info(id: SessionId, vm: VmId, state: SessionState, input: bool) -> SessionInfo {
         SessionInfo {
+            tools: Default::default(),
             session_id: id,
             vm_id: vm,
             connection_id: Some(7),
@@ -4408,6 +4449,7 @@ mod tests {
         l.wait("request listed", |s| s.agents.requests.len() == 1);
 
         let approval = SessionApproval {
+            tools: Default::default(),
             vm_id: vm,
             capabilities: [lightvm_proto::Capability::VmInput].into(),
             duration_s: 3600,
@@ -4500,6 +4542,7 @@ mod tests {
         use lightvm_proto::report::{OutcomeSource, ReportVersions};
         let t = UtcTimestamp::from_unix_millis(1_791_709_920_000).unwrap();
         SessionReport {
+            tools: Default::default(),
             report_format: lightvm_proto::report::REPORT_FORMAT.into(),
             session_id: id,
             vm_id: VmId::new_v7(),

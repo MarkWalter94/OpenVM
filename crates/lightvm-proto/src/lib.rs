@@ -31,8 +31,16 @@ mod session;
 mod state;
 mod text;
 mod time;
+mod tools;
+mod tools_wire;
 
-pub use audit::{AuditAction, AuditEvent, AuditOutcome, NetworkAudit};
+pub use tools::{
+    ToolCall, ToolGrant, ToolReply, ToolShare, ToolUiAction, ToolUiNode, ToolsConfig,
+    valid_tool_name,
+};
+pub use tools_wire::{ToolFileEntry, ToolFileReply, ToolFileRequest, ToolRelativePath};
+
+pub use audit::{AuditAction, AuditEvent, AuditOutcome, NetworkAudit, ToolAudit};
 pub use error::{ErrorCode, ProtocolError, ProtocolErrorCode, PublicError, ReplyError};
 pub use ids::{
     BaselineId, GrantId, IdParseError, MediaId, OperationId, RunId, SessionId, SnapshotId, VmId,

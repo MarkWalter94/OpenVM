@@ -59,6 +59,8 @@ Source: "{#StagingDir}\SBOM.cdx.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StagingDir}\BUILDINFO.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StagingDir}\SHA256SUMS.txt"; DestDir: "{app}"; Flags: ignoreversion
 
+Source: "{#StagingDir}\tools\*"; DestDir: "{app}\tools"; Flags: ignoreversion
+
 [Icons]
 Name: "{userprograms}\LightVM"; Filename: "{app}\lightvm-desktop.exe"; WorkingDir: "{app}"; Comment: "LightVM (experimental alpha)"
 

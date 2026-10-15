@@ -237,6 +237,7 @@ fn request_is_approved_with_the_code_one_vm_and_the_chosen_limits() {
     assert!(enabled(&h, &approve));
     click(&mut h, &approve);
     let expected = SessionApproval {
+        tools: Default::default(),
         vm_id: vm_id(2),
         capabilities: [
             Capability::VmList,

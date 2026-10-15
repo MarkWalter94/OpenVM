@@ -97,6 +97,7 @@ pub const FAKE_GEOMETRY: DisplayGeometry = DisplayGeometry {
 /// Test configuration valid for the MVP limits.
 pub fn sample_config(name: &str) -> VmConfig {
     VmConfig {
+        tools: Default::default(),
         name: VmName::parse(name).expect("valid test name"),
         guest_os: GuestOs::UbuntuLtsX86_64,
         vcpus: 2,

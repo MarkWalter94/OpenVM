@@ -497,11 +497,15 @@ impl Firmware {
     }
 }
 
-/// VM configuration requested by the user. No field is a path or
-/// a QEMU option: media are referenced by [`MediaId`] of the approved registry.
+/// VM configuration requested by the user. Media reference the approved
+/// registry. Tools share roots are explicit user-approved folder settings
+/// (ADR-0031); no agent request or QEMU option is interpreted as a host path.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct VmConfig {
+    /// Off by default. User-only settings for host integration.
+    #[serde(default, skip_serializing_if = "crate::ToolsConfig::is_default")]
+    pub tools: crate::ToolsConfig,
     /// Visible name.
     pub name: VmName,
     /// Declared guest operating system.

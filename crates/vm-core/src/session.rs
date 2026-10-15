@@ -89,6 +89,7 @@ impl Session {
 /// Session creation request, approved by the user in the app.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionSpec {
+    pub tools: lightvm_proto::ToolGrant,
     /// Allowed VMs.
     pub vm_allowlist: std::collections::BTreeSet<VmId>,
     /// Granted capabilities.

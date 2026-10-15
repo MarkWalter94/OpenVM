@@ -103,6 +103,16 @@
         }
       ]
     },
+    "tools": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ToolAudit"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "vm_id": {
       "description": "VM involved.",
       "anyOf": [
@@ -175,6 +185,14 @@
     "AuditAction": {
       "description": "Type of recorded action.",
       "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "tools_call",
+            "tools_transfer",
+            "tools_policy"
+          ]
+        },
         {
           "description": "VM creation.",
           "type": "string",
@@ -436,6 +454,18 @@
       "description": "Authorizable action on a VM. Serialized names follow the MCP catalog\n(ROADMAP 9); `vm.input` covers mouse and keyboard.",
       "oneOf": [
         {
+          "type": "string",
+          "enum": [
+            "share.read",
+            "share.write",
+            "clipboard",
+            "files.transfer",
+            "usb",
+            "ui.inspect",
+            "ui.act"
+          ]
+        },
+        {
           "description": "List filtered by the grant.",
           "type": "string",
           "const": "vm.list"
@@ -682,6 +712,43 @@
           "type": "string",
           "const": "restored"
         }
+      ]
+    },
+    "ToolAudit": {
+      "type": "object",
+      "properties": {
+        "bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "feature": {
+          "type": "string"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "share": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "feature"
       ]
     },
     "UtcTimestamp": {

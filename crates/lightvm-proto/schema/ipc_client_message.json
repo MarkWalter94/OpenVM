@@ -81,6 +81,30 @@
       "description": "Call of an agent session.",
       "oneOf": [
         {
+          "type": "object",
+          "properties": {
+            "call": {
+              "type": "string",
+              "const": "guest_tools"
+            },
+            "command": {
+              "$ref": "#/$defs/ToolCall"
+            },
+            "run_id": {
+              "$ref": "#/$defs/RunId"
+            },
+            "vm_id": {
+              "$ref": "#/$defs/VmId"
+            }
+          },
+          "required": [
+            "call",
+            "vm_id",
+            "run_id",
+            "command"
+          ]
+        },
+        {
           "description": "VMs of the grant (`vm.list`).",
           "type": "object",
           "properties": {
@@ -432,6 +456,18 @@
     "Capability": {
       "description": "Authorizable action on a VM. Serialized names follow the MCP catalog\n(ROADMAP 9); `vm.input` covers mouse and keyboard.",
       "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "share.read",
+            "share.write",
+            "clipboard",
+            "files.transfer",
+            "usb",
+            "ui.inspect",
+            "ui.act"
+          ]
+        },
         {
           "description": "List filtered by the grant.",
           "type": "string",
@@ -1117,6 +1153,31 @@
     "Request": {
       "description": "Typed operations.",
       "oneOf": [
+        {
+          "description": "User-only guest integration call; no host paths or commands.",
+          "type": "object",
+          "properties": {
+            "call": {
+              "$ref": "#/$defs/ToolCall"
+            },
+            "op": {
+              "type": "string",
+              "const": "guest_tools"
+            },
+            "run_id": {
+              "$ref": "#/$defs/RunId"
+            },
+            "vm_id": {
+              "$ref": "#/$defs/VmId"
+            }
+          },
+          "required": [
+            "op",
+            "vm_id",
+            "run_id",
+            "call"
+          ]
+        },
         {
           "description": "Liveness check.",
           "type": "object",
@@ -2303,6 +2364,9 @@
           ],
           "default": null
         },
+        "tools": {
+          "$ref": "#/$defs/ToolGrant"
+        },
         "vm_id": {
           "description": "The single VM of the session (MVP).",
           "$ref": "#/$defs/VmId"
@@ -2408,6 +2472,438 @@
         }
       ]
     },
+    "ToolCall": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "clipboard_read"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "clipboard_write"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "text"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "max_depth": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "max_nodes": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "op": {
+              "type": "string",
+              "const": "ui_tree"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "max_depth",
+            "max_nodes"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "$ref": "#/$defs/ToolUiAction"
+            },
+            "element": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "op": {
+              "type": "string",
+              "const": "ui_invoke"
+            },
+            "tree": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "value": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "tree",
+            "element",
+            "action"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "file"
+            },
+            "request": {
+              "$ref": "#/$defs/ToolFileRequest"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "request"
+          ]
+        }
+      ]
+    },
+    "ToolFileRequest": {
+      "description": "Host share operations, authorized by the supervisor before dispatch.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "list"
+            },
+            "path": {
+              "$ref": "#/$defs/ToolRelativePath"
+            },
+            "share": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "share",
+            "path"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "length": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "offset": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "op": {
+              "type": "string",
+              "const": "read"
+            },
+            "path": {
+              "$ref": "#/$defs/ToolRelativePath"
+            },
+            "share": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "share",
+            "path",
+            "offset",
+            "length"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "begin"
+            },
+            "path": {
+              "$ref": "#/$defs/ToolRelativePath"
+            },
+            "replace": {
+              "type": "boolean",
+              "default": false
+            },
+            "sha256": {
+              "type": "string"
+            },
+            "share": {
+              "type": "string"
+            },
+            "size": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "share",
+            "path",
+            "size",
+            "sha256"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "data": {
+              "type": "string"
+            },
+            "offset": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "op": {
+              "type": "string",
+              "const": "write"
+            },
+            "transfer": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "transfer",
+            "offset",
+            "data"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "commit"
+            },
+            "transfer": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "transfer"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "cancel"
+            },
+            "transfer": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "transfer"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "mkdir"
+            },
+            "path": {
+              "$ref": "#/$defs/ToolRelativePath"
+            },
+            "share": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "share",
+            "path"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "remove"
+            },
+            "path": {
+              "$ref": "#/$defs/ToolRelativePath"
+            },
+            "share": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "share",
+            "path"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "from": {
+              "$ref": "#/$defs/ToolRelativePath"
+            },
+            "op": {
+              "type": "string",
+              "const": "rename"
+            },
+            "replace": {
+              "type": "boolean"
+            },
+            "share": {
+              "type": "string"
+            },
+            "to": {
+              "$ref": "#/$defs/ToolRelativePath"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "share",
+            "from",
+            "to",
+            "replace"
+          ]
+        }
+      ]
+    },
+    "ToolGrant": {
+      "description": "Named subsets granted by the user. Booleans in `shares` denote write\npermission; feature capabilities remain independently required.",
+      "type": "object",
+      "properties": {
+        "shares": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "boolean"
+          }
+        },
+        "usb_devices": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "ToolRelativePath": {
+      "description": "Guest path: a sequence of names, not a host-native path. Empty means\nthe share root (only for listing).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "ToolShare": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "root": {
+          "description": "Host folder chosen explicitly in the user UI. Never sent to agents\nor the guest; the supervisor opens it without following links.",
+          "type": "string"
+        },
+        "writable": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "root"
+      ]
+    },
+    "ToolUiAction": {
+      "type": "string",
+      "enum": [
+        "invoke",
+        "set_value",
+        "select"
+      ]
+    },
+    "ToolsConfig": {
+      "type": "object",
+      "properties": {
+        "clipboard": {
+          "type": "boolean",
+          "default": false
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "files_transfer": {
+          "type": "boolean",
+          "default": false
+        },
+        "shares": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ToolShare"
+          }
+        },
+        "ui_act": {
+          "type": "boolean",
+          "default": false
+        },
+        "ui_inspect": {
+          "type": "boolean",
+          "default": false
+        },
+        "usb_devices": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
     "VmAction": {
       "description": "Action requested on an existing VM.",
       "oneOf": [
@@ -2493,7 +2989,7 @@
       ]
     },
     "VmConfig": {
-      "description": "VM configuration requested by the user. No field is a path or\na QEMU option: media are referenced by [`MediaId`] of the approved registry.",
+      "description": "VM configuration requested by the user. Media reference the approved\nregistry. Tools share roots are explicit user-approved folder settings\n(ADR-0031); no agent request or QEMU option is interpreted as a host path.",
       "type": "object",
       "properties": {
         "data_media": {
@@ -2573,6 +3069,10 @@
           "description": "Network mode (ADR-0033); `offline` by default.",
           "$ref": "#/$defs/NetworkProfile",
           "default": "offline"
+        },
+        "tools": {
+          "description": "Off by default. User-only settings for host integration.",
+          "$ref": "#/$defs/ToolsConfig"
         },
         "vcpus": {
           "description": "Number of vCPUs (not a CPU percentage limit: ROADMAP 7.2).",

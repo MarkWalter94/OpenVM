@@ -176,6 +176,12 @@ fn mask() -> Ipv4Addr {
 /// Builds the server message of type `kind` answering `m` (UDP payload).
 #[must_use]
 pub fn build_reply(m: &ClientMessage, kind: MessageType) -> Vec<u8> {
+    build_reply_with_dns(m, kind, true)
+}
+
+/// Tools-only links have no DNS or search suffix, so another NIC retains
+/// the DNS configuration that belongs to the user's NAT connection.
+pub fn build_reply_with_dns(m: &ClientMessage, kind: MessageType, advertise_dns: bool) -> Vec<u8> {
     let mut out = vec![0u8; HEADER_LEN];
     out[0] = OP_REPLY;
     out[1] = 1;
@@ -206,16 +212,18 @@ pub fn build_reply(m: &ClientMessage, kind: MessageType) -> Vec<u8> {
             opt(59, &(LEASE_SECONDS / 8 * 7).to_be_bytes());
         }
         opt(1, &mask().octets());
-        opt(6, &DNS_IP.octets());
-        opt(15, DOMAIN_SUFFIX.as_bytes());
-        // Search list (RFC 3397, option 119) for clients that ignore 15.
-        let mut search = Vec::new();
-        for l in DOMAIN_SUFFIX.split('.') {
-            search.push(u8::try_from(l.len()).unwrap_or(0));
-            search.extend_from_slice(l.as_bytes());
+        if advertise_dns {
+            opt(6, &DNS_IP.octets());
+            opt(15, DOMAIN_SUFFIX.as_bytes());
+            // Search list (RFC 3397, option 119) for clients that ignore 15.
+            let mut search = Vec::new();
+            for l in DOMAIN_SUFFIX.split('.') {
+                search.push(u8::try_from(l.len()).unwrap_or(0));
+                search.extend_from_slice(l.as_bytes());
+            }
+            search.push(0);
+            opt(119, &search);
         }
-        search.push(0);
-        opt(119, &search);
     }
     out.push(255);
     if out.len() < MIN_REPLY_LEN {

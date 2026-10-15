@@ -218,6 +218,7 @@ impl Harness {
             Request::ApproveSession {
                 request_id,
                 approval: SessionApproval {
+                    tools: Default::default(),
                     vm_id: vm,
                     capabilities: [
                         Capability::VmStatus,
@@ -862,7 +863,7 @@ fn e2e_real_client_runs_the_fixture() {
             {
                 log(&evidence, &format!("session request from {:?}, purpose {:?}, code {} — approved by the harness (stand-in for the user's click)", r.client_name, r.purpose, r.verification_code));
                 let caps: CapabilitySet = [Capability::VmList, Capability::VmStatus, Capability::VmScreenshot, Capability::VmInput, Capability::VmLogs].into_iter().collect();
-                if let ResponseBody::Session { session: s } = ok(&mut u, Request::ApproveSession { request_id: r.request_id, approval: SessionApproval { vm_id: vm, capabilities: caps, duration_s: 1800, quotas: None, lease_ms: None, give_input: true, network_endpoints: Vec::new() } }).await {
+                if let ResponseBody::Session { session: s } = ok(&mut u, Request::ApproveSession { request_id: r.request_id, approval: SessionApproval { tools: Default::default(), vm_id: vm, capabilities: caps, duration_s: 1800, quotas: None, lease_ms: None, give_input: true, network_endpoints: Vec::new() } }).await {
                     session = Some(s.session_id);
                 }
             }
@@ -1064,6 +1065,7 @@ async fn scenario(
                 Request::ApproveSession {
                     request_id: r.request_id,
                     approval: SessionApproval {
+                        tools: Default::default(),
                         vm_id: vm,
                         capabilities: caps,
                         duration_s,

@@ -200,6 +200,7 @@ async fn agent(svc: &Svc, u: &mut Client, vm: VmId, lease_ms: Option<u32>) -> Ag
         Request::ApproveSession {
             request_id,
             approval: SessionApproval {
+                tools: Default::default(),
                 vm_id: vm,
                 capabilities: caps,
                 duration_s: 3600,

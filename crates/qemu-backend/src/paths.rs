@@ -87,6 +87,10 @@ impl ManagedPath {
 /// supervisor; the backend does not build paths from caller text, except for
 /// fixed file names inside the returned directories.
 pub trait ManagedPaths: Send + Sync {
+    /// Private, per-run Tools bootstrap ISO, prepared by the supervisor.
+    fn tools_iso(&self, _run: &RunId) -> Result<Option<ManagedPath>> {
+        Ok(None)
+    }
     /// Approved QEMU system emulator of this host (`qemu-system-x86_64`, or
     /// `qemu-system-aarch64` on Apple Silicon, ADR-0028).
     fn qemu_system(&self) -> Result<ManagedPath>;

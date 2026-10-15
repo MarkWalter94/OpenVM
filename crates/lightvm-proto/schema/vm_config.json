@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "VmConfig",
-  "description": "VM configuration requested by the user. No field is a path or\na QEMU option: media are referenced by [`MediaId`] of the approved registry.",
+  "description": "VM configuration requested by the user. Media reference the approved\nregistry. Tools share roots are explicit user-approved folder settings\n(ADR-0031); no agent request or QEMU option is interpreted as a host path.",
   "type": "object",
   "properties": {
     "data_media": {
@@ -81,6 +81,10 @@
       "description": "Network mode (ADR-0033); `offline` by default.",
       "$ref": "#/$defs/NetworkProfile",
       "default": "offline"
+    },
+    "tools": {
+      "description": "Off by default. User-only settings for host integration.",
+      "$ref": "#/$defs/ToolsConfig"
     },
     "vcpus": {
       "description": "Number of vCPUs (not a CPU percentage limit: ROADMAP 7.2).",
@@ -338,6 +342,66 @@
           "const": "endpoints"
         }
       ]
+    },
+    "ToolShare": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "root": {
+          "description": "Host folder chosen explicitly in the user UI. Never sent to agents\nor the guest; the supervisor opens it without following links.",
+          "type": "string"
+        },
+        "writable": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "root"
+      ]
+    },
+    "ToolsConfig": {
+      "type": "object",
+      "properties": {
+        "clipboard": {
+          "type": "boolean",
+          "default": false
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "files_transfer": {
+          "type": "boolean",
+          "default": false
+        },
+        "shares": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ToolShare"
+          }
+        },
+        "ui_act": {
+          "type": "boolean",
+          "default": false
+        },
+        "ui_inspect": {
+          "type": "boolean",
+          "default": false
+        },
+        "usb_devices": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
     },
     "VmLimits": {
       "description": "Execution limits of a VM (ADR-0017), set by the user in the\nVM settings and applied by the supervisor, never by the client.",

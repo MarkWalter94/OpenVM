@@ -509,6 +509,7 @@ pub struct LightVmApp {
     last_fb_update: Option<Instant>,
     fb_updates: u64,
     frames: u64,
+    tools_clipboard_pending: Option<(VmId, RunId)>,
     live: Option<LiveConsole>,
     /// VM whose console the Console page shows.
     console_vm: Option<VmId>,
@@ -615,6 +616,7 @@ impl LightVmApp {
             last_fb_update: None,
             fb_updates: 0,
             frames: 0,
+            tools_clipboard_pending: None,
             live: None,
             console_vm: None,
             ticket_request: None,
@@ -3603,6 +3605,7 @@ impl LightVmApp {
                 }
                 ui.add_space(4.0);
             }
+            self.tools_clipboard_ui(ui, ctx, vm_id, state.as_ref(), agent.is_none());
             let (layout, fullscreen) = (self.settings.keyboard_layout, self.fullscreen);
             let modal_open = self.dialog_open() || self.closing.is_some();
             let action = self.live.as_mut().and_then(|live| {
@@ -3638,6 +3641,104 @@ impl LightVmApp {
         page(ui, "lightvm_page_console", |ui| {
             theme::page_header(ui, "Console", CONSOLE_DESCRIPTION, |_| {});
             self.console_empty_state(ui, state.as_ref());
+        });
+    }
+
+    fn tools_clipboard_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        vm_id: VmId,
+        state: Option<&ServiceState>,
+        input_owned: bool,
+    ) {
+        use lightvm_proto::{ToolCall, ToolReply};
+        use service::RequestStatus;
+        let Some(state) = state else {
+            self.tools_clipboard_pending = None;
+            return;
+        };
+        let focused = ctx.input(|i| i.viewport().focused.unwrap_or(false));
+        let Some(vm) = state
+            .vm(vm_id)
+            .filter(|v| v.config.tools.enabled && v.config.tools.clipboard)
+        else {
+            self.tools_clipboard_pending = None;
+            return;
+        };
+        let Some(run_id) = vm.run_id else {
+            self.tools_clipboard_pending = None;
+            return;
+        };
+        if let Some(target) = self.tools_clipboard_pending {
+            if target != (vm_id, run_id) || !focused || !input_owned {
+                self.tools_clipboard_pending = None;
+            } else if let Some((v, r, status)) = &state.tools
+                && (*v, *r) == target
+            {
+                match status {
+                    RequestStatus::Done(ToolReply::Clipboard { text }) => {
+                        let result =
+                            arboard::Clipboard::new().and_then(|mut c| c.set_text(text.clone()));
+                        self.screenshot_status = Some((
+                            if result.is_ok() {
+                                "Guest text copied to the host clipboard".into()
+                            } else {
+                                "Host clipboard is unavailable".into()
+                            },
+                            if result.is_ok() {
+                                theme::Tone::Positive
+                            } else {
+                                theme::Tone::Warning
+                            },
+                        ));
+                        self.tools_clipboard_pending = None;
+                    }
+                    RequestStatus::Failed(f) => {
+                        self.screenshot_status = Some((f.message.clone(), theme::Tone::Warning));
+                        self.tools_clipboard_pending = None;
+                    }
+                    _ => (),
+                }
+            }
+        }
+        let pending = state.tools.as_ref().is_some_and(|(_, _, s)| s.is_pending());
+        ui.add_enabled_ui(focused && input_owned && !pending, |ui| {
+            ui.horizontal(|ui| {
+                if ui
+                    .button("Host text → Guest clipboard")
+                    .on_hover_text("Read the host clipboard once and send text to this guest")
+                    .clicked()
+                {
+                    match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
+                        Ok(text) if text.len() <= 64 * 1024 && !text.contains('\0') => {
+                            self.send(ServiceCommand::GuestTools {
+                                vm_id,
+                                run_id,
+                                call: ToolCall::ClipboardWrite { text },
+                            });
+                        }
+                        _ => {
+                            self.screenshot_status = Some((
+                                "Host clipboard text is unavailable or exceeds 64 KiB".into(),
+                                theme::Tone::Warning,
+                            ));
+                        }
+                    }
+                }
+                if ui
+                    .button("Guest text → Host clipboard")
+                    .on_hover_text("Read guest clipboard text once and replace the host clipboard")
+                    .clicked()
+                {
+                    self.tools_clipboard_pending = Some((vm_id, run_id));
+                    self.send(ServiceCommand::GuestTools {
+                        vm_id,
+                        run_id,
+                        call: ToolCall::ClipboardRead,
+                    });
+                }
+            });
         });
     }
 

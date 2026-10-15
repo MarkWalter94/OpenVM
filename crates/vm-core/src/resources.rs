@@ -208,6 +208,7 @@ pub fn existing_disk_limits(limits: ResourceLimits, current: &VmConfig) -> Resou
 /// Zero values or below the minimum → `invalid_argument`; above the limit →
 /// `resource_limit` with the field in `details`.
 pub fn validate_config(config: &VmConfig, limits: &ResourceLimits) -> Result<(), PublicError> {
+    config.tools.validate()?;
     if config.vcpus == 0 {
         return Err(PublicError::invalid_argument("vcpus must be at least 1"));
     }

@@ -16,6 +16,9 @@ use crate::{
 )]
 #[serde(rename_all = "snake_case")]
 pub enum AuditAction {
+    ToolsCall,
+    ToolsTransfer,
+    ToolsPolicy,
     /// VM creation.
     VmCreate,
     /// VM start (request forwarded or outcome).
@@ -183,6 +186,8 @@ pub enum AuditOutcome {
 /// Audit event. `seq` is the total order assigned by the core, strictly increasing.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AuditEvent {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<ToolAudit>,
     /// Order (from 1, strictly increasing).
     pub seq: u64,
     /// UTC instant.
@@ -217,4 +222,17 @@ pub struct AuditEvent {
     /// Network details (`network_*` events).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network: Option<NetworkAudit>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ToolAudit {
+    pub feature: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }

@@ -233,6 +233,12 @@ pub enum ReportEventBody {
         /// Details (addresses and counts, never content).
         detail: crate::NetworkAudit,
     },
+    /// Tools metadata, never file contents or clipboard/UI values.
+    Tools {
+        action: String,
+        outcome: crate::AuditOutcome,
+        detail: crate::ToolAudit,
+    },
     /// Service note (plain text).
     Note {
         /// Text.
@@ -244,6 +250,9 @@ pub enum ReportEventBody {
 /// `get_session_report` replies `events` is empty: events are read by page.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionReport {
+    /// Named Tools resources authorized for this session.
+    #[serde(default, skip_serializing_if = "crate::ToolGrant::is_empty")]
+    pub tools: crate::ToolGrant,
     /// [`REPORT_FORMAT`].
     pub report_format: String,
     /// Session.

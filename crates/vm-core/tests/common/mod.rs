@@ -436,6 +436,7 @@ impl Harness {
 
     pub fn vm_config(&self, name: &str, media: Option<MediaId>) -> VmConfig {
         VmConfig {
+            tools: Default::default(),
             name: VmName::parse(name).unwrap(),
             guest_os: GuestOs::UbuntuLtsX86_64,
             vcpus: 2,
@@ -500,6 +501,7 @@ impl Harness {
 
     pub fn session(&mut self, vms: &[VmId], caps: &[Capability], token: u8) -> (SessionId, Caller) {
         let spec = SessionSpec {
+            tools: Default::default(),
             vm_allowlist: vms.iter().copied().collect(),
             capabilities: caps.iter().copied().collect(),
             quotas: Quotas::UNBOUNDED,
@@ -565,4 +567,4 @@ impl Harness {
     }
 }
 
-pub const ALL_CAPS: [Capability; 11] = Capability::ALL;
+pub const ALL_CAPS: [Capability; 11] = Capability::VM_CONTROLS;

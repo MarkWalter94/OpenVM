@@ -653,6 +653,7 @@ fn quotas_are_enforced() {
     let run = h.start(vm);
     h.screenshot_geometry(vm, run);
     let spec = vm_core::session::SessionSpec {
+        tools: Default::default(),
         vm_allowlist: [vm].into_iter().collect(),
         capabilities: ALL_CAPS.into_iter().collect(),
         quotas: Quotas {
@@ -929,6 +930,7 @@ fn session_creation_limits() {
     let vm = h.create_vm("a");
     h.session(&[vm], &ALL_CAPS, 1);
     let spec = vm_core::session::SessionSpec {
+        tools: Default::default(),
         vm_allowlist: [vm].into_iter().collect(),
         capabilities: ALL_CAPS.into_iter().collect(),
         quotas: Quotas::UNBOUNDED,

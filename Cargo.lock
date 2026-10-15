@@ -2075,6 +2075,7 @@ dependencies = [
 name = "lightvm-desktop"
 version = "0.0.0"
 dependencies = [
+ "arboard",
  "eframe",
  "egui",
  "egui_extras",
@@ -2141,6 +2142,7 @@ dependencies = [
  "interprocess",
  "lightvm-fixture",
  "lightvm-proto",
+ "lightvm-tools",
  "png",
  "qemu-backend",
  "rfb-client",
@@ -2155,6 +2157,19 @@ dependencies = [
  "vm-storage",
  "vmware-import",
  "widestring",
+]
+
+[[package]]
+name = "lightvm-tools"
+version = "0.0.0"
+dependencies = [
+ "getrandom 0.4.3",
+ "lightvm-proto",
+ "rustix 1.1.5",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subtle",
 ]
 
 [[package]]

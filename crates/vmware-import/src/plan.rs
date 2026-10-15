@@ -303,6 +303,7 @@ pub fn plan(
         warn(&mut warnings, ImportWarningKind::DirtyDisk, None);
     }
     let config = VmConfig {
+        tools: Default::default(),
         name,
         guest_os: g.os,
         vcpus,

@@ -449,6 +449,7 @@ async fn pairing(u: &mut Client) -> Credential {
 
 fn approval(vm: VmId, give_input: bool) -> SessionApproval {
     SessionApproval {
+        tools: Default::default(),
         vm_id: vm,
         capabilities: [
             Capability::VmList,

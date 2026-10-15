@@ -174,6 +174,26 @@ Started on 2026-10-14 at the owner's request (ROADMAP 12, R6, in parallel; not a
 | Real guests (Windows and Linux) reverted to an earlier snapshot boot normally | — | not verified (no guest installed for this feature) |
 | A running take with the guest file systems flushed first (LightVM Tools, ADR-0031) | — | not implemented |
 
+## R6 work: LightVM Tools (ADR-0031, ADR-0034, ADR-0036)
+
+Implementation in progress on macOS Apple Silicon (2026-10-15), paused at
+owner request for commit/push. Tools now have product wiring: private per-run
+ISO and authenticated channels through the supervisor stack, VM settings and
+named session grants, shared-folder operations, bounded clipboard/UI/file RPC,
+MCP UI tools, explicit focused console clipboard buttons, direct-Win32 and
+Python guest components, transfer audit/report metadata and a private staging
+recovery journal. Guest bundle build recipe and Windows package integration
+are present. Features remain disabled by default.
+
+**Tools are not complete or guest-qualified.** USB redirection, desktop file
+transfer progress/cancellation and drag/drop, clipboard images/automatic sync,
+full filesystem mapping compatibility and guest filesystem quiescence remain
+open. Windows native runtime, installer/package execution, real Windows/Linux
+guests and WPF UI Automation need verification. Only this Mac is available.
+Windows 11 x64 and filtered Internet remain next, in that order after Tools.
+Evidence, commands and the handoff are in
+`docs/verification/R6-07-lightvm-tools.md` (2026-10-15 follow-up).
+
 ## R6 work: guest network (ADR-0033)
 
 Started on 2026-10-15 at the owner's request (ROADMAP 12, R6; declared exception to section 7.2 item 2). Three network modes per VM in **Edit** → **Network**: **Offline** (default, unchanged), **NAT** for manual use (`-netdev user` with the profile's inbox-driver NIC: `e1000`, `rtl8139` for XP, none for Windows on ARM), and the **endpoint allowlist**: the NIC on `-netdev stream` to the supervisor's own network (`crates/guest-net`, smoltcp 0.14.0) where only the endpoints the user lists answer (name and virtual address inside the guest, one TCP service on the host or LAN each; one host connection per guest connection; DHCP without router; DNS for the allowed names only; nothing else). Agent sessions never get NAT: they get the endpoints granted with `network.endpoints` (ADR-0034) or no network; the allowed set follows the sessions, revocation resets the connections, and a run never widens after a session. Network set-up, connections (bytes, no content), refusals and changes are audited and recorded in the session reports. `guestfwd` was not used: R6-04 §1 showed it is one shared host connection. Evidence: `docs/verification/R6-06-guest-network.md`.

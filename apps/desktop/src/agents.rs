@@ -187,6 +187,8 @@ pub struct ApproveForm {
     pub give_input: bool,
     /// Network endpoints of the VM granted (normalized names, ADR-0033).
     pub endpoints: BTreeSet<String>,
+    /// Named Tools shares approved for this session.
+    pub tools: lightvm_proto::ToolGrant,
     /// The user confirmed that the agent shows the same code.
     pub code_matches: bool,
     /// The approval was sent.
@@ -230,6 +232,7 @@ impl ApproveForm {
             lease_ms: LEASES[0].0,
             give_input: false,
             endpoints: BTreeSet::new(),
+            tools: Default::default(),
             code_matches: false,
             sent: false,
         }
@@ -252,6 +255,7 @@ impl ApproveForm {
             q => Some(q.quotas()),
         };
         Some(SessionApproval {
+            tools: self.tools.clone(),
             vm_id,
             capabilities: caps,
             duration_s: self.duration_s,
@@ -869,6 +873,8 @@ fn approve_form_ui(
     );
     theme::divider(ui);
     network_grant_ui(ui, env, f, editable);
+    theme::divider(ui);
+    tools_grant_ui(ui, env, f, editable);
     theme::divider(ui);
     let input = f.caps.contains(&Capability::VmInput);
     if !input {
@@ -1598,6 +1604,87 @@ pub fn banner_ui(
         });
     }
     choice
+}
+
+fn tools_grant_ui(ui: &mut egui::Ui, env: &AgentsEnv<'_>, f: &mut ApproveForm, editable: bool) {
+    use lightvm_proto::Capability::*;
+    let config =
+        f.vm.and_then(|id| env.state.vms.iter().find(|v| v.vm_id == id))
+            .map(|v| &v.config.tools);
+    let Some(config) = config.filter(|c| c.enabled) else {
+        f.tools = Default::default();
+        f.caps.retain(|c| !c.is_integration());
+        return;
+    };
+    small(
+        ui,
+        "Guest Tools: every permission starts off. Shared folders expose the selected host files to this guest.",
+    );
+    for (cap, enabled, label) in [
+        (
+            Clipboard,
+            config.clipboard,
+            "Read and write guest clipboard text",
+        ),
+        (
+            FilesTransfer,
+            config.files_transfer,
+            "Transfer guest inbox/outbox files",
+        ),
+        (
+            UiInspect,
+            config.ui_inspect,
+            "Inspect guest application controls",
+        ),
+        (
+            UiAct,
+            config.ui_act,
+            "Act on guest controls (requires input ownership)",
+        ),
+    ] {
+        let mut on = enabled && f.caps.contains(&cap);
+        ui.add_enabled(editable && enabled, egui::Checkbox::new(&mut on, label));
+        if on {
+            f.caps.insert(cap);
+        } else {
+            f.caps.remove(&cap);
+        }
+    }
+    if f.caps.contains(&UiAct) {
+        f.caps.insert(UiInspect);
+        f.caps.insert(VmInput);
+    }
+    f.tools
+        .shares
+        .retain(|name, _| config.shares.iter().any(|s| &s.name == name));
+    for share in &config.shares {
+        ui.horizontal(|ui| {
+            let mut read = f.tools.shares.contains_key(&share.name);
+            let mut write =
+                f.tools.shares.get(&share.name).copied().unwrap_or(false) && share.writable;
+            ui.add_enabled(
+                editable,
+                egui::Checkbox::new(&mut read, format!("Shared folder: {}", share.name)),
+            );
+            ui.add_enabled(
+                editable && read && share.writable,
+                egui::Checkbox::new(&mut write, "Write"),
+            );
+            if read {
+                f.tools.shares.insert(share.name.clone(), write);
+            } else {
+                f.tools.shares.remove(&share.name);
+            }
+        });
+    }
+    f.caps.remove(&ShareRead);
+    f.caps.remove(&ShareWrite);
+    if !f.tools.shares.is_empty() {
+        f.caps.insert(ShareRead);
+    }
+    if f.tools.shares.values().any(|write| *write) {
+        f.caps.insert(ShareWrite);
+    }
 }
 
 #[cfg(test)]

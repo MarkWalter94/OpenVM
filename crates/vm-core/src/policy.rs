@@ -79,7 +79,14 @@ pub fn host_layer(host: &HostCapacity) -> PolicyLayer {
             | Capability::VmStop
             | Capability::VmReset
             | Capability::VmLogs
-            | Capability::NetworkEndpoints => true,
+            | Capability::NetworkEndpoints
+            | Capability::ShareRead
+            | Capability::ShareWrite
+            | Capability::Clipboard
+            | Capability::FilesTransfer
+            | Capability::Usb
+            | Capability::UiInspect
+            | Capability::UiAct => true,
         })
         .collect();
     PolicyLayer {

@@ -51,6 +51,7 @@ param(
     [string]$Version,
     [string]$OutDir,
     [string]$TargetDir,
+    [string]$ToolsBundle,
     [switch]$SkipBuild,
     [switch]$NoSetupExe
 )
@@ -157,6 +158,23 @@ Copy-Item (Join-Path $Repo 'docs\USER_GUIDE.md') $Staging
 Copy-Item (Join-Path $Repo 'LICENSE') (Join-Path $Staging 'LICENSE.txt')
 Copy-Item (Join-Path $PSScriptRoot 'install.ps1') $Staging
 Copy-Item (Join-Path $PSScriptRoot 'uninstall.ps1') $Staging
+
+# Guest Tools are built separately with the XP-targeting mingw-w64 recipe.
+# Their checksum files are shipped beside the supervisor and checked at run start.
+if (-not $ToolsBundle) { $ToolsBundle = Join-Path $Release 'tools' }
+$ToolsDest = Join-Path $Staging 'tools'
+New-Item -ItemType Directory -Force -Path $ToolsDest | Out-Null
+foreach ($n in @('TOOLS.EXE', 'TOOLS.PY', 'TOOLS.EXE.sha256', 'TOOLS.PY.sha256', 'README.txt', 'LICENSE.txt')) {
+    $source = Join-Path $ToolsBundle $n
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+        throw "Guest Tools bundle missing: $source. Build packaging/tools/build.py --output <bundle> and pass -ToolsBundle <bundle>."
+    }
+    Copy-Item -LiteralPath $source -Destination (Join-Path $ToolsDest $n)
+}
+foreach ($n in @('TOOLS.EXE', 'TOOLS.PY')) {
+    $expectedTools = (Get-Content -LiteralPath (Join-Path $ToolsDest "$n.sha256") -Raw).Trim()
+    if ($expectedTools -notmatch '^[0-9a-f]{64}$' -or (Get-Sha256 (Join-Path $ToolsDest $n)) -ne $expectedTools) { throw "Guest Tools checksum mismatch: $n" }
+}
 
 # --- Third-party licences ---------------------------------------------------
 Write-Step 'Generating THIRD-PARTY-LICENSES.txt'
@@ -289,8 +307,8 @@ $info = @(
 )
 [System.IO.File]::WriteAllText((Join-Path $Staging 'BUILDINFO.txt'), (($info -join "`r`n") + "`r`n"), $utf8)
 
-$sums = Get-ChildItem -LiteralPath $Staging -File | Where-Object { $_.Name -ne 'SHA256SUMS.txt' } | Sort-Object Name |
-    ForEach-Object { "$(Get-Sha256 $_.FullName)  $($_.Name)" }
+$sums = Get-ChildItem -LiteralPath $Staging -Recurse -File | Where-Object { $_.Name -ne 'SHA256SUMS.txt' } | Sort-Object Name |
+    ForEach-Object { $relative = $_.FullName.Substring($Staging.Length + 1).Replace('\', '/'); "$(Get-Sha256 $_.FullName)  $relative" }
 [System.IO.File]::WriteAllText((Join-Path $Staging 'SHA256SUMS.txt'), (($sums -join "`n") + "`n"), $utf8)
 
 # --- Zip (forward-slash entries, timestamps = commit time) -------------------
@@ -303,8 +321,9 @@ $fs = [System.IO.File]::Open($Zip, [System.IO.FileMode]::CreateNew)
 try {
     $za = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Create)
     try {
-        foreach ($f in (Get-ChildItem -LiteralPath $Staging -File | Sort-Object Name)) {
-            $e = $za.CreateEntry("$Name/$($f.Name)", [System.IO.Compression.CompressionLevel]::Optimal)
+        foreach ($f in (Get-ChildItem -LiteralPath $Staging -Recurse -File | Sort-Object FullName)) {
+            $relative = $f.FullName.Substring($Staging.Length + 1).Replace('\', '/')
+            $e = $za.CreateEntry("$Name/$relative", [System.IO.Compression.CompressionLevel]::Optimal)
             $e.LastWriteTime = $commitTime
             $es = $e.Open()
             try { $in = [System.IO.File]::OpenRead($f.FullName); try { $in.CopyTo($es) } finally { $in.Dispose() } } finally { $es.Dispose() }

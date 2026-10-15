@@ -103,6 +103,12 @@ pub enum ClientMessage {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
+    /// User-only guest integration call; no host paths or commands.
+    GuestTools {
+        vm_id: VmId,
+        run_id: RunId,
+        call: crate::ToolCall,
+    },
     /// Liveness check.
     Ping,
     /// Capabilities of the service and the backend.
@@ -515,6 +521,7 @@ impl Request {
     pub const fn name(&self) -> &'static str {
         match self {
             Self::Ping => "ping",
+            Self::GuestTools { .. } => "guest_tools",
             Self::GetCapabilities => "get_capabilities",
             Self::ListVms => "list_vms",
             Self::VmStatus { .. } => "vm_status",
@@ -615,6 +622,12 @@ pub struct SessionAuth {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "call", rename_all = "snake_case")]
 pub enum AgentCall {
+    GuestTools {
+        vm_id: VmId,
+        run_id: RunId,
+        #[serde(rename = "command")]
+        call: crate::ToolCall,
+    },
     /// VMs of the grant (`vm.list`).
     ListVms,
     /// Status of a VM of the grant (`vm.status`).
@@ -732,6 +745,7 @@ impl AgentCall {
     pub const fn name(&self) -> &'static str {
         match self {
             Self::ListVms => "list_vms",
+            Self::GuestTools { .. } => "guest_tools",
             Self::VmStatus { .. } => "vm_status",
             Self::Submit { .. } => "submit",
             Self::Screenshot { .. } => "screenshot",
@@ -752,6 +766,9 @@ impl AgentCall {
     /// `true` if the call mutates a VM (refused while the session is paused).
     #[must_use]
     pub const fn is_mutation(&self) -> bool {
+        if let Self::GuestTools { call, .. } = self {
+            return !matches!(call, crate::ToolCall::UiTree { .. });
+        }
         matches!(
             self,
             Self::Submit { .. } | Self::Snapshot { .. } | Self::Restore { .. }
@@ -762,7 +779,8 @@ impl AgentCall {
     #[must_use]
     pub fn vm_id(&self) -> Option<VmId> {
         match self {
-            Self::VmStatus { vm_id }
+            Self::GuestTools { vm_id, .. }
+            | Self::VmStatus { vm_id }
             | Self::Screenshot { vm_id, .. }
             | Self::ListBaselines { vm_id }
             | Self::Snapshot { vm_id, .. }
@@ -790,6 +808,8 @@ impl AgentCall {
 /// What the user grants when approving a session request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionApproval {
+    #[serde(default, skip_serializing_if = "crate::ToolGrant::is_empty")]
+    pub tools: crate::ToolGrant,
     /// The single VM of the session (MVP).
     pub vm_id: VmId,
     /// Granted capabilities (not empty).
@@ -869,6 +889,9 @@ pub struct SessionUsage {
 /// Agent session, for the UI.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionInfo {
+    /// Named Tools resources granted to this session.
+    #[serde(default, skip_serializing_if = "crate::ToolGrant::is_empty")]
+    pub tools: crate::ToolGrant,
     /// Session.
     pub session_id: SessionId,
     /// VM of the grant.
@@ -1363,6 +1386,9 @@ pub struct EmergencyStopReport {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ResponseBody {
+    GuestTools {
+        reply: crate::ToolReply,
+    },
     /// Response to `ping`.
     Pong,
     /// Response to `get_capabilities`.

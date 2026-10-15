@@ -595,17 +595,25 @@ pub fn check_network(
     let backend = match expected {
         GuestNetwork::None => return check_no_nic(info_network, pci_network),
         GuestNetwork::Nat => "type=user",
-        GuestNetwork::Supervisor => "type=stream",
+        GuestNetwork::Supervisor | GuestNetwork::NatTools => "type=stream",
     };
     let types: Vec<&str> = info_network
         .split(['\n', ','])
         .map(str::trim)
         .filter(|t| t.starts_with("type="))
         .collect();
-    let ok = pci_network.len() == 1
-        && types.len() == 2
-        && types.contains(&"type=nic")
-        && types.contains(&backend);
+    let ok = if expected == GuestNetwork::NatTools {
+        pci_network.len() == 2
+            && types.len() == 4
+            && types.iter().filter(|t| **t == "type=nic").count() == 2
+            && types.contains(&"type=user")
+            && types.contains(&"type=stream")
+    } else {
+        pci_network.len() == 1
+            && types.len() == 2
+            && types.contains(&"type=nic")
+            && types.contains(&backend)
+    };
     if !ok {
         return Err(BackendError::UnexpectedNetwork(format!(
             "expected one NIC on {backend}: info network={:?}, network-class PCI={pci_network:?}",
@@ -690,6 +698,13 @@ impl QemuRun {
             && !caps.devices.contains(nic.qemu_name())
         {
             missing.push(nic.qemu_name());
+        }
+        if spec.network != GuestNetwork::None
+            && spec.profile.nic().is_none()
+            && paths.tools_iso(&spec.run_id)?.is_some()
+            && !caps.devices.contains("virtio-net-pci")
+        {
+            missing.push("virtio-net-pci");
         }
         if !missing.is_empty() {
             return Err(BackendError::Unsupported {

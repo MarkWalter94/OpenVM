@@ -192,6 +192,7 @@ fn screenshot_over_byte_quota_fails_without_updating_geometry() {
     let vm = h.create_vm("a");
     let run = h.start(vm);
     let spec = SessionSpec {
+        tools: Default::default(),
         vm_allowlist: [vm].into_iter().collect(),
         capabilities: ALL_CAPS.into_iter().collect(),
         quotas: Quotas {
@@ -626,6 +627,7 @@ fn agent_session_limit_and_rejected_sessions_are_audited() {
     let vm = h.create_vm("a");
     h.session(&[vm], &ALL_CAPS, 1);
     let spec = SessionSpec {
+        tools: Default::default(),
         vm_allowlist: [vm].into_iter().collect(),
         capabilities: ALL_CAPS.into_iter().collect(),
         quotas: Quotas::UNBOUNDED,

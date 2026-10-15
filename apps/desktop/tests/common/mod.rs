@@ -132,6 +132,7 @@ pub(crate) fn vm(n: u8, name: &str, state: VmState) -> VmSummary {
         state,
         run_id: state.has_process().then(|| run_id(n)),
         config: lightvm_proto::VmConfig {
+            tools: Default::default(),
             name: VmName::parse(name).unwrap(),
             guest_os: lightvm_proto::GuestOs::UbuntuLtsX86_64,
             vcpus: 2,
@@ -397,6 +398,7 @@ pub(crate) fn session(
 ) -> lightvm_proto::ipc::SessionInfo {
     use lightvm_proto::Capability;
     lightvm_proto::ipc::SessionInfo {
+        tools: Default::default(),
         session_id: session_id(n),
         vm_id: vm_id(vm),
         connection_id: (state != lightvm_proto::SessionState::Terminated).then_some(7),
@@ -467,6 +469,7 @@ pub(crate) fn report(
         }],
     };
     SessionReport {
+        tools: Default::default(),
         report_format: lightvm_proto::report::REPORT_FORMAT.into(),
         session_id: session_id(n),
         vm_id: vm_id(vm),
@@ -611,6 +614,7 @@ pub(crate) fn vmware_preview_lsilogic() -> lightvm_proto::ipc::VmwareImportPrevi
         display_name: Some("Windows 7 x64 - VS2010".into()),
         vmware_guest_os: "windows7-64".into(),
         config: VmConfig {
+            tools: Default::default(),
             name: VmName::parse("Windows 7 x64 - VS2010").unwrap(),
             guest_os: GuestOs::Windows7,
             vcpus: 2,

@@ -736,7 +736,10 @@ async fn import_list_create_and_delete_with_the_sqlite_catalog() {
     assert_eq!(media.kind, MediaKind::InstallIso);
     assert_eq!(media.size_bytes, 48 * 1024);
     // ADR-0029: the user's file is used in place, nothing is copied.
-    assert_eq!(media.location.as_deref(), Some(iso.to_str().unwrap()));
+    assert_eq!(
+        std::fs::canonicalize(media.location.as_deref().unwrap()).unwrap(),
+        std::fs::canonicalize(&iso).unwrap()
+    );
     assert!(!media.missing);
     assert_eq!(std::fs::read_dir(dir.join("media")).unwrap().count(), 0);
     match req(&mut ui, Request::ListMedia).await {

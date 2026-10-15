@@ -59,6 +59,8 @@ pub mod start;
 #[cfg(feature = "supervisor")]
 pub mod supervisor;
 #[cfg(feature = "supervisor")]
+pub mod tools;
+#[cfg(feature = "supervisor")]
 pub mod vmware;
 
 #[cfg(feature = "supervisor")]

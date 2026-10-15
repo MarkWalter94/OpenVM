@@ -43,6 +43,7 @@ fn vm_with(h: &mut Harness, name: &str, mode: NetworkProfile) -> VmId {
 
 fn spec(vm: VmId, caps: &[Capability], endpoints: &[&str], h: &Harness) -> SessionSpec {
     SessionSpec {
+        tools: Default::default(),
         vm_allowlist: [vm].into_iter().collect(),
         capabilities: caps.iter().copied().collect(),
         quotas: Quotas::UNBOUNDED,
