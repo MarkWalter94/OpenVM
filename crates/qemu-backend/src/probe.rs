@@ -1333,6 +1333,9 @@ pub struct ProbeConfig {
     pub swtpm: Option<PathBuf>,
     /// SHA-256 of the approved swtpm executables.
     pub approved_swtpm_sha256: Vec<String>,
+    /// SHA-256 of approved storage helper files (ADR-0030), besides
+    /// [`crate::storage_helper::APPROVED_HELPER_SHA256`].
+    pub approved_storage_helper_sha256: Vec<String>,
 }
 
 impl Default for ProbeConfig {
@@ -1355,6 +1358,7 @@ impl Default for ProbeConfig {
             approved_firmware_sha256: Vec::new(),
             swtpm: None,
             approved_swtpm_sha256,
+            approved_storage_helper_sha256: Vec::new(),
         }
     }
 }

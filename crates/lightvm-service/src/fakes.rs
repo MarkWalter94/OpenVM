@@ -262,9 +262,7 @@ pub struct FakeImageTool {
 pub struct FakeStorageHelper {
     /// Reports returned in order (an exhausted list is an error).
     pub reports: std::sync::Mutex<
-        std::collections::VecDeque<
-            Result<qemu_backend::storage_helper::HelperReport, PublicError>,
-        >,
+        std::collections::VecDeque<Result<qemu_backend::storage_helper::HelperReport, PublicError>>,
     >,
     /// Jobs received: `(keys, reg)`.
     pub jobs: std::sync::Mutex<Vec<(Vec<String>, Option<String>)>>,

@@ -88,7 +88,11 @@ impl DriverPlan {
     #[must_use]
     pub fn verify_keys(&self) -> Vec<String> {
         let mut k = self.inspect_keys();
-        k.extend(self.critical_devices.iter().map(|(d, _)| format!("{CDDB}{d}")));
+        k.extend(
+            self.critical_devices
+                .iter()
+                .map(|(d, _)| format!("{CDDB}{d}")),
+        );
         k
     }
 }
@@ -165,9 +169,10 @@ pub fn parse_export(text: &str, cs: &str) -> Vec<RegKey> {
             continue;
         };
         if keys[i].values.len() < MAX_VALUES {
-            keys[i]
-                .values
-                .push((name.to_ascii_lowercase(), value.trim_end_matches('\\').to_owned()));
+            keys[i].values.push((
+                name.to_ascii_lowercase(),
+                value.trim_end_matches('\\').to_owned(),
+            ));
             continuing = value.ends_with('\\');
         }
     }
@@ -299,7 +304,9 @@ pub fn job_reg(plan: &DriverPlan, insp: &Inspected) -> String {
     let root = "HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\";
     let mut r = String::from("Windows Registry Editor Version 5.00\r\n");
     for s in plan.services {
-        r.push_str(&format!("\r\n[{root}{SERVICES}{s}]\r\n\"Start\"=dword:00000000\r\n"));
+        r.push_str(&format!(
+            "\r\n[{root}{SERVICES}{s}]\r\n\"Start\"=dword:00000000\r\n"
+        ));
         if let Some((_, names)) = insp.start_overrides.iter().find(|(n, _)| n == s)
             && !names.is_empty()
         {
@@ -385,12 +392,27 @@ mod tests {
             driver_plan(GuestOs::WindowsVista, DiskController::Ahci),
             Some(VISTA_AHCI)
         );
-        assert_eq!(driver_plan(GuestOs::Windows7, DiskController::Ahci), Some(VISTA_AHCI));
-        assert_eq!(driver_plan(GuestOs::Windows10, DiskController::Ahci), Some(WIN8_AHCI));
-        assert_eq!(driver_plan(GuestOs::Windows81, DiskController::Ahci), Some(WIN8_AHCI));
-        assert_eq!(driver_plan(GuestOs::WindowsXp, DiskController::Ide), Some(XP_IDE));
+        assert_eq!(
+            driver_plan(GuestOs::Windows7, DiskController::Ahci),
+            Some(VISTA_AHCI)
+        );
+        assert_eq!(
+            driver_plan(GuestOs::Windows10, DiskController::Ahci),
+            Some(WIN8_AHCI)
+        );
+        assert_eq!(
+            driver_plan(GuestOs::Windows81, DiskController::Ahci),
+            Some(WIN8_AHCI)
+        );
+        assert_eq!(
+            driver_plan(GuestOs::WindowsXp, DiskController::Ide),
+            Some(XP_IDE)
+        );
         assert_eq!(driver_plan(GuestOs::WindowsXp, DiskController::Ahci), None);
-        assert_eq!(driver_plan(GuestOs::OtherLinuxX86_64, DiskController::Virtio), None);
+        assert_eq!(
+            driver_plan(GuestOs::OtherLinuxX86_64, DiskController::Virtio),
+            None
+        );
         assert_eq!(driver_plan(GuestOs::Windows10, DiskController::Nvme), None);
         let v = VISTA_AHCI.verify_keys();
         assert_eq!(
@@ -472,7 +494,9 @@ mod tests {
         let insp = check_inspection(&WIN8_AHCI, &ex("ControlSet001", t2)).unwrap();
         assert!(!job_reg(&WIN8_AHCI, &insp).contains("StartOverride"));
         // A hostile value name is not echoed into the .reg.
-        let t3 = format!("{t2}\n[HKEY_LOCAL_MACHINE\\SYSTEM\\ControlSet001\\Services\\storahci\\StartOverride]\n\"0]\\r\\n[x\"=dword:00000003\n");
+        let t3 = format!(
+            "{t2}\n[HKEY_LOCAL_MACHINE\\SYSTEM\\ControlSet001\\Services\\storahci\\StartOverride]\n\"0]\\r\\n[x\"=dword:00000003\n"
+        );
         assert!(check_inspection(&WIN8_AHCI, &ex("ControlSet001", &t3)).is_err());
     }
 

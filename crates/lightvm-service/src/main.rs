@@ -62,7 +62,7 @@ use lightvm_service::supervisor::{Backend, ParentLossPolicy};
 use lightvm_service::{ServiceConfig, start};
 
 const USAGE: &str = "usage: lightvm-service --catalog <dir> [--qemu-dir <dir>] \
-[--firmware-dir <dir>] [--swtpm <file>] [--approved-hashes <file>] [--audit-log <file>] [--runtime-dir <dir>] [--parent-watch stdin|none] \
+[--firmware-dir <dir>] [--storage-helper-dir <dir>] [--swtpm <file>] [--approved-hashes <file>] [--audit-log <file>] [--runtime-dir <dir>] [--parent-watch stdin|none] \
 [--parent-loss-policy kill-vms|shutdown-vms|keep-vms] [--parent-loss-powerdown-s N]
        lightvm-service --emergency-stop --catalog <dir>
        lightvm-service --move-catalog --catalog <dir> --to <new dir> [--keep-source]";
@@ -75,6 +75,7 @@ struct Args {
     catalog: PathBuf,
     qemu_dir: Option<PathBuf>,
     firmware_dir: Option<PathBuf>,
+    storage_helper_dir: Option<PathBuf>,
     swtpm: Option<PathBuf>,
     approved_hashes: Option<PathBuf>,
     audit_log: Option<PathBuf>,
@@ -92,6 +93,7 @@ fn parse_args() -> Result<Args, String> {
     let mut catalog = None;
     let mut qemu_dir = None;
     let mut firmware_dir = None;
+    let mut storage_helper_dir = None;
     let mut swtpm = None;
     let mut approved_hashes = None;
     let mut audit_log = None;
@@ -112,6 +114,7 @@ fn parse_args() -> Result<Args, String> {
             "--catalog" => catalog = Some(PathBuf::from(value()?)),
             "--qemu-dir" => qemu_dir = Some(PathBuf::from(value()?)),
             "--firmware-dir" => firmware_dir = Some(PathBuf::from(value()?)),
+            "--storage-helper-dir" => storage_helper_dir = Some(PathBuf::from(value()?)),
             "--swtpm" => swtpm = Some(PathBuf::from(value()?)),
             "--approved-hashes" => approved_hashes = Some(PathBuf::from(value()?)),
             "--audit-log" => audit_log = Some(PathBuf::from(value()?)),
@@ -171,6 +174,7 @@ fn parse_args() -> Result<Args, String> {
         catalog,
         qemu_dir,
         firmware_dir,
+        storage_helper_dir,
         swtpm,
         approved_hashes,
         audit_log,
@@ -289,7 +293,8 @@ fn private_root(
     Ok(short)
 }
 
-/// Firmware directory, swtpm and development approvals (ADR-0028): from the
+/// Firmware directory, swtpm, storage helper folder (ADR-0030) and
+/// development approvals (ADR-0028): from the
 /// arguments, else the defaults under the user state directory. An
 /// approvals file given explicitly must exist and be valid; the default one
 /// is used only when present (and must then be valid too).
@@ -300,6 +305,12 @@ fn configure_aarch64_and_approvals(setup: &mut QemuSetup, args: &Args) -> Result
         .clone()
         .or_else(|| state.as_ref().map(|d| d.join("firmware")));
     setup.swtpm.clone_from(&args.swtpm);
+    // Storage helper of the VMware import (ADR-0030): optional, separate
+    // GPL image built by packaging/storage-helper.
+    setup.storage_helper_dir = args
+        .storage_helper_dir
+        .clone()
+        .or_else(|| state.as_ref().map(|d| d.join("storage-helper")));
     let approvals = match (&args.approved_hashes, &state) {
         (Some(p), _) => Some(p.clone()),
         (None, Some(d)) => Some(d.join("approved-dev.sha256")).filter(|p| p.is_file()),

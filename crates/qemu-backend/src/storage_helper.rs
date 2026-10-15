@@ -75,10 +75,16 @@ impl HelperImage {
         }
         let kernel = ManagedPath::verify(k)?;
         let initrd = ManagedPath::verify(i)?;
-        for (p, name) in [(&kernel, "storage helper kernel"), (&initrd, "storage helper initramfs")] {
+        for (p, name) in [
+            (&kernel, "storage helper kernel"),
+            (&initrd, "storage helper initramfs"),
+        ] {
             let meta = std::fs::metadata(p.as_path()).map_err(BackendError::Io)?;
             if !meta.is_file() {
-                return Err(BackendError::invalid("storage_helper", "not a regular file"));
+                return Err(BackendError::invalid(
+                    "storage_helper",
+                    "not a regular file",
+                ));
             }
             let sha = sha256_file(p.as_path())?;
             let ok = APPROVED_HELPER_SHA256
@@ -167,7 +173,10 @@ pub fn parse_report(serial: &str) -> HelperReport {
         let Some(rest) = line.strip_prefix("LIGHTVM-PREP ") else {
             continue;
         };
-        if let Some(x) = rest.strip_prefix("X ").or_else(|| (rest == "X").then_some("")) {
+        if let Some(x) = rest
+            .strip_prefix("X ")
+            .or_else(|| (rest == "X").then_some(""))
+        {
             if let Some((_, text)) = r.exports.last_mut() {
                 text.push_str(x);
                 text.push('\n');
@@ -316,7 +325,14 @@ pub fn run_helper(
         if let Some(r) = &job.reg {
             write(&reg, r)?;
         }
-        let args = helper_args(m, image, disk, &keys, job.reg.as_ref().map(|_| &reg), &serial);
+        let args = helper_args(
+            m,
+            image,
+            disk,
+            &keys,
+            job.reg.as_ref().map(|_| &reg),
+            &serial,
+        );
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         let cmd = ImageCommand {
             qemu_img: &m.qemu_system,
@@ -363,7 +379,10 @@ LIGHTVM-PREP X \"Start\"=dword:00000000\nLIGHTVM-PREP MISSING Services\\x\nLIGHT
         assert_eq!(r.exports.len(), 1);
         assert_eq!(r.exports[0].0, "ControlSet001");
         assert!(r.exports[0].1.contains("\"Start\"=dword:00000000\n"));
-        assert_eq!(r.missing, vec![("ControlSet001".into(), "Services\\x".into())]);
+        assert_eq!(
+            r.missing,
+            vec![("ControlSet001".into(), "Services\\x".into())]
+        );
 
         let r = parse_report("LIGHTVM-PREP RESULT error hibernated Windows is hibernated\n");
         assert_eq!(
@@ -375,7 +394,8 @@ LIGHTVM-PREP X \"Start\"=dword:00000000\nLIGHTVM-PREP MISSING Services\\x\nLIGHT
         );
         assert_eq!(parse_report("garbage\n").outcome, HelperOutcome::Missing);
         // Exported text cannot forge a record: it is always behind `X `.
-        let r = parse_report("LIGHTVM-PREP CS ControlSet001\nLIGHTVM-PREP X LIGHTVM-PREP RESULT ok\n");
+        let r =
+            parse_report("LIGHTVM-PREP CS ControlSet001\nLIGHTVM-PREP X LIGHTVM-PREP RESULT ok\n");
         assert_eq!(r.outcome, HelperOutcome::Missing);
     }
 
@@ -385,7 +405,9 @@ LIGHTVM-PREP X \"Start\"=dword:00000000\nLIGHTVM-PREP MISSING Services\\x\nLIGHT
         assert!(is_safe_key(
             "Control\\CriticalDeviceDatabase\\pci#ven_8086&dev_2922&cc_010601"
         ));
-        for bad in ["", "a\\\\b", "a b", "a\"b", "a'b", "a$b", "a\nb", "\\a", "a;b", "a`b"] {
+        for bad in [
+            "", "a\\\\b", "a b", "a\"b", "a'b", "a$b", "a\nb", "\\a", "a;b", "a`b",
+        ] {
             assert!(!is_safe_key(bad), "{bad:?}");
         }
     }
@@ -413,7 +435,14 @@ LIGHTVM-PREP X \"Start\"=dword:00000000\nLIGHTVM-PREP MISSING Services\\x\nLIGHT
         assert!(s.contains("virtio-blk-pci,drive=disk"));
         assert!(!s.contains("prep.reg"));
         assert!(!s.contains("tcg"));
-        let a = helper_args(&m, &image, &p("disk.qcow2"), &p("k.txt"), Some(&p("j.reg")), &p("s.log"));
+        let a = helper_args(
+            &m,
+            &image,
+            &p("disk.qcow2"),
+            &p("k.txt"),
+            Some(&p("j.reg")),
+            &p("s.log"),
+        );
         assert!(a.join(" ").contains("name=opt/org.lightvm/prep.reg,file="));
     }
 }
