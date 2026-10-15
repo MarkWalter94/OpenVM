@@ -464,18 +464,14 @@ fn progress_or_outcome(ui: &mut egui::Ui, env: &SnapshotsEnv<'_>) {
     let p = theme::Palette::of(ui);
     let v = env.vm;
     let pending = env.request.filter(|r| r.status.is_pending());
-    let running = v
-        .baselines
-        .operation
-        .filter(is_snapshot_op)
-        .or_else(|| {
-            pending.and_then(|r| match &r.op {
-                SnapshotOp::Take => Some(StorageOperation::TakeSnapshot),
-                SnapshotOp::Revert(_) => Some(StorageOperation::RevertSnapshot),
-                SnapshotOp::Delete(_) => Some(StorageOperation::DeleteSnapshot),
-                SnapshotOp::Rename(_) => None,
-            })
-        });
+    let running = v.baselines.operation.filter(is_snapshot_op).or_else(|| {
+        pending.and_then(|r| match &r.op {
+            SnapshotOp::Take => Some(StorageOperation::TakeSnapshot),
+            SnapshotOp::Revert(_) => Some(StorageOperation::RevertSnapshot),
+            SnapshotOp::Delete(_) => Some(StorageOperation::DeleteSnapshot),
+            SnapshotOp::Rename(_) => None,
+        })
+    });
     if let Some(op) = running {
         let (title, body) = match op {
             StorageOperation::TakeSnapshot => {

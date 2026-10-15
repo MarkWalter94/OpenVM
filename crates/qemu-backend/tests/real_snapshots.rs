@@ -149,10 +149,7 @@ fn not_cancelled() -> impl Fn() -> bool {
 
 /// A 32 MiB scratch disk in `dir`, with the verified `qemu-img` and the
 /// private directory of the image command outputs.
-fn scratch_disk(
-    lab: &Lab,
-    dir: &Path,
-) -> (ManagedPath, ManagedPath, ManagedPath, PathBuf) {
+fn scratch_disk(lab: &Lab, dir: &Path) -> (ManagedPath, ManagedPath, ManagedPath, PathBuf) {
     let log_dir = dir.join("img-logs");
     std::fs::create_dir_all(&log_dir).unwrap();
     let disk = dir.join("disk.qcow2");
@@ -198,33 +195,69 @@ fn real_snapshot_off_qemu_img() {
     // STATE-A, then the first snapshot.
     write_state(&lab, &disk, "0x41");
     let t0 = Instant::now();
-    image::internal_snapshot(&cmd, SnapshotAction::Create, &disk_mp, "0001", &not_cancelled())
-        .expect("snapshot -c 0001");
+    image::internal_snapshot(
+        &cmd,
+        SnapshotAction::Create,
+        &disk_mp,
+        "0001",
+        &not_cancelled(),
+    )
+    .expect("snapshot -c 0001");
     log.line(format!("snapshot -c 0001 in {:?}", t0.elapsed()));
     // STATE-B: written after the take, must be discarded by the apply.
     write_state(&lab, &disk, "0x42");
-    image::internal_snapshot(&cmd, SnapshotAction::Apply, &disk_mp, "0001", &not_cancelled())
-        .expect("snapshot -a 0001");
+    image::internal_snapshot(
+        &cmd,
+        SnapshotAction::Apply,
+        &disk_mp,
+        "0001",
+        &not_cancelled(),
+    )
+    .expect("snapshot -a 0001");
     log.line("after -a 0001 (STATE-B written after): the first 8 bytes must be STATE-A");
     assert_state(&lab, &disk, "0x41");
 
     // A second snapshot of the current state, then STATE-C, then the
     // deletion of the first: the apply of the second still restores
     // STATE-A (the deleted one is gone, the other keeps its state).
-    image::internal_snapshot(&cmd, SnapshotAction::Create, &disk_mp, "0002", &not_cancelled())
-        .expect("snapshot -c 0002");
+    image::internal_snapshot(
+        &cmd,
+        SnapshotAction::Create,
+        &disk_mp,
+        "0002",
+        &not_cancelled(),
+    )
+    .expect("snapshot -c 0002");
     write_state(&lab, &disk, "0x43");
-    image::internal_snapshot(&cmd, SnapshotAction::Delete, &disk_mp, "0001", &not_cancelled())
-        .expect("snapshot -d 0001");
-    image::internal_snapshot(&cmd, SnapshotAction::Apply, &disk_mp, "0002", &not_cancelled())
-        .expect("snapshot -a 0002");
+    image::internal_snapshot(
+        &cmd,
+        SnapshotAction::Delete,
+        &disk_mp,
+        "0001",
+        &not_cancelled(),
+    )
+    .expect("snapshot -d 0001");
+    image::internal_snapshot(
+        &cmd,
+        SnapshotAction::Apply,
+        &disk_mp,
+        "0002",
+        &not_cancelled(),
+    )
+    .expect("snapshot -a 0002");
     log.line(
         "after -d 0001 and -a 0002 (STATE-C written after): the first 8 bytes must be STATE-A",
     );
     assert_state(&lab, &disk, "0x41");
 
     // Deleting a tag that is not there is a failure, not a change.
-    let e = image::internal_snapshot(&cmd, SnapshotAction::Delete, &disk_mp, "0003", &not_cancelled());
+    let e = image::internal_snapshot(
+        &cmd,
+        SnapshotAction::Delete,
+        &disk_mp,
+        "0003",
+        &not_cancelled(),
+    );
     assert!(e.is_err(), "deleting a missing tag must fail");
     log.line(format!("deleting a missing tag: {e:?}"));
     log.line("nothing changed: the first 8 bytes are still STATE-A");
@@ -258,7 +291,10 @@ impl ManagedPaths for FixedDisk {
         Ok(Vec::new())
     }
     fn media(&self, _media: &lightvm_proto::MediaId) -> qemu_backend::error::Result<ManagedPath> {
-        Err(qemu_backend::BackendError::invalid("media", "no media in this test"))
+        Err(qemu_backend::BackendError::invalid(
+            "media",
+            "no media in this test",
+        ))
     }
     fn run_dir(&self, _run: &RunId) -> qemu_backend::error::Result<ManagedPath> {
         ManagedPath::verify(&self.run)
@@ -288,11 +324,7 @@ fn real_snapshot_running_qmp() {
     // STATE-X on the disk before the VM starts.
     write_state(&lab, &disk, "0x58");
     let vars = dir.join("vars.fd");
-    std::fs::copy(
-        lab.qemu_dir.join("share").join("edk2-i386-vars.fd"),
-        &vars,
-    )
-    .unwrap();
+    std::fs::copy(lab.qemu_dir.join("share").join("edk2-i386-vars.fd"), &vars).unwrap();
     let run = dir.join("run");
     let p = dir.join("p");
     std::fs::create_dir_all(&run).unwrap();
@@ -306,12 +338,15 @@ fn real_snapshot_running_qmp() {
     };
 
     let qemu_system = ManagedPath::verify(lab.qemu_dir.join("qemu-system-x86_64.exe")).unwrap();
-    let mut caps = probe::probe_host(&qemu_system, &qemu_img, &ProbeConfig::default())
-        .expect("probe_host");
+    let mut caps =
+        probe::probe_host(&qemu_system, &qemu_img, &ProbeConfig::default()).expect("probe_host");
     log.line(format!("QEMU {}", caps.version));
     let probe_dir = ManagedPath::verify(dir.join("probe")).unwrap();
     std::fs::create_dir_all(probe_dir.as_path()).unwrap();
-    let machine = caps.recommended_machine(MachineFamily::Q35).unwrap().clone();
+    let machine = caps
+        .recommended_machine(MachineFamily::Q35)
+        .unwrap()
+        .clone();
     let cpu = caps.cpu_model(CpuModel::VERIFIED_DEFAULT).unwrap();
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -355,13 +390,22 @@ fn real_snapshot_running_qmp() {
 
     // The take while it runs: QMP `blockdev-snapshot-internal-sync`.
     let t0 = Instant::now();
-    rt.block_on(run.snapshot_disk("aaaa1111")).expect("snapshot_disk");
-    log.line(format!("snapshot_disk(aaaa1111) while running in {:?}", t0.elapsed()));
+    rt.block_on(run.snapshot_disk("aaaa1111"))
+        .expect("snapshot_disk");
+    log.line(format!(
+        "snapshot_disk(aaaa1111) while running in {:?}",
+        t0.elapsed()
+    ));
     // A second take and its deletion, both over QMP.
-    rt.block_on(run.snapshot_disk("bbbb2222")).expect("snapshot_disk 2");
+    rt.block_on(run.snapshot_disk("bbbb2222"))
+        .expect("snapshot_disk 2");
     let t0 = Instant::now();
-    rt.block_on(run.delete_disk_snapshot("bbbb2222")).expect("delete_disk_snapshot");
-    log.line(format!("delete_disk_snapshot(bbbb2222) in {:?}", t0.elapsed()));
+    rt.block_on(run.delete_disk_snapshot("bbbb2222"))
+        .expect("delete_disk_snapshot");
+    log.line(format!(
+        "delete_disk_snapshot(bbbb2222) in {:?}",
+        t0.elapsed()
+    ));
     // An invalid tag is refused before it reaches QMP.
     assert!(
         rt.block_on(run.snapshot_disk("BAD NAME")).is_err(),
@@ -379,8 +423,14 @@ fn real_snapshot_running_qmp() {
     log.line(format!("VM stopped: phase {:?}", report.phase));
     // STATE-Y written after the take: must be discarded by the apply.
     write_state(&lab, &disk, "0x59");
-    image::internal_snapshot(&cmd, SnapshotAction::Apply, &disk_mp, "aaaa1111", &not_cancelled())
-        .expect("snapshot -a aaaa1111");
+    image::internal_snapshot(
+        &cmd,
+        SnapshotAction::Apply,
+        &disk_mp,
+        "aaaa1111",
+        &not_cancelled(),
+    )
+    .expect("snapshot -a aaaa1111");
     log.line("after -a aaaa1111 (STATE-Y written after): the first 8 bytes must be STATE-X");
     assert_state(&lab, &disk, "0x58");
 }
