@@ -31,8 +31,14 @@ pub const DESCRIPTION: &str = "A VMware Workstation or Player VM is converted in
 /// Accessible name of the name field.
 pub const NAME_FIELD: &str = "Name of the imported VM";
 
-/// Text of the LSI Logic warning (ADR-0030).
-pub const STORAGE_DRIVER_WARNING: &str = "Windows may not start: storage driver preparation needed. The disk was on an LSI Logic SCSI controller, which LightVM cannot emulate: Windows stops at boot (STOP 0x7B) until the driver of the new controller is enabled. Prepare the VM in VMware before importing, as described in the user guide, section \u{201c}Importing a VMware VM\u{201d}, \u{201c}LSI Logic disks\u{201d}.";
+/// Text of the storage driver warning when LightVM cannot prepare the disk
+/// itself (ADR-0030: storage helper not installed, or a combination it
+/// does not cover).
+pub const STORAGE_DRIVER_WARNING: &str = "Windows may not start: storage driver preparation needed. The disk was on a controller LightVM cannot keep (an LSI Logic SCSI controller, which LightVM cannot emulate, or an NVMe disk with legacy BIOS, which the BIOS of LightVM cannot start from): Windows stops at boot (STOP 0x7B) until the driver of the new controller is enabled, and the storage helper that enables it automatically is not installed. Prepare the VM in VMware before importing, as described in the user guide, section \u{201c}Importing a VMware VM\u{201d}, \u{201c}LSI Logic disks\u{201d}.";
+
+/// Text of the storage driver notice when LightVM prepares the disk itself
+/// (ADR-0030, storage helper).
+pub const STORAGE_DRIVER_ENABLED: &str = "The disk was on a controller LightVM cannot keep (an LSI Logic SCSI controller, which LightVM cannot emulate, or an NVMe disk with legacy BIOS, which the BIOS of LightVM cannot start from). LightVM sets the guest's own Windows driver of the new controller to start at boot, in the converted disk only: the VMware VM is not changed. If Windows in VMware was hibernated, used Fast Startup or was not shut down cleanly, the import stops and says so. Windows may ask to be activated again: its hardware changed.";
 
 /// Import page state, from the choice of the `.vmx` to the outcome.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -174,6 +180,7 @@ pub fn not_imported_text(item: NotImportedItem) -> &'static str {
 pub fn warning_text(w: &ImportWarning) -> String {
     let base = match w.kind {
         ImportWarningKind::StorageDriverPreparation => STORAGE_DRIVER_WARNING,
+        ImportWarningKind::StorageDriverEnabled => STORAGE_DRIVER_ENABLED,
         ImportWarningKind::ControllerReplaced => {
             "The disk controller of the VM cannot be emulated: the disk is attached to the standard controller of the system. Standard Linux distributions start; a custom initramfs may lack the driver."
         }
@@ -210,6 +217,9 @@ pub fn phase_text(phase: VmwareImportPhase) -> &'static str {
     match phase {
         VmwareImportPhase::Checking => "Checking the VMware files…",
         VmwareImportPhase::Converting => "Converting the disk…",
+        VmwareImportPhase::PreparingDisk => {
+            "Enabling the Windows storage driver in the converted disk…"
+        }
         VmwareImportPhase::Finishing => "Checking the converted disk and creating the VM…",
     }
 }
@@ -769,5 +779,12 @@ mod tests {
         });
         assert!(t.starts_with("Windows may not start: storage driver preparation needed"));
         assert!(t.contains("Importing a VMware VM"));
+        let t = warning_text(&ImportWarning {
+            kind: ImportWarningKind::StorageDriverEnabled,
+            detail: Some("LsiLogic → Ahci".into()),
+        });
+        assert!(t.contains("VMware VM is not changed"), "{t}");
+        assert!(t.ends_with("(LsiLogic → Ahci)"));
+        assert!(phase_text(VmwareImportPhase::PreparingDisk).contains("storage driver"));
     }
 }

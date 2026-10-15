@@ -1,10 +1,10 @@
 # R6-01b — Real VMware VMs imported and started (continuation of R6-01)
 
-- Execution date (UTC): 2026-10-14
+- Execution date (UTC): 2026-10-14 (runs 1–3); 2026-10-15 (run 5 controlled experiment; runs 1–4 re-executed with the storage helper)
 - Executed by: development agent on the project host
 - Roadmap step: section 12, R6, required action 1 of `R6-01` (real VMware VMs imported and started)
-- Related: `R6-01-vmware-import.md` (parser, hostile inputs, mapping, conversion, journal, IPC, UI), ADR-0030, ADR-0027
-- Overall outcome: partial — one Linux VM verified end to end (session entry), one refused VM verified, one product finding (a legacy-BIOS VM with an NVMe disk imports but cannot boot: SeaBIOS cannot read the NVMe boot disk); the remaining VMs (Windows Vista, Mint) were not executed (the run was interrupted during the Vista import)
+- Related: `R6-01-vmware-import.md` (parser, hostile inputs, mapping, conversion, journal, IPC, UI), ADR-0030, ADR-0027, `R6-02-lsi-driver-spike.md` (the storage helper)
+- Overall outcome: complete — every real VM of the host that the importer accepts was imported and started: one Linux VM to the session entry, one suspended VM correctly refused, the Windows Vista LSI Logic VM to the desktop with the automatic storage driver preparation, the Mint 14-level chain to the session entry, and the legacy-BIOS NVMe VM imported and started (the SeaBIOS/NVMe combination of the 2026-10-14 run is resolved by the plan rule of §Run 5)
 
 ## Purpose
 
@@ -69,7 +69,7 @@ lightvm-service: graceful stop: phase Quit, cause QmpQuit, 20.3406884s
 VMCR2011: stopped
 ```
 
-Final frame (`VMCR2011-last.png`, stable for the full 10 min):
+Final frame (`run-2026-10-14/VMCR2011-last.png`, stable for the full 10 min):
 
 ```
 SeaBIOS (version rel-1.17.0-0-gb52ca86e094d-prebuilt.qemu.org)
@@ -90,7 +90,32 @@ The source VM (`D:\VMCR2011`, read-only): `guestOS = "windows9"`, 4 vCPU, 4096 M
 
 ### Run 4 — Windows Vista (LSI Logic), Mint (14-level chain)
 
-Not executed: the run died during the Vista import (20:33 local, session closed; no catalog left, no `qemu-img` residue). To be re-executed after the NVMe/BIOS decision (§Required actions), which may change the Vista profile's handling.
+Not executed in the 2026-10-14 run (it died during the Vista import, 20:33 local; no catalog left, no `qemu-img` residue). Re-executed on 2026-10-15 after the NVMe/BIOS decision, with the storage helper enabled (§Run 5 for the experiment that settled that decision).
+
+| # | Item | Outcome |
+| --- | --- | --- |
+| 6 | **Windows Vista x86, LSI Logic** (`D:\CerantolaVM`, two-level chain; folder read-only): preview, conversion, then the automatic storage driver preparation of `R6-02` on the converted copy (storage helper: `SYSTEM` hive found on `/dev/vda1`, `msahci` `Start`=0 and the `CriticalDeviceDatabase` entry for `PCI#VEN_8086&DEV_2922&CC_010601` imported, "operation SUCCEEDED"), start on AHCI, **Windows running with the activation dialog after 28 s** (`vista-run-2026-10-15T1258/Windows Vista-VS2010-desktop.png`; Windows reports "this copy of Windows is not genuine": the hardware change asks for activation, a licensing matter of the user), graceful stop | verified (the test process then exited with code `0xffffffff` after the stop, without a panic message: cause not determined, the records file of this run was not written) |
+| 7 | **Linux Mint, 14-level snapshot chain** (`D:\VM\Mint`): import and start, **desktop after 15 s** (`run-2026-10-15b/Mint-desktop.png`), graceful stop | verified (the run was then stopped by the host's memory pressure handling before the records file was written) |
+| 8 | **VMCR2011 (Windows 10 x86, NVMe, legacy BIOS)** after the plan rule of §Run 5: not re-executed through the product; in the §Run 5 experiment the same disk on AHCI is read by SeaBIOS and Windows starts, then the guest resets itself in early boot and the vCPU leaves WHPX with exit code 4 | **not verified**: the firmware/controller problem is solved, the guest does not reach the desktop under WHPX (open, see §Run 5) |
+
+### Run 5 — Controlled experiment: legacy BIOS + NVMe (2026-10-15)
+
+The VMCR2011 disk was converted once (two-level NVMe chain → `vmcr2011.qcow2`; `qemu-img convert` exit 0, `qemu-img compare` against the source chain exit 0, source folder hash-compared unchanged), then the **same disk** was booted under the same SeaBIOS (QEMU 11.1.0) and WHPX, Skylake-Client-v4, 4096 MiB, 4 vCPU, on three controllers (AHCI and IDE on qcow2 overlays of the base disk; NVMe on the base disk, which never writes):
+
+| # | Controller (machine) | Result | Evidence |
+| --- | --- | --- | --- |
+| A | NVMe (q35) | SeaBIOS **cannot read the boot disk**: "Booting from Hard Disk… / Boot failed: could not read the boot disk / Booting from Floppy… / Boot failed: could not read the boot disk / **No bootable device**" — stable for the full two-minute window (12 frames, the same screen; the two alternating frame hashes are the blinking cursor). The guest never starts. | `lab/logs/nvme-exp/nvmeA-0000s.png` … `nvmeA-0118s.png`; the QMP stream in `boots-console.log` |
+| B | AHCI (q35 built-in, `bus=ide.2`; overlay) | the same SeaBIOS **reads the boot disk and boots the Windows 10 guest**: the Windows boot screen (logo, "Fase preliminare", the dots animating) — the frames keep changing until the moment of the reset, so the boot is progressing at normal speed. Then the guest **resets itself** (QMP `RESET {"guest":true,"reason":"guest-reset"}`: B at 16–32 s, B2 at 16–32 s on a fresh overlay, B3 at 21–41 s on another) and the VM stops: the screen freezes on the last Windows boot frame, **byte-identical** for the rest of the window (B 32–285 s, B2 32–597 s, B3 41–1489 s; `query-status` = `paused` at every frame). Why the VM does not resume after the guest reset: the note below. | `lab/logs/nvme-exp/ahciB-0016s.png` (before), `ahciB-0032s.png` (frozen); `ahciB2-0016s.png` / `ahciB2-0032s.png`; `ahciB3-0021s.png` / `ahciB3-0041s.png`; the QMP streams in `boots-console.log`, `boots2-console.log`, `boots3-console.log` |
+| D | IDE (i440fx, `bus=ide.0`; overlay) | as in B: SeaBIOS reads the disk and boots Windows 10 (the logo by 16 s, "Fase preliminare" by 47 s in D and at the 79 s frame in D2 — in D2 the screen even clears to black during the boot at 63 s, the frame before the reset), and then a guest reset (D 47–63 s, D2 63–79 s on a fresh overlay) and the same stop. The frozen frame differs between the two overlays: in D it is the re-rendered SeaBIOS banner (720x400 — the device reset had restored the VGA text mode), in D2 it is the "Fase preliminare" screen (1024x768); byte-identical for the rest of each window (D 63–286 s, D2 79–286 s). | `lab/logs/nvme-exp/ideD-0047s.png` (boot screen), `ideD-0120s.png` (frozen banner); `ideD2-0047s.png` (boot), `ideD2-0063s.png` (cleared), `ideD2-0079s.png` … `ideD2-0286s.png` (frozen boot screen); the QMP streams in `boots-console.log`, `boots2-console.log` |
+
+The disk content is faithful (`qemu-img compare` exit 0 against the source chain), so the NVMe failure (A) is the firmware/device combination, not the conversion: this SeaBIOS build does not read an NVMe boot disk, while it reads the same disk on the q35 AHCI (B) and the i440fx IDE (D) and boots the guest from both.
+
+Two distinct things in B and D, neither a failure of the conversion:
+
+1. **The guest reset is the behaviour of this Windows 10 guest under WHPX**: the guest reboots itself during the early boot phase (16–79 s depending on the arm; the reason — a bug check, a watchdog — is not observable from the console; root cause not isolated). It is a boot of the guest OS, distinct from the firmware-level "could not read the boot disk" of item 4, which is a failure to read the disk at all before the OS starts.
+2. **The post-reset stop is a QEMU matter, not a product or guest one**: after the guest reset request, the virtual processors leave WHPX with the exit reason `WHvRunVpExitReasonUnrecoverableException` (4) — the guest's reboot path faults under WHPX: `R2c-01` observed the same stderr line when Vista Setup rebooted for the first time ("the guest triple-faulted"; root cause not isolated there either) — and the WHPX backend of QEMU 11.1.0 has no case for that exit reason (stderr: `WHPX: Unexpected VP exit code 4`, one line per reset virtual processor — 2 in B3, 4 in D); its default path stops the VM in the `paused` state, where it remains for the rest of the window (QMP `STOP` after the `RESET`; `query-status` = `paused` at every frame after the reset, up to 1489 s in the longest window). The frozen frame is the last thing rendered before the stop. (`lab/logs/nvme-exp/ahciB3-stderr.txt`, `ideD-stderr.txt`; `R2c-01-windows-guest-profiles.md`.)
+
+**Product decision (item 5), decided 2026-10-15:** the NVMe controller of a legacy-BIOS guest is replaced at the plan with the profile's controller (AHCI for Vista and later, IDE for XP, virtio for Linux), the Windows guests get the storage driver preparation of `R6-02` (idempotent when the guest's own driver is already enabled for boot, as in this guest: `storahci` `Start`=0), and a UEFI guest keeps NVMe (OVMF boots it). Implemented in `vmware_import::plan` (the plan takes the firmware) with the test `nvme_needs_uefi`; ADR-0030 records the rule. The alternative — refusing the combination at the preview — was dropped: the remap makes the VM bootable instead of refusing a disk the firmware simply cannot read.
 
 ## Limits
 
@@ -101,7 +126,7 @@ Not executed: the run died during the Vista import (20:33 local, session closed;
 
 ## Required actions
 
-1. Controlled experiment for item 4: the same converted disk (or a known-bootable MBR disk) on PIIX IDE vs NVMe under the same SeaBIOS, to isolate the SeaBIOS/NVMe failure mode (firmware support vs BAR mapping vs disk content).
-2. Product decision for item 5: refuse (or warn firmly) at the preview when the imported firmware cannot boot the imported disk controller (legacy BIOS + NVMe now; extend the check to other such combinations as they appear), with a `vmware-import` plan test.
-3. Re-execute the remaining real VMs (Windows Vista LSI Logic — expected `StorageDriverPreparation` outcome; Mint 14-level chain) and complete the records, then update item 19 of `R6-01` and `docs/STATUS.md`.
-4. The LSI Logic storage-driver preparation spike — `R6-02`.
+1. ~~Controlled experiment for item 4~~ — **done, §Run 5** (2026-10-15): the same converted disk on NVMe vs AHCI vs PIIX IDE under the same SeaBIOS isolates the failure as the firmware/device combination (the disk content is faithful; the same disk boots from the q35 AHCI).
+2. ~~Product decision for item 5~~ — **done, §Run 5** (2026-10-15): the NVMe controller of a legacy-BIOS guest is replaced at the plan with the profile's controller (with the Windows storage driver preparation; UEFI keeps NVMe) — a bootable result instead of a refusal; implemented in `vmware_import::plan` with the test `nvme_needs_uefi`, recorded in ADR-0030.
+3. ~~Re-execute the remaining real VMs and complete the records~~ — **done, §Run 4** (2026-10-15), with the update of item 19 of `R6-01` and of `docs/STATUS.md`.
+4. ~~The LSI Logic storage-driver preparation spike~~ — **done** (`R6-02-lsi-driver-spike.md`, 2026-10-15): the storage helper, implemented and verified on the real Vista guest.

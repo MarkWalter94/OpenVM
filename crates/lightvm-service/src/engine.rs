@@ -553,6 +553,23 @@ pub trait ImageTool: Send + Sync + std::fmt::Debug + 'static {
             "snapshots not available on this backend",
         ))
     }
+    /// `true` when the storage helper (ADR-0030, an approved image found by
+    /// the probe) can prepare converted Windows disks.
+    fn storage_helper_available(&self) -> bool {
+        false
+    }
+    /// Runs the storage helper on the converted disk `disk` (a journal
+    /// temporary nobody else has open): exports `keys`, after importing
+    /// `reg` when given (ADR-0030, `qemu_backend::storage_helper`).
+    fn run_storage_helper(
+        &self,
+        _disk: &Path,
+        _keys: &[String],
+        _reg: Option<&str>,
+        _cancel: &dyn Fn() -> bool,
+    ) -> Result<qemu_backend::storage_helper::HelperReport, PublicError> {
+        Err(PublicError::unsupported("storage helper not available"))
+    }
 }
 
 /// Internal snapshot operation on a disk with the VM off (ADR-0032).

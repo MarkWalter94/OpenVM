@@ -73,6 +73,7 @@ pub mod qmp;
 pub mod run;
 pub mod screenshot;
 pub mod storage_guard;
+pub mod storage_helper;
 mod sys;
 pub mod validate;
 pub mod vcpu_fault;

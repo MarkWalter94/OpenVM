@@ -16,7 +16,10 @@
 //!    ([`crate::engine::VmEngine::vmware_begin`]);
 //! 4. worker: [`convert`]: `qemu-img convert -p -f vmdk -O qcow2` into the
 //!    journal temporary with the guard still held, progress, cancellation;
-//!    then `qemu-img check` and the virtual size of the result;
+//!    then `qemu-img check` and the virtual size of the result; for a
+//!    Windows guest moved to another controller, the storage driver of the
+//!    new controller enabled in the converted disk by the storage helper
+//!    ([`prepare_storage_driver`]) and the disk checked again;
 //! 5. supervisor: the disk is published and the VM row written in one
 //!    commit ([`crate::engine::VmEngine::vmware_finish`]), or everything is
 //!    rolled back ([`crate::engine::VmEngine::vmware_abort`]).
@@ -27,8 +30,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use lightvm_proto::ipc::VmwareImportPreview;
+use lightvm_proto::ipc::{ImportWarningKind, VmwareImportPhase, VmwareImportPreview};
 use lightvm_proto::{DisplayAdapter, PublicError, VmConfig, VmName};
+use vmware_import::driver_prep;
 use vmware_import::inspect::Guard;
 use vmware_import::{ChainFacts, HostLimits, Inspection, Plan};
 
@@ -153,8 +157,19 @@ pub fn analyze(
             .unwrap_or_default();
         vmware_import::plan::suggested_name(inspection.vmx.get("displayname"), &stem)
     });
-    let plan =
+    let mut plan =
         vmware_import::plan(&inspection, &facts, &ctx.limits, name).map_err(|e| e.to_public())?;
+    // The storage helper prepares the converted disk itself: the preview
+    // says so instead of asking for the manual preparation.
+    if let Some(hw) = &plan.config.imported
+        && automatic_preparation(ctx.tool.as_ref(), plan.config.guest_os, hw)
+    {
+        for w in &mut plan.warnings {
+            if w.kind == ImportWarningKind::StorageDriverPreparation {
+                w.kind = ImportWarningKind::StorageDriverEnabled;
+            }
+        }
+    }
     let required_bytes = vmware_import::plan::required_bytes(&facts);
     let free_bytes = ctx.tool.free_bytes(&ctx.catalog_root);
     Ok(Analysis {
@@ -190,19 +205,23 @@ pub fn check_space(required: u64, free: Option<u64>, reserve: u64) -> Result<(),
 }
 
 /// Converts the chain of `a` into `dst` (a journal temporary that does not
-/// exist yet), then checks the result. The guard of the analysis is held
-/// until the end; `progress` receives the percentage.
+/// exist yet), then checks the result and, for a Windows guest moved to
+/// another controller, enables its storage driver in the converted disk
+/// ([`prepare_storage_driver`]). The guard of the analysis is held until the
+/// end of the conversion; `progress` receives the phase and the percentage.
 pub fn convert(
     a: Analysis,
     dst: &Path,
     cancel: &dyn Fn() -> bool,
-    progress: &mut dyn FnMut(u8),
-) -> Result<(), PublicError> {
+    progress: &mut dyn FnMut(VmwareImportPhase, u8),
+) -> Result<DriverPreparation, PublicError> {
     if cancel() {
         return Err(cancelled());
     }
     let tool = a.tool.clone();
-    tool.convert_vmdk(&a.inspection.disk.top, dst, cancel, progress)?;
+    tool.convert_vmdk(&a.inspection.disk.top, dst, cancel, &mut |p| {
+        progress(VmwareImportPhase::Converting, p);
+    })?;
     if cancel() {
         return Err(cancelled());
     }
@@ -214,15 +233,27 @@ pub fn convert(
         ));
     }
     drop(a.guard);
-    if let Some(hw) = &a.plan.config.imported {
-        let outcome = prepare_storage_driver(dst, hw);
-        if outcome == DriverPreparation::ManualPreparationNeeded {
-            crate::diag!(
-                "lightvm-service: VMware import: the guest needs its storage driver enabled for boot (manual preparation, ADR-0030)"
-            );
-        }
+    let Some(hw) = &a.plan.config.imported else {
+        return Ok(DriverPreparation::NotNeeded);
+    };
+    if hw.storage_driver_preparation
+        && automatic_preparation(tool.as_ref(), a.plan.config.guest_os, hw)
+    {
+        progress(VmwareImportPhase::PreparingDisk, 0);
     }
-    Ok(())
+    let outcome = prepare_storage_driver(tool.as_ref(), dst, a.plan.config.guest_os, hw, cancel)?;
+    match outcome {
+        DriverPreparation::Enabled => {
+            // The helper wrote into the disk: check it again.
+            tool.check(dst, cancel)?;
+            progress(VmwareImportPhase::PreparingDisk, 100);
+        }
+        DriverPreparation::ManualPreparationNeeded => crate::diag!(
+            "lightvm-service: VMware import: the guest needs its storage driver enabled for boot (manual preparation, ADR-0030)"
+        ),
+        DriverPreparation::NotNeeded => {}
+    }
+    Ok(outcome)
 }
 
 /// Outcome of [`prepare_storage_driver`].
@@ -230,29 +261,87 @@ pub fn convert(
 pub enum DriverPreparation {
     /// The guest keeps a controller it has a boot driver for.
     NotNeeded,
-    /// Windows was on a controller QEMU does not emulate (VMware
-    /// `lsilogic`/`buslogic`): the driver of the new controller must be
-    /// enabled for boot; the user prepares the guest in VMware
-    /// (`docs/USER_GUIDE.md`, "LSI Logic disks").
+    /// The driver of the new controller was enabled in the converted disk
+    /// and verified (storage helper).
+    Enabled,
+    /// Windows was moved to another controller and the automatic
+    /// preparation is not available (no approved storage helper, or a
+    /// guest/controller combination it does not cover): the user prepares
+    /// the guest in VMware (`docs/USER_GUIDE.md`, "LSI Logic disks").
     ManualPreparationNeeded,
 }
 
-/// Hook of the offline storage driver enablement (ADR-0030): it will edit
-/// the guest `SYSTEM` hive of the **converted copy** (`converted`, a
-/// journal temporary, never the VMware files) so that the inbox driver of
-/// [`ImportedHardware::disk_controller`] starts at boot. The method (hive
-/// editing on the image, the host privileges it needs, the Windows
-/// versions it covers) is decided by a separate spike: until then nothing
-/// is changed and the outcome says whether the manual preparation applies.
+/// `true` when the import of a guest with `hw` will enable its storage
+/// driver itself: preparation needed, a plan for the guest and controller
+/// (`vmware_import::driver_prep`) and the storage helper available.
 #[must_use]
-pub fn prepare_storage_driver(
-    converted: &Path,
+pub fn automatic_preparation(
+    tool: &dyn ImageTool,
+    os: lightvm_proto::GuestOs,
     hw: &lightvm_proto::ImportedHardware,
-) -> DriverPreparation {
-    let _ = converted;
-    if hw.storage_driver_preparation {
-        DriverPreparation::ManualPreparationNeeded
-    } else {
-        DriverPreparation::NotNeeded
+) -> bool {
+    hw.storage_driver_preparation
+        && driver_prep::driver_plan(os, hw.disk_controller).is_some()
+        && tool.storage_helper_available()
+}
+
+/// Outcome of a helper run as a result: its exports, or the refusal.
+fn helper_exports(
+    r: qemu_backend::storage_helper::HelperReport,
+) -> Result<Vec<(String, String)>, PublicError> {
+    use qemu_backend::storage_helper::HelperOutcome;
+    for i in &r.info {
+        crate::diag!(
+            "lightvm-service: storage helper: {}",
+            vmware_import::shown(i)
+        );
     }
+    match r.outcome {
+        HelperOutcome::Ok => Ok(r.exports),
+        HelperOutcome::Error { code, text } => {
+            Err(driver_prep::PrepError::Helper(code, text).to_public())
+        }
+        HelperOutcome::Missing => Err(driver_prep::PrepError::NoResult.to_public()),
+    }
+}
+
+/// Offline storage driver enablement (ADR-0030): edits the guest `SYSTEM`
+/// hive of the **converted copy** (`converted`, a journal temporary, never
+/// the VMware files) so that the inbox driver of
+/// [`lightvm_proto::ImportedHardware::disk_controller`] starts at boot.
+/// Two runs of the storage helper: an inspection (read-only: the driver
+/// must be installed in the guest), then the import of the `.reg` built by
+/// `vmware_import::driver_prep` and the export of every key it touched,
+/// verified here. Without a plan for the guest or without the helper,
+/// nothing is changed and the outcome says the manual preparation applies.
+pub fn prepare_storage_driver(
+    tool: &dyn ImageTool,
+    converted: &Path,
+    os: lightvm_proto::GuestOs,
+    hw: &lightvm_proto::ImportedHardware,
+    cancel: &dyn Fn() -> bool,
+) -> Result<DriverPreparation, PublicError> {
+    if !hw.storage_driver_preparation {
+        return Ok(DriverPreparation::NotNeeded);
+    }
+    if !automatic_preparation(tool, os, hw) {
+        return Ok(DriverPreparation::ManualPreparationNeeded);
+    }
+    let Some(plan) = driver_prep::driver_plan(os, hw.disk_controller) else {
+        return Ok(DriverPreparation::ManualPreparationNeeded);
+    };
+    let inspected = tool.run_storage_helper(converted, &plan.inspect_keys(), None, cancel)?;
+    let inspected = driver_prep::check_inspection(&plan, &helper_exports(inspected)?)
+        .map_err(|e| e.to_public())?;
+    if cancel() {
+        return Err(cancelled());
+    }
+    let reg = driver_prep::job_reg(&plan, &inspected);
+    let done = tool.run_storage_helper(converted, &plan.verify_keys(), Some(&reg), cancel)?;
+    driver_prep::verify(&plan, &helper_exports(done)?).map_err(|e| e.to_public())?;
+    crate::diag!(
+        "lightvm-service: VMware import: storage driver of {:?} enabled in the converted disk",
+        hw.disk_controller
+    );
+    Ok(DriverPreparation::Enabled)
 }

@@ -289,7 +289,7 @@ A VM you already have in **VMware Workstation or VMware Player** (a folder with 
 - **Shut the VM down** from inside the guest (Start → Shut down), not *Suspend*. A **suspended** VM is refused (*resume it in VMware and shut it down*), and so is a VM that is **running or locked** (VMware keeps `.lck` folders next to the files while the VM is open: close the VM, or VMware, first) and a VM that was **not shut down cleanly** (power it on in VMware and shut it down from the guest).
 - **Encrypted** VMs are refused: remove the encryption in VMware first (VM Settings → Options → Access Control).
 - Check the guest type in VMware (VM Settings → Options → General): LightVM maps it to its own systems (Windows XP, Vista, 7, 8.1, 10, Linux 64-bit). An **unknown or unsupported guest type** is refused, for example Windows 11, Windows Server or a 32-bit Linux. **Windows Vista 64-bit** VMs are refused on a Windows PC, as in section 6.1.
-- If the disk is on an **LSI Logic** SCSI controller and the guest is Windows, prepare it first: see [LSI Logic disks](#lsi-logic-disks) below.
+- If the disk is on an **LSI Logic** SCSI controller and the guest is Windows, LightVM prepares the converted disk itself (it enables the guest's own driver of the new controller): see [LSI Logic disks](#lsi-logic-disks) below for the conditions and for the manual preparation when it is not available.
 - Have enough free space on the drive of the LightVM catalog: about the space the VMware disk files use (the preview shows it).
 
 **Steps:**
@@ -313,7 +313,7 @@ A VM you already have in **VMware Workstation or VMware Player** (a folder with 
 | --- | --- |
 | SATA | SATA (AHCI) |
 | IDE | IDE (the VM uses the older PC chipset that has an IDE controller) |
-| NVMe | NVMe |
+| NVMe | NVMe (UEFI VMs); for legacy BIOS VMs the standard controller of the system, because the legacy firmware cannot boot from NVMe (see below) |
 | SCSI, VMware Paravirtual (PVSCSI) | VMware Paravirtual SCSI (the guest keeps its VMware PVSCSI driver) |
 | SCSI, LSI Logic SAS | LSI Logic SAS 1068 |
 | SCSI, LSI Logic (parallel) | the standard controller of the system: SATA (AHCI) for Vista and later, IDE for XP, virtio for Linux; see below |
@@ -325,9 +325,18 @@ A VM you already have in **VMware Workstation or VMware Player** (a folder with 
 
 #### LSI Logic disks
 
-QEMU, which runs the VMs, cannot emulate the **LSI Logic parallel SCSI** controller that VMware uses by default for many Windows VMs. LightVM attaches such a disk to the standard controller of the system (SATA AHCI for Windows Vista and later), but **Windows may not start: storage driver preparation needed**. Windows starts only from a disk controller whose driver it loads at boot; otherwise it stops with the blue screen **STOP 0x0000007B (INACCESSIBLE_BOOT_DEVICE)**. The preview warns about it, and the VM's **Edit** panel repeats the warning.
+QEMU, which runs the VMs, cannot emulate the **LSI Logic parallel SCSI** controller that VMware uses by default for many Windows VMs. LightVM attaches such a disk to the standard controller of the system (SATA AHCI for Windows Vista and later, IDE for XP), and Windows starts only from a disk controller whose driver it loads at boot; otherwise it stops with the blue screen **STOP 0x0000007B (INACCESSIBLE_BOOT_DEVICE)**. The same replacement and preparation applies to a **NVMe** disk of a **legacy BIOS** VM: the legacy firmware cannot boot from NVMe, so the disk moves to the standard controller (UEFI VMs keep NVMe).
 
-An automatic preparation of the converted copy is planned (a separate spike will decide how); until then, prepare the VM **in VMware, before importing**, while it still runs on LSI Logic. Use one of these two ways.
+**LightVM prepares the disk for you, in the converted copy only.** The VMware VM is never changed. During the import, after the conversion, LightVM enables the **guest's own** driver of the new controller so that it starts at boot — nothing is copied or installed, and no administrator rights are needed on your PC. The page shows the phase *Enabling the Windows storage driver in the converted disk…* and, when it succeeds, the notice *LightVM sets the guest's own Windows driver of the new controller to start at boot, in the converted disk only: the VMware VM is not changed*. The preparation covers Windows Vista, 7, 8.1 and 10 (SATA AHCI) and Windows XP (IDE), and it is verified: if the check of the prepared disk fails, the import stops and nothing is created.
+
+Two conditions, in VMware, before you import:
+
+- **Shut the guest down cleanly** from inside Windows (Start → Shut down), not *Suspend*. A **hibernated** guest, or a guest shut down with **Fast Startup**, cannot be prepared: the import stops and says so (*Windows in the VMware VM is hibernated or was shut down with Fast Startup… start the VM in VMware, shut it down completely (Shift + Shut down, or `shutdown /s /t 0`) and import it again*). The same happens if the guest **was not shut down cleanly**.
+- The driver of the new controller must be **installed in the guest** (all the systems listed above install it by default). If it is not, the import stops naming the driver, and you can prepare the guest in VMware with the manual ways below and import it again.
+
+After the import, the first start may take a little longer than usual (Windows reconfigures its storage drivers for the new hardware), and **Windows may ask to be activated again**: its hardware changed.
+
+If the preparation is not available on this installation (the storage helper is not installed, or your guest is a combination it does not cover), the preview keeps the warning *Windows may not start: storage driver preparation needed* and the VM's **Edit** panel repeats it. Prepare the VM **in VMware, before importing**, while it still runs on LSI Logic. Use one of these two ways.
 
 *Way 1: enable the SATA (AHCI) driver for boot in the registry.* In the Windows guest running in VMware, as an administrator:
 
@@ -338,7 +347,7 @@ An automatic preparation of the converted copy is planned (a separate spike will
 
 *Way 2: let Windows install the driver itself.* In VMware, add a small second disk (1 GB) on a **SATA** controller to the VM (VM Settings → Add → Hard Disk → SATA), start Windows, let it find the new disk and install its driver, restart once, shut down, then remove that small disk in VMware and import. The second disk is not imported in any case.
 
-The same preparation applies if you choose to move the VM to another controller in VMware first (for example to SATA): a VM whose disk is already on SATA, PVSCSI, LSI Logic SAS, IDE or NVMe needs no preparation. Windows XP has no built-in SATA driver: an XP VM on LSI Logic is attached to IDE and needs the IDE driver enabled for boot (the standard XP *Mergeide* registry change), which the project has not verified. Linux VMs usually need no preparation: standard distributions load the driver of the new controller at boot (not verified by the project).
+A VM whose disk is already on SATA, PVSCSI, LSI Logic SAS, IDE or NVMe (with UEFI) needs no preparation. Linux VMs usually need no preparation: standard distributions load the driver of the new controller at boot (not verified by the project).
 
 ---
 

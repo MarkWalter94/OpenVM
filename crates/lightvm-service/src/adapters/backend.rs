@@ -209,11 +209,17 @@ pub fn resolve_qemu_layout(dir: &Path) -> Result<QemuLayout, PublicError> {
 }
 
 /// Kinds of approved hashes a development approvals file can extend.
-const APPROVAL_KINDS: [&str; 4] = ["qemu-system", "qemu-img", "firmware", "swtpm"];
+const APPROVAL_KINDS: [&str; 5] = [
+    "qemu-system",
+    "qemu-img",
+    "firmware",
+    "swtpm",
+    "storage-helper",
+];
 
 /// Extends the approved hash lists of `probe` with a development approvals
 /// file: one entry per line, `<sha256> <kind> [comment]`, `kind` one of
-/// `qemu-system`, `qemu-img`, `firmware`, `swtpm`; empty lines and lines
+/// `qemu-system`, `qemu-img`, `firmware`, `swtpm`, `storage-helper`; empty lines and lines
 /// starting with `#` are skipped. Any other line is an error: the file is
 /// refused whole rather than partly applied. Returns the number of entries.
 ///
@@ -251,6 +257,7 @@ pub fn load_approvals(probe: &mut ProbeConfig, text: &str) -> Result<usize, Stri
             "qemu-system" => &mut probe.approved_qemu_system_sha256,
             "qemu-img" => &mut probe.approved_qemu_img_sha256,
             "firmware" => &mut probe.approved_firmware_sha256,
+            "storage-helper" => &mut probe.approved_storage_helper_sha256,
             _ => &mut probe.approved_swtpm_sha256,
         };
         if !list.contains(&hash) {
@@ -297,6 +304,10 @@ pub struct QemuSetup {
     /// swtpm executable; `None`: the one in the QEMU distribution folder,
     /// if any ([`resolve_qemu_layout`]).
     pub swtpm: Option<PathBuf>,
+    /// Folder of the storage helper (ADR-0030,
+    /// `qemu_backend::storage_helper`); `None`: not looked for (Windows
+    /// guests moved to another controller are then prepared by hand).
+    pub storage_helper_dir: Option<PathBuf>,
 }
 
 impl QemuSetup {
@@ -314,6 +325,7 @@ impl QemuSetup {
             free_storage_gib: 256,
             firmware_dir: None,
             swtpm: None,
+            storage_helper_dir: None,
         }
     }
 }
@@ -600,10 +612,12 @@ pub fn probe(setup: QemuSetup) -> Result<(QemuHost, QemuVmBackend, HostCapacity)
     }
     let img_dir = ManagedPath::verify(img_dir).map_err(|e| public(&e))?;
     prepare::restrict_to_current_user(&img_dir).map_err(|e| public(&e))?;
+    let helper = storage_helper(&setup, &caps, &machine, cpu.as_ref());
     let image_tool = Arc::new(QemuImageTool {
         qemu_img: caps.qemu_img.clone(),
         log_dir: img_dir,
         vars_template: caps.firmware.as_ref().map(|f| f.vars_template.clone()),
+        helper,
     });
     let registry: Registry = Arc::default();
     let priority_killed: PriorityKilled = Arc::default();
@@ -649,6 +663,11 @@ pub struct QemuImageTool {
     qemu_img: ManagedPath,
     log_dir: ManagedPath,
     vars_template: Option<PathBuf>,
+    /// Approved storage helper and the machine it runs on (ADR-0030).
+    helper: Option<(
+        qemu_backend::storage_helper::HelperImage,
+        qemu_backend::storage_helper::HelperMachine,
+    )>,
 }
 
 impl QemuImageTool {
@@ -767,6 +786,33 @@ impl ImageTool for QemuImageTool {
         )
         .map_err(|e| image_error(&e))
     }
+    fn storage_helper_available(&self) -> bool {
+        self.helper.is_some()
+    }
+    fn run_storage_helper(
+        &self,
+        disk: &Path,
+        keys: &[String],
+        reg: Option<&str>,
+        cancel: &dyn Fn() -> bool,
+    ) -> Result<qemu_backend::storage_helper::HelperReport, PublicError> {
+        let Some((image, machine)) = &self.helper else {
+            return Err(PublicError::unsupported("storage helper not available"));
+        };
+        let job = qemu_backend::storage_helper::HelperJob {
+            keys: keys.to_vec(),
+            reg: reg.map(str::to_owned),
+        };
+        qemu_backend::storage_helper::run_helper(
+            machine,
+            image,
+            &verified(disk)?,
+            &job,
+            &self.log_dir,
+            cancel,
+        )
+        .map_err(|e| image_error(&e))
+    }
 }
 
 impl QemuImageTool {
@@ -778,8 +824,61 @@ impl QemuImageTool {
             qemu_img,
             log_dir,
             vars_template: None,
+            helper: None,
         }
     }
+}
+
+/// The storage helper of the installation (ADR-0030), when its folder is
+/// configured, both files are there with an approved SHA-256 and the probe
+/// verified the accelerator: it runs on the host reference machine (q35),
+/// the nominal CPU model and SeaBIOS of the approved build. Anything else
+/// leaves Windows guests moved to another controller to the manual
+/// preparation (with a diagnostic).
+fn storage_helper(
+    setup: &QemuSetup,
+    caps: &HostCapabilities,
+    machine: &MachineType,
+    cpu: Option<&CpuModel>,
+) -> Option<(
+    qemu_backend::storage_helper::HelperImage,
+    qemu_backend::storage_helper::HelperMachine,
+)> {
+    let dir = setup.storage_helper_dir.as_ref()?;
+    let image = match qemu_backend::storage_helper::HelperImage::locate(
+        dir,
+        &setup.probe.approved_storage_helper_sha256,
+    ) {
+        Ok(Some(i)) => i,
+        Ok(None) => {
+            crate::diag!(
+                "lightvm-service: storage helper not installed ({}): imported Windows guests moved to another disk controller need the manual preparation",
+                dir.display()
+            );
+            return None;
+        }
+        Err(e) => {
+            crate::diag!("lightvm-service: storage helper not used: {e}");
+            return None;
+        }
+    };
+    let cpu = cpu?.clone();
+    if !caps.accelerator.is_available()
+        || machine.family() != qemu_backend::cmdline::MachineFamily::Q35
+    {
+        return None;
+    }
+    let bios = verified_seabios(caps).ok();
+    Some((
+        image,
+        qemu_backend::storage_helper::HelperMachine {
+            qemu_system: caps.qemu_system.clone(),
+            machine: machine.clone(),
+            accelerator: Accelerator::for_current_host(),
+            cpu,
+            bios,
+        },
+    ))
 }
 
 /// Paths of a run for `qemu-backend`, all decided by the service.

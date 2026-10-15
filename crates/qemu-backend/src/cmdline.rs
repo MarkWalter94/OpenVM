@@ -121,7 +121,7 @@ impl MachineFamily {
 
     /// Fixed machine properties of the family, appended to `type=`
     /// (`virt` needs GICv3 under HVF, ADR-0028).
-    fn fixed_properties(self) -> &'static str {
+    pub(crate) fn fixed_properties(self) -> &'static str {
         match self {
             Self::Q35 | Self::I440fx => "",
             Self::Virt => ",gic-version=3",

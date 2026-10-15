@@ -1315,13 +1315,22 @@ impl SupervisorThread {
                 let Ok((slot, reply)) = job_rx.recv() else {
                     return;
                 };
-                let mut progress = |p: u8| {
+                let mut progress = |phase: VmwareImportPhase, p: u8| {
                     let _ = events.send(ServiceEvent::VmwareImportProgress {
-                        phase: VmwareImportPhase::Converting,
+                        phase,
                         percent: p.min(100),
                     });
                 };
-                let r = crate::vmware::convert(analysis, &dst, &|| c2(), &mut progress);
+                let mut config = config;
+                let r = crate::vmware::convert(analysis, &dst, &|| c2(), &mut progress).map(|o| {
+                    // The driver is enabled in the disk: nothing left for
+                    // the user to prepare.
+                    if o == crate::vmware::DriverPreparation::Enabled
+                        && let Some(hw) = config.imported.as_mut()
+                    {
+                        hw.storage_driver_preparation = false;
+                    }
+                });
                 let _ = tx.send(Command::VmwareConverted(Box::new(VmwareStep {
                     caller: who,
                     display,

@@ -4,7 +4,7 @@
 //! fake. They are not part of the product: the binary always uses the real
 //! adapters ([`crate::adapters`]).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
@@ -257,7 +257,20 @@ pub struct FakeImageTool {
     pub snapshot_fail: Arc<std::sync::atomic::AtomicBool>,
     /// Delay of `internal_snapshot`, polled for cancellation every 10 ms.
     pub snapshot_delay: std::time::Duration,
+    /// Scripted storage helper (ADR-0030); `None` = not available.
+    pub storage_helper: Option<Arc<FakeStorageHelper>>,
 }
+
+/// Storage helper of the tests: each run returns the next scripted report
+/// and records its job.
+#[derive(Debug, Default)]
+pub struct FakeStorageHelper {
+    /// Reports returned in order (an exhausted list is an error).
+    pub reports: Mutex<VecDeque<Result<qemu_backend::storage_helper::HelperReport, PublicError>>>,
+    /// Jobs received: `(keys, reg)`.
+    pub jobs: Mutex<Vec<(Vec<String>, Option<String>)>>,
+}
+
 
 /// Fake disk with internal snapshots for the user snapshot tests
 /// (ADR-0032), without `qemu-img`: a minimal QCOW2 v3 image whose snapshot
@@ -551,6 +564,32 @@ impl ImageTool for FakeImageTool {
     fn free_bytes(&self, dir: &Path) -> Option<u64> {
         self.free_bytes
             .or_else(|| self.vmdk_tool.as_ref().and_then(|t| t.free_bytes(dir)))
+    }
+    fn storage_helper_available(&self) -> bool {
+        self.storage_helper.is_some()
+    }
+    fn run_storage_helper(
+        &self,
+        _disk: &Path,
+        keys: &[String],
+        reg: Option<&str>,
+        cancel: &dyn Fn() -> bool,
+    ) -> Result<qemu_backend::storage_helper::HelperReport, PublicError> {
+        push(&self.calls, "storage_helper");
+        let Some(h) = &self.storage_helper else {
+            return Err(PublicError::unsupported("storage helper not available"));
+        };
+        if cancel() {
+            return Err(PublicError::state_conflict("operation cancelled"));
+        }
+        if let Ok(mut j) = h.jobs.lock() {
+            j.push((keys.to_vec(), reg.map(str::to_owned)));
+        }
+        h.reports
+            .lock()
+            .ok()
+            .and_then(|mut r| r.pop_front())
+            .unwrap_or_else(|| Err(PublicError::infrastructure("no scripted helper report")))
     }
     fn create_overlay(&self, backing_ref: &str, _size: u64, dst: &Path) -> Result<(), PublicError> {
         push(&self.calls, "create_overlay");

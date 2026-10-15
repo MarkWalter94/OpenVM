@@ -469,12 +469,13 @@ pub struct ImportedHardware {
     /// socket per vCPU, as for VMs created in LightVM.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cores_per_socket: Option<u32>,
-    /// The source disk was on a controller QEMU does not emulate (VMware
-    /// `lsilogic`) and the guest is Windows: the storage driver of
-    /// [`Self::disk_controller`] must be enabled for boot in the guest
-    /// before it can start from this disk (ADR-0030). The automatic offline
-    /// preparation is not available yet; the user prepares the guest in
-    /// VMware (`docs/USER_GUIDE.md`).
+    /// The source disk was on a controller LightVM cannot keep (VMware
+    /// `lsilogic`, or NVMe with legacy BIOS) and the guest is Windows: the
+    /// storage driver of [`Self::disk_controller`] must be enabled for boot
+    /// in the guest before it can start from this disk (ADR-0030). Cleared
+    /// when the import enabled it in the converted disk (storage helper);
+    /// still set when the user must prepare the guest in VMware
+    /// (`docs/USER_GUIDE.md`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub storage_driver_preparation: bool,
 }

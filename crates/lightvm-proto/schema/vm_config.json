@@ -262,7 +262,7 @@
           "$ref": "#/$defs/ImportSource"
         },
         "storage_driver_preparation": {
-          "description": "The source disk was on a controller QEMU does not emulate (VMware\n`lsilogic`) and the guest is Windows: the storage driver of\n[`Self::disk_controller`] must be enabled for boot in the guest\nbefore it can start from this disk (ADR-0030). The automatic offline\npreparation is not available yet; the user prepares the guest in\nVMware (`docs/USER_GUIDE.md`).",
+          "description": "The source disk was on a controller LightVM cannot keep (VMware\n`lsilogic`, or NVMe with legacy BIOS) and the guest is Windows: the\nstorage driver of [`Self::disk_controller`] must be enabled for boot\nin the guest before it can start from this disk (ADR-0030). Cleared\nwhen the import enabled it in the converted disk (storage helper);\nstill set when the user must prepare the guest in VMware\n(`docs/USER_GUIDE.md`).",
           "type": "boolean"
         }
       },

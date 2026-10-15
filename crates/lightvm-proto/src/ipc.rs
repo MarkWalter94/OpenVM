@@ -1832,11 +1832,18 @@ pub struct ImportWarning {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum ImportWarningKind {
-    /// Windows on an LSI Logic parallel controller, which QEMU does not
-    /// emulate: Windows may not start (stop 0x7B) until the storage driver
-    /// of the new controller is enabled in the guest (manual preparation,
-    /// `docs/USER_GUIDE.md`).
+    /// Windows on a controller LightVM cannot keep (an LSI Logic parallel
+    /// controller, which QEMU does not emulate, or an NVMe boot disk with
+    /// legacy BIOS, which SeaBIOS cannot boot): Windows may not start (stop
+    /// 0x7B) until the storage driver of the new controller is enabled in
+    /// the guest, and the storage helper is not available for the automatic
+    /// preparation (manual preparation, `docs/USER_GUIDE.md`).
     StorageDriverPreparation,
+    /// As [`Self::StorageDriverPreparation`], but LightVM enables the
+    /// guest's own driver of the new controller in the converted disk with
+    /// the storage helper (offline `SYSTEM` hive edit; the VMware VM is not
+    /// changed).
+    StorageDriverEnabled,
     /// A controller QEMU does not emulate on a Linux guest: the disk is
     /// attached to the profile's controller (the initramfs must have its
     /// driver, as standard distributions do).
@@ -1870,6 +1877,9 @@ pub enum VmwareImportPhase {
     Checking,
     /// `qemu-img convert` running.
     Converting,
+    /// The storage driver of the new controller being enabled in the
+    /// converted disk (storage helper, ADR-0030).
+    PreparingDisk,
     /// Check of the converted disk and creation of the VM.
     Finishing,
 }
