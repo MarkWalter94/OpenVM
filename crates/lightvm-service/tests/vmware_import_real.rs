@@ -18,6 +18,9 @@
 //! take, for example an unclean shutdown).
 //!
 //! Requires `LIGHTVM_E2E_QEMU_DIR`; optional `LIGHTVM_E2E_VMX` (required),
+//! `LIGHTVM_E2E_HELPER_DIR` (folder of the approved storage helper,
+//! `packaging/storage-helper`: without it a Windows guest moved to another
+//! controller is imported for the manual preparation, as usual),
 //! `LIGHTVM_VM_EVIDENCE_DIR` (default `lab/logs/vmware-real`),
 //! `LIGHTVM_VM_DESKTOP_MIN` (default 10), `LIGHTVM_VM_EXPECT_DESKTOP`,
 //! `LIGHTVM_VM_EXPECT_REFUSED`.
@@ -640,6 +643,9 @@ fn e2e_real_vmware_vm_import_and_boot() {
         quit_timeout: Duration::from_secs(5),
         kill_timeout: Duration::from_secs(10),
     };
+    if let Some(h) = std::env::var_os("LIGHTVM_E2E_HELPER_DIR") {
+        setup.storage_helper_dir = Some(PathBuf::from(h));
+    }
     let (host, vm_backend, capacity) = probe(setup).expect("QEMU probe");
     assert!(
         capacity.accelerator_available,
@@ -758,8 +764,19 @@ fn e2e_real_vmware_vm_import_and_boot() {
                 }
             };
             rec.imported = Some(imp_name);
+            // The row carries the preparation outcome: the flag is cleared
+            // when the storage helper enabled the driver in the disk.
+            let prepared = vm
+                .config
+                .imported
+                .as_ref()
+                .is_some_and(|h| !h.storage_driver_preparation);
+            if prepared {
+                rec.note = format!("{}; storage driver enabled in the converted disk", rec.note);
+            }
 
-            // 3. Source unchanged, converted content identical.
+            // 3. Source unchanged, converted content identical (the prepared
+            // disk differs from the source by design: the SYSTEM hive edit).
             let after = folder_hashes(&folder);
             rec.source_unchanged = Some(before == after);
             let top = vmware_import::inspect(&resolved(&vmx).to_string_lossy())
@@ -772,10 +789,14 @@ fn e2e_real_vmware_vm_import_and_boot() {
                 .join("vms")
                 .join(vm.id.to_string())
                 .join("primary.qcow2");
-            let same = disk.is_file() && content_identical(&q, &top, &disk);
-            rec.content_identical = Some(same);
-            if !same {
-                failures.push(format!("{name}: converted disk differs from the source"));
+            if !prepared {
+                let same = disk.is_file() && content_identical(&q, &top, &disk);
+                rec.content_identical = Some(same);
+                if !same {
+                    failures.push(format!("{name}: converted disk differs from the source"));
+                }
+            } else if !disk.is_file() {
+                failures.push(format!("{name}: converted disk missing"));
             }
 
             // 4. Start and watch.
