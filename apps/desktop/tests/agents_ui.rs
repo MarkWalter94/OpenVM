@@ -250,6 +250,7 @@ fn request_is_approved_with_the_code_one_vm_and_the_chosen_limits() {
         quotas: Some(lightvm_desktop::agents::QuotaPreset::Small.quotas()),
         lease_ms: Some(5_000),
         give_input: true,
+        network_endpoints: Vec::new(),
     };
     assert_eq!(
         actions(&hs),

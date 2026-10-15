@@ -1427,6 +1427,7 @@ impl SupervisorThread {
             objective: info.purpose.clone(),
             started_at: info.created_at,
             capabilities: c.grant.capabilities.clone(),
+            network_endpoints: c.grant.network_endpoints.iter().cloned().collect(),
             quotas: c.grant.quotas,
             expires_at: c.grant.expires_at,
             policy_revision: c.grant.policy_revision,

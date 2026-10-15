@@ -114,6 +114,50 @@ pub enum AuditAction {
     /// Rename or new description of a user snapshot (ADR-0032; never the
     /// texts).
     SnapshotUpdate,
+    /// Network of a run set up (ADR-0033): `network.mode`, and for the
+    /// endpoint allowlist one event per endpoint with the host address it
+    /// was resolved to at the start (`failed` if it could not be resolved:
+    /// that endpoint refuses every connection).
+    NetworkSetup,
+    /// A guest connection through the endpoint allowlist ended (ADR-0033):
+    /// endpoint, addresses and byte counts, never the content.
+    NetworkConnection,
+    /// A guest connection attempt refused by the endpoint allowlist
+    /// (`denied`; the first ones of each run, later ones only counted).
+    NetworkDenied,
+    /// The endpoints allowed on a running VM changed (session started or
+    /// ended, revocation, expiry, Emergency Stop): connections to endpoints
+    /// no longer allowed were reset.
+    NetworkPolicy,
+}
+
+/// Network details of a `network_*` audit event (ADR-0033). Addresses and
+/// counts only: never data carried by the connection.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct NetworkAudit {
+    /// Network mode of the run (`offline`, `nat`, `endpoints`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// Endpoint name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    /// Destination inside the guest network (`10.0.2.101:1433`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<String>,
+    /// Host address the connection was opened to (or the endpoint
+    /// resolved to).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// Bytes from the guest to the endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes_from_guest: Option<u64>,
+    /// Bytes from the endpoint to the guest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes_to_guest: Option<u64>,
+    /// How it ended or why it was refused (`closed`, `revoked`,
+    /// `not_allowed`...), or the allowed endpoints for `network_policy`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Recorded outcome.
@@ -170,4 +214,7 @@ pub struct AuditEvent {
     /// Termination cause (for `session_terminate`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub termination: Option<TerminationCause>,
+    /// Network details (`network_*` events).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<NetworkAudit>,
 }

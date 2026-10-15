@@ -341,6 +341,7 @@ struct Stack {
     notify: Arc<Notify>,
     stats: NetStats,
     denied_records: usize,
+    trace: Option<std::fs::File>,
 }
 
 impl Stack {
@@ -394,6 +395,8 @@ impl Stack {
             notify: Arc::new(Notify::new()),
             stats: NetStats::default(),
             denied_records: 0,
+            trace: std::env::var_os("LIGHTVM_NET_TRACE")
+                .and_then(|p| std::fs::File::create(p).ok()),
         }
     }
 
@@ -454,15 +457,30 @@ impl Stack {
     fn poll(&mut self) {
         let now = self.now();
         self.iface.poll(now, &mut self.dev, &mut self.sockets);
-        for f in self.dev.tx.drain(..) {
-            self.stats.frames_out += 1;
-            let _ = self.sink.send(f);
+        let out: Vec<Vec<u8>> = self.dev.tx.drain(..).collect();
+        for f in out {
+            self.send_frame(f);
         }
     }
 
     fn send_frame(&mut self, f: Vec<u8>) {
         self.stats.frames_out += 1;
+        self.trace("out", &f, "");
         let _ = self.sink.send(f);
+    }
+
+    /// Diagnostic trace (`LIGHTVM_NET_TRACE=<file>`): one line per frame,
+    /// headers only.
+    fn trace(&mut self, dir: &str, f: &[u8], note: &str) {
+        if let Some(t) = self.trace.as_mut() {
+            use std::io::Write as _;
+            let _ = writeln!(
+                t,
+                "{:>10.3} {dir} {} {note}",
+                self.t0.elapsed().as_secs_f64() * 1000.0,
+                frame::describe(f)
+            );
+        }
     }
 
     fn deny(&mut self, destination: SocketAddrV4, reason: DenyReason) {
@@ -479,7 +497,13 @@ impl Stack {
 
     fn on_frame(&mut self, f: Vec<u8>) {
         self.stats.frames_in += 1;
-        match frame::classify(&f, &self.owned) {
+        let class = frame::classify(&f, &self.owned);
+        if self.trace.is_some() {
+            let note = format!("{class:?}");
+            let note = note.split(['{', '(']).next().unwrap_or_default().to_owned();
+            self.trace("in ", &f, &note);
+        }
+        match class {
             Class::Stack => self.feed(f),
             Class::TcpSyn { dst, src_port } => {
                 self.on_syn(dst, src_port);
@@ -848,7 +872,16 @@ impl Stack {
             }
             let s = self.sockets.get_mut::<tcp::Socket<'_>>(handle);
             if !s.can_recv() {
-                if !s.may_recv() {
+                // FIN from the guest (not merely "cannot receive yet": a
+                // socket still in SYN-RECEIVED cannot receive either).
+                if matches!(
+                    s.state(),
+                    tcp::State::CloseWait
+                        | tcp::State::LastAck
+                        | tcp::State::Closing
+                        | tcp::State::TimeWait
+                        | tcp::State::Closed
+                ) {
                     // FIN from the guest: half-close towards the host.
                     c.to_host = None;
                 }

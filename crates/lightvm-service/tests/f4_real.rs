@@ -458,6 +458,7 @@ fn approval(vm: VmId, give_input: bool) -> SessionApproval {
         quotas: None,
         lease_ms: None,
         give_input,
+        network_endpoints: Vec::new(),
     }
 }
 
@@ -479,6 +480,7 @@ async fn new_agent(endpoint: &str, u: &mut Client, a: SessionApproval) -> Agent 
             purpose: "F4 exit criterion".into(),
             requested_vms: vec![a.vm_id],
             requested_capabilities: CapabilitySet::new(),
+            requested_endpoints: Vec::new(),
         },
     )
     .await

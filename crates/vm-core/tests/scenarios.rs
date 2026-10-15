@@ -664,6 +664,7 @@ fn quotas_are_enforced() {
         },
         expires_at: UtcTimestamp::from_unix_millis(T0 + 60_000).unwrap(),
         lease_millis: 10_000,
+        network_endpoints: Default::default(),
     };
     let (grant, _) = h
         .core
@@ -933,6 +934,7 @@ fn session_creation_limits() {
         quotas: Quotas::UNBOUNDED,
         expires_at: UtcTimestamp::from_unix_millis(T0 + 60_000).unwrap(),
         lease_millis: 10_000,
+        network_endpoints: Default::default(),
     };
     denied(
         ErrorCode::ResourceLimit,

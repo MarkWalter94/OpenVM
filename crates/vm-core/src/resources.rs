@@ -223,6 +223,14 @@ pub fn validate_config(config: &VmConfig, limits: &ResourceLimits) -> Result<(),
     if let Some(hw) = &config.imported {
         hw.validate(config.guest_os, config.vcpus)?;
     }
+    // ADR-0033: endpoints checked; no NIC for Windows on ARM (no inbox
+    // driver for the emulated adapters).
+    lightvm_proto::validate_network(config.network, &config.endpoints)?;
+    if config.network.has_nic() && config.guest_os.is_aarch64() {
+        return Err(PublicError::unsupported(
+            "network modes other than offline are not available for Windows 11 ARM64",
+        ));
+    }
     // An imported disk already holds the installed system: its size is the
     // source's (ADR-0030), not a choice the guest minimum applies to.
     let min_disk = min_disk_gib(config.guest_os);

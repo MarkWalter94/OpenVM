@@ -32,7 +32,7 @@ mod state;
 mod text;
 mod time;
 
-pub use audit::{AuditAction, AuditEvent, AuditOutcome};
+pub use audit::{AuditAction, AuditEvent, AuditOutcome, NetworkAudit};
 pub use error::{ErrorCode, ProtocolError, ProtocolErrorCode, PublicError, ReplyError};
 pub use ids::{
     BaselineId, GrantId, IdParseError, MediaId, OperationId, RunId, SessionId, SnapshotId, VmId,
@@ -43,12 +43,13 @@ pub use input::{
 };
 pub use model::{
     BaselineOrigin, BaselineRecord, DetectedGuest, DiskController, DisplayAdapter, DisplayGeometry,
-    FileIdentity, Firmware, GuestArch, GuestOs, HostCapacity, ImageFormat, ImportSource,
-    ImportedHardware, MAX_CORES_PER_SOCKET, MAX_DATA_MEDIA_BYTES, MAX_INSTALL_MEDIA_BYTES,
-    MAX_MEMORY_MARGIN_MIB, MAX_STORAGE_BUDGET_GIB, MIN_CPU_MAX_PERCENT, MIN_MEMORY_MARGIN_MIB,
-    MediaEntry, MediaKind, MediaLocation, MediaRecord, NetworkProfile, OperationKind,
-    OperationRecord, OperationStatus, ResourceLimits, ResourceTemplate, RunEndReason, RunRecord,
-    Screenshot, VmConfig, VmLimits, VmRecord,
+    FIRST_ENDPOINT_IP, FileIdentity, Firmware, GuestArch, GuestOs, HostCapacity, ImageFormat,
+    ImportSource, ImportedHardware, LAST_ENDPOINT_IP, MAX_CORES_PER_SOCKET, MAX_DATA_MEDIA_BYTES,
+    MAX_ENDPOINT_NAME_CHARS, MAX_INSTALL_MEDIA_BYTES, MAX_MEMORY_MARGIN_MIB, MAX_NETWORK_ENDPOINTS,
+    MAX_STORAGE_BUDGET_GIB, MIN_CPU_MAX_PERCENT, MIN_MEMORY_MARGIN_MIB, MediaEntry, MediaKind,
+    MediaLocation, MediaRecord, NetworkEndpoint, NetworkProfile, OperationKind, OperationRecord,
+    OperationStatus, ResourceLimits, ResourceTemplate, RunEndReason, RunRecord, Screenshot,
+    VmConfig, VmLimits, VmRecord, next_endpoint_ip, validate_network,
 };
 pub use request::{Actor, Admission, Caller, VmAction, VmRequest};
 pub use session::{

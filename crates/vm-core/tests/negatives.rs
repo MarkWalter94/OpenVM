@@ -200,6 +200,7 @@ fn screenshot_over_byte_quota_fails_without_updating_geometry() {
         },
         expires_at: UtcTimestamp::from_unix_millis(T0 + 60_000).unwrap(),
         lease_millis: 10_000,
+        network_endpoints: Default::default(),
     };
     let (grant, _) = h
         .core
@@ -630,6 +631,7 @@ fn agent_session_limit_and_rejected_sessions_are_audited() {
         quotas: Quotas::UNBOUNDED,
         expires_at: UtcTimestamp::from_unix_millis(T0 + 60_000).unwrap(),
         lease_millis: 10_000,
+        network_endpoints: Default::default(),
     };
     denied(
         ErrorCode::ResourceLimit,

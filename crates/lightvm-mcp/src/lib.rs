@@ -554,6 +554,7 @@ impl Adapter {
                     purpose: purpose.to_owned(),
                     requested_vms: Vec::new(),
                     requested_capabilities: all,
+                    requested_endpoints: Vec::new(),
                 },
                 T_SHORT,
             )

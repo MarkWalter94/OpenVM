@@ -209,6 +209,7 @@ fn approval(vm: VmId) -> SessionApproval {
         quotas: None,
         lease_ms: None,
         give_input: false,
+        network_endpoints: Vec::new(),
     }
 }
 
@@ -225,6 +226,7 @@ async fn session(
             purpose: "F4 test".into(),
             requested_vms: vec![a.vm_id],
             requested_capabilities: a.capabilities.clone(),
+            requested_endpoints: Vec::new(),
         },
     )
     .await
@@ -469,6 +471,7 @@ async fn agent_access_is_off_at_start_and_gates_session_requests() {
         purpose: "y".into(),
         requested_vms: Vec::new(),
         requested_capabilities: CapabilitySet::new(),
+        requested_endpoints: Vec::new(),
     };
     let e = err(&mut a, req.clone()).await;
     assert_eq!(e.code, ErrorCode::PermissionDenied);
@@ -507,6 +510,7 @@ async fn agent_access_is_off_at_start_and_gates_session_requests() {
             purpose: "y".into(),
             requested_vms: Vec::new(),
             requested_capabilities: CapabilitySet::new(),
+            requested_endpoints: Vec::new(),
         },
     )
     .await;
@@ -585,6 +589,7 @@ async fn denied_and_expired_requests() {
         purpose: "y".into(),
         requested_vms: Vec::new(),
         requested_capabilities: CapabilitySet::new(),
+        requested_endpoints: Vec::new(),
     };
     let id = match ok(&mut a, rq()).await {
         ResponseBody::SessionRequested { request_id, .. } => request_id,
@@ -1022,6 +1027,7 @@ async fn session_is_bound_to_its_connection_and_role() {
             purpose: "b".into(),
             requested_vms: Vec::new(),
             requested_capabilities: CapabilitySet::new(),
+            requested_endpoints: Vec::new(),
         },
     )
     .await
@@ -1603,6 +1609,7 @@ async fn request_role_matrix() {
             purpose: "x".into(),
             requested_vms: Vec::new(),
             requested_capabilities: CapabilitySet::new(),
+            requested_endpoints: Vec::new(),
         },
         Request::AwaitSession { request_id: 1 },
         Request::Agent {

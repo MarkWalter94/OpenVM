@@ -54,6 +54,7 @@ pub(crate) struct OpenReport {
     pub(crate) objective: String,
     pub(crate) started_at: UtcTimestamp,
     pub(crate) capabilities: CapabilitySet,
+    pub(crate) network_endpoints: Vec<String>,
     pub(crate) quotas: Quotas,
     pub(crate) expires_at: UtcTimestamp,
     pub(crate) policy_revision: PolicyRevision,
@@ -405,6 +406,7 @@ impl ReportStore {
             vm_config_revision: o.vm_config_revision,
             policy_revision: o.policy_revision,
             capabilities: o.capabilities,
+            network_endpoints: o.network_endpoints,
             quotas: o.quotas,
             expires_at: o.expires_at,
             versions: o.versions,
@@ -1150,6 +1152,26 @@ fn name_of<T: serde::Serialize>(v: &T) -> String {
         .unwrap_or_else(|| "?".into())
 }
 
+/// One-line text of a network event (ADR-0033): addresses and counts.
+fn network_text(action: &str, d: &lightvm_proto::NetworkAudit) -> String {
+    let mut s = format!("network {}", plain(action, 64));
+    for (k, v) in [
+        ("mode", d.mode.as_deref()),
+        ("endpoint", d.endpoint.as_deref()),
+        ("destination", d.destination.as_deref()),
+        ("target", d.target.as_deref()),
+        ("reason", d.reason.as_deref()),
+    ] {
+        if let Some(v) = v {
+            s.push_str(&format!(" {k}={}", plain(v, 256)));
+        }
+    }
+    if let (Some(up), Some(down)) = (d.bytes_from_guest, d.bytes_to_guest) {
+        s.push_str(&format!(" bytes_from_guest={up} bytes_to_guest={down}"));
+    }
+    s
+}
+
 /// One-line plain text of an event (`vm.logs`, Markdown).
 pub(crate) fn event_text(b: &ReportEventBody) -> String {
     match b {
@@ -1216,6 +1238,7 @@ pub(crate) fn event_text(b: &ReportEventBody) -> String {
         ReportEventBody::Declaration { claimed_outcome } => {
             format!("agent declaration: claims {}", name_of(claimed_outcome))
         }
+        ReportEventBody::Network { action, detail } => network_text(action, detail),
         ReportEventBody::Note { text } => format!("note: {}", plain(text, 512)),
     }
 }
@@ -1656,6 +1679,7 @@ mod tests {
             objective: "objective".into(),
             started_at: UtcTimestamp::now(),
             capabilities: CapabilitySet::new(),
+            network_endpoints: Vec::new(),
             quotas: lightvm_proto::ipc::AGENT_DEFAULT_QUOTAS,
             expires_at: UtcTimestamp::now(),
             policy_revision: PolicyRevision(1),

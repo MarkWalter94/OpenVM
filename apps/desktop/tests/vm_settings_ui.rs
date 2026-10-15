@@ -26,6 +26,7 @@ fn config() -> VmConfig {
         memory_mib: 2048,
         disk_gib: 16,
         network: NetworkProfile::Offline,
+        endpoints: Vec::new(),
         install_media: None,
         data_media: None,
         firmware: Firmware::Uefi,

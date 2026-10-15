@@ -230,6 +230,7 @@ fn approval(vm: VmId, caps: CapabilitySet, give_input: bool) -> SessionApproval 
         quotas: None,
         lease_ms: None,
         give_input,
+        network_endpoints: Vec::new(),
     }
 }
 

@@ -99,6 +99,9 @@ pub struct SessionSpec {
     pub expires_at: UtcTimestamp,
     /// Lease duration in ms (1..=10000).
     pub lease_millis: i64,
+    /// Network endpoints granted with `network.endpoints` (names of the
+    /// VM's endpoints; empty without the capability). ADR-0033.
+    pub network_endpoints: std::collections::BTreeSet<String>,
 }
 
 /// Session registry.

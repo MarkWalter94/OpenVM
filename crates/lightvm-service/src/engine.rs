@@ -444,6 +444,8 @@ pub struct NewSession {
     pub client_name: String,
     /// Purpose declared by the agent.
     pub purpose: String,
+    /// Network endpoints granted with `network.endpoints` (ADR-0033).
+    pub network_endpoints: BTreeSet<String>,
 }
 
 /// Facts of a VM for a session report, see [`VmEngine::report_context`].
@@ -1767,6 +1769,7 @@ where
             state: s.state,
             termination: s.termination,
             capabilities: s.grant.capabilities.clone(),
+            network_endpoints: s.grant.network_endpoints.iter().cloned().collect(),
             quotas: s.grant.quotas,
             usage: lightvm_proto::ipc::SessionUsage {
                 operations: s.usage.operations,
@@ -1780,7 +1783,35 @@ where
         })
     }
 
+    /// Granted endpoints of `session` on a VM with `config`, as the agent
+    /// uses them inside the guest (ADR-0033).
+    fn agent_endpoints(
+        &self,
+        config: &VmConfig,
+        session: SessionId,
+    ) -> Vec<lightvm_proto::ipc::AgentEndpointView> {
+        let Some(s) = self.core.sessions().get(session) else {
+            return Vec::new();
+        };
+        if !s.grant.capabilities.contains(&Capability::NetworkEndpoints)
+            || config.network == lightvm_proto::NetworkProfile::Offline
+        {
+            return Vec::new();
+        }
+        config
+            .endpoints
+            .iter()
+            .filter(|e| s.grant.network_endpoints.contains(&e.key()))
+            .map(|e| lightvm_proto::ipc::AgentEndpointView {
+                name: e.name.clone(),
+                virtual_ip: e.virtual_ip,
+                port: e.port,
+            })
+            .collect()
+    }
+
     fn agent_view(&self, st: VmStatus, session: SessionId) -> AgentVmView {
+        let network_endpoints = self.agent_endpoints(&st.config, session);
         AgentVmView {
             vm_id: st.vm_id,
             name: st.name,
@@ -1791,6 +1822,7 @@ where
                 == InputOwner::Agent {
                     session_id: session,
                 },
+            network_endpoints,
         }
     }
 
@@ -2555,6 +2587,7 @@ where
             quotas: new.quotas,
             expires_at: new.expires_at,
             lease_millis: new.lease_ms,
+            network_endpoints: new.network_endpoints,
         };
         let (grant, lease) = self.core.create_session(spec, new.token)?;
         let id = grant.session_id;

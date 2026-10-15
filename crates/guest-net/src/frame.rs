@@ -202,6 +202,74 @@ pub(crate) fn udp_frame(
     buf
 }
 
+/// One-line summary of a frame for the diagnostic trace
+/// (`LIGHTVM_NET_TRACE`): addresses, ports, TCP flags, sequence numbers and
+/// lengths; never the payload.
+pub(crate) fn describe(frame: &[u8]) -> String {
+    let Ok(eth) = EthernetFrame::new_checked(frame) else {
+        return format!("short frame {}", frame.len());
+    };
+    match eth.ethertype() {
+        EthernetProtocol::Arp => match ArpPacket::new_checked(eth.payload())
+            .ok()
+            .and_then(|p| ArpRepr::parse(&p).ok())
+        {
+            Some(ArpRepr::EthernetIpv4 {
+                operation,
+                source_protocol_addr,
+                target_protocol_addr,
+                ..
+            }) => format!("arp {operation:?} {source_protocol_addr} -> {target_protocol_addr}"),
+            _ => "arp ?".into(),
+        },
+        EthernetProtocol::Ipv4 => {
+            let Ok(p) = Ipv4Packet::new_checked(eth.payload()) else {
+                return "ipv4 ?".into();
+            };
+            let (s, d) = (p.src_addr(), p.dst_addr());
+            match p.next_header() {
+                IpProtocol::Tcp => match TcpPacket::new_checked(p.payload()) {
+                    Ok(t) => {
+                        let mut fl = String::new();
+                        for (on, c) in [
+                            (t.syn(), 'S'),
+                            (t.ack(), 'A'),
+                            (t.fin(), 'F'),
+                            (t.rst(), 'R'),
+                            (t.psh(), 'P'),
+                        ] {
+                            if on {
+                                fl.push(c);
+                            }
+                        }
+                        format!(
+                            "tcp {s}:{} -> {d}:{} [{fl}] seq={} ack={} win={} len={} ok={}",
+                            t.src_port(),
+                            t.dst_port(),
+                            t.seq_number(),
+                            t.ack_number(),
+                            t.window_len(),
+                            t.payload().len(),
+                            t.verify_checksum(&IpAddress::Ipv4(s), &IpAddress::Ipv4(d))
+                        )
+                    }
+                    Err(_) => format!("tcp {s} -> {d} ?"),
+                },
+                IpProtocol::Udp => match UdpPacket::new_checked(p.payload()) {
+                    Ok(u) => format!(
+                        "udp {s}:{} -> {d}:{} len={}",
+                        u.src_port(),
+                        u.dst_port(),
+                        u.payload().len()
+                    ),
+                    Err(_) => format!("udp {s} -> {d} ?"),
+                },
+                other => format!("ipv4 {other} {s} -> {d}"),
+            }
+        }
+        other => format!("{other} len={}", frame.len()),
+    }
+}
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

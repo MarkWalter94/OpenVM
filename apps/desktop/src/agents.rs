@@ -246,6 +246,7 @@ impl ApproveForm {
             quotas,
             lease_ms: (self.lease_ms != LEASES[0].0).then_some(self.lease_ms),
             give_input: self.give_input && self.caps.contains(&Capability::VmInput),
+            network_endpoints: Vec::new(),
         })
     }
 }
@@ -1545,6 +1546,7 @@ mod tests {
             requested_vms: vec![],
             requested_capabilities: [Capability::VmReset, Capability::VmStop, Capability::VmInput]
                 .into(),
+            requested_endpoints: Vec::new(),
             verification_code: "123-456".into(),
             requested_at: UtcTimestamp::from_unix_millis(0).unwrap(),
             expires_at: UtcTimestamp::from_unix_millis(300_000).unwrap(),

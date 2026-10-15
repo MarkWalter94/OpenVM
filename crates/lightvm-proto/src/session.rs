@@ -45,11 +45,16 @@ pub enum Capability {
     /// Authorized LightVM events and QEMU logs.
     #[serde(rename = "vm.logs")]
     VmLogs,
+    /// Network endpoints of the VM's allowlist (ADR-0033, ADR-0034): the
+    /// grant lists which ones ([`Grant::network_endpoints`]). Without it
+    /// the session's VM runs without network.
+    #[serde(rename = "network.endpoints")]
+    NetworkEndpoints,
 }
 
 impl Capability {
     /// All capabilities.
-    pub const ALL: [Capability; 10] = [
+    pub const ALL: [Capability; 11] = [
         Capability::VmList,
         Capability::VmStatus,
         Capability::VmStart,
@@ -60,6 +65,7 @@ impl Capability {
         Capability::VmSnapshot,
         Capability::VmRestore,
         Capability::VmLogs,
+        Capability::NetworkEndpoints,
     ];
 
     /// Stable name.
@@ -76,6 +82,7 @@ impl Capability {
             Capability::VmSnapshot => "vm.snapshot",
             Capability::VmRestore => "vm.restore",
             Capability::VmLogs => "vm.logs",
+            Capability::NetworkEndpoints => "network.endpoints",
         }
     }
 
@@ -224,6 +231,11 @@ pub struct Grant {
     pub quotas: Quotas,
     /// Revision of the policy the grant was issued with.
     pub policy_revision: PolicyRevision,
+    /// Network endpoints of the VM the session may use (names as in the VM
+    /// settings, normalized to lower case), with
+    /// [`Capability::NetworkEndpoints`]; empty otherwise (ADR-0033).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub network_endpoints: BTreeSet<String>,
 }
 
 impl Grant {

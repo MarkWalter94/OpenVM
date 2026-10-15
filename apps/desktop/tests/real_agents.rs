@@ -160,6 +160,7 @@ fn agent(
                     Capability::VmInput,
                 ]
                 .into(),
+                requested_endpoints: Vec::new(),
             })
             .await
             .unwrap();

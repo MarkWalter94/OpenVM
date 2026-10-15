@@ -385,6 +385,36 @@ pub fn event_text(e: &ReportEventBody) -> String {
             "The agent declared {} (its claim, not the outcome)",
             outcome_text(*claimed_outcome).to_lowercase()
         ),
+        ReportEventBody::Network { action, detail } => {
+            let what = match action.as_str() {
+                "network_setup" => "Network set up",
+                "network_connection" => "Network connection",
+                "network_denied" => "Network connection refused",
+                "network_policy" => "Allowed network endpoints changed",
+                _ => "Network",
+            };
+            let mut s = what.to_owned();
+            for v in [
+                detail.mode.as_deref(),
+                detail.endpoint.as_deref(),
+                detail.destination.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                s.push_str(&format!(" {v}"));
+            }
+            if let Some(t) = &detail.target {
+                s.push_str(&format!(" \u{2192} {t}"));
+            }
+            if let (Some(up), Some(down)) = (detail.bytes_from_guest, detail.bytes_to_guest) {
+                s.push_str(&format!(", {up} B sent, {down} B received"));
+            }
+            if let Some(r) = &detail.reason {
+                s.push_str(&format!(" ({r})"));
+            }
+            s
+        }
         ReportEventBody::Note { text } => text.clone(),
     }
 }

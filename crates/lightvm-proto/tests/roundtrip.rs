@@ -29,6 +29,7 @@ fn sample_config() -> VmConfig {
         memory_mib: 4096,
         disk_gib: 40,
         network: NetworkProfile::Offline,
+        endpoints: Vec::new(),
         install_media: Some(MediaId::from_unix_millis(1, [1; 10])),
         data_media: None,
         firmware: Firmware::Uefi,
@@ -237,20 +238,93 @@ fn models_roundtrip() {
         capability: None,
         error: None,
         termination: None,
+        network: None,
     });
 }
 
 #[test]
-fn config_rejects_unknown_fields_and_non_offline_network() {
+fn config_rejects_unknown_fields_and_network_modes() {
     let mut v = serde_json::to_value(sample_config()).unwrap();
-    v["network"] = json!("nat");
+    // ADR-0033: three modes, nothing else.
+    for ok in ["offline", "nat", "endpoints"] {
+        v["network"] = json!(ok);
+        assert!(
+            serde_json::from_value::<VmConfig>(v.clone()).is_ok(),
+            "{ok}"
+        );
+    }
+    v["network"] = json!("bridged");
     assert!(serde_json::from_value::<VmConfig>(v.clone()).is_err());
+    v["network"] = json!("endpoints");
+    v["endpoints"] = json!([{"name": "sql.lan", "host": "127.0.0.1", "port": 1433,
+        "virtual_ip": "10.0.2.101"}]);
+    let c: VmConfig = serde_json::from_value(v.clone()).unwrap();
+    assert_eq!(c.endpoints[0].port, 1433);
+    validate_network(c.network, &c.endpoints).unwrap();
+    v["endpoints"][0]["hostfwd"] = json!("tcp::1-:2");
+    assert!(serde_json::from_value::<VmConfig>(v.clone()).is_err());
+    v.as_object_mut().unwrap().remove("endpoints");
     v["network"] = json!("offline");
     v["qemu_args"] = json!("-drive file=/etc/shadow");
     assert!(
         serde_json::from_value::<VmConfig>(v).is_err(),
         "unknown fields rejected"
     );
+}
+
+#[test]
+fn network_endpoint_validation() {
+    use std::net::Ipv4Addr;
+    let ep = |name: &str, host: &str, port: u16, ip: [u8; 4]| NetworkEndpoint {
+        name: name.into(),
+        host: host.into(),
+        port,
+        virtual_ip: Ipv4Addr::from(ip),
+    };
+    let good = vec![
+        ep("sql.lan", "sqlserver.corp.example", 1433, [10, 0, 2, 100]),
+        ep("wcf", "127.0.0.1", 8733, [10, 0, 2, 101]),
+        ep("v6", "::1", 80, [10, 0, 2, 102]),
+    ];
+    validate_network(NetworkProfile::Endpoints, &good).unwrap();
+    validate_network(NetworkProfile::Offline, &[]).unwrap();
+    assert!(validate_network(NetworkProfile::Endpoints, &[]).is_err());
+    assert_eq!(next_endpoint_ip(&good), Some(Ipv4Addr::new(10, 0, 2, 103)));
+    let bad = [
+        ep("*.lan", "h", 1, [10, 0, 2, 100]),
+        ep("sql", "*.corp", 1, [10, 0, 2, 100]),
+        ep("sql", "h", 0, [10, 0, 2, 100]),
+        ep("sql", "", 1, [10, 0, 2, 100]),
+        ep("sql", " h", 1, [10, 0, 2, 100]),
+        ep("sql", "http://h", 1, [10, 0, 2, 100]),
+        ep("sql", "0.0.0.0", 1, [10, 0, 2, 100]),
+        ep("sql", "h", 1, [10, 0, 2, 15]),
+        ep("sql", "h", 1, [10, 0, 2, 2]),
+        ep("sql", "h", 1, [192, 168, 1, 1]),
+        ep("10.0.2.5", "h", 1, [10, 0, 2, 100]),
+        ep("x.lightvm.internal", "h", 1, [10, 0, 2, 100]),
+        ep("bad name", "h", 1, [10, 0, 2, 100]),
+    ];
+    for b in bad {
+        assert!(
+            validate_network(NetworkProfile::Endpoints, std::slice::from_ref(&b)).is_err(),
+            "{b:?}"
+        );
+    }
+    let dup_name = vec![
+        ep("SQL", "a", 1, [10, 0, 2, 100]),
+        ep("sql", "b", 2, [10, 0, 2, 101]),
+    ];
+    assert!(validate_network(NetworkProfile::Endpoints, &dup_name).is_err());
+    let dup_addr = vec![
+        ep("a", "a", 1, [10, 0, 2, 100]),
+        ep("b", "b", 1, [10, 0, 2, 100]),
+    ];
+    assert!(validate_network(NetworkProfile::Endpoints, &dup_addr).is_err());
+    let many: Vec<NetworkEndpoint> = (0..33u8)
+        .map(|i| ep(&format!("e{i}"), "h", 1, [10, 0, 2, 100 + i]))
+        .collect();
+    assert!(validate_network(NetworkProfile::Endpoints, &many).is_err());
 }
 
 #[test]
@@ -264,6 +338,7 @@ fn session_types_roundtrip() {
         expires_at: ts(60_000),
         quotas: Quotas::UNBOUNDED,
         policy_revision: PolicyRevision(4),
+        network_endpoints: BTreeSet::new(),
     };
     rt(&grant);
     let v = serde_json::to_value(&grant).unwrap();
@@ -310,7 +385,8 @@ fn session_types_roundtrip() {
             "vm.input",
             "vm.snapshot",
             "vm.restore",
-            "vm.logs"
+            "vm.logs",
+            "network.endpoints"
         ]
     );
 }

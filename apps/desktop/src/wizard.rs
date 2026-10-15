@@ -485,6 +485,7 @@ impl Wizard {
             memory_mib: self.memory_mib,
             disk_gib: self.disk_gib,
             network: NetworkProfile::Offline,
+            endpoints: Vec::new(),
             install_media: self.install_media,
             data_media: self.data_media,
             firmware: if os.allowed_firmware().contains(&self.firmware) {
