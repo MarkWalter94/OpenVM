@@ -4,7 +4,7 @@
 //! fake. They are not part of the product: the binary always uses the real
 //! adapters ([`crate::adapters`]).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
@@ -261,11 +261,9 @@ pub struct FakeImageTool {
 #[derive(Debug, Default)]
 pub struct FakeStorageHelper {
     /// Reports returned in order (an exhausted list is an error).
-    pub reports: std::sync::Mutex<
-        std::collections::VecDeque<Result<qemu_backend::storage_helper::HelperReport, PublicError>>,
-    >,
+    pub reports: Mutex<VecDeque<Result<qemu_backend::storage_helper::HelperReport, PublicError>>>,
     /// Jobs received: `(keys, reg)`.
-    pub jobs: std::sync::Mutex<Vec<(Vec<String>, Option<String>)>>,
+    pub jobs: Mutex<Vec<(Vec<String>, Option<String>)>>,
 }
 
 /// Minimal QCOW2 v3 header with an optional backing reference (format
