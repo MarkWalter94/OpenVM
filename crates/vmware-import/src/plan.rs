@@ -7,6 +7,7 @@
 //! | `firmware = "efi"` / absent | UEFI (new variable store) / SeaBIOS |
 //! | `pvscsi`, `lsisas1068`, SATA, IDE, NVMe | `pvscsi`, `mptsas1068`, AHCI, PIIX IDE, NVMe |
 //! | `lsilogic`, `buslogic` (not emulated by QEMU) | the guest profile's controller; Windows: warning and storage driver preparation |
+//! | NVMe with legacy BIOS (SeaBIOS does not boot from NVMe, R6-01b) | the guest profile's controller; Windows: warning and storage driver preparation |
 //!
 //! The network, sound, USB, shared folders, 3D, serial and parallel ports,
 //! floppy, CD drives, other disks and intermediate snapshots are listed as
@@ -167,15 +168,20 @@ pub struct Plan {
 const DEFAULT_MEMSIZE: u64 = 256;
 const GIB: u64 = 1 << 30;
 
-/// LightVM controller for a VMware controller and guest: `(controller,
-/// replaced)`, `replaced` when QEMU does not emulate the VMware one (or the
-/// guest has no driver for the equivalent) and the profile's is used.
+/// LightVM controller for a VMware controller, guest and firmware:
+/// `(controller, replaced)`, `replaced` when QEMU does not emulate the
+/// VMware one (or the guest has no driver for the equivalent, or the firmware
+/// cannot boot it) and the profile's is used. SeaBIOS does not read NVMe
+/// boot disks (R6-01b run 3: "could not read the boot disk"), so an NVMe
+/// disk of a legacy-BIOS guest moves to the profile's controller; UEFI
+/// (OVMF) boots NVMe and keeps it.
 #[must_use]
-pub fn controller_for(c: VmwareController, os: GuestOs) -> (DiskController, bool) {
+pub fn controller_for(c: VmwareController, os: GuestOs, fw: Firmware) -> (DiskController, bool) {
     let mapped = match c {
         VmwareController::Ide => Some(DiskController::Ide),
         VmwareController::Sata => Some(DiskController::Ahci),
-        VmwareController::Nvme => Some(DiskController::Nvme),
+        VmwareController::Nvme if fw == Firmware::Uefi => Some(DiskController::Nvme),
+        VmwareController::Nvme => None,
         VmwareController::Pvscsi => Some(DiskController::Pvscsi),
         VmwareController::LsiSas1068 => Some(DiskController::LsiSas1068),
         VmwareController::LsiLogic | VmwareController::BusLogic => None,
@@ -269,7 +275,7 @@ pub fn plan(
             max_gib: limits.max_disk_gib,
         });
     }
-    let (disk_controller, replaced) = controller_for(insp.disk.controller, g.os);
+    let (disk_controller, replaced) = controller_for(insp.disk.controller, g.os, insp.firmware);
     let storage_driver_preparation = replaced && g.os.is_windows();
     if storage_driver_preparation {
         warn(
@@ -508,33 +514,68 @@ mod tests {
     #[test]
     fn controllers() {
         use VmwareController as V;
+        let bios = Firmware::Bios;
+        let uefi = Firmware::Uefi;
         assert_eq!(
-            controller_for(V::Pvscsi, GuestOs::Windows7),
+            controller_for(V::Pvscsi, GuestOs::Windows7, uefi),
             (DiskController::Pvscsi, false)
         );
         assert_eq!(
-            controller_for(V::LsiLogic, GuestOs::WindowsVista),
+            controller_for(V::LsiLogic, GuestOs::WindowsVista, bios),
             (DiskController::Ahci, true)
         );
         assert_eq!(
-            controller_for(V::LsiLogic, GuestOs::WindowsXp),
+            controller_for(V::LsiLogic, GuestOs::WindowsXp, bios),
             (DiskController::Ide, true)
         );
         assert_eq!(
-            controller_for(V::BusLogic, GuestOs::OtherLinuxX86_64),
+            controller_for(V::BusLogic, GuestOs::OtherLinuxX86_64, uefi),
             (DiskController::Virtio, true)
         );
         assert_eq!(
-            controller_for(V::Sata, GuestOs::WindowsXp),
+            controller_for(V::Sata, GuestOs::WindowsXp, bios),
             (DiskController::Ide, true)
         );
         assert_eq!(
-            controller_for(V::Ide, GuestOs::Windows7),
+            controller_for(V::Ide, GuestOs::Windows7, uefi),
             (DiskController::Ide, false)
         );
         assert_eq!(
-            controller_for(V::LsiSas1068, GuestOs::Windows10),
+            controller_for(V::LsiSas1068, GuestOs::Windows10, uefi),
             (DiskController::LsiSas1068, false)
+        );
+    }
+
+    /// NVMe is kept only with UEFI: SeaBIOS cannot read an NVMe boot disk
+    /// (R6-01b run 3, frame evidence `VMCR2011-last.png`), so a legacy-BIOS
+    /// NVMe guest moves to the profile's controller (which SeaBIOS does
+    /// boot: IDE and AHCI natively, virtio since the Debian run of R6-01b).
+    #[test]
+    fn nvme_needs_uefi() {
+        use VmwareController as V;
+        assert_eq!(
+            controller_for(V::Nvme, GuestOs::Windows10, Firmware::Uefi),
+            (DiskController::Nvme, false)
+        );
+        assert_eq!(
+            controller_for(V::Nvme, GuestOs::Windows10, Firmware::Bios),
+            (DiskController::Ahci, true)
+        );
+        assert_eq!(
+            controller_for(V::Nvme, GuestOs::Windows7, Firmware::Bios),
+            (DiskController::Ahci, true)
+        );
+        assert_eq!(
+            controller_for(V::Nvme, GuestOs::WindowsVista, Firmware::Bios),
+            (DiskController::Ahci, true)
+        );
+        assert_eq!(
+            controller_for(V::Nvme, GuestOs::WindowsXp, Firmware::Bios),
+            (DiskController::Ide, true)
+        );
+        assert_eq!(
+            controller_for(V::Nvme, GuestOs::OtherLinuxX86_64, Firmware::Bios),
+            (DiskController::Virtio, true)
         );
     }
 
