@@ -63,8 +63,9 @@ mod vm_import;
 
 pub use baseline::{
     BaselineInfo, BaselineJob, BaselineJobDone, BaselineOverview, CreateBaseline,
-    CurrentStateFiles, FaultAction, FaultPoint, ProducedImage, RestoreBaseline, RestoreJob,
-    RestoreJobDone, StartFiles, TPM_BASELINE_UNSUPPORTED, qcow2_backing,
+    CurrentStateFiles, FaultAction, FaultPoint, PROMOTE_RUNNING_SNAPSHOT, ProducedImage,
+    RestoreBaseline, RestoreJob, RestoreJobDone, StartFiles, TPM_BASELINE_UNSUPPORTED,
+    qcow2_backing,
 };
 pub use budget::{
     BUDGET_MANIFEST_FILE, BaselineUsage, BudgetCheck, BudgetConfig, BudgetManifest, Enforcement,

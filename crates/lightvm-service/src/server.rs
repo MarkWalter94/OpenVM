@@ -1092,6 +1092,10 @@ async fn handle_connection(shared: Arc<Shared>, stream: BoxedStream, peer: PeerI
                             | Request::ImportVmware { .. }
                             | Request::CreateBaseline { .. }
                             | Request::RestoreBaseline { .. }
+                            | Request::TakeSnapshot { .. }
+                            | Request::RevertSnapshot { .. }
+                            | Request::DeleteSnapshot { .. }
+                            | Request::PromoteSnapshot { .. }
                             | Request::AwaitSession { .. }
                             | Request::Agent { call: AgentCall::Snapshot { .. } | AgentCall::Restore { .. }, .. }
                     ) {
@@ -1447,6 +1451,45 @@ async fn dispatch(
         Request::DeleteBaseline { vm_id, baseline_id } => {
             SupervisorRequest::DeleteBaseline { vm_id, baseline_id }
         }
+        Request::ListSnapshots { vm_id } => SupervisorRequest::ListSnapshots(vm_id),
+        Request::TakeSnapshot {
+            vm_id,
+            name,
+            description,
+        } => SupervisorRequest::TakeSnapshot {
+            vm_id,
+            name,
+            description,
+        },
+        Request::RevertSnapshot { vm_id, snapshot_id } => {
+            SupervisorRequest::RevertSnapshot { vm_id, snapshot_id }
+        }
+        Request::DeleteSnapshot { vm_id, snapshot_id } => {
+            SupervisorRequest::DeleteSnapshot { vm_id, snapshot_id }
+        }
+        Request::UpdateSnapshot {
+            vm_id,
+            snapshot_id,
+            name,
+            description,
+        } => SupervisorRequest::UpdateSnapshot {
+            vm_id,
+            snapshot_id,
+            name,
+            description,
+        },
+        Request::GetSnapshotThumbnail { vm_id, snapshot_id } => {
+            SupervisorRequest::SnapshotThumbnail { vm_id, snapshot_id }
+        }
+        Request::PromoteSnapshot {
+            vm_id,
+            snapshot_id,
+            label,
+        } => SupervisorRequest::PromoteSnapshot {
+            vm_id,
+            snapshot_id,
+            label,
+        },
         Request::Subscribe => {
             if events.is_none() {
                 *events = Some(shared.events.subscribe());

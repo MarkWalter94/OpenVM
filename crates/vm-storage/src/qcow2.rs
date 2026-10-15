@@ -189,7 +189,9 @@ fn l1_entries(
     }
     let buf = read_at(f, path, offset, bytes, file_len)?;
     Ok(buf
-        .chunks_exact(8)
+        .as_chunks::<8>()
+        .0
+        .iter()
         .map(|c| be64(c, 0).unwrap_or(0) & L1_OFFSET_MASK)
         .collect())
 }

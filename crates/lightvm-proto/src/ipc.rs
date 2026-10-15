@@ -1068,10 +1068,9 @@ pub enum StorageOperation {
     TakeSnapshot,
     /// `revert_snapshot` (ADR-0032).
     RevertSnapshot,
-    /// `delete_snapshot` (ADR-0032).
+    /// `delete_snapshot` (ADR-0032). (`promote_snapshot` shows as
+    /// `create_baseline`.)
     DeleteSnapshot,
-    /// `promote_snapshot` (ADR-0032).
-    PromoteSnapshot,
 }
 
 /// Longest description of a user snapshot, in characters.

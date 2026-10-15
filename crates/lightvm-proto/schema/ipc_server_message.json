@@ -4713,14 +4713,9 @@
           "const": "revert_snapshot"
         },
         {
-          "description": "`delete_snapshot` (ADR-0032).",
+          "description": "`delete_snapshot` (ADR-0032). (`promote_snapshot` shows as\n`create_baseline`.)",
           "type": "string",
           "const": "delete_snapshot"
-        },
-        {
-          "description": "`promote_snapshot` (ADR-0032).",
-          "type": "string",
-          "const": "promote_snapshot"
         }
       ]
     },

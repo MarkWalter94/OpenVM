@@ -169,6 +169,9 @@ pub struct BaselineJob {
     derived_from: Option<BaselineId>,
     config_revision: u64,
     config: serde_json::Value,
+    /// Internal snapshot of the source disk the image is made from (a user
+    /// snapshot promoted to a baseline, ADR-0032).
+    snapshot_tag: Option<String>,
     _source_disk_guard: File,
     _base_guard: Option<BaselineGuard>,
 }
@@ -189,6 +192,13 @@ impl BaselineJobDone {
 }
 
 impl BaselineJob {
+    /// Internal snapshot of the source disk to copy instead of its current
+    /// state (`qemu-img convert -l snapshot.name=<tag>`), for a user
+    /// snapshot promoted to a baseline.
+    pub fn snapshot_tag(&self) -> Option<&str> {
+        self.snapshot_tag.as_deref()
+    }
+
     /// New baseline.
     pub fn baseline_id(&self) -> BaselineId {
         self.baseline_id
@@ -472,8 +482,51 @@ impl Catalog {
     /// detector: [`StorageError::VmBusy`]); `promote_baseline` and
     /// `copy_vars` intents are recorded.
     pub fn begin_create_baseline(&mut self, req: CreateBaseline) -> Result<BaselineJob> {
-        let vm = self.stopped_without_runs(&req.vm_id, "baseline")?;
+        self.begin_baseline_from(req, None)
+    }
+
+    /// First step of the promotion of a user snapshot to a baseline
+    /// (ADR-0032 with the rules of ADR-0005): as
+    /// [`Self::begin_create_baseline`] from the standalone disk, but the
+    /// image is made from the snapshot's internal state
+    /// ([`BaselineJob::snapshot_tag`]) with the snapshot's copy of the UEFI
+    /// variables and its configuration. Only snapshots taken with the VM
+    /// off; `req.clean_shutdown` should be the snapshot's.
+    pub fn begin_promote_snapshot(
+        &mut self,
+        req: CreateBaseline,
+        snapshot: &crate::SnapshotId,
+    ) -> Result<BaselineJob> {
+        self.begin_baseline_from(req, Some(snapshot))
+    }
+
+    fn begin_baseline_from(
+        &mut self,
+        mut req: CreateBaseline,
+        snapshot: Option<&crate::SnapshotId>,
+    ) -> Result<BaselineJob> {
+        let mut vm = self.stopped_without_runs(&req.vm_id, "baseline")?;
         refuse_tpm_guest(&vm)?;
+        let mut snapshot_tag = None;
+        if let Some(sid) = snapshot {
+            let s = self.read(|tx| tx.snapshot(sid))?;
+            if s.vm_id != req.vm_id {
+                return Err(StorageError::NotFound {
+                    kind: "snapshot",
+                    id: sid.to_string(),
+                });
+            }
+            if s.taken_while_running {
+                return Err(StorageError::StateConflict(PROMOTE_RUNNING_SNAPSHOT.into()));
+            }
+            req.standalone.vars = s
+                .vars_sha256
+                .as_ref()
+                .map(|_| CatalogLayout::snapshot_vars(&req.vm_id, sid));
+            vm.config = s.config.clone();
+            vm.revision = s.config_revision;
+            snapshot_tag = Some(s.disk_tag);
+        }
         let current = self.read(|tx| {
             let Some(cs) = tx.current_state(&req.vm_id)? else {
                 return Ok(None);
@@ -482,6 +535,11 @@ impl Catalog {
             let vars = cs.vars_fw_id.as_ref().map(|f| tx.firmware(f)).transpose()?;
             Ok(Some((cs, disk, vars)))
         })?;
+        if snapshot_tag.is_some() && current.is_some() {
+            return Err(StorageError::StateConflict(
+                crate::SNAPSHOT_ON_OVERLAY.into(),
+            ));
+        }
         let (disk_rel, vars_rel, derived_from, base_guard) = match current {
             Some((cs, disk, vars)) => {
                 let g = self.baseline_guard(&cs.baseline_id, false)?;
@@ -562,6 +620,7 @@ impl Catalog {
             derived_from,
             config_revision: vm.revision,
             config: vm.config,
+            snapshot_tag,
             _source_disk_guard: disk_guard,
             _base_guard: base_guard,
         })
@@ -1236,6 +1295,10 @@ fn be64(b: &[u8], o: usize) -> Option<u64> {
         u64::from_be_bytes(a)
     })
 }
+
+/// Refusal of the promotion of a snapshot taken while the VM ran (ADR-0005:
+/// an unclean state never becomes a verified baseline).
+pub const PROMOTE_RUNNING_SNAPSHOT: &str = "a snapshot taken while the VM was running cannot become a baseline: only snapshots taken with the VM off";
 
 /// Message of [`refuse_tpm_guest`].
 pub const TPM_BASELINE_UNSUPPORTED: &str =

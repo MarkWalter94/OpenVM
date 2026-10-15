@@ -735,6 +735,38 @@ impl ImageTool for QemuImageTool {
             .ok()
             .map(|r| r.free_disk_bytes)
     }
+    fn internal_snapshot(
+        &self,
+        disk: &Path,
+        action: crate::engine::DiskSnapshotAction,
+        tag: &str,
+        cancel: &dyn Fn() -> bool,
+    ) -> Result<(), PublicError> {
+        use crate::engine::DiskSnapshotAction as A;
+        let action = match action {
+            A::Create => image::SnapshotAction::Create,
+            A::Apply => image::SnapshotAction::Apply,
+            A::Delete => image::SnapshotAction::Delete,
+        };
+        image::internal_snapshot(&self.cmd(true), action, &verified(disk)?, tag, cancel)
+            .map_err(|e| image_error(&e))
+    }
+    fn convert_snapshot(
+        &self,
+        src: &Path,
+        tag: &str,
+        dst: &Path,
+        cancel: &dyn Fn() -> bool,
+    ) -> Result<(), PublicError> {
+        image::convert_snapshot(
+            &self.cmd(true),
+            &verified(src)?,
+            tag,
+            &verified(dst)?,
+            cancel,
+        )
+        .map_err(|e| image_error(&e))
+    }
 }
 
 impl QemuImageTool {
@@ -1861,6 +1893,33 @@ impl BackendPort for QemuVmBackend {
         let mut buf = Vec::new();
         f.take(16 * 1024).read_to_end(&mut buf).ok()?;
         Some(String::from_utf8_lossy(&buf).into_owned())
+    }
+
+    fn snapshot_disk(&mut self, vm_id: VmId, run_id: RunId, tag: &str) -> Result<(), PublicError> {
+        let run = self.run(vm_id, run_id)?.clone();
+        self.rt
+            .block_on(run.snapshot_disk(tag))
+            .map_err(|e| public(&e))
+    }
+
+    fn delete_disk_snapshot(
+        &mut self,
+        vm_id: VmId,
+        run_id: RunId,
+        tag: &str,
+    ) -> Result<(), PublicError> {
+        let run = self.run(vm_id, run_id)?.clone();
+        self.rt
+            .block_on(run.delete_disk_snapshot(tag))
+            .map_err(|e| public(&e))
+    }
+
+    fn snapshot_thumbnail(&mut self, vm_id: VmId, run_id: RunId) -> Option<Vec<u8>> {
+        let run = self.run(vm_id, run_id).ok()?.clone();
+        self.rt
+            .block_on(run.thumbnail(160, 100, lightvm_proto::ipc::MAX_SNAPSHOT_THUMBNAIL_BYTES))
+            .ok()
+            .flatten()
     }
 
     fn take_screenshot(&mut self, vm_id: VmId, run_id: RunId) -> Option<(Screenshot, Vec<u8>)> {
