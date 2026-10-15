@@ -1,0 +1,240 @@
+--- a/meson.build
++++ b/meson.build
+@@ -219,9 +219,7 @@
+   .require(host_os == 'linux', error_message: 'vfio-user server is supported only on Linux') \
+   .allowed()
+ 
+-have_tpm = get_option('tpm') \
+-  .require(host_os != 'windows', error_message: 'TPM emulation only available on POSIX systems') \
+-  .allowed()
++have_tpm = get_option('tpm').allowed()
+ 
+ # vhost
+ have_vhost_user = get_option('vhost_user') \
+--- a/qapi/tpm.json
++++ b/qapi/tpm.json
+@@ -92,9 +92,14 @@
+ #
+ # @chardev: Name of a unix socket chardev
+ #
++# @data-chardev: Name of a socket chardev that carries the TPM
++#     commands, instead of a descriptor passed with SET_DATAFD
++#     (required on Windows hosts)
++#
+ # Since: 2.11
+ ##
+-{ 'struct': 'TPMEmulatorOptions', 'data': { 'chardev' : 'str' },
++{ 'struct': 'TPMEmulatorOptions', 'data': { 'chardev' : 'str',
++                                            '*data-chardev' : 'str' },
+   'if': 'CONFIG_TPM' }
+ 
+ ##
+--- a/backends/tpm/tpm_emulator.c
++++ b/backends/tpm/tpm_emulator.c
+@@ -71,6 +71,9 @@
+     TPMEmulatorOptions *options;
+     CharFrontend ctrl_chr;
+     QIOChannel *data_ioc;
++    /* data channel as a separate (e.g. TCP) chardev instead of SET_DATAFD */
++    CharFrontend data_chr;
++    bool use_data_chr;
+     TPMVersion tpm_version;
+     uint32_t caps; /* capabilities of the TPM */
+     uint8_t cur_locty_number; /* last set locality */
+@@ -170,6 +173,32 @@
+     return 0;
+ }
+ 
++static int tpm_emulator_data_write(TPMEmulator *tpm_emu, const uint8_t *buf,
++                                   size_t len, Error **errp)
++{
++    if (tpm_emu->use_data_chr) {
++        if (qemu_chr_fe_write_all(&tpm_emu->data_chr, buf, len) != len) {
++            error_setg(errp, "tpm-emulator: write to data chardev failed");
++            return -1;
++        }
++        return 0;
++    }
++    return qio_channel_write_all(tpm_emu->data_ioc, (char *)buf, len, errp);
++}
++
++static int tpm_emulator_data_read(TPMEmulator *tpm_emu, uint8_t *buf,
++                                  size_t len, Error **errp)
++{
++    if (tpm_emu->use_data_chr) {
++        if (qemu_chr_fe_read_all(&tpm_emu->data_chr, buf, len) != len) {
++            error_setg(errp, "tpm-emulator: read from data chardev failed");
++            return -1;
++        }
++        return 0;
++    }
++    return qio_channel_read_all(tpm_emu->data_ioc, (char *)buf, len, errp);
++}
++
+ static int tpm_emulator_unix_tx_bufs(TPMEmulator *tpm_emu,
+                                      const uint8_t *in, uint32_t in_len,
+                                      uint8_t *out, uint32_t out_len,
+@@ -186,12 +215,12 @@
+         is_selftest = tpm_util_is_selftest(in, in_len);
+     }
+ 
+-    ret = qio_channel_write_all(tpm_emu->data_ioc, (char *)in, in_len, errp);
++    ret = tpm_emulator_data_write(tpm_emu, in, in_len, errp);
+     if (ret != 0) {
+         return -1;
+     }
+ 
+-    ret = qio_channel_read_all(tpm_emu->data_ioc, (char *)out,
++    ret = tpm_emulator_data_read(tpm_emu, out,
+               sizeof(struct tpm_resp_hdr), errp);
+     if (ret != 0) {
+         return -1;
+@@ -203,8 +232,11 @@
+      */
+     to_read = tpm_cmd_get_size(out);
+     if (to_read > out_len) {
+-        if (qio_channel_shutdown(tpm_emu->data_ioc, QIO_CHANNEL_SHUTDOWN_BOTH,
+-                                 &local_err) < 0) {
++        if (tpm_emu->use_data_chr) {
++            qemu_chr_fe_disconnect(&tpm_emu->data_chr);
++        } else if (qio_channel_shutdown(tpm_emu->data_ioc,
++                                        QIO_CHANNEL_SHUTDOWN_BOTH,
++                                        &local_err) < 0) {
+             error_report_err(local_err);
+         }
+         error_setg(errp, "tpm-emulator: Disconnected after receiving "
+@@ -213,8 +245,8 @@
+         return -1;
+     }
+ 
+-    ret = qio_channel_read_all(tpm_emu->data_ioc,
+-              (char *)out + sizeof(struct tpm_resp_hdr),
++    ret = tpm_emulator_data_read(tpm_emu,
++              out + sizeof(struct tpm_resp_hdr),
+               to_read - sizeof(struct tpm_resp_hdr), errp);
+     if (ret != 0) {
+         return -1;
+@@ -316,6 +348,10 @@
+         return -1;
+     }
+ 
++    if (tpm_emu->use_data_chr) {
++        caps &= ~PTM_CAP_SET_DATAFD;
++    }
++
+     if (!TPM_EMULATOR_IMPLEMENTS_ALL_CAPS(tpm_emu, caps)) {
+         error_report("tpm-emulator: TPM does not implement minimum set of "
+                      "required capabilities for TPM %s (0x%x)", tpm, (int)caps);
+@@ -612,6 +648,11 @@
+ 
+ static int tpm_emulator_prepare_data_fd(TPMEmulator *tpm_emu)
+ {
++#ifdef _WIN32
++    error_report("tpm-emulator: on Windows hosts the 'data-chardev' "
++                 "parameter is required (no descriptor passing)");
++    return -1;
++#else
+     ptm_res res;
+     Error *err = NULL;
+     int fds[2] = { -1, -1 };
+@@ -644,6 +685,41 @@
+     close(fds[0]);
+     close(fds[1]);
+     return -1;
++#endif
++}
++
++/*
++ * Probe the TPM version over the data channel (TPM2 ReadClock, then a
++ * TPM 1.2 GetTicks), like tpm_util_test_tpmdev() but through the
++ * emulator's own transport.
++ */
++static int tpm_emulator_probe_version(TPMEmulator *tpm_emu)
++{
++    static const uint8_t tpm2_req[] = {
++        0x80, 0x01, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x01, 0x81
++    }; /* TPM2_ST_NO_SESSIONS, len 10, TPM2_CC_ReadClock */
++    static const uint8_t tpm12_req[] = {
++        0x00, 0xc1, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00, 0xf1
++    }; /* TPM_TAG_RQU_COMMAND, len 10, TPM_ORD_GetTicks */
++    uint8_t out[4096];
++    Error *err = NULL;
++
++    if (tpm_emulator_unix_tx_bufs(tpm_emu, tpm2_req, sizeof(tpm2_req),
++                                  out, sizeof(out), NULL, &err) == 0 &&
++        tpm_cmd_get_tag(out) == 0x8001) {
++        tpm_emu->tpm_version = TPM_VERSION_2_0;
++        return 0;
++    }
++    error_free(err);
++    err = NULL;
++    if (tpm_emulator_unix_tx_bufs(tpm_emu, tpm12_req, sizeof(tpm12_req),
++                                  out, sizeof(out), NULL, &err) == 0 &&
++        tpm_cmd_get_tag(out) == 0x00c4) {
++        tpm_emu->tpm_version = TPM_VERSION_1_2;
++        return 0;
++    }
++    error_free(err);
++    return -1;
+ }
+ 
+ static int tpm_emulator_handle_device_opts(TPMEmulator *tpm_emu, QemuOpts *opts)
+@@ -673,15 +749,26 @@
+ 
+     tpm_emu->options->chardev = g_strdup(value);
+ 
+-    if (tpm_emulator_prepare_data_fd(tpm_emu) < 0) {
++    value = qemu_opt_get(opts, "data-chardev");
++    if (value) {
++        dev = qemu_chr_find(value);
++        if (!dev) {
++            error_report("tpm-emulator: data chardev '%s' not found", value);
++            goto err;
++        }
++        if (!qemu_chr_fe_init(&tpm_emu->data_chr, dev, &err)) {
++            error_prepend(&err, "tpm-emulator: No valid chardev found at '%s':",
++                          value);
++            error_report_err(err);
++            goto err;
++        }
++        tpm_emu->use_data_chr = true;
++        tpm_emu->options->data_chardev = g_strdup(value);
++    } else if (tpm_emulator_prepare_data_fd(tpm_emu) < 0) {
+         goto err;
+     }
+ 
+-    /* FIXME: tpm_util_test_tpmdev() accepts only on socket fd, as it also used
+-     * by passthrough driver, which not yet using GIOChannel.
+-     */
+-    if (tpm_util_test_tpmdev(QIO_CHANNEL_SOCKET(tpm_emu->data_ioc)->fd,
+-                             &tpm_emu->tpm_version)) {
++    if (tpm_emulator_probe_version(tpm_emu)) {
+         error_report("'%s' is not emulating TPM device.",
+                       tpm_emu->options->chardev);
+         goto err;
+@@ -741,6 +828,11 @@
+         .type = QEMU_OPT_STRING,
+         .help = "Character device to use for out-of-band control messages",
+     },
++    {
++        .name = "data-chardev",
++        .type = QEMU_OPT_STRING,
++        .help = "Character device for TPM commands (instead of SET_DATAFD)",
++    },
+     { /* end of list */ },
+ };
+ 
+@@ -1068,7 +1160,12 @@
+ 
+     tpm_emulator_shutdown(tpm_emu);
+ 
+-    object_unref(OBJECT(tpm_emu->data_ioc));
++    if (tpm_emu->data_ioc) {
++        object_unref(OBJECT(tpm_emu->data_ioc));
++    }
++    if (tpm_emu->use_data_chr) {
++        qemu_chr_fe_deinit(&tpm_emu->data_chr, false);
++    }
+ 
+     qemu_chr_fe_deinit(&tpm_emu->ctrl_chr, false);
+ 

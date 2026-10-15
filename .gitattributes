@@ -6,3 +6,5 @@ packaging/firmware/**/*.patch -text
 # Storage helper init runs in Linux: LF only.
 packaging/storage-helper/init text eol=lf
 packaging/storage-helper/*.py text eol=lf
+# QEMU sources use LF: patches against them must keep it.
+packaging/qemu-win11/*.patch text eol=lf
