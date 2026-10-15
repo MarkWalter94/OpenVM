@@ -425,6 +425,86 @@ pub fn convert_vmdk(
     Ok(())
 }
 
+/// Operation on the internal snapshots of a QCOW2 image with the VM off
+/// (ADR-0032).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotAction {
+    /// `qemu-img snapshot -c`: new internal snapshot of the current state.
+    Create,
+    /// `qemu-img snapshot -a`: the current state becomes the snapshot's.
+    Apply,
+    /// `qemu-img snapshot -d`: removes the snapshot, the others keep theirs.
+    Delete,
+}
+
+/// `qemu-img snapshot -c/-a/-d <tag>` on the image `disk`, which no
+/// process may have open (the VM is off; `qemu-img` takes the image lock).
+/// `tag` is a snapshot identifier chosen by the supervisor.
+pub fn internal_snapshot(
+    cmd: &ImageCommand<'_>,
+    action: SnapshotAction,
+    disk: &ManagedPath,
+    tag: &str,
+    cancel: &dyn Fn() -> bool,
+) -> Result<()> {
+    crate::run::check_snapshot_name(tag)?;
+    let (flag, what) = match action {
+        SnapshotAction::Create => ("-c", "snapshot -c"),
+        SnapshotAction::Apply => ("-a", "snapshot -a"),
+        SnapshotAction::Delete => ("-d", "snapshot -d"),
+    };
+    let o = cmd.run(
+        &[
+            "snapshot",
+            "-q",
+            "-f",
+            "qcow2",
+            flag,
+            tag,
+            disk.qemu_value(),
+        ],
+        cancel,
+    )?;
+    if o.code != Some(0) {
+        return Err(failed(what, &o));
+    }
+    Ok(())
+}
+
+/// Standalone QCOW2 copy of the internal snapshot `tag` of `src` into the
+/// new file `dst` (`qemu-img convert -l snapshot.name=<tag>`): promotion of
+/// a user snapshot to a baseline (ADR-0032, ADR-0005). `dst` must not exist.
+pub fn convert_snapshot(
+    cmd: &ImageCommand<'_>,
+    src: &ManagedPath,
+    tag: &str,
+    dst: &ManagedPath,
+    cancel: &dyn Fn() -> bool,
+) -> Result<()> {
+    crate::run::check_snapshot_name(tag)?;
+    refuse_existing(dst)?;
+    let sel = format!("snapshot.name={tag}");
+    let o = cmd.run(
+        &[
+            "convert",
+            "-q",
+            "-f",
+            "qcow2",
+            "-O",
+            "qcow2",
+            "-l",
+            &sel,
+            src.qemu_value(),
+            dst.qemu_value(),
+        ],
+        cancel,
+    )?;
+    if o.code != Some(0) {
+        return Err(failed("convert", &o));
+    }
+    Ok(())
+}
+
 /// Virtual size of a QCOW2 image (`qemu-img info --output=json`).
 pub fn virtual_size(cmd: &ImageCommand<'_>, p: &ManagedPath) -> Result<u64> {
     let o = cmd.run(

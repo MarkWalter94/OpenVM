@@ -268,6 +268,31 @@ fn remove_sockets(cmd: &QemuCommand) {
 /// Maximum wait for the swtpm control socket.
 const SWTPM_SOCKET_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Node name of the VM's own disk on the command line (`-blockdev
+/// ...,node-name=disk0`, see `cmdline.rs`).
+const PRIMARY_DISK_NODE: &str = "disk0";
+
+/// Longest wait of an internal snapshot command: QEMU updates the reference
+/// counts of every allocated cluster with the guest paused.
+const INTERNAL_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Name of an internal snapshot: what the supervisor generates (a UUID),
+/// nothing else reaches QMP or `qemu-img`.
+pub fn check_snapshot_name(name: &str) -> Result<()> {
+    let ok = !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase() || b == b'-');
+    if ok {
+        Ok(())
+    } else {
+        Err(BackendError::StateConflict(
+            "invalid internal snapshot name".into(),
+        ))
+    }
+}
+
 /// Starts swtpm in `container` and waits for its control socket. The socket
 /// is only checked for existence, never connected to: with `--terminate`
 /// swtpm exits when its first control connection closes, which must be
@@ -1030,6 +1055,45 @@ impl QemuRun {
         .await?;
         *lock(&self.geometry) = Some(r.0.geometry);
         Ok(r)
+    }
+
+    /// Disk-only internal snapshot `name` of the VM's own disk while it runs
+    /// (ADR-0032, QMP `blockdev-snapshot-internal-sync` on the `disk0`
+    /// node). The disk state is crash-consistent: like after a power cut at
+    /// that instant. `name` must be a snapshot identifier chosen by the
+    /// supervisor (`[0-9a-f-]`, at most 64 characters).
+    pub async fn snapshot_disk(&self, name: &str) -> Result<()> {
+        self.ensure_running()?;
+        check_snapshot_name(name)?;
+        self.qmp
+            .snapshot_internal(PRIMARY_DISK_NODE, name, INTERNAL_SNAPSHOT_TIMEOUT)
+            .await?;
+        Ok(())
+    }
+
+    /// Deletes the internal snapshot `name` of the VM's own disk while it
+    /// runs (QMP `blockdev-snapshot-delete-internal-sync`, ADR-0032).
+    pub async fn delete_disk_snapshot(&self, name: &str) -> Result<()> {
+        self.ensure_alive()?;
+        check_snapshot_name(name)?;
+        self.qmp
+            .snapshot_delete_internal(PRIMARY_DISK_NODE, name, INTERNAL_SNAPSHOT_TIMEOUT)
+            .await?;
+        Ok(())
+    }
+
+    /// Small PNG of the screen (at most `max_w` × `max_h`, aspect kept) for
+    /// a snapshot thumbnail; `None` if it does not fit in `max_png_bytes`.
+    pub async fn thumbnail(
+        &self,
+        max_w: u32,
+        max_h: u32,
+        max_png_bytes: usize,
+    ) -> Result<Option<Vec<u8>>> {
+        let (_, rgb) = self.screenshot_rgb().await?;
+        let small = crate::screenshot::downscale(&rgb, max_w, max_h);
+        let png = crate::screenshot::encode_png(&small)?;
+        Ok((png.len() <= max_png_bytes).then_some(png))
     }
 
     /// Geometry of the last screenshot (or of the last

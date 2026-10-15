@@ -47,6 +47,10 @@ use crate::session::{SessionRegistry, SessionSpec, discard_code_for};
 pub const MAX_QUEUE_LEN: usize = 256;
 /// Finished operations remembered per VM for idempotency purposes.
 pub const IDEMPOTENCY_WINDOW: usize = 1024;
+/// Refusal of a user snapshot operation while an agent session targets the
+/// VM (ADR-0032: snapshots are a manual-use feature).
+pub const SNAPSHOT_AGENT_SESSION: &str =
+    "an agent session is using this VM: snapshots are available again when it ends";
 
 /// `true` if an operation of the given kind is allowed in the given state (pure guard).
 ///
@@ -56,7 +60,8 @@ pub const IDEMPOTENCY_WINDOW: usize = 1024;
 /// | `stop` | `running` |
 /// | `force_stop` | `starting`, `running`, `stopping` |
 /// | `reset`, `screenshot`, `input` | `running` (input also `stopping` for the user: [`input_allowed_for`]) |
-/// | `create`, `snapshot`, `restore` | `stopped` |
+/// | `create`, `snapshot`, `restore`, `user_snapshot_revert` | `stopped` |
+/// | `user_snapshot`, `user_snapshot_delete` | `stopped`, `running` (ADR-0032) |
 /// | `emergency_stop` | any (priority path) |
 #[must_use]
 pub fn action_allowed_in(kind: OperationKind, state: VmState) -> bool {
@@ -64,7 +69,11 @@ pub fn action_allowed_in(kind: OperationKind, state: VmState) -> bool {
         OperationKind::Start
         | OperationKind::Create
         | OperationKind::Snapshot
-        | OperationKind::Restore => state == VmState::Stopped,
+        | OperationKind::Restore
+        | OperationKind::UserSnapshotRevert => state == VmState::Stopped,
+        OperationKind::UserSnapshot | OperationKind::UserSnapshotDelete => {
+            matches!(state, VmState::Stopped | VmState::Running)
+        }
         OperationKind::Stop
         | OperationKind::Reset
         | OperationKind::Screenshot
@@ -300,6 +309,9 @@ fn audit_action_for(kind: OperationKind) -> AuditAction {
         OperationKind::Snapshot => AuditAction::BaselineCreate,
         OperationKind::Restore => AuditAction::BaselineRestore,
         OperationKind::EmergencyStop => AuditAction::EmergencyStop,
+        OperationKind::UserSnapshot => AuditAction::SnapshotTake,
+        OperationKind::UserSnapshotRevert => AuditAction::SnapshotRevert,
+        OperationKind::UserSnapshotDelete => AuditAction::SnapshotDelete,
     }
 }
 
@@ -2512,6 +2524,233 @@ where
                 ..Ev::default()
             },
         );
+        r
+    }
+
+    // ----- user snapshots (ADR-0032) -------------------------------------
+
+    /// Why user snapshots of the VM cannot be changed now, for the UI:
+    /// `None` when they can (the storage adds its own reasons, such as a VM
+    /// running on an overlay of a baseline).
+    #[must_use]
+    pub fn snapshot_unavailable_reason(&self, vm_id: VmId) -> Option<&'static str> {
+        if !self.sessions.live_for_vm(vm_id).is_empty() {
+            return Some(SNAPSHOT_AGENT_SESSION);
+        }
+        None
+    }
+
+    /// Checks shared by the user snapshot requests: the user only (agent
+    /// sessions never touch snapshots: `permission_denied`), no live agent
+    /// session on the VM (`state_conflict`, reason `agent_session`), nothing
+    /// queued or forwarded and no storage operation (`vm_busy`), the VM
+    /// `stopped`, or `running` when `allow_running`. Refusals are audited
+    /// as `denied`. Returns the record and the current run.
+    fn check_snapshot_request(
+        &mut self,
+        caller: &Caller,
+        vm_id: VmId,
+        action: AuditAction,
+        allow_running: bool,
+    ) -> Result<(VmRecord, Option<RunId>), PublicError> {
+        let actor = caller.actor();
+        let ev = Ev {
+            vm_id: Some(vm_id),
+            session_id: agent_session(caller),
+            ..Ev::default()
+        };
+        if matches!(caller, Caller::Agent { .. }) {
+            let err =
+                PublicError::permission_denied("snapshots are not available to agent sessions");
+            return Err(self.deny(actor, action, ev, err));
+        }
+        let live = !self.sessions.live_for_vm(vm_id).is_empty();
+        let check = match self.vms.get(&vm_id) {
+            None => Err(PublicError::not_found("VM does not exist")),
+            Some(_) if live => Err(PublicError::state_conflict(SNAPSHOT_AGENT_SESSION)
+                .with_detail("reason", "agent_session")),
+            Some(rt) if rt.storage_op.is_some() => Err(PublicError::vm_busy(
+                "storage operation in progress on the VM",
+            )),
+            Some(rt) if !rt.queue.is_empty() || !rt.in_flight.is_empty() => {
+                Err(PublicError::vm_busy("operations in progress on the VM"))
+            }
+            Some(rt) if rt.state == VmState::Stopped => Ok((rt.record.clone(), None)),
+            Some(rt) if rt.state == VmState::Running && allow_running => {
+                Ok((rt.record.clone(), rt.run_id))
+            }
+            Some(rt) => Err(PublicError::state_conflict(if allow_running {
+                "snapshots need the VM stopped or running"
+            } else {
+                "reverting to a snapshot needs the VM stopped: shut it down first"
+            })
+            .with_detail("state", rt.state.as_str())),
+        };
+        check.map_err(|err| self.deny(actor, action, ev, err))
+    }
+
+    /// First step of a user snapshot operation (ADR-0032): `kind` is
+    /// [`OperationKind::UserSnapshot`] or [`OperationKind::UserSnapshotDelete`]
+    /// (VM `stopped` or `running`) or [`OperationKind::UserSnapshotRevert`]
+    /// (VM `stopped`). After the checks of
+    /// [`Self::check_snapshot_request`], `begin` runs on the catalog with the
+    /// VM record and its current run (journal intent); on success the VM is
+    /// busy until [`Self::finish_snapshot_operation`]. Audited: `accepted`,
+    /// or `failed` if `begin` fails.
+    pub fn begin_snapshot_operation<T>(
+        &mut self,
+        caller: &Caller,
+        vm_id: VmId,
+        kind: OperationKind,
+        begin: impl FnOnce(&mut S, &VmRecord, Option<RunId>) -> Result<T, PublicError>,
+    ) -> Result<(OperationId, T), PublicError> {
+        let allow_running = match kind {
+            OperationKind::UserSnapshot | OperationKind::UserSnapshotDelete => true,
+            OperationKind::UserSnapshotRevert => false,
+            _ => {
+                return Err(PublicError::invalid_argument(
+                    "not a snapshot operation kind",
+                ));
+            }
+        };
+        let action = audit_action_for(kind);
+        let actor = caller.actor();
+        let (vm, run) = self.check_snapshot_request(caller, vm_id, action, allow_running)?;
+        let op = self.ids.operation_id();
+        let ev = |error| Ev {
+            vm_id: Some(vm_id),
+            run_id: run,
+            operation_id: Some(op),
+            error,
+            ..Ev::default()
+        };
+        let out = match begin(&mut self.store, &vm, run) {
+            Ok(t) => t,
+            Err(err) => {
+                self.emit_after(actor, action, AuditOutcome::Failed, ev(Some(err.code)));
+                return Err(err);
+            }
+        };
+        let now = self.clock.now();
+        let record = OperationRecord {
+            id: op,
+            vm_id,
+            run_id: run,
+            session_id: None,
+            kind,
+            status: OperationStatus::Forwarded,
+            error: None,
+            requested_at: now,
+            updated_at: now,
+        };
+        let _ = self.store.upsert_operation(&record);
+        self.op_index.insert(op, vm_id);
+        if let Some(rt) = self.vms.get_mut(&vm_id) {
+            rt.storage_op = Some(StorageOp {
+                record,
+                caller: caller.clone(),
+            });
+        }
+        self.emit_after(actor, action, AuditOutcome::Accepted, ev(None));
+        Ok((op, out))
+    }
+
+    /// Last step of a user snapshot operation: `finish` settles it on the
+    /// catalog and may return the VM record written by a revert (the
+    /// snapshot's configuration, new revision), which becomes the core's.
+    /// Recorded and audited (`succeeded`/`failed`); the VM is free again.
+    pub fn finish_snapshot_operation<T>(
+        &mut self,
+        vm_id: VmId,
+        operation_id: OperationId,
+        finish: impl FnOnce(&mut S) -> Result<(T, Option<VmRecord>), PublicError>,
+    ) -> Result<T, PublicError> {
+        let mut new_record = None;
+        let r = self.finish_storage_operation(vm_id, operation_id, |store| {
+            let (t, rec) = finish(store)?;
+            new_record = rec;
+            Ok(t)
+        });
+        if let Some(rec) = new_record
+            && let Some(rt) = self.vms.get_mut(&vm_id)
+        {
+            rt.record = rec;
+            rt.geometry = None;
+        }
+        r
+    }
+
+    /// The configuration a revert to a snapshot gives the VM: the
+    /// snapshot's `config` with the VM's current name, at revision + 1.
+    /// Media no longer in the registry are detached; a configuration beyond
+    /// the current limits or for a guest this host no longer runs is
+    /// refused (`invalid_argument`/`unsupported`).
+    pub fn reverted_record(
+        &self,
+        vm_id: VmId,
+        mut config: VmConfig,
+    ) -> Result<VmRecord, PublicError> {
+        let rt = self
+            .vms
+            .get(&vm_id)
+            .ok_or_else(|| PublicError::not_found("VM does not exist"))?;
+        config.name = rt.record.config.name.clone();
+        for slot in [&mut config.install_media, &mut config.data_media] {
+            if let Some(id) = *slot
+                && self.store.get_media(id)?.is_none()
+            {
+                *slot = None;
+            }
+        }
+        self.check_config_host(&config)
+            .and_then(|()| validate_config(&config, &self.effective_limits()))
+            .and_then(|()| self.check_config_media(&config))
+            .map_err(|e| {
+                PublicError::state_conflict(format!(
+                    "the snapshot's configuration is not valid on this host any more: {}",
+                    e.message
+                ))
+                .with_detail("reason", "snapshot_config")
+            })?;
+        Ok(VmRecord {
+            config,
+            config_revision: rt.record.config_revision.saturating_add(1),
+            ..rt.record.clone()
+        })
+    }
+
+    /// Reads or renames user snapshots of a VM: the user only (audited
+    /// `snapshot_update` when `update`; a read by an agent is denied).
+    pub fn snapshot_access<T>(
+        &mut self,
+        caller: &Caller,
+        vm_id: VmId,
+        update: bool,
+        f: impl FnOnce(&mut S) -> Result<T, PublicError>,
+    ) -> Result<T, PublicError> {
+        let action = AuditAction::SnapshotUpdate;
+        let actor = caller.actor();
+        let ev = Ev {
+            vm_id: Some(vm_id),
+            session_id: agent_session(caller),
+            ..Ev::default()
+        };
+        if matches!(caller, Caller::Agent { .. }) {
+            let err =
+                PublicError::permission_denied("snapshots are not available to agent sessions");
+            return Err(self.deny(actor, action, ev, err));
+        }
+        if !self.vms.contains_key(&vm_id) {
+            return Err(PublicError::not_found("VM does not exist"));
+        }
+        let r = f(&mut self.store);
+        if update {
+            let (outcome, error) = match &r {
+                Ok(_) => (AuditOutcome::Succeeded, None),
+                Err(e) => (AuditOutcome::Failed, Some(e.code)),
+            };
+            self.emit_after(actor, action, outcome, Ev { error, ..ev });
+        }
         r
     }
 
