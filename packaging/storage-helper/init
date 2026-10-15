@@ -133,8 +133,15 @@ for cs in $sets; do
         reged -I -C "$HIVE" "$ROOT" /tmp/job-$cs.reg > /tmp/import.out 2>&1
         rc=$?
         sed 's/^/LIGHTVM-PREP INFO reged: /' /tmp/import.out | tail -n 20
-        # reged exits 0 after a commit; any other status is a failure.
-        [ "$rc" -eq 0 ] || fail import_failed "reged import into $cs exit $rc"
+        # reged (chntpw 140201) exits 2 when it saved the changed hive and 0
+        # when nothing was saved; anything else, or a report without
+        # "SUCCEEDED", is a failure. The export below is the real check.
+        case $rc in
+            0|2) grep -q 'operation SUCCEEDED' /tmp/import.out ||
+                    fail import_failed "reged import into $cs not completed" ;;
+            *) fail import_failed "reged import into $cs exit $rc" ;;
+        esac
+        grep -q 'FAILED' /tmp/import.out && fail import_failed "reged reported a failure in $cs"
     fi
     say "CS $cs"
     while IFS= read -r k; do

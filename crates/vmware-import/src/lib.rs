@@ -26,7 +26,10 @@
 //!   `qemu-img info --backing-chain --output=json` against the files
 //!   validated here (format, chain, virtual size, allocation);
 //! - [`plan`]: mapping to a LightVM configuration (ADR-0030 table) within
-//!   the host limits, with the lists of what is and is not imported.
+//!   the host limits, with the lists of what is and is not imported;
+//! - [`driver_prep`]: what the offline enablement of the guest's storage
+//!   driver writes into the converted disk and how its result is checked
+//!   (the edit itself runs in the storage helper, started by the caller).
 //!
 //! **Why the descriptors are parsed here and not only by `qemu-img`.**
 //! `qemu-img info` gives the format, the chain and the virtual size
@@ -41,6 +44,7 @@
 //! The crate does not write anything and starts no process: the caller
 //! (`lightvm-service`) runs `qemu-img` from the approved QEMU build.
 
+pub mod driver_prep;
 pub mod inspect;
 pub mod paths;
 pub mod plan;
