@@ -36,9 +36,13 @@ gpg --batch --status-fd 1 --verify "$TARBALL.sig" "$TARBALL" 2>/dev/null |
 
 SRC=$WORK/qemu-$QEMU_VERSION
 rm -rf "$SRC"
-# roms/ (firmware sources) holds symlinks MSYS2 cannot create and is not
-# needed: the pc-bios blobs are used.
-tar -xJf "$TARBALL" -C "$WORK" --exclude="qemu-$QEMU_VERSION/roms/*"
+# MSYS2 tar emulates a symlink by copying its target, which fails while the
+# target is not extracted yet: extract twice, the second pass must succeed.
+# roms/ (firmware sources) and tests/lcitool/ hold dangling links and are not
+# needed (the pc-bios blobs are used).
+X=(--exclude="qemu-$QEMU_VERSION/roms/*" --exclude="qemu-$QEMU_VERSION/tests/lcitool/*")
+tar -xJf "$TARBALL" -C "$WORK" "${X[@]}" 2>/dev/null || true
+tar -xJf "$TARBALL" -C "$WORK" "${X[@]}" --skip-old-files
 for p in "$HERE"/0*.patch; do
   patch -d "$SRC" -p1 --forward --no-backup-if-mismatch < "$p"
 done
