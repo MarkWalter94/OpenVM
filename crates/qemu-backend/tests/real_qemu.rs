@@ -691,6 +691,56 @@ fn real_nic_detector() {
     let _ = std::fs::remove_file(sock.as_path());
 }
 
+/// ADR-0033: the product command lines of the two network modes start
+/// under WHPX and pass the post-start network check (exactly the expected
+/// NIC and back end in `info network` / `query-pci`); the `-netdev stream`
+/// socket is in the private directory and accepts the supervisor.
+#[test]
+#[ignore = "needs real QEMU: set LIGHTVM_QEMU_DIR"]
+fn real_network_modes() {
+    use qemu_backend::GuestNetwork;
+    let _g = SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let lab = require_lab!();
+    let mut log = Log::new(&lab, "network");
+    let paths = lab_paths(&lab, &mut log);
+    let caps = probe_caps(&lab, &paths, &mut log);
+    let rt = rt();
+    for net in [GuestNetwork::Nat, GuestNetwork::Supervisor] {
+        let run_id = RunId::new_v7();
+        paths.prepare_run(&run_id);
+        let mut s = spec(&caps, &paths, run_id);
+        s.network = net;
+        let cfg = RunConfig {
+            leave_paused: true,
+            ..RunConfig::default()
+        };
+        let run = rt
+            .block_on(QemuRun::start(&caps, &s, &paths, cfg))
+            .unwrap_or_else(|e| panic!("{net:?}: launch failed: {e}"));
+        let info = rt.block_on(run.network_diagnostics()).unwrap();
+        log.line(format!("{net:?}: args {:?}", run.command().args));
+        log.line(format!("{net:?}: info network {:?}", info.trim()));
+        match net {
+            GuestNetwork::Supervisor => {
+                let sock = run.net_socket().expect("net.sock").to_path_buf();
+                assert!(sock.starts_with(paths.private_dir_path(&run_id)));
+                let s = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)
+                    .unwrap();
+                s.connect(&socket2::SockAddr::unix(&sock).unwrap())
+                    .expect("supervisor connects to the netdev socket");
+                log.line(format!("{net:?}: connected to {}", sock.display()));
+                drop(s);
+            }
+            _ => assert!(run.net_socket().is_none()),
+        }
+        let r = rt.block_on(run.emergency_stop(Duration::from_secs(10)));
+        log.line(format!("{net:?}: stop {r:?}"));
+        let _ = rt.block_on(run.close());
+    }
+}
+
 /// F1 exit criterion: at least 20 real start/stop cycles with WHPX, overlay
 /// disk created with `qemu-img`, no orphans, no unexpected NIC.
 #[test]
