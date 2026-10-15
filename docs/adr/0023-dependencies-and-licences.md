@@ -39,6 +39,10 @@ Besides the egui default fonts, `lightvm-desktop` embeds two fonts with `include
 
 They are assets of a workspace crate, not Cargo packages: `cargo-deny` and `lightvm-sbom` do not see them, so this table is their inventory entry; the third-party notices of the F6 package must add the two licence files. OFL conditions kept: the fonts are not sold by themselves, are not modified or renamed, and each copy of the software contains the copyright notice and licence.
 
+### Guest network stack (2026-10-15)
+
+`crates/guest-net` (ADR-0033) adds `smoltcp` 0.14.0 (`0BSD`; default features off, only `std`, `medium-ethernet`, `proto-ipv4`, `socket-tcp`, `auto-icmp-echo-reply`; `proto-dhcpv4`/`socket-udp`/`socket-dhcpv4` only for the tests) with its dependencies `managed` 0.8.0 (`0BSD`), `heapless` 0.9.3 and `hash32` 0.3.1 (`MIT OR Apache-2.0`), `byteorder` 1.5.0 (`Unlicense OR MIT`), `stable_deref_trait` 1.2.1 (`MIT OR Apache-2.0`). Need: a user-mode TCP/IP stack that terminates the guest's TCP so that each guest connection to an approved endpoint gets its own host connection (QEMU `guestfwd` cannot, R6-04 §1). No network features beyond what the stack implements; it opens host connections only through `tokio::net::TcpStream` to the endpoints the user approved. `cargo deny check` result in `docs/verification/R6-06-guest-network.md`.
+
 ### Patched dependencies (2026-10-10)
 
 `egui-winit` 0.36.2 (MIT OR Apache-2.0) is used as a patched copy in `vendor/egui-winit` (`[patch.crates-io]`, `vendor/README.md`) so that the host clipboard is never read (F1-13). Rules: minimal, marked patches, the same version pinned in ADR-0014, original licence unchanged, reapplication and re-verification on every upgrade; the licence inventory counts the copy as the original dependency.

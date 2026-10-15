@@ -394,7 +394,7 @@ A VM whose disk is already on SATA, PVSCSI, LSI Logic SAS, IDE or NVMe (with UEF
 | **Emergency Stop** | Button at the top right of the Dashboard. Immediately terminates **all** VMs and revokes the agent sessions. | Anything looks wrong and you want everything to stop now. |
 | **More** → **Delete…** | Removes the VM and its disk after a confirmation. Only possible while the VM is stopped (otherwise: *Stop the VM to delete it*). **Cannot be undone.** Imported installation images stay in the registry (to remove them see section 9.1). | VM no longer needed. |
 
-Resources and execution limits (**Virtual processors**, **Memory (RAM)**, **Disk**, **Maximum CPU**, **Memory margin**, **Storage budget**) are changed with **Edit** → **Save settings**, only while the VM is **Stopped**; the disk can only grow.
+Resources and execution limits (**Virtual processors**, **Memory (RAM)**, **Disk**, **Maximum CPU**, **Memory margin**, **Storage budget**) and the network (section 9.2) are changed with **Edit** → **Save settings**, only while the VM is **Stopped**; the disk can only grow.
 
 Closing LightVM while VMs are running opens a dialog: **Stop them and quit** shuts the VMs down in an orderly way (terminating those that do not stop within the timeout) and then closes LightVM; **Cancel** keeps everything running. VMs are not left running in the background. If the VMs stop by themselves while the dialog is open, LightVM closes without asking further. If the supervisor has already stopped or lost its connection, LightVM closes at once: the VMs it was running follow the **If LightVM closes unexpectedly** setting.
 
@@ -411,6 +411,34 @@ Keep each file in its place. While a VM runs, LightVM holds the file open so tha
 To remove an image from the list, press **Delete…** next to it and confirm with **Delete medium**. For an image used in place only the entry is removed: **the ISO file stays where it is, untouched** (the dialog says so). For a copy made by an earlier version, LightVM removes its copy from the catalog and frees that space; the original file is not touched. You can import either again later. **Cannot be undone.**
 
 An image that a VM uses as installation or data media cannot be deleted: **Delete…** is disabled and its tooltip names the VMs. Remove it first with **Edit** → **Installation media** (or **Data media**) → **Remove** → **Save settings**, or with **Remove installation media…** on the Dashboard, or delete the VM. If the supervisor still refuses (for example a VM started using it from another window meanwhile), the dialog stays open and says why: *The medium was not deleted: it is used by 1 VM: "…"*, or *a running VM or another operation holds it open*. Agent sessions can never delete media. If LightVM is interrupted during a deletion, it finishes or undoes it the next time it starts.
+
+### 9.2 Network: Offline, NAT, endpoint allowlist
+
+A VM has one of three network modes, chosen in **Edit** → **Network** → **Mode** while the VM is **Stopped** (a running VM never changes network):
+
+| Mode | What the guest reaches | Agent sessions |
+| --- | --- | --- |
+| **Offline (no network adapter)** — the default | Nothing: the VM has no network adapter. | Same. |
+| **NAT (manual use only)** | This PC, the local network and the Internet, like VMware NAT. The guest gets its address automatically (DHCP); this PC is `10.0.2.2` inside the guest. | **Never.** While an agent session uses the VM, the VM starts with the endpoints granted to the session, or with no network. A session cannot be approved while the VM runs with NAT: stop it first. |
+| **Endpoint allowlist** | Only the endpoints you list (below), each one TCP service. Nothing else on this PC, the local network or the Internet; no UDP (except the name lookups of the listed names), no IPv6. | Only the endpoints you tick when you approve the session; none ticked: no network. |
+
+The guest needs a driver for the network adapter: Linux and Windows Vista and later find it on their own (Intel PRO/1000, `e1000`); Windows XP uses a Realtek RTL8139. Windows 11 on ARM (Mac) VMs can only be offline.
+
+**Endpoints.** In **Edit** → **Network** (mode **Endpoint allowlist**, or **NAT** if you want to grant endpoints to agent sessions) press **Add endpoint** and fill in:
+
+- **Name**: the name the guest uses, for example `sql.lan` or `wcfhost` (letters, digits, `-` and dots; no `*`). Inside the guest it also works as `wcfhost.lightvm.internal`.
+- **Host**: the real computer the service runs on, as seen from this PC: `127.0.0.1` for a service on this PC, or a name or address on your network (for example `sqlserver.corp.example`).
+- **Port**: the TCP port of the service (1–65535); the guest uses the same port.
+
+LightVM gives each endpoint an address inside the guest (shown as *guest 10.0.2.100*): the guest connects to `Name:Port` or to that address and port, and LightVM opens a connection to `Host:Port` for each connection of the guest. The host name is looked up when the VM starts; the address used is in the audit log. **Save settings** stays disabled while an endpoint is incomplete or invalid; the panel says why.
+
+What to know:
+
+- **An allowed endpoint receives whatever the guest sends to it.** List only the services the guest needs, with an account that can do only what the test needs (a database server, for example, may offer features that reach files or the network).
+- **SQL Server must listen on a fixed TCP port** (for example 1433, set in SQL Server Configuration Manager → TCP/IP → IP All → TCP Port). A **named instance** found through the SQL Server Browser (UDP 1434) is **not reachable**: only TCP is carried. In the connection string use `sql.lan,1433` (or the instance's fixed port).
+- A WCF service on this PC must listen on an address the connection can reach, for example `net.tcp://localhost:8733/...` or `http://+:8733/...`, and the guest uses `net.tcp://wcfhost:8733/...`.
+- Windows inside the guest may show the network as *Unidentified network* / *No Internet access*: that is expected (there is no Internet).
+- When an agent session ends, a VM that was running for it keeps **no** network until it is stopped and started again: a session never widens the network of a running VM.
 
 ---
 
@@ -507,6 +535,7 @@ An **agent session** lets an AI agent (for example an MCP client running on this
 | --- | --- |
 | **Virtual machine** | Exactly one VM. Every other VM stays out of the agent's reach. If the agent asked for one VM, it is preselected. |
 | **What it may do** | Tick only what is needed: see the VM in its list, read its state, see the screen (screenshots), type and use the mouse, start it, stop or force-stop it, reset it. Stop and reset are marked **Can lose unsaved work** and are never ticked for you. Anything not ticked is refused by the supervisor. |
+| **Network** | Shown when the VM has network endpoints (section 9.2): tick the ones the agent may reach inside the guest. None is ticked for you; with none ticked the VM runs **without network** for the session. If the agent asked for some, the request says which. A VM running with NAT must be stopped first. |
 | **Keyboard and mouse** | **Give keyboard and mouse to the agent now**: only one of you types at a time (see below). You can also hand them over later. |
 | **Duration** | 15 min, 1 hour, 4 hours or 8 hours; the session then ends by itself. |
 | **Limits** | Small, Standard or Large: how many actions, input events and screenshots the agent may use in the session. |
@@ -528,7 +557,7 @@ Then tick **The agent shows the code …** (after comparing it) and press **Appr
 claude mcp add lightvm -- "%LOCALAPPDATA%\Programs\LightVM\lightvm-mcp.exe"
 ```
 
-(write the full path if your shell does not expand `%LOCALAPPDATA%`), pair the client (step 2) and give a prompt such as: *"Use the lightvm MCP server (its help tool documents how it works). Task: … (the VM, what to do, how to check it, the guest login if needed)."* Before handing over a task, keep in mind that the VM has **no network, no shared folders and no clipboard**: the agent works only through the screen, the mouse and the keyboard, typing any code or file content into the guest. It types with the **US keyboard layout**, so the guest should use the US layout; and tick only the capabilities the task needs.
+(write the full path if your shell does not expand `%LOCALAPPDATA%`), pair the client (step 2) and give a prompt such as: *"Use the lightvm MCP server (its help tool documents how it works). Task: … (the VM, what to do, how to check it, the guest login if needed)."* Before handing over a task, keep in mind that the VM has **no shared folders and no clipboard**, and **no network** unless you grant it network endpoints (the agent's `vm_status` then lists their names, addresses and ports): the agent works only through the screen, the mouse and the keyboard, typing any code or file content into the guest. It types with the **US keyboard layout**, so the guest should use the US layout; and tick only the capabilities the task needs.
 
 **6. The AI Workspace.** The Agents page is titled **AI Workspace**. From the top:
 
@@ -615,7 +644,7 @@ If you used the setup `.exe`, uninstall from **Settings → Apps → Installed a
 - **Windows 11 x64 only**, tested on a single PC (`docs/COMPATIBILITY.md`). Linux and macOS are not supported (the macOS build in CI only checks portability).
 - **Not code-signed** (ADR-0020): SmartScreen warnings are expected; rely on the checksums.
 - **QEMU not included** and only 11.1.0 accepted; its own code signature is expired.
-- **No network** in the VM (Offline only). No updates or software downloads inside the guest.
+- **Network**: Offline by default; **NAT** for manual use and an **endpoint allowlist** (section 9.2). The allowlist has been verified with a Linux guest only; reaching a WCF service and SQL Server from a Windows guest is not verified yet. Only TCP is carried through the allowlist.
 - **No clipboard** and **no shared folders** between Windows and the VM. Files go into the VM only through an approved read-only data disc.
 - **Keyboard**: Italian and English (US) layouts are the targets; other layouts and IME input are not verified.
 - **CPU model**: the VM uses a generic CPU model, not the host's (`-cpu host` does not boot on the test PC), so some guest software may run slower or detect fewer CPU features.

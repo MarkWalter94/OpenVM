@@ -18,6 +18,7 @@ Document required by section 10 (F0) of `docs/ROADMAP.md`, derived from section 
 | Protocol (`lightvm-proto`) | Library | IPC/MCP types and JSON Schema generated from a single source; stable public errors | — | — |
 | Guest detection (`guest-detect`) | Library in the supervisor | Reads an imported installation ISO (ISO 9660/Joliet, UDF, WIM XML metadata) and suggests the guest system, architecture, build and edition; bounded work and memory on untrusted bytes | Does not choose the hardware profile (the user confirms the system in the wizard); does not write, mount or execute anything from the image; no external dependencies | 0008, 0027 |
 | VMware import (`vmware-import`) | Library in the supervisor | Reads the `.vmx` and the VMDK descriptors of a VMware VM chosen by the user (untrusted input: size, line and extent limits, known keys only), checks that every disk file is a regular file inside the VM folder, cross-checks `qemu-img info` and maps the VM to a configuration (controller, firmware, CPU topology, RAM) within the host limits | Writes nothing and starts no process; nothing it reads reaches the QEMU command line as text; the conversion is run by the service with the approved `qemu-img` into a journaled temporary | 0030 |
+| Guest network (`guest-net`) | Library in the supervisor, one thread per VM on the endpoint allowlist | The other end of QEMU's `-netdev stream` (ADR-0033): frame filter, DHCP and DNS answers, smoltcp terminating the guest's TCP, one host connection per guest connection to an approved endpoint, run-time allowed set, limits and connection records | Does not route, forward DNS, carry UDP or IPv6, decide which endpoints are allowed (the engine sets them from the sessions) or resolve names (the backend resolves them at the start of the run) | 0033 |
 | QEMU | Child process of the supervisor, one per running VM | Runs the guest with an accelerator | — | 0007 |
 
 ## 2. Diagram
@@ -45,7 +46,8 @@ Document required by section 10 (F0) of `docs/ROADMAP.md`, derived from section 
  │  protected RFB display       │──► framebuffer to the UI
  └────────┬────────────────────┘
           │
-        guest (offline, no NIC)
+        guest (offline by default; NAT in manual use; or NIC on `-netdev stream`
+        to the supervisor's guest-net stack: endpoint allowlist, ADR-0033)
 ```
 
 ## 3. Process model
@@ -128,6 +130,7 @@ effective_policy = global_limits ∩ vm_policy ∩ session_grant ∩ available_h
 | --- | --- | --- | --- |
 | QMP | Unix socket `qmp.sock` in the private per-execution directory; a single client, the supervisor, connected right after spawn (QEMU serves one client at a time) | supervisor | verified in F0 (`F0-02` §4.3, `F0-04` §6, `F0-06`); named pipe created by QEMU discarded (ADR-0012) |
 | Display | Unix socket `vnc.sock` in the private per-execution directory | UI (RFB client), with the endpoint received from the supervisor | verified in F0 (`F0-04`); per-execution credential pending (ADR-0013) |
+| Guest network | Unix socket `net.sock` in the private per-execution directory, `-netdev stream` server in QEMU; the supervisor connects after the start (endpoint allowlist only) | supervisor (`guest-net`) | verified with a real guest (`R6-06`) |
 | UI/MCP ↔ supervisor IPC | named pipe with ACL (Windows), Unix socket with restrictive permissions (Linux) | supervisor | from F1 |
 
 ## 8. Crate structure (section 6.2)
@@ -142,6 +145,7 @@ crates/lightvm-service/    supervisor and local IPC
 crates/lightvm-proto/      IPC/MCP types and generated JSON Schema
 crates/vmware-import/      examination of VMware VMs for import by conversion (ADR-0030)
 crates/guest-detect/       guest system detection from installation ISOs (ADR-0027)
+crates/guest-net/          supervisor-owned guest network of the endpoint allowlist (ADR-0033)
 crates/mcp-server/         added in F5
 tests/{integration,security,e2e}/
 docs/{adr,verification}/
@@ -153,15 +157,16 @@ Dependency direction (not fixed by the roadmap; recorded here and in ADR-0024):
 apps/desktop ──► lightvm-proto, rfb-client, lightvm-service (IPC client only, without `supervisor`)
 lightvm-mcp ──► lightvm-proto, lightvm-service (IPC client only)
 rfb-client ──► (no dependency on QMP, processes, storage or supervisor)
-lightvm-service ──► vm-core, qemu-backend, vm-storage, lightvm-proto
+lightvm-service ──► vm-core, qemu-backend, vm-storage, lightvm-proto, guest-net
 qemu-backend ──► vm-core
 vm-storage ──► vm-core
 vm-core ──► (no dependency on UI, processes or I/O)
 guest-detect ──► lightvm-proto
 vmware-import ──► lightvm-proto
+guest-net ──► (smoltcp, socket2, tokio only; no dependency on the other crates)
 ```
 
-**Guest hardware profiles.** The QEMU command line is built from a closed set of profiles selected by the guest system and the firmware, never from free-form options. Linux guests use the ADR-0011 profile (`pc-q35`, UEFI, virtio devices). Windows XP, Vista, 7, 8.1 and 10 use the ADR-0027 profiles: emulated AHCI/IDE disk, standard `VGA`, `usb-tablet` on an xHCI or UHCI controller and the built-in PS/2 keyboard; SeaBIOS (`-bios`, pinned hash) or, for 8.1 and 10, UEFI; `pc-i440fx` only for XP. Every profile has no NIC (ADR-0004), uses the same nominal CPU model and is probed with its own machine type and firmware (ADR-0007). Disallowed system/firmware combinations are rejected in `vm-core` and in the backend. A VM without NVRAM (Legacy BIOS) has baselines with the disk only. A VM imported from VMware (ADR-0030) keeps the disk controller, display adapter and CPU topology it was installed with (`VmConfig::imported`, fixed after the import): the guest's profile with the disk on AHCI, PIIX IDE (on the i440fx board), NVMe, `pvscsi` or `mptsas1068` (`scsi-hd`) and optionally `vmware-svga`, still from the closed device set; Linux imports may keep legacy BIOS.
+**Guest hardware profiles.** The QEMU command line is built from a closed set of profiles selected by the guest system and the firmware, never from free-form options. Linux guests use the ADR-0011 profile (`pc-q35`, UEFI, virtio devices). Windows XP, Vista, 7, 8.1 and 10 use the ADR-0027 profiles: emulated AHCI/IDE disk, standard `VGA`, `usb-tablet` on an xHCI or UHCI controller and the built-in PS/2 keyboard; SeaBIOS (`-bios`, pinned hash) or, for 8.1 and 10, UEFI; `pc-i440fx` only for XP. Every profile has a fixed inbox-driver NIC model (`e1000`; `rtl8139` for XP; none for Windows 11 ARM64) used only when the run's network is NAT or the endpoint allowlist (ADR-0033), offline by default (ADR-0004); every profile uses the same nominal CPU model and is probed with its own machine type and firmware (ADR-0007). Disallowed system/firmware combinations are rejected in `vm-core` and in the backend. A VM without NVRAM (Legacy BIOS) has baselines with the disk only. A VM imported from VMware (ADR-0030) keeps the disk controller, display adapter and CPU topology it was installed with (`VmConfig::imported`, fixed after the import): the guest's profile with the disk on AHCI, PIIX IDE (on the i440fx board), NVMe, `pvscsi` or `mptsas1068` (`scsi-hd`) and optionally `vmware-svga`, still from the closed device set; Linux imports may keep legacy BIOS.
 
 The UI depends on the protocol and the RFB client, never on the backend or storage; the MCP adapter depends only on the protocol. Section 6.2 places the console in `qemu-backend`, while section 6.4 runs the RFB client in the UI process: ADR-0024 separates the client into `crates/rfb-client` and leaves the server side of the console in `qemu-backend`. New crates (`vm-network`, `ai-control-bridge`, `vm-security`, `agent-runtime`, `test-runner`) only when they have stable responsibilities and dependencies; no plugin framework or second backend in the MVP. The F0 spikes (`spikes/`) are not product code and are not in the dependency graph of any shipped binary (since 2026-10-11 `f0-console` is no longer used by the UI; the console goes through the supervisor's display ticket, ADR-0013).
 
