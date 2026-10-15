@@ -1,0 +1,18 @@
+--- a/accel/whpx/whpx-common.c
++++ b/accel/whpx/whpx-common.c
+@@ -306,8 +306,13 @@
+ 
+     if (!QEMU_IS_ALIGNED(size, page_size) ||
+         !QEMU_IS_ALIGNED(gva, page_size)) {
+-        /* Not page aligned, so we can not map as RAM */
+-        add = false;
++        /*
++         * Not page aligned, so we can not map as RAM. Such a section was
++         * never mapped either, and WHvUnmapGpaRange() rejects unaligned
++         * ranges: leave it unmapped, accesses exit to QEMU (e.g. the
++         * tpm-crb command buffer and the TPM PPI RAM).
++         */
++        return;
+     }
+ 
+     if (!add) {
