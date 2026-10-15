@@ -158,7 +158,7 @@ Started on 2026-10-14 at the owner's request (ROADMAP 12, R6, in parallel; not a
 | Through the IPC: preview, import, progress events, refusals (locked VM, storage budget, path), cancel by the user, by the Emergency Stop and by the shutdown with nothing left; agent sessions refused | `lightvm-service` `tests/vmware_import.rs`, `tests/f4.rs` (role matrix) | verified in simulation/test |
 | UI: entry, picker, preview with warnings, name, display choice, progress, cancel, errors | `lightvm-desktop` `tests/vmware_import_ui.rs`, snapshots | verified in simulation/test |
 | LSI Logic Windows guests: automatic offline enablement of the storage driver | ADR-0030 (spike pending) | not implemented: warning and manual preparation (`USER_GUIDE.md` §6.3) |
-| Real VMware VMs (Windows with PVSCSI, LSI Logic and SATA; Linux) imported and started to the desktop | — | not verified |
+| Real VMware VMs (Windows with PVSCSI, LSI Logic and SATA; Linux) imported and started to the desktop | `docs/verification/R6-01b-vmware-import-real.md` | partial: one Linux VM to the session entry (source unchanged, content identical, no orphans, audit), one suspended VM correctly refused; a legacy-BIOS VM with an NVMe disk imports but SeaBIOS cannot boot it (product gap: the combination is accepted without warning); Vista and Mint outstanding |
 
 ## R2c work: Windows guests
 

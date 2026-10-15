@@ -63,7 +63,9 @@ Examples: `F0-01-toolchain-eframe.md`, `F0-02-qemu-whpx-qmp.md`, `F1-04-start-st
 | `F1-05-desktop-egui.md` | F1 (backlog F1-13, F1-16, F1-18, F1-19) | partial: clipboard without text in the UI (headless) but read in egui-winit not blocking; rendering fallback verified; UI + supervisor measurements (wgpu above the memory target); RDP, cold start and manual test not executed | complete |
 | `R2c-01-windows-guest-profiles.md` | R2c (Windows guest hardware profiles, ADR-0027) | partial: SeaBIOS + WHPX with `Skylake-Client-v4` on `pc-q35-11.1` and `pc-i440fx-11.1` verified with the Ubuntu ISO; every Windows guest test not executed (pending list) | complete |
 | `R2b-01-macos-hvf-windows11-arm64.md` | R2b (macOS Apple Silicon, ADR-0028) | partial: Windows 11 ARM64 setup under HVF passes the requirements check with swtpm and the project-built Secure Boot firmware; watchdog containment 0 orphans in 60 cycles; installation, OOBE and baseline not executed | complete |
-| `R6-01-vmware-import.md` | R6 (import of VMware VMs, ADR-0030) | partial: parser, hostile inputs, mapping, journal, conversion with the real `qemu-img`, IPC and UI verified in test; real VMware VMs not executed | complete |
+| `R6-01-vmware-import.md` | R6 (import of VMware VMs, ADR-0030) | partial: parser, hostile inputs, mapping, journal, conversion with the real `qemu-img`, IPC and UI verified in test; real VMware VMs partially executed (see `R6-01b`) | complete |
+| `R6-01b-vmware-import-real.md` | R6 (real VMware VMs, continuation of `R6-01`) | partial: one real Linux VM to the session entry (source unchanged, content identical, no orphans), one suspended VM refused; NVMe + legacy-BIOS boot-failure finding; Vista and Mint not executed | in progress |
+| `R6-02-lsi-driver-spike.md` | R6 (offline storage-driver preparation for LSI Logic Windows guests) | in progress: technique and driver source identified; execution pending | in progress |
 
 ## Template
 

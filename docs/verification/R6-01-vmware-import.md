@@ -65,7 +65,7 @@ Device start check (§Results 9): `qemu-system-x86_64.exe -nodefaults -accel whp
 | 16 | Agent sessions refused for the three VMware requests (role matrix) | verified | `lightvm-service` `tests/f4.rs::request_role_matrix` |
 | 17 | UI: entry and picker, preview with the LSI Logic warning and the display choice, Linux/PVSCSI preview, invalid or taken name, not enough space, refused preview, progress, cancel, failure, success; snapshots | verified (kittest) | `lightvm-desktop` `tests/vmware_import_ui.rs`, `tests/visual_snapshots.rs` |
 | 18 | A crash of the supervisor process during a real conversion | not executed (the journal recovery is verified at the storage level, item 11) | — |
-| 19 | Real VMware VMs (Windows with PVSCSI, LSI Logic, SATA; Linux) imported and started to the desktop | not executed | — |
+| 19 | Real VMware VMs (Windows with PVSCSI, LSI Logic, SATA; Linux) imported and started to the desktop | partial — one Linux VM to the session entry, one refused VM, one NVMe/BIOS boot-failure finding; Vista and Mint not executed (`R6-01b`) | `docs/verification/R6-01b-vmware-import-real.md` |
 | 20 | Offline storage driver enablement for LSI Logic Windows guests | not executed (not implemented; manual preparation documented) | ADR-0030 |
 
 ## Limits
@@ -77,7 +77,8 @@ Device start check (§Results 9): `qemu-system-x86_64.exe -nodefaults -accel whp
 
 ## Required actions
 
-- Import and start real VMware VMs as listed in ADR-0030 (item 19), recording each guest, controller and outcome in a new dated section or file.
+- Import and start real VMware VMs as listed in ADR-0030 (item 19), recording each guest, controller and outcome in a new dated section or file — started in `R6-01b` (partial: one Linux VM to the session entry, one refused VM, one NVMe/BIOS boot-failure finding; Windows Vista and Mint outstanding).
+- Resolve the NVMe/BIOS combination found in `R6-01b` item 5: refuse or warn at the preview when the imported firmware cannot boot the imported disk controller (legacy BIOS + NVMe), with a `vmware-import` plan test.
 - Spike for the offline storage driver enablement of LSI Logic Windows guests (ADR-0030), then its implementation behind the existing hook (`lightvm_service::vmware::prepare_storage_driver`).
 
 ## Proposed decisions
