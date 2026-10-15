@@ -252,6 +252,22 @@ pub struct FakeImageTool {
     /// Free bytes reported for the catalog volume (budget tests); `None` =
     /// the real free space when `vmdk_tool` is set.
     pub free_bytes: Option<u64>,
+    /// Scripted storage helper (ADR-0030); `None` = not available.
+    pub storage_helper: Option<Arc<FakeStorageHelper>>,
+}
+
+/// Storage helper of the tests: each run returns the next scripted report
+/// and records its job.
+#[derive(Debug, Default)]
+pub struct FakeStorageHelper {
+    /// Reports returned in order (an exhausted list is an error).
+    pub reports: std::sync::Mutex<
+        std::collections::VecDeque<
+            Result<qemu_backend::storage_helper::HelperReport, PublicError>,
+        >,
+    >,
+    /// Jobs received: `(keys, reg)`.
+    pub jobs: std::sync::Mutex<Vec<(Vec<String>, Option<String>)>>,
 }
 
 /// Minimal QCOW2 v3 header with an optional backing reference (format
@@ -386,6 +402,32 @@ impl ImageTool for FakeImageTool {
     fn free_bytes(&self, dir: &Path) -> Option<u64> {
         self.free_bytes
             .or_else(|| self.vmdk_tool.as_ref().and_then(|t| t.free_bytes(dir)))
+    }
+    fn storage_helper_available(&self) -> bool {
+        self.storage_helper.is_some()
+    }
+    fn run_storage_helper(
+        &self,
+        _disk: &Path,
+        keys: &[String],
+        reg: Option<&str>,
+        cancel: &dyn Fn() -> bool,
+    ) -> Result<qemu_backend::storage_helper::HelperReport, PublicError> {
+        push(&self.calls, "storage_helper");
+        let Some(h) = &self.storage_helper else {
+            return Err(PublicError::unsupported("storage helper not available"));
+        };
+        if cancel() {
+            return Err(PublicError::state_conflict("operation cancelled"));
+        }
+        if let Ok(mut j) = h.jobs.lock() {
+            j.push((keys.to_vec(), reg.map(str::to_owned)));
+        }
+        h.reports
+            .lock()
+            .ok()
+            .and_then(|mut r| r.pop_front())
+            .unwrap_or_else(|| Err(PublicError::infrastructure("no scripted helper report")))
     }
     fn create_overlay(&self, backing_ref: &str, _size: u64, dst: &Path) -> Result<(), PublicError> {
         push(&self.calls, "create_overlay");

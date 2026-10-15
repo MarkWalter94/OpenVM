@@ -36,7 +36,7 @@ pub const APPROVED_HELPER_SHA256: &[&str] = &[
     // lightvm-storage-helper.vmlinuz (Alpine linux-virt 6.18.56-r0)
     "dc99c86bb8e58cb4eda5f01eac44c4d972105945a46dfe76a9e86e8529915c72",
     // lightvm-storage-helper.initrd
-    "2c7f8c6b63ebb2607e60438247df58948ec1bec22c3840bce713d5682f82b939",
+    "4efcd0badce86a2e5ac6916a61732c85ab2cbf12df0688f88f555a72487e7cf2",
 ];
 
 /// Longest run of the helper (boot, mount, edit, power off take seconds).

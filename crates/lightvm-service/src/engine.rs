@@ -497,6 +497,23 @@ pub trait ImageTool: Send + Sync + std::fmt::Debug + 'static {
     fn free_bytes(&self, _dir: &Path) -> Option<u64> {
         None
     }
+    /// `true` when the storage helper (ADR-0030, an approved image found by
+    /// the probe) can prepare converted Windows disks.
+    fn storage_helper_available(&self) -> bool {
+        false
+    }
+    /// Runs the storage helper on the converted disk `disk` (a journal
+    /// temporary nobody else has open): exports `keys`, after importing
+    /// `reg` when given (ADR-0030, `qemu_backend::storage_helper`).
+    fn run_storage_helper(
+        &self,
+        _disk: &Path,
+        _keys: &[String],
+        _reg: Option<&str>,
+        _cancel: &dyn Fn() -> bool,
+    ) -> Result<qemu_backend::storage_helper::HelperReport, PublicError> {
+        Err(PublicError::unsupported("storage helper not available"))
+    }
 }
 
 /// Catalog side of a VMware import (ADR-0030): journal intent `import_vm`,

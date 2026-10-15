@@ -105,6 +105,20 @@ if [ "$MODE" = rw ]; then
         15) fail unclean "the Windows volume was not shut down cleanly" ;;
         *) fail mount_failed "ntfs-3g exit $rc: $(head -c 200 /tmp/mount.err | tr '\n' ' ')" ;;
     esac
+    # ntfs-3g falls back to a read-only mount (exit 0) for a hibernated or
+    # Fast Startup volume and for an unclean one: never edit such a volume.
+    sed 's/^/LIGHTVM-PREP INFO ntfs-3g: /' /tmp/mount.err | head -n 10
+    opts=$(awk '$2 == "/mnt" { print $4 }' /proc/mounts | head -n 1)
+    case ",$opts," in
+        *,rw,*) ;;
+        *)
+            # The generic fallback text mentions hibernation in both cases;
+            # "Windows is hibernated" is printed only for a hibernated one.
+            grep -qi 'is hibernated' /tmp/mount.err &&
+                fail hibernated "Windows is hibernated or uses Fast Startup"
+            fail unclean "the Windows volume was not shut down cleanly (mounted read-only)"
+            ;;
+    esac
 else
     ntfs-3g -o ro "$dev" /mnt 2>/tmp/mount.err || fail mount_failed "read-only mount"
 fi
