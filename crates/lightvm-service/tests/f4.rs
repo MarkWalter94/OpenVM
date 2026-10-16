@@ -203,12 +203,14 @@ const AGENT_CAPS: [Capability; 7] = [
 
 fn approval(vm: VmId) -> SessionApproval {
     SessionApproval {
+        tools: Default::default(),
         vm_id: vm,
         capabilities: caps(&AGENT_CAPS),
         duration_s: 3600,
         quotas: None,
         lease_ms: None,
         give_input: false,
+        network_endpoints: Vec::new(),
     }
 }
 
@@ -225,6 +227,7 @@ async fn session(
             purpose: "F4 test".into(),
             requested_vms: vec![a.vm_id],
             requested_capabilities: a.capabilities.clone(),
+            requested_endpoints: Vec::new(),
         },
     )
     .await
@@ -469,6 +472,7 @@ async fn agent_access_is_off_at_start_and_gates_session_requests() {
         purpose: "y".into(),
         requested_vms: Vec::new(),
         requested_capabilities: CapabilitySet::new(),
+        requested_endpoints: Vec::new(),
     };
     let e = err(&mut a, req.clone()).await;
     assert_eq!(e.code, ErrorCode::PermissionDenied);
@@ -507,6 +511,7 @@ async fn agent_access_is_off_at_start_and_gates_session_requests() {
             purpose: "y".into(),
             requested_vms: Vec::new(),
             requested_capabilities: CapabilitySet::new(),
+            requested_endpoints: Vec::new(),
         },
     )
     .await;
@@ -585,6 +590,7 @@ async fn denied_and_expired_requests() {
         purpose: "y".into(),
         requested_vms: Vec::new(),
         requested_capabilities: CapabilitySet::new(),
+        requested_endpoints: Vec::new(),
     };
     let id = match ok(&mut a, rq()).await {
         ResponseBody::SessionRequested { request_id, .. } => request_id,
@@ -1022,6 +1028,7 @@ async fn session_is_bound_to_its_connection_and_role() {
             purpose: "b".into(),
             requested_vms: Vec::new(),
             requested_capabilities: CapabilitySet::new(),
+            requested_endpoints: Vec::new(),
         },
     )
     .await
@@ -1461,12 +1468,20 @@ async fn request_role_matrix() {
             | Request::Shutdown
             | Request::ListMedia
             | Request::ImportMedia { .. }
+            | Request::DeleteMedia { .. }
             | Request::DeleteVm { .. }
             | Request::OpenConsole { .. }
             | Request::ListBaselines { .. }
             | Request::CreateBaseline { .. }
             | Request::RestoreBaseline { .. }
             | Request::DeleteBaseline { .. }
+            | Request::ListSnapshots { .. }
+            | Request::TakeSnapshot { .. }
+            | Request::RevertSnapshot { .. }
+            | Request::DeleteSnapshot { .. }
+            | Request::UpdateSnapshot { .. }
+            | Request::GetSnapshotThumbnail { .. }
+            | Request::PromoteSnapshot { .. }
             | Request::GetAgentAccess
             | Request::SetAgentAccess { .. }
             | Request::ListSessionRequests
@@ -1484,7 +1499,11 @@ async fn request_role_matrix() {
             | Request::SetSessionVerdict { .. }
             | Request::VerifySession { .. }
             | Request::ExportSessionReport { .. }
-            | Request::DeleteSessionReport { .. } => Who::Ui,
+            | Request::DeleteSessionReport { .. }
+            | Request::PreviewVmwareImport { .. }
+            | Request::ImportVmware { .. }
+            | Request::CancelVmwareImport
+            | Request::GuestTools { .. } => Who::Ui,
         }
     }
     let svc = start_svc("f4-roles", Opts::default()).await;
@@ -1496,6 +1515,7 @@ async fn request_role_matrix() {
         token: lightvm_proto::SessionToken::from_bytes([1; 32]),
     };
     let baseline = lightvm_proto::BaselineId::from_unix_millis(1_760_000_000_000, [2; 10]);
+    let snapshot = lightvm_proto::SnapshotId::from_unix_millis(1_760_000_000_000, [4; 10]);
     let label = lightvm_proto::Label::parse("x").unwrap();
     let all = vec![
         Request::Ping,
@@ -1533,6 +1553,10 @@ async fn request_role_matrix() {
             media_kind: lightvm_proto::MediaKind::InstallIso,
             declared_origin: "x".into(),
         },
+        // Deleting a medium is the user's decision, never an agent's.
+        Request::DeleteMedia {
+            media_id: lightvm_proto::MediaId::from_unix_millis(1_760_000_000_000, [3; 10]),
+        },
         Request::DeleteVm {
             vm_id: vm,
             expected_revision: 1,
@@ -1552,11 +1576,42 @@ async fn request_role_matrix() {
             vm_id: vm,
             baseline_id: baseline,
         },
+        // ADR-0032: user snapshots are UI-only.
+        Request::ListSnapshots { vm_id: vm },
+        Request::TakeSnapshot {
+            vm_id: vm,
+            name: label.clone(),
+            description: String::new(),
+        },
+        Request::RevertSnapshot {
+            vm_id: vm,
+            snapshot_id: snapshot,
+        },
+        Request::DeleteSnapshot {
+            vm_id: vm,
+            snapshot_id: snapshot,
+        },
+        Request::UpdateSnapshot {
+            vm_id: vm,
+            snapshot_id: snapshot,
+            name: label.clone(),
+            description: String::new(),
+        },
+        Request::GetSnapshotThumbnail {
+            vm_id: vm,
+            snapshot_id: snapshot,
+        },
+        Request::PromoteSnapshot {
+            vm_id: vm,
+            snapshot_id: snapshot,
+            label: label.clone(),
+        },
         Request::RequestSession {
             client_name: "x".into(),
             purpose: "x".into(),
             requested_vms: Vec::new(),
             requested_capabilities: CapabilitySet::new(),
+            requested_endpoints: Vec::new(),
         },
         Request::AwaitSession { request_id: 1 },
         Request::Agent {
@@ -1612,6 +1667,17 @@ async fn request_role_matrix() {
             include_screenshots: false,
         },
         Request::DeleteSessionReport { session_id: sid },
+        // ADR-0030: a VMware VM is examined and imported for the user only;
+        // an agent never names a host file.
+        Request::PreviewVmwareImport {
+            vmx_path: "C:/vm/x.vmx".into(),
+        },
+        Request::ImportVmware {
+            vmx_path: "C:/vm/x.vmx".into(),
+            name: lightvm_proto::VmName::parse("x").unwrap(),
+            display: lightvm_proto::DisplayAdapter::Standard,
+        },
+        Request::CancelVmwareImport,
     ];
     let mut a = agent_client(&svc, &mut u).await;
     let mut checked = 0;

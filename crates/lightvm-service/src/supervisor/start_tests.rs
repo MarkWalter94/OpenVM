@@ -63,8 +63,13 @@ fn fixture() -> Fx {
             size_bytes: ISO_BYTES,
             declared_origin: Label::parse("test").unwrap(),
             approved_at: UtcTimestamp::now(),
+            detected_guest: None,
+            location: None,
+            missing: false,
         },
-        managed_path: ManagedRelPath::parse("media/x.iso").unwrap(),
+        location: lightvm_proto::MediaLocation::Managed(
+            ManagedRelPath::parse("media/x.iso").unwrap(),
+        ),
         file_identity: None,
     };
     let mut store = MemoryStore::default();
@@ -105,6 +110,7 @@ fn fixture() -> Fx {
             crate::resume::DEFAULT_RESUME_GAP,
         ),
         reports: ReportStore::default(),
+        vmware: Default::default(),
     };
     sup.engine.offload_start_checks(true);
     Fx {

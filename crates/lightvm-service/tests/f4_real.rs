@@ -163,6 +163,12 @@ fn qcode_for(c: char) -> (bool, &'static str) {
         ';' => (false, "semicolon"),
         '|' => (true, "backslash"),
         '=' => (false, "equal"),
+        '(' => (true, "9"),
+        ')' => (true, "0"),
+        '<' => (true, "comma"),
+        '>' => (true, "dot"),
+        '&' => (true, "7"),
+        '$' => (true, "4"),
         '\n' => (false, "ret"),
         other => panic!("character not mapped: {other:?}"),
     }
@@ -443,6 +449,7 @@ async fn pairing(u: &mut Client) -> Credential {
 
 fn approval(vm: VmId, give_input: bool) -> SessionApproval {
     SessionApproval {
+        tools: Default::default(),
         vm_id: vm,
         capabilities: [
             Capability::VmList,
@@ -458,6 +465,7 @@ fn approval(vm: VmId, give_input: bool) -> SessionApproval {
         quotas: None,
         lease_ms: None,
         give_input,
+        network_endpoints: Vec::new(),
     }
 }
 
@@ -479,6 +487,7 @@ async fn new_agent(endpoint: &str, u: &mut Client, a: SessionApproval) -> Agent 
             purpose: "F4 exit criterion".into(),
             requested_vms: vec![a.vm_id],
             requested_capabilities: CapabilitySet::new(),
+            requested_endpoints: Vec::new(),
         },
     )
     .await
@@ -889,4 +898,258 @@ fn e2e_real_qemu_f4_agent_session() {
         handle.shutdown().await;
     });
     let _ = std::fs::remove_file(&fx_iso);
+}
+
+/// TCP line server for the network test: counts connections and the lines
+/// received, answers `ECHO <line>`.
+fn net_server() -> (
+    u16,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    std::sync::Arc<std::sync::atomic::AtomicU32>,
+) {
+    use std::io::{BufRead as _, Write as _};
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let conns = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let (l2, c2) = (lines.clone(), conns.clone());
+    std::thread::spawn(move || {
+        for s in l.incoming().flatten() {
+            c2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let l3 = l2.clone();
+            std::thread::spawn(move || {
+                let mut w = s.try_clone().unwrap();
+                for line in std::io::BufReader::new(s).lines().map_while(Result::ok) {
+                    let _ = writeln!(w, "ECHO {line}");
+                    l3.lock().unwrap().push(line);
+                }
+            });
+        }
+    });
+    (port, lines, conns)
+}
+
+/// ADR-0033 end to end through the product: a VM on the endpoint allowlist
+/// with two endpoints, an agent session granted one of them; the agent
+/// starts the VM (Ubuntu live desktop, 2 vCPU, 2 GiB), opens a terminal and
+/// connects from the guest by name to the granted endpoint (three
+/// connections, each its own host connection), to the endpoint not granted
+/// and to the host gateway address. Checked on the host side (servers and
+/// audit), then the revocation resets the network.
+#[test]
+#[ignore = "requires approved QEMU, an accelerator and the Ubuntu ISO (LIGHTVM_E2E_QEMU_DIR)"]
+fn e2e_real_qemu_network_endpoints() {
+    use std::sync::atomic::Ordering;
+    let lab = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../lab");
+    let iso = std::env::var_os("LIGHTVM_E2E_ISO").map_or_else(
+        || lab.join("media").join("ubuntu-26.04.1-desktop-amd64.iso"),
+        PathBuf::from,
+    );
+    let cpu = std::env::var("LIGHTVM_E2E_CPU").unwrap_or_else(|_| "Skylake-Client-v4".into());
+    let evidence = std::env::var_os("LIGHTVM_NET_EVIDENCE_DIR").map_or_else(
+        || std::env::temp_dir().join("lightvm-net-evidence"),
+        PathBuf::from,
+    );
+    std::fs::create_dir_all(&evidence).unwrap();
+    let (sql_port, sql_lines, sql_conns) = net_server();
+    let (wcf_port, _, wcf_conns) = net_server();
+    let dir = temp_dir("net-real");
+    let _cleanup = RemoveCatalog(dir.clone());
+    let store = SqliteStore::open(&dir).unwrap();
+    let mut setup = QemuSetup::new(qemu_dir(), store.root(), short_dir("lvn"));
+    setup.cpu_model = cpu;
+    let (host, vm_backend, capacity) = probe(setup).expect("QEMU probe");
+    assert!(capacity.accelerator_available);
+    let audit_file = dir.join("audit").join("audit.jsonl");
+    let audit = FileAuditSink::open(&audit_file).unwrap();
+    let inspector = ManagedMediaInspector::new(store.root());
+    let engine =
+        CoreEngine::new(store, audit, vm_backend, inspector, core_config(capacity)).unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .unwrap();
+    let mut log = String::new();
+    rt.block_on(async {
+        let mut cfg = ServiceConfig::new(&dir);
+        cfg.runtime_dir = Some(dir.join("run"));
+        cfg.display_dir = Some(short_dir("lvd"));
+        let (handle, ui_cred) = start(cfg, Box::new(engine), Box::new(host)).await.unwrap();
+        let ep = handle.endpoint().to_owned();
+        let mut u = Client::connect(&ep).await.unwrap();
+        assert!(matches!(
+            u.hello(&ui_cred).await.unwrap(),
+            ServerMessage::HelloOk { role: Role::Ui, .. }
+        ));
+        let install = import(&mut u, &iso, MediaKind::InstallIso).await;
+        let mut vmc = sample_config("net-e2e");
+        vmc.vcpus = 2;
+        vmc.memory_mib = 2048;
+        vmc.disk_gib = 8;
+        vmc.install_media = Some(install.id);
+        vmc.network = lightvm_proto::NetworkProfile::Endpoints;
+        vmc.endpoints = vec![
+            lightvm_proto::NetworkEndpoint {
+                name: "sql.lan".into(),
+                host: "localhost".into(),
+                port: sql_port,
+                virtual_ip: std::net::Ipv4Addr::new(10, 0, 2, 100),
+            },
+            lightvm_proto::NetworkEndpoint {
+                name: "wcf".into(),
+                host: "127.0.0.1".into(),
+                port: wcf_port,
+                virtual_ip: std::net::Ipv4Addr::new(10, 0, 2, 101),
+            },
+        ];
+        let vm = match ok(&mut u, Request::CreateVm { config: vmc }).await {
+            ResponseBody::VmCreated { vm } => vm.id,
+            other => panic!("{other:?}"),
+        };
+        ok(&mut u, Request::SetAgentAccess { enabled: true }).await;
+        let mut a_approval = approval(vm, true);
+        a_approval.capabilities.insert(Capability::NetworkEndpoints);
+        a_approval.network_endpoints = vec!["sql.lan".into()];
+        let mut a = new_agent(&ep, &mut u, a_approval).await;
+        let t = Instant::now();
+        // The user starts the VM while the session is live: the run gets
+        // the session's allowlist (never the VM's mode in manual use). The
+        // reply of a start comes after the 6 GB ISO is verified; the agent
+        // keeps renewing its 10 s lease meanwhile on its own connection.
+        let mut u2 = Client::connect(&ep).await.unwrap();
+        assert!(matches!(
+            u2.hello(&ui_cred).await.unwrap(),
+            ServerMessage::HelloOk { role: Role::Ui, .. }
+        ));
+        let starter = tokio::spawn(async move {
+            ok(
+                &mut u2,
+                Request::SubmitVm {
+                    request: VmRequest {
+                        operation_id: OperationId::new_v7(),
+                        vm_id: vm,
+                        expected_run_id: None,
+                        action: VmAction::Start,
+                    },
+                },
+            )
+            .await
+        });
+        while !starter.is_finished() {
+            a.sleep(Duration::from_secs(1)).await;
+            assert!(t.elapsed() < Duration::from_secs(600), "start reply");
+        }
+        let r = starter.await.unwrap();
+        assert!(matches!(r, ResponseBody::Operation { .. }), "{r:?}");
+        let run = loop {
+            let (s, run) = vm_state(&mut u, vm).await;
+            if s == VmState::Running {
+                break run.expect("run");
+            }
+            assert!(t.elapsed() < Duration::from_secs(600), "VM not running: {s:?}");
+            a.sleep(Duration::from_secs(1)).await;
+        };
+        match a.read(AgentCall::VmStatus { vm_id: vm }).await {
+            ResponseBody::AgentVm { vm } => {
+                log.push_str(&format!("agent view of the network: {:?}\n", vm.network_endpoints));
+                assert_eq!(vm.network_endpoints.len(), 1);
+            }
+            other => panic!("{other:?}"),
+        }
+        // The live desktop is not needed: wait for it (logged), then use a
+        // text console (Ctrl+Alt+F3, user `ubuntu` without password on the
+        // live system), which does not depend on GNOME being responsive.
+        let boot = a.wait_desktop(vm, run, Duration::from_secs(600)).await;
+        log.push_str(&format!(
+            "desktop: {boot:?} (started {:?} ago)\n",
+            t.elapsed()
+        ));
+        let cmd = format!(
+            "for i in 1 2 3; do (exec 3<>/dev/tcp/sql.lan/{sql_port} && echo HELLO-E2E-$i >&3 && head -n1 <&3); done; (exec 3<>/dev/tcp/wcf/{wcf_port}); (exec 3<>/dev/tcp/10.0.2.101/{wcf_port}); (exec 3<>/dev/tcp/10.0.2.2/{wcf_port})\n"
+        );
+        for attempt in 0..3 {
+            a.keys(
+                vm,
+                run,
+                vec![
+                    key("ctrl", true),
+                    key("alt", true),
+                    key("f3", true),
+                    key("f3", false),
+                    key("alt", false),
+                    key("ctrl", false),
+                ],
+            )
+            .await;
+            a.sleep(Duration::from_secs(8)).await;
+            a.type_text(vm, run, "ubuntu\n").await;
+            a.sleep(Duration::from_secs(10)).await;
+            a.type_text(vm, run, &cmd).await;
+            a.sleep(Duration::from_secs(20)).await;
+            let (_, _, _, png) = a.stable(vm, run).await;
+            let _ = std::fs::write(evidence.join(format!("net-e2e-console-{attempt}.png")), &png);
+            if sql_conns.load(Ordering::SeqCst) >= 3 {
+                break;
+            }
+        }
+        let lines = sql_lines.lock().unwrap().clone();
+        log.push_str(&format!(
+            "sql.lan server: {} connections, lines {lines:?}; wcf server: {} connections\n",
+            sql_conns.load(Ordering::SeqCst),
+            wcf_conns.load(Ordering::SeqCst)
+        ));
+        // Revocation: the allowed set becomes empty.
+        ok(
+            &mut u,
+            Request::RevokeSession {
+                session_id: a.auth.session_id,
+            },
+        )
+        .await;
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let events = audit_events(&audit_file);
+        for e in events.iter().filter(|e| e.network.is_some()) {
+            log.push_str(&format!(
+                "audit {:?} {:?} session={} {:?}\n",
+                e.action,
+                e.outcome,
+                e.session_id.is_some(),
+                e.network.as_ref().unwrap()
+            ));
+        }
+        std::fs::write(evidence.join("net-e2e.txt"), &log).unwrap();
+        eprintln!("{log}");
+        assert_eq!(
+            lines,
+            ["HELLO-E2E-1", "HELLO-E2E-2", "HELLO-E2E-3"],
+            "three connections by name, each with its own data"
+        );
+        assert_eq!(sql_conns.load(Ordering::SeqCst), 3);
+        assert_eq!(wcf_conns.load(Ordering::SeqCst), 0, "endpoint not granted reached");
+        let has = |a: AuditAction, f: &dyn Fn(&lightvm_proto::NetworkAudit) -> bool| {
+            events
+                .iter()
+                .any(|e| e.action == a && e.network.as_ref().is_some_and(f))
+        };
+        assert!(has(AuditAction::NetworkSetup, &|n| n.endpoint.as_deref() == Some("sql.lan")
+            && n.target == Some(format!("127.0.0.1:{sql_port}"))));
+        assert!(has(AuditAction::NetworkConnection, &|n| n.bytes_from_guest == Some(12)));
+        assert!(has(AuditAction::NetworkDenied, &|n| n.reason.as_deref() == Some("not_allowed")));
+        assert!(has(AuditAction::NetworkPolicy, &|n| n.reason.as_deref() == Some("allowed: none")));
+        ok(
+            &mut u,
+            Request::SubmitVm {
+                request: VmRequest {
+                    operation_id: OperationId::new_v7(),
+                    vm_id: vm,
+                    expected_run_id: Some(run),
+                    action: VmAction::ForceStop,
+                },
+            },
+        )
+        .await;
+        wait_state(&mut u, vm, VmState::Stopped, T).await;
+        handle.shutdown().await;
+    });
 }

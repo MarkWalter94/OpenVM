@@ -5,6 +5,8 @@
 //! [`crate::Catalog::commit`], which records the transition to `committed` in
 //! the same transaction.
 
+use std::path::{Path, PathBuf};
+
 use rusqlite::{OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 
@@ -19,6 +21,7 @@ use crate::ids::{
 };
 use crate::paths::ManagedPath;
 use crate::time::now_rfc3339;
+use lightvm_proto::DetectedGuest;
 
 fn to_i64(v: u64) -> Result<i64> {
     i64::try_from(v).map_err(|_| StorageError::Constraint(format!("value out of range: {v}")))
@@ -26,6 +29,42 @@ fn to_i64(v: u64) -> Result<i64> {
 
 fn to_u64(v: i64) -> u64 {
     u64::try_from(v).unwrap_or(0)
+}
+
+/// Text of a referenced media's path (the column is text: a path that is not
+/// valid Unicode cannot be recorded, nor given to QEMU).
+fn path_text(p: &Path) -> Result<&str> {
+    p.to_str()
+        .ok_or_else(|| StorageError::Constraint("media path is not valid Unicode".into()))
+}
+
+/// `storage`, `managed_path` and `external_path` of a media row.
+fn location_cols(l: &MediaLocation) -> Result<(&'static str, Option<&str>, Option<&str>)> {
+    Ok(match l {
+        MediaLocation::Managed(p) => ("managed", Some(p.as_str()), None),
+        MediaLocation::Referenced(p) => {
+            if !p.is_absolute() {
+                return Err(StorageError::Constraint(
+                    "referenced media path is not absolute".into(),
+                ));
+            }
+            ("referenced", None, Some(path_text(p)?))
+        }
+    })
+}
+
+/// JSON text of a detected guest for the `media.detected_guest` column.
+fn guest_json(g: Option<&DetectedGuest>) -> Result<Option<String>> {
+    g.map(serde_json::to_string)
+        .transpose()
+        .map_err(|e| StorageError::Constraint(format!("detected guest not serializable: {e}")))
+}
+
+/// `media.detected_guest`: a value this version cannot read (written by a
+/// newer one) is a hint lost, not a broken registry: read as `None`.
+fn guest_col(row: &Row<'_>, idx: usize) -> rusqlite::Result<Option<DetectedGuest>> {
+    let s: Option<String> = row.get(idx)?;
+    Ok(s.and_then(|s| serde_json::from_str(&s).ok()))
 }
 
 fn path_col(row: &Row<'_>, idx: usize) -> rusqlite::Result<ManagedPath> {
@@ -73,12 +112,35 @@ pub struct VmRecord {
     pub updated_at: String,
 }
 
+/// Where the bytes of a registry media are (schema 8, ADR-0029).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MediaLocation {
+    /// Read-only managed copy, relative to the root (`storage = 'managed'`:
+    /// every media approved before schema 8).
+    Managed(ManagedPath),
+    /// The user's own file, used in place and never copied
+    /// (`storage = 'referenced'`): absolute path as resolved by the system
+    /// when it was selected. Outside the catalog: never moved, modified or
+    /// removed by it.
+    Referenced(PathBuf),
+}
+
+impl MediaLocation {
+    /// The managed copy, if the media has one.
+    pub fn managed(&self) -> Option<&ManagedPath> {
+        match self {
+            Self::Managed(p) => Some(p),
+            Self::Referenced(_) => None,
+        }
+    }
+}
+
 /// Media in the approved registry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaRecord {
     /// Identifier.
     pub media_id: MediaId,
-    /// SHA-256 of the managed copy.
+    /// SHA-256 of the file at approval.
     pub sha256: String,
     /// Size in bytes.
     pub size_bytes: u64,
@@ -88,10 +150,18 @@ pub struct MediaRecord {
     pub declared_origin: String,
     /// Approval time (UTC).
     pub approved_at: String,
-    /// Managed copy, relative to the root.
-    pub managed_path: ManagedPath,
+    /// Managed copy or the user's file used in place.
+    pub location: MediaLocation,
     /// Status.
     pub status: MediaStatus,
+    /// Guest OS detected from the file (installation media only,
+    /// ADR-0027); `None` if nothing supported was recognized or the file was
+    /// not examined yet.
+    pub detected_guest: Option<DetectedGuest>,
+    /// `true` once the file has been examined for the guest OS (whatever
+    /// the outcome); `false` for media approved before the detection
+    /// existed (schema 7).
+    pub guest_examined: bool,
 }
 
 /// Managed disk.
@@ -475,14 +545,17 @@ impl Tx<'_> {
 
     // ------------------------------------------------------------- media
 
-    /// Records an approved media (the managed copy must be produced with an
-    /// `import_media` intent).
+    /// Records an approved media (a managed copy must be produced with an
+    /// `import_media` intent; a referenced file is only checked and hashed,
+    /// [`crate::Catalog::finish_media_import`]).
     pub fn insert_media(&self, m: &MediaRecord) -> Result<()> {
+        let (storage, managed, external) = location_cols(&m.location)?;
         self.inner
             .execute(
                 "INSERT INTO media(media_id, sha256, size_bytes, kind, declared_origin, approved_at,
-                                   managed_path, status)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                                   storage, managed_path, external_path, status, detected_guest,
+                                   guest_examined)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     m.media_id.sql(),
                     m.sha256,
@@ -490,11 +563,97 @@ impl Tx<'_> {
                     m.kind,
                     m.declared_origin,
                     m.approved_at,
-                    m.managed_path.as_str(),
-                    m.status
+                    storage,
+                    managed,
+                    external,
+                    m.status,
+                    guest_json(m.detected_guest.as_ref())?,
+                    m.guest_examined
                 ],
             )
             .db()?;
+        Ok(())
+    }
+
+    /// The referenced media of `kind` whose file is `path` (one at most).
+    pub fn referenced_media(&self, path: &Path, kind: MediaKind) -> Result<Option<MediaId>> {
+        let p = path_text(path)?;
+        self.inner
+            .query_row(
+                "SELECT media_id FROM media
+                 WHERE storage = 'referenced' AND external_path = ?1 AND kind = ?2",
+                params![p, kind],
+                |r| idc(r, 0),
+            )
+            .optional()
+            .db()
+    }
+
+    /// The same file selected again (ADR-0029): new hash, size, guest and
+    /// approval time, status `approved`. The identifier stays, so the VMs
+    /// that use the media keep it.
+    pub fn reapprove_media(&self, m: &MediaRecord) -> Result<()> {
+        let n = self
+            .inner
+            .execute(
+                "UPDATE media SET sha256 = ?2, size_bytes = ?3, declared_origin = ?4,
+                                  approved_at = ?5, status = ?6, detected_guest = ?7,
+                                  guest_examined = ?8
+                 WHERE media_id = ?1 AND storage = 'referenced'",
+                params![
+                    m.media_id.sql(),
+                    m.sha256,
+                    to_i64(m.size_bytes)?,
+                    m.declared_origin,
+                    m.approved_at,
+                    m.status,
+                    guest_json(m.detected_guest.as_ref())?,
+                    m.guest_examined
+                ],
+            )
+            .db()?;
+        if n == 0 {
+            return Err(StorageError::NotFound {
+                kind: "referenced media",
+                id: m.media_id.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Sets the status of a media (`approved` again when the file of a
+    /// referenced media is back, `missing` when it is not found).
+    pub fn set_media_status(&self, id: &MediaId, status: MediaStatus) -> Result<()> {
+        self.inner
+            .execute(
+                "UPDATE media SET status = ?2 WHERE media_id = ?1",
+                params![id.sql(), status],
+            )
+            .db()?;
+        Ok(())
+    }
+
+    /// Records the outcome of the guest OS detection on a media's managed
+    /// copy (ADR-0027): `guest` (or `None`, nothing recognized) and
+    /// `guest_examined = 1`.
+    pub fn set_media_detected_guest(
+        &self,
+        id: &MediaId,
+        guest: Option<&DetectedGuest>,
+    ) -> Result<()> {
+        let n = self
+            .inner
+            .execute(
+                "UPDATE media SET detected_guest = ?2, guest_examined = 1 WHERE media_id = ?1",
+                params![id.sql(), guest_json(guest)?],
+            )
+            .db()?;
+        if n == 0 {
+            return Err(StorageError::NotFound {
+                kind: "media",
+                id: id.to_string(),
+            });
+        }
         Ok(())
     }
 
@@ -503,9 +662,18 @@ impl Tx<'_> {
         self.inner
             .query_row(
                 "SELECT media_id, sha256, size_bytes, kind, declared_origin, approved_at,
-                        managed_path, status FROM media WHERE media_id = ?1",
+                        managed_path, status, detected_guest, guest_examined, storage,
+                        external_path
+                 FROM media WHERE media_id = ?1",
                 params![id.sql()],
                 |r| {
+                    let storage: String = r.get(10)?;
+                    let location = if storage == "referenced" {
+                        let p: String = r.get(11)?;
+                        MediaLocation::Referenced(PathBuf::from(p))
+                    } else {
+                        MediaLocation::Managed(path_col(r, 6)?)
+                    };
                     Ok(MediaRecord {
                         media_id: idc(r, 0)?,
                         sha256: r.get(1)?,
@@ -513,8 +681,10 @@ impl Tx<'_> {
                         kind: r.get(3)?,
                         declared_origin: r.get(4)?,
                         approved_at: r.get(5)?,
-                        managed_path: path_col(r, 6)?,
+                        location,
                         status: r.get(7)?,
+                        detected_guest: guest_col(r, 8)?,
+                        guest_examined: r.get(9)?,
                     })
                 },
             )
@@ -574,6 +744,21 @@ impl Tx<'_> {
             .db()?;
         let rows = st
             .query_map(params![vm.sql()], |r| Ok((r.get(0)?, idc(r, 1)?)))
+            .db()?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().db()
+    }
+
+    /// Names of the VMs a media is attached to, in name order.
+    pub fn media_users(&self, media: &MediaId) -> Result<Vec<String>> {
+        let mut st = self
+            .inner
+            .prepare(
+                "SELECT DISTINCT v.name FROM vm_media m JOIN vms v ON v.vm_id = m.vm_id
+                 WHERE m.media_id = ?1 ORDER BY v.name",
+            )
+            .db()?;
+        let rows = st
+            .query_map(params![media.sql()], |r| r.get::<_, String>(0))
             .db()?;
         rows.collect::<rusqlite::Result<Vec<_>>>().db()
     }

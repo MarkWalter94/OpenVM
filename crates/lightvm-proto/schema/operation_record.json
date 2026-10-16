@@ -184,6 +184,21 @@
           "description": "Emergency Stop (priority path, outside the queue).",
           "type": "string",
           "const": "emergency_stop"
+        },
+        {
+          "description": "User snapshot taken, VM off or running (ADR-0032; outside the queue).",
+          "type": "string",
+          "const": "user_snapshot"
+        },
+        {
+          "description": "Revert to a user snapshot with the VM off (ADR-0032; outside the\nqueue).",
+          "type": "string",
+          "const": "user_snapshot_revert"
+        },
+        {
+          "description": "Deletion of a user snapshot (ADR-0032; outside the queue).",
+          "type": "string",
+          "const": "user_snapshot_delete"
         }
       ]
     },

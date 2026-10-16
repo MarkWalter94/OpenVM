@@ -5,7 +5,7 @@
 //!
 //! | Kind | Situation found | Action |
 //! | --- | --- | --- |
-//! | creation | DB row missing | removes the temporary and the orphaned final file → `aborted` |
+//! | creation | DB row missing | removes the temporary and the orphaned final file (VMware import, `import_vm`: also the empty VM directory) → `aborted` |
 //! | creation | row present, final file present | completes → `committed` |
 //! | creation | row present, file only in the temporary | completes the rename → `committed` |
 //! | creation | row present, no file | VM `recovering`, overlay `missing`, runs `failed`; baseline untouched → `aborted` |
@@ -13,11 +13,13 @@
 //! | deletion | file in the temporary, row present | completes the row deletion; if a reference prevents it, restores the file → `committed`/`aborted` |
 //! | deletion | no file, row present | same as creation's "row present, no file" → `aborted` |
 //! | export | any | removes the temporary → `aborted` (the external destination is never touched) |
+//! | user snapshot (`take_snapshot`, `revert_snapshot`, `delete_snapshot`) | decided from the VM disk's QCOW2 snapshot table (tag present, active L1 equal to the snapshot's) | completed or undone as in `snapshot.rs` → `committed`/`aborted` |
 //! | any | error during reconciliation (file in use, link, I/O) | intent `needs_review`, VM `recovering` and busy; retried at the next reconciliation |
 //!
 //! It then removes leftover temporaries of already committed deletions and
 //! exports, and checks that the registered disk, firmware and media files
-//! exist (a path that cannot be verified is reported as
+//! exist (managed media copies only: files used in place, ADR-0029, are
+//! outside the catalog; a path that cannot be verified is reported as
 //! [`IntegrityIssue::Unverifiable`]). A missing base file is only reported:
 //! reconciliation never modifies a baseline's rows or files.
 
@@ -31,6 +33,7 @@ use crate::error::{Result, SqlResultExt, StorageError};
 use crate::fsx;
 use crate::ids::{ArtifactId, BaselineId, DiskId, FirmwareId, MediaId, VmId, parse_id};
 use crate::records::Tx;
+use crate::snapshot::Settled;
 use crate::time::now_rfc3339;
 
 /// Overall outcome of reconciliation.
@@ -186,6 +189,15 @@ impl Catalog {
         i: &Intent,
         prior: IntentState,
     ) -> Result<(RecoveryOutcome, String, IntentState)> {
+        // User snapshots (ADR-0032): settled from the disk's QCOW2 snapshot
+        // table, see `snapshot.rs`.
+        if i.kind.is_snapshot() {
+            let (settled, detail) = self.settle_snapshot_intent(i)?;
+            return Ok(match settled {
+                Settled::Done => (RolledForward, detail, IntentState::Committed),
+                Settled::NotDone => (RolledBack, detail, IntentState::Aborted),
+            });
+        }
         let temp_exists = exists_no_follow(&i.temp_path)?;
         let final_exists = match &i.final_path {
             Some(p) => exists_no_follow(p)?,
@@ -427,8 +439,10 @@ impl Catalog {
                 .conn
                 .prepare(
                     "SELECT intent_id FROM journal
-                     WHERE state = 'committed' AND kind IN ('delete_file','export','discard_file')
-                       AND resolution IS NULL",
+                     WHERE state = 'committed'
+                       AND ((kind IN ('delete_file','export','discard_file') AND resolution IS NULL)
+                            OR (kind IN ('take_snapshot','revert_snapshot','delete_snapshot')
+                                AND (resolution IS NULL OR resolution IN ('taken','reverted','deleted'))))",
                 )
                 .db()?;
             let rows = st.query_map([], |r| r.get(0)).db()?;
@@ -505,7 +519,13 @@ impl Catalog {
             let media: Vec<(String, String)> = {
                 let mut st = tx
                     .conn()
-                    .prepare("SELECT media_id, managed_path FROM media WHERE status = 'approved'")
+                    // Managed copies only: a file used in place (ADR-0029)
+                    // is outside the catalog; its presence is checked when
+                    // the registry is listed and before every use.
+                    .prepare(
+                        "SELECT media_id, managed_path FROM media
+                         WHERE status = 'approved' AND storage = 'managed'",
+                    )
                     .db()?;
                 let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).db()?;
                 rows.collect::<rusqlite::Result<_>>().db()?
@@ -572,6 +592,9 @@ fn delete_target_rows(tx: &Tx<'_>, kind: TargetKind, id: &str) -> Result<()> {
         TargetKind::Artifact => tx.delete_artifact(&parse_id::<ArtifactId>(id)?),
         TargetKind::Media => tx.delete_media(&parse_id::<MediaId>(id)?),
         TargetKind::Vm => crate::vm_delete::delete_vm_rows(tx, &parse_id::<VmId>(id)?),
+        TargetKind::Snapshot => Err(StorageError::StateConflict(
+            "snapshot rows are settled by their own intents".into(),
+        )),
         TargetKind::None => Ok(()),
     }
 }

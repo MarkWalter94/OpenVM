@@ -23,17 +23,69 @@ fn vm(n: u8) -> VmId {
 
 fn sample_config() -> VmConfig {
     VmConfig {
+        tools: Default::default(),
         name: VmName::parse("ubuntu-lts 24.04").unwrap(),
         guest_os: GuestOs::UbuntuLtsX86_64,
         vcpus: 2,
         memory_mib: 4096,
         disk_gib: 40,
         network: NetworkProfile::Offline,
+        endpoints: Vec::new(),
         install_media: Some(MediaId::from_unix_millis(1, [1; 10])),
         data_media: None,
         firmware: Firmware::Uefi,
         limits: Default::default(),
+        imported: None,
     }
+}
+
+/// ADR-0030: an imported configuration round-trips, an older one (without
+/// the field) still reads, unknown fields stay refused, and the imported
+/// hardware is checked against the guest and the vCPUs.
+#[test]
+fn imported_hardware_roundtrip_and_checks() {
+    use lightvm_proto::{
+        DiskController, DisplayAdapter, GuestArch, ImportSource, ImportedHardware,
+    };
+    let mut c = sample_config();
+    let json = serde_json::to_value(&c).unwrap();
+    assert!(json.get("imported").is_none(), "absent when None: {json}");
+    let hw = ImportedHardware {
+        source: ImportSource::Vmware,
+        arch: GuestArch::X86_64,
+        disk_controller: DiskController::Pvscsi,
+        display: DisplayAdapter::Standard,
+        cores_per_socket: Some(2),
+        storage_driver_preparation: false,
+    };
+    c.vcpus = 4;
+    c.imported = Some(hw);
+    let back: VmConfig = serde_json::from_value(serde_json::to_value(&c).unwrap()).unwrap();
+    assert_eq!(back, c);
+    assert!(hw.validate(GuestOs::OtherLinuxX86_64, 4).is_ok());
+    assert!(
+        hw.validate(GuestOs::OtherLinuxX86_64, 3).is_err(),
+        "2 does not divide 3"
+    );
+    let svga = ImportedHardware {
+        display: DisplayAdapter::VmwareSvga,
+        ..hw
+    };
+    assert!(svga.validate(GuestOs::OtherLinuxX86_64, 4).is_err());
+    assert!(svga.validate(GuestOs::Windows7, 4).is_ok());
+    let virtio = ImportedHardware {
+        disk_controller: DiskController::Virtio,
+        ..hw
+    };
+    assert!(virtio.validate(GuestOs::Windows10, 4).is_err());
+    let ahci = ImportedHardware {
+        disk_controller: DiskController::Ahci,
+        ..hw
+    };
+    assert!(ahci.validate(GuestOs::WindowsXp, 4).is_err());
+    let mut bad = serde_json::to_value(&c).unwrap();
+    bad["imported"]["unknown"] = serde_json::json!(1);
+    assert!(serde_json::from_value::<VmConfig>(bad).is_err());
 }
 
 #[test]
@@ -93,23 +145,53 @@ fn models_roundtrip() {
         size_bytes: 1 << 30,
         declared_origin: Label::parse("ISO produced by the user").unwrap(),
         approved_at: ts(10),
+        detected_guest: None,
+        location: None,
+        missing: false,
     };
     rt(&media);
+    // The optional fields are omitted when empty: records of a supervisor
+    // that predates them still read.
+    let text = serde_json::to_string(&media).unwrap();
+    assert!(
+        !text.contains("location") && !text.contains("missing"),
+        "{text}"
+    );
     rt(&MediaEntry {
-        record: media,
-        managed_path: ManagedRelPath::parse("media/0192-abc.iso").unwrap(),
+        record: media.clone(),
+        location: MediaLocation::Managed(ManagedRelPath::parse("media/0192-abc.iso").unwrap()),
         file_identity: Some(FileIdentity {
             volume: 7,
             file_id: [3; 16],
         }),
     });
+    let referenced = MediaRecord {
+        location: Some("C:\\ISO\\ubuntu.iso".into()),
+        missing: true,
+        ..media
+    };
+    rt(&referenced);
+    let entry = MediaEntry {
+        record: referenced,
+        location: MediaLocation::Referenced("C:\\ISO\\ubuntu.iso".into()),
+        file_identity: None,
+    };
+    rt(&entry);
+    assert_eq!(
+        entry.location.file_name().as_deref(),
+        Some(if cfg!(windows) {
+            "ubuntu.iso"
+        } else {
+            "C:\\ISO\\ubuntu.iso"
+        })
+    );
     rt(&BaselineRecord {
         id: BaselineId::from_unix_millis(9, [9; 10]),
         vm_id: vm(1),
         config_revision: 3,
         origin: BaselineOrigin::CleanShutdown,
         disk_sha256: Sha256Digest::from_bytes([1; 32]),
-        firmware_sha256: Sha256Digest::from_bytes([2; 32]),
+        firmware_sha256: Some(Sha256Digest::from_bytes([2; 32])),
         protected: true,
         label: None,
         created_at: ts(20),
@@ -145,6 +227,7 @@ fn models_roundtrip() {
     });
     rt(&ResourceLimits::MVP_DEFAULT);
     rt(&AuditEvent {
+        tools: None,
         seq: 1,
         at: ts(1),
         actor: Actor::User,
@@ -157,14 +240,32 @@ fn models_roundtrip() {
         capability: None,
         error: None,
         termination: None,
+        network: None,
     });
 }
 
 #[test]
-fn config_rejects_unknown_fields_and_non_offline_network() {
+fn config_rejects_unknown_fields_and_network_modes() {
     let mut v = serde_json::to_value(sample_config()).unwrap();
-    v["network"] = json!("nat");
+    // ADR-0033: three modes, nothing else.
+    for ok in ["offline", "nat", "endpoints"] {
+        v["network"] = json!(ok);
+        assert!(
+            serde_json::from_value::<VmConfig>(v.clone()).is_ok(),
+            "{ok}"
+        );
+    }
+    v["network"] = json!("bridged");
     assert!(serde_json::from_value::<VmConfig>(v.clone()).is_err());
+    v["network"] = json!("endpoints");
+    v["endpoints"] = json!([{"name": "sql.lan", "host": "127.0.0.1", "port": 1433,
+        "virtual_ip": "10.0.2.101"}]);
+    let c: VmConfig = serde_json::from_value(v.clone()).unwrap();
+    assert_eq!(c.endpoints[0].port, 1433);
+    validate_network(c.network, &c.endpoints).unwrap();
+    v["endpoints"][0]["hostfwd"] = json!("tcp::1-:2");
+    assert!(serde_json::from_value::<VmConfig>(v.clone()).is_err());
+    v.as_object_mut().unwrap().remove("endpoints");
     v["network"] = json!("offline");
     v["qemu_args"] = json!("-drive file=/etc/shadow");
     assert!(
@@ -174,9 +275,65 @@ fn config_rejects_unknown_fields_and_non_offline_network() {
 }
 
 #[test]
+fn network_endpoint_validation() {
+    use std::net::Ipv4Addr;
+    let ep = |name: &str, host: &str, port: u16, ip: [u8; 4]| NetworkEndpoint {
+        name: name.into(),
+        host: host.into(),
+        port,
+        virtual_ip: Ipv4Addr::from(ip),
+    };
+    let good = vec![
+        ep("sql.lan", "sqlserver.corp.example", 1433, [10, 0, 2, 100]),
+        ep("wcf", "127.0.0.1", 8733, [10, 0, 2, 101]),
+        ep("v6", "::1", 80, [10, 0, 2, 102]),
+    ];
+    validate_network(NetworkProfile::Endpoints, &good).unwrap();
+    validate_network(NetworkProfile::Offline, &[]).unwrap();
+    assert!(validate_network(NetworkProfile::Endpoints, &[]).is_err());
+    assert_eq!(next_endpoint_ip(&good), Some(Ipv4Addr::new(10, 0, 2, 103)));
+    let bad = [
+        ep("*.lan", "h", 1, [10, 0, 2, 100]),
+        ep("sql", "*.corp", 1, [10, 0, 2, 100]),
+        ep("sql", "h", 0, [10, 0, 2, 100]),
+        ep("sql", "", 1, [10, 0, 2, 100]),
+        ep("sql", " h", 1, [10, 0, 2, 100]),
+        ep("sql", "http://h", 1, [10, 0, 2, 100]),
+        ep("sql", "0.0.0.0", 1, [10, 0, 2, 100]),
+        ep("sql", "h", 1, [10, 0, 2, 15]),
+        ep("sql", "h", 1, [10, 0, 2, 2]),
+        ep("sql", "h", 1, [192, 168, 1, 1]),
+        ep("10.0.2.5", "h", 1, [10, 0, 2, 100]),
+        ep("x.lightvm.internal", "h", 1, [10, 0, 2, 100]),
+        ep("bad name", "h", 1, [10, 0, 2, 100]),
+    ];
+    for b in bad {
+        assert!(
+            validate_network(NetworkProfile::Endpoints, std::slice::from_ref(&b)).is_err(),
+            "{b:?}"
+        );
+    }
+    let dup_name = vec![
+        ep("SQL", "a", 1, [10, 0, 2, 100]),
+        ep("sql", "b", 2, [10, 0, 2, 101]),
+    ];
+    assert!(validate_network(NetworkProfile::Endpoints, &dup_name).is_err());
+    let dup_addr = vec![
+        ep("a", "a", 1, [10, 0, 2, 100]),
+        ep("b", "b", 1, [10, 0, 2, 100]),
+    ];
+    assert!(validate_network(NetworkProfile::Endpoints, &dup_addr).is_err());
+    let many: Vec<NetworkEndpoint> = (0..33u8)
+        .map(|i| ep(&format!("e{i}"), "h", 1, [10, 0, 2, 100 + i]))
+        .collect();
+    assert!(validate_network(NetworkProfile::Endpoints, &many).is_err());
+}
+
+#[test]
 fn session_types_roundtrip() {
     let sid = SessionId::from_unix_millis(1, [1; 10]);
     let grant = Grant {
+        tools: Default::default(),
         id: GrantId::from_unix_millis(1, [2; 10]),
         session_id: sid,
         vm_allowlist: BTreeSet::from([vm(1)]),
@@ -184,6 +341,7 @@ fn session_types_roundtrip() {
         expires_at: ts(60_000),
         quotas: Quotas::UNBOUNDED,
         policy_revision: PolicyRevision(4),
+        network_endpoints: BTreeSet::new(),
     };
     rt(&grant);
     let v = serde_json::to_value(&grant).unwrap();
@@ -221,6 +379,13 @@ fn session_types_roundtrip() {
     assert_eq!(
         caps,
         [
+            "share.read",
+            "share.write",
+            "clipboard",
+            "files.transfer",
+            "usb",
+            "ui.inspect",
+            "ui.act",
             "vm.list",
             "vm.status",
             "vm.start",
@@ -230,7 +395,8 @@ fn session_types_roundtrip() {
             "vm.input",
             "vm.snapshot",
             "vm.restore",
-            "vm.logs"
+            "vm.logs",
+            "network.endpoints"
         ]
     );
 }

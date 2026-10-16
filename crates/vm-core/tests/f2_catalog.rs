@@ -155,6 +155,85 @@ fn media_import_is_user_only_and_audited_without_the_path() {
 }
 
 #[test]
+fn media_deletion_is_user_only_refused_while_used_and_audited() {
+    let mut h = Harness::new();
+    let origin = Label::parse("ubuntu.com").unwrap();
+    let path = std::path::Path::new("C:/Users/u/Downloads/ubuntu.iso");
+    let m = h
+        .core
+        .import_media(&Caller::User, path, MediaKind::InstallIso, origin)
+        .unwrap();
+    let a = h
+        .core
+        .create_vm(&Caller::User, h.vm_config("web-test", Some(m.id)))
+        .unwrap()
+        .id;
+    h.core
+        .create_vm(&Caller::User, h.vm_config("api-test", Some(m.id)))
+        .unwrap();
+
+    // Used by two VMs.
+    let e = h.core.delete_media(&Caller::User, m.id).unwrap_err();
+    assert_eq!(e.code, ErrorCode::StateConflict);
+    assert!(
+        e.message.starts_with(
+            "the medium is used by 2 VMs: \u{201c}api-test\u{201d}, \u{201c}web-test\u{201d}"
+        ),
+        "{}",
+        e.message
+    );
+    assert_eq!(
+        e.details
+            .as_ref()
+            .and_then(|d| d.get("reason"))
+            .map(String::as_str),
+        Some("media_in_use")
+    );
+    assert_eq!(
+        last(&h, AuditAction::MediaDelete).outcome,
+        AuditOutcome::Denied
+    );
+    assert!(h.store.0.borrow().media.contains_key(&m.id));
+
+    // Agent session: denied whatever its capabilities.
+    let (_, agent) = h.session(&[a], &[Capability::VmStatus], 4);
+    assert_eq!(
+        code(h.core.delete_media(&agent, m.id)),
+        ErrorCode::PermissionDenied
+    );
+
+    // Once no VM uses it: catalog failure audited, then deleted.
+    let vms: Vec<VmId> = h.store.0.borrow().vms.keys().copied().collect();
+    for vm in vms {
+        h.core.delete_vm(&Caller::User, vm, 1).unwrap();
+    }
+    h.store.0.borrow_mut().fail_files = true;
+    assert_eq!(
+        code(h.core.delete_media(&Caller::User, m.id)),
+        ErrorCode::InfrastructureError
+    );
+    assert_eq!(
+        last(&h, AuditAction::MediaDelete).outcome,
+        AuditOutcome::Failed
+    );
+    h.store.0.borrow_mut().fail_files = false;
+    h.core.delete_media(&Caller::User, m.id).unwrap();
+    let e = last(&h, AuditAction::MediaDelete);
+    assert_eq!(e.outcome, AuditOutcome::Succeeded);
+    assert!(
+        !h.core
+            .list_media(&Caller::User)
+            .unwrap()
+            .iter()
+            .any(|r| r.id == m.id)
+    );
+    assert_eq!(
+        code(h.core.delete_media(&Caller::User, m.id)),
+        ErrorCode::NotFound
+    );
+}
+
+#[test]
 fn console_ticket_requires_a_running_vm_and_is_audited() {
     let mut h = Harness::new();
     let vm = h.create_vm("console");

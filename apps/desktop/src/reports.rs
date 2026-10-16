@@ -385,6 +385,46 @@ pub fn event_text(e: &ReportEventBody) -> String {
             "The agent declared {} (its claim, not the outcome)",
             outcome_text(*claimed_outcome).to_lowercase()
         ),
+        ReportEventBody::Network { action, detail } => {
+            let what = match action.as_str() {
+                "network_setup" => "Network set up",
+                "network_connection" => "Network connection",
+                "network_denied" => "Network connection refused",
+                "network_policy" => "Allowed network endpoints changed",
+                _ => "Network",
+            };
+            let mut s = what.to_owned();
+            for v in [
+                detail.mode.as_deref(),
+                detail.endpoint.as_deref(),
+                detail.destination.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                s.push_str(&format!(" {v}"));
+            }
+            if let Some(t) = &detail.target {
+                s.push_str(&format!(" \u{2192} {t}"));
+            }
+            if let (Some(up), Some(down)) = (detail.bytes_from_guest, detail.bytes_to_guest) {
+                s.push_str(&format!(", {up} B sent, {down} B received"));
+            }
+            if let Some(r) = &detail.reason {
+                s.push_str(&format!(" ({r})"));
+            }
+            s
+        }
+        ReportEventBody::Tools {
+            action,
+            outcome,
+            detail,
+        } => format!(
+            "Tools {action}: {outcome:?}; {} / {} ({} bytes)",
+            detail.feature,
+            detail.share.as_deref().unwrap_or("guest"),
+            detail.bytes.unwrap_or(0)
+        ),
         ReportEventBody::Note { text } => text.clone(),
     }
 }
@@ -640,6 +680,16 @@ pub fn report_sections(
                 });
             }
         });
+        theme::row(ui, "Network", None, |ui| {
+            if r.network_endpoints.is_empty() {
+                ui.label("No network endpoints granted");
+            } else {
+                plain(
+                    ui,
+                    &format!("Only these endpoints: {}", r.network_endpoints.join(", ")),
+                );
+            }
+        });
         theme::row(ui, "Time", None, |ui| {
             ui.label(format!(
                 "Approved {} \u{b7} granted until {}",
@@ -700,8 +750,10 @@ pub fn report_sections(
                 short_hash(&r.vm_manifest_sha256)
             ));
             ui.label(match r.guest_os {
-                lightvm_proto::GuestOs::UbuntuLtsX86_64 => "Guest: Ubuntu LTS x86_64",
-                lightvm_proto::GuestOs::OtherLinuxX86_64 => "Guest: other Linux x86_64",
+                lightvm_proto::GuestOs::UbuntuLtsX86_64 => "Guest: Ubuntu LTS x86_64".to_owned(),
+                lightvm_proto::GuestOs::OtherLinuxX86_64 => "Guest: other Linux x86_64".to_owned(),
+                lightvm_proto::GuestOs::Windows11Arm64 => "Guest: Windows 11 ARM64".to_owned(),
+                os => format!("Guest: {}", crate::dashboard::os_label(os)),
             });
         });
         theme::row(ui, "Started from", None, |ui| match &r.baseline {

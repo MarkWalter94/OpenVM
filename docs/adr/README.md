@@ -61,7 +61,7 @@ When a Proposed ADR is closed, the following are updated: the ADR's status and D
 | [0005](0005-baseline-with-vm-off.md) | Baseline with the VM off and per-session overlay | Accepted | 8 |
 | [0006](0006-mcp-stdio-pairing-grant.md) | MCP over stdio with pairing and a limited grant, no generic QMP | Accepted | 9 |
 | [0007](0007-no-tcg-fallback-for-ai-sessions.md) | No TCG fallback for AI sessions | Accepted | 3, 7.2 |
-| [0008](0008-media-registry-data-disc.md) | Approved media registry and read-only data medium | Accepted | 4, 6.3 |
+| [0008](0008-media-registry-data-disc.md) | Approved media registry and read-only data medium | Accepted; copy rule amended by ADR-0029 | 4, 6.3 |
 | [0009](0009-emergency-stop-os-primitives.md) | Emergency Stop with OS primitives, independent of QMP | Accepted | 7.3 |
 | [0010](0010-qemu-build-and-source.md) | QEMU build and source | Accepted (Windows; Linux in R2a) | 6.3, 10 F0, 17 |
 | [0011](0011-guest-release-and-firmware.md) | Guest release and firmware | Accepted | 4, 8, 17 |
@@ -80,5 +80,13 @@ When a Proposed ADR is closed, the following are updated: the ADR's status and D
 | [0024](0024-separate-rfb-client-crate.md) | Separate `rfb-client` crate used by the UI; `qemu-backend` stays in the supervisor | Accepted | 6.1, 6.2, 6.4 |
 | [0025](0025-disk-exclusion-in-supervisor.md) | Disk exclusion guaranteed by the supervisor, not by the QEMU lock | Accepted (Windows; Linux in R2a) | 3, 6.3, 7.1, 7.4, 8, 10 |
 | [0026](0026-authentication-authorization-codes.md) | Public codes for authentication and authorization | Accepted (2026-10-10) | 6.3, 7.3, 7.4, 9 |
-| [0025](0025-disk-exclusion-in-supervisor.md) | Disk exclusion guaranteed by the supervisor, not by the QEMU lock | Accepted (Windows; Linux in R2a) | 3, 6.3, 7.1, 8 |
-| [0026](0026-authentication-authorization-codes.md) | Public codes `unauthenticated`, `session_expired`, `permission_denied` | Proposed | 6.3, 7, 9 |
+| [0027](0027-windows-guest-hardware-profiles.md) | Windows guest hardware profiles (XP, Vista, 7, 8.1, 10; SeaBIOS; offline) | Accepted (2026-10-12): direction set; evidence pending | 4, 5, 12 (R2c) |
+| [0028](0028-macos-hvf-windows11-arm64.md) | macOS Apple Silicon host and Windows 11 ARM64 guest (HVF, swtpm, project-built Secure Boot firmware, offline) | Accepted (2026-10-12): direction set; evidence partial | 5, 7.2, 12 (R2b) |
+| [0029](0029-media-used-in-place.md) | Installation and data ISOs used in place, without a managed copy (owner decision; amends ADR-0008) | Accepted (2026-10-14) | 6.3, 7.4 |
+| [0030](0030-vmware-vm-import.md) | Import of VMware virtual machines by conversion (owner decision) | Accepted (2026-10-14): implemented and verified in test (R6-01); real VMware VMs and the LSI Logic driver enablement pending | 7.4, 8, 12 (R6) |
+| [0031](0031-host-guest-integration-manual-use.md) | Host/guest integration in manual use: shared folders, clipboard, file drag and drop, USB (owner decision) | Accepted (2026-10-14): direction set; spikes pending | 4, 7.2, 7.4, 12 (R6) |
+| [0032](0032-user-snapshots.md) | User snapshots in manual use: VMware-style tree, disk state taken with the VM off or running, no RAM (owner decision) | Accepted (2026-10-14): implemented and verified in test, disk operations verified on hardware (R6-03); real guests pending | 8, 12 (R6) |
+| [0033](0033-network-nat-and-endpoint-allowlist.md) | Guest network: NAT in manual use, endpoint allowlist for agent sessions (owner decision; amends ADR-0004) | Accepted (2026-10-15); implemented, real case (Windows guest, WCF, SQL Server) not verified | 7.2, 7.4, 12 (R1, R6) |
+| [0034](0034-integration-capabilities-in-agent-sessions.md) | Integration features grantable to agent sessions (owner decision; amends ADR-0031) | Accepted (2026-10-15): `network.endpoints` implemented; the other capabilities pending | 7.2, 7.3, 9, 12 (R6) |
+| [0035](0035-windows11-x64-emulated-tpm.md) | Windows 11 x64 guest on Windows hosts with emulated TPM 2.0 and Secure Boot | Accepted (2026-10-15): project-built QEMU and OVMF decided; evidence pending | 5, 12 (R2c, R6) |
+| [0036](0036-guest-ui-inspection-for-agents.md) | Guest UI inspection for agents (accessibility tree) and real LLM clients | Accepted (2026-10-15): direction set; evidence pending | 9, 10 (F5), 12 (R6) |

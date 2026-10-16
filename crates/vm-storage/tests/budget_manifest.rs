@@ -2,7 +2,7 @@
 
 mod common;
 
-use vm_storage::{ArtifactId, MediaId};
+use vm_storage::{ArtifactId, MediaId, MediaLocation};
 use vm_storage::{
     ArtifactKind, ArtifactRecord, Catalog, CatalogLayout, Divergence, Enforcement, MediaKind,
     MediaRecord, MediaStatus, StorageError, now_rfc3339,
@@ -39,8 +39,23 @@ fn usage_is_accounted_per_category() {
             kind: MediaKind::Data,
             declared_origin: "fixture".into(),
             approved_at: now_rfc3339(),
-            managed_path: CatalogLayout::media_file(&media, "iso")?,
+            location: MediaLocation::Managed(CatalogLayout::media_file(&media, "iso")?),
             status: MediaStatus::Approved,
+            detected_guest: None,
+            guest_examined: false,
+        })?;
+        // ADR-0029: a file used in place takes no space in the catalog.
+        tx.insert_media(&MediaRecord {
+            media_id: MediaId::new_v7(),
+            sha256: "2".repeat(64),
+            size_bytes: 7_000_000,
+            kind: MediaKind::Iso,
+            declared_origin: "the user's ISO".into(),
+            approved_at: now_rfc3339(),
+            location: MediaLocation::Referenced(std::env::temp_dir().join("user.iso")),
+            status: MediaStatus::Approved,
+            detected_guest: None,
+            guest_examined: true,
         })
     })
     .unwrap();

@@ -47,6 +47,7 @@ pub const FIXTURE_VERIFIER: &str = "adr-0019-fixture-pixel v1 (lightvm-fixture)"
 /// Facts of a new report, gathered at the approval.
 #[derive(Debug, Clone)]
 pub(crate) struct OpenReport {
+    pub(crate) tools: lightvm_proto::ToolGrant,
     pub(crate) session_id: SessionId,
     pub(crate) vm_id: VmId,
     pub(crate) vm_name: String,
@@ -54,6 +55,7 @@ pub(crate) struct OpenReport {
     pub(crate) objective: String,
     pub(crate) started_at: UtcTimestamp,
     pub(crate) capabilities: CapabilitySet,
+    pub(crate) network_endpoints: Vec<String>,
     pub(crate) quotas: Quotas,
     pub(crate) expires_at: UtcTimestamp,
     pub(crate) policy_revision: PolicyRevision,
@@ -405,6 +407,8 @@ impl ReportStore {
             vm_config_revision: o.vm_config_revision,
             policy_revision: o.policy_revision,
             capabilities: o.capabilities,
+            network_endpoints: o.network_endpoints,
+            tools: o.tools,
             quotas: o.quotas,
             expires_at: o.expires_at,
             versions: o.versions,
@@ -574,6 +578,49 @@ impl ReportStore {
                 ReportEventBody::VmState { state, run_id },
             );
             l.dirty = true;
+        }
+    }
+
+    /// A network event of a VM (ADR-0033): recorded in the live reports of
+    /// that VM.
+    pub(crate) fn network(
+        &mut self,
+        vm_id: VmId,
+        action: lightvm_proto::AuditAction,
+        detail: &lightvm_proto::NetworkAudit,
+    ) {
+        let now = UtcTimestamp::now();
+        let action = name_of(&action);
+        for l in self.live.values_mut() {
+            if l.report.vm_id != vm_id || l.report.state == SessionState::Terminated {
+                continue;
+            }
+            Self::push(
+                &mut l.report,
+                now,
+                ReportEventBody::Network {
+                    action: action.clone(),
+                    detail: detail.clone(),
+                },
+            );
+            l.dirty = true;
+        }
+    }
+
+    pub(crate) fn tools(&mut self, record: &crate::engine::ToolsRecord) {
+        for l in self.live.values_mut() {
+            if l.report.vm_id == record.vm_id && l.report.state != SessionState::Terminated {
+                Self::push(
+                    &mut l.report,
+                    UtcTimestamp::now(),
+                    ReportEventBody::Tools {
+                        action: name_of(&record.action),
+                        outcome: record.outcome,
+                        detail: record.detail.clone(),
+                    },
+                );
+                l.dirty = true;
+            }
         }
     }
 
@@ -1150,6 +1197,26 @@ fn name_of<T: serde::Serialize>(v: &T) -> String {
         .unwrap_or_else(|| "?".into())
 }
 
+/// One-line text of a network event (ADR-0033): addresses and counts.
+fn network_text(action: &str, d: &lightvm_proto::NetworkAudit) -> String {
+    let mut s = format!("network {}", plain(action, 64));
+    for (k, v) in [
+        ("mode", d.mode.as_deref()),
+        ("endpoint", d.endpoint.as_deref()),
+        ("destination", d.destination.as_deref()),
+        ("target", d.target.as_deref()),
+        ("reason", d.reason.as_deref()),
+    ] {
+        if let Some(v) = v {
+            s.push_str(&format!(" {k}={}", plain(v, 256)));
+        }
+    }
+    if let (Some(up), Some(down)) = (d.bytes_from_guest, d.bytes_to_guest) {
+        s.push_str(&format!(" bytes_from_guest={up} bytes_to_guest={down}"));
+    }
+    s
+}
+
 /// One-line plain text of an event (`vm.logs`, Markdown).
 pub(crate) fn event_text(b: &ReportEventBody) -> String {
     match b {
@@ -1216,6 +1283,18 @@ pub(crate) fn event_text(b: &ReportEventBody) -> String {
         ReportEventBody::Declaration { claimed_outcome } => {
             format!("agent declaration: claims {}", name_of(claimed_outcome))
         }
+        ReportEventBody::Network { action, detail } => network_text(action, detail),
+        ReportEventBody::Tools {
+            action,
+            outcome,
+            detail,
+        } => format!(
+            "Tools {} {:?}: {} {} bytes",
+            plain(action, 64),
+            outcome,
+            plain(detail.feature.as_str(), 64),
+            detail.bytes.unwrap_or(0)
+        ),
         ReportEventBody::Note { text } => format!("note: {}", plain(text, 512)),
     }
 }
@@ -1649,6 +1728,7 @@ mod tests {
         let id = SessionId::new_v7();
         let vm = VmId::new_v7();
         store.open(OpenReport {
+            tools: Default::default(),
             session_id: id,
             vm_id: vm,
             vm_name: "vm".into(),
@@ -1656,6 +1736,7 @@ mod tests {
             objective: "objective".into(),
             started_at: UtcTimestamp::now(),
             capabilities: CapabilitySet::new(),
+            network_endpoints: Vec::new(),
             quotas: lightvm_proto::ipc::AGENT_DEFAULT_QUOTAS,
             expires_at: UtcTimestamp::now(),
             policy_revision: PolicyRevision(1),

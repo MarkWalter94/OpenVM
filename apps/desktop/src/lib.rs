@@ -40,6 +40,7 @@ use std::time::{Duration, Instant};
 
 pub mod agents;
 pub mod baselines;
+pub mod catalog_move;
 pub mod clipboard;
 pub mod console;
 pub mod dashboard;
@@ -47,26 +48,32 @@ pub mod diag;
 pub mod dialogs;
 pub mod keymap;
 pub mod libraries;
+pub mod media_library;
 pub mod pairing;
 pub mod render;
 pub mod reports;
 pub mod service;
 pub mod settings;
+pub mod snapshots;
 pub mod theme;
 pub mod vm_settings;
+pub mod vmware_import;
 pub mod wizard;
 
 use console::{ConsoleAction, LiveConsole};
 use dashboard::{Confirm, DashboardAction};
 use lightvm_proto::ipc::InputOwner;
-use lightvm_proto::{BaselineId, Label, MediaKind, RunId, SessionId, UtcTimestamp, VmId, VmState};
+use lightvm_proto::{
+    BaselineId, Label, MediaKind, RunId, SessionId, SnapshotId, UtcTimestamp, VmId, VmState,
+};
 use render::RenderingInfo;
 use service::{
-    BaselineOp, RequestStatus, Service, ServiceCommand, ServiceConfig, ServiceState, Supervisor,
+    BaselineOp, RequestStatus, Service, ServiceCommand, ServiceConfig, ServiceState, SnapshotOp,
+    Supervisor,
 };
 use settings::{SupervisorAction, SupervisorUiState, UiSettings};
 
-pub use dashboard::dashboard_ui;
+pub use dashboard::{SupervisorQemu, dashboard_ui, dashboard_with_qemu_ui};
 
 /// Folder picker: receives the title, returns the chosen folder.
 pub type FolderPicker = Box<dyn FnMut(&str) -> Option<std::path::PathBuf>>;
@@ -80,9 +87,9 @@ pub type SavePicker = Box<dyn FnMut(&str) -> Option<std::path::PathBuf>>;
 pub type ReportPicker =
     Box<dyn FnMut(&str, lightvm_proto::report::ReportFormat) -> Option<std::path::PathBuf>>;
 
-/// Native save dialog for session reports (Windows only).
+/// Native save dialog for session reports (Windows and macOS).
 pub fn native_report_picker() -> Option<ReportPicker> {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     {
         Some(Box::new(
             |name: &str, format: lightvm_proto::report::ReportFormat| {
@@ -98,29 +105,29 @@ pub fn native_report_picker() -> Option<ReportPicker> {
             },
         ))
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         None
     }
 }
 
-/// Native folder picker (Windows only; elsewhere no picker).
+/// Native folder picker (Windows and macOS; elsewhere no picker).
 pub fn native_folder_picker() -> Option<FolderPicker> {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     {
         Some(Box::new(|title: &str| {
             rfd::FileDialog::new().set_title(title).pick_folder()
         }))
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         None
     }
 }
 
-/// Native ISO picker (Windows only).
+/// Native ISO picker (Windows and macOS).
 pub fn native_file_picker() -> Option<FilePicker> {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     {
         Some(Box::new(|title: &str| {
             rfd::FileDialog::new()
@@ -129,15 +136,32 @@ pub fn native_file_picker() -> Option<FilePicker> {
                 .pick_file()
         }))
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         None
     }
 }
 
-/// Native save dialog for PNG screenshots (Windows only).
+/// Native picker of the `.vmx` file of a VMware VM (Windows and macOS).
+pub fn native_vmx_picker() -> Option<FilePicker> {
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        Some(Box::new(|title: &str| {
+            rfd::FileDialog::new()
+                .set_title(title)
+                .add_filter("VMware VM configuration", &["vmx"])
+                .pick_file()
+        }))
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        None
+    }
+}
+
+/// Native save dialog for PNG screenshots (Windows and macOS).
 pub fn native_save_picker() -> Option<SavePicker> {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     {
         Some(Box::new(|name: &str| {
             rfd::FileDialog::new()
@@ -147,7 +171,7 @@ pub fn native_save_picker() -> Option<SavePicker> {
                 .save_file()
         }))
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         None
     }
@@ -283,6 +307,81 @@ struct BaselineDialog {
     focus: bool,
 }
 
+/// Snapshot action to confirm (ADR-0032).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SnapshotConfirm {
+    /// New snapshot: the name and description the user types.
+    Take { name: String, description: String },
+    /// Revert: the VM must be off; `vm_running` (at the opening) decides
+    /// whether the confirmation offers to shut it down normally first and to
+    /// snapshot the current state before it.
+    Revert {
+        id: SnapshotId,
+        label: String,
+        vm_running: bool,
+        /// "Shut down first" checkbox (VM running only).
+        shut_down: bool,
+        /// "Take a snapshot of the current state first" checkbox.
+        snapshot_current: bool,
+    },
+    /// Deletion.
+    Delete { id: SnapshotId, label: String },
+    /// New name and description: the current values, edited in place.
+    Rename {
+        id: SnapshotId,
+        name: String,
+        description: String,
+    },
+}
+
+impl SnapshotConfirm {
+    /// The request recorded by the supervisor state is this one.
+    fn matches(&self, op: &SnapshotOp) -> bool {
+        match (self, op) {
+            (Self::Take { .. }, SnapshotOp::Take) => true,
+            (Self::Revert { id, .. }, SnapshotOp::Revert(i))
+            | (Self::Delete { id, .. }, SnapshotOp::Delete(i))
+            | (Self::Rename { id, .. }, SnapshotOp::Rename(i)) => id == i,
+            _ => false,
+        }
+    }
+}
+
+/// Wait in the dialog for a take or revert to show up as running on the VM;
+/// then the dialog closes and the progress is on the page (the Emergency
+/// Stop must stay reachable).
+const SNAPSHOT_DIALOG_WAIT: Duration = Duration::from_secs(2);
+
+/// Snapshot confirmation dialog open.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SnapshotDialog {
+    vm_id: VmId,
+    name: String,
+    kind: SnapshotConfirm,
+    /// The action was sent, at this instant.
+    sent: Option<Instant>,
+    focus: bool,
+}
+
+/// A revert of a running VM in progress (ADR-0032): the offered snapshot of
+/// the current state and/or the orderly shutdown must finish before the
+/// revert is sent (it needs the VM off).
+struct RevertFlow {
+    vm_id: VmId,
+    snapshot_id: SnapshotId,
+    /// What the flow is waiting for.
+    waiting: RevertWaiting,
+}
+
+/// What a [`RevertFlow`] is waiting for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RevertWaiting {
+    /// The offered snapshot of the current state (offered while the VM ran).
+    Take,
+    /// The orderly shutdown of the VM.
+    Stop,
+}
+
 /// Revocation of an agent session to confirm.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RevokeDialog {
@@ -410,6 +509,7 @@ pub struct LightVmApp {
     last_fb_update: Option<Instant>,
     fb_updates: u64,
     frames: u64,
+    tools_clipboard_pending: Option<(VmId, RunId)>,
     live: Option<LiveConsole>,
     /// VM whose console the Console page shows.
     console_vm: Option<VmId>,
@@ -430,6 +530,10 @@ pub struct LightVmApp {
     applied_service: Option<(std::path::PathBuf, Option<std::path::PathBuf>)>,
     folder_picker: Option<FolderPicker>,
     file_picker: Option<FilePicker>,
+    /// Picker of the `.vmx` of a VMware VM (ADR-0030).
+    vmx_picker: Option<FilePicker>,
+    /// "Import VMware VM" page, from the choice of the `.vmx` to the outcome.
+    vmware_import: Option<vmware_import::ImportFlow>,
     save_picker: Option<SavePicker>,
     report_picker: Option<ReportPicker>,
     /// Supervisor configuration given on the command line (`--catalog`):
@@ -437,14 +541,30 @@ pub struct LightVmApp {
     cli_config: Option<ServiceConfig>,
     /// Restart or stop of the supervisor in progress outside the UI thread.
     restart: Option<std::sync::mpsc::Receiver<RestartOutcome>>,
+    /// Move of the catalog (Settings), from confirmation to outcome.
+    catalog_move: Option<catalog_move::MoveFlow>,
+    /// Runner of the catalog move (the supervisor executable; fake in tests).
+    move_runner: Option<catalog_move::MoveRunner>,
     vm_edit: Option<vm_settings::VmEdit>,
     wizard: Option<wizard::Wizard>,
+    /// Systems the New VM wizard offers (the host's, fake in tests).
+    guest_support: wizard::GuestSupport,
     dialog: Option<ConfirmDialog>,
     /// VM whose Baselines page is open (F3).
     baselines_vm: Option<VmId>,
     baseline_dialog: Option<BaselineDialog>,
+    /// Deletion of an imported medium to confirm (Settings).
+    media_dialog: Option<media_library::DeleteDialog>,
     /// Creation or restore sent by this UI: VM and instant (elapsed time).
     baseline_sent: Option<(VmId, Instant)>,
+    /// VM whose Snapshots page is open (ADR-0032).
+    snapshots_vm: Option<VmId>,
+    snapshot_dialog: Option<SnapshotDialog>,
+    /// Take or revert sent by this UI: VM and instant (elapsed time).
+    snapshot_sent: Option<(VmId, Instant)>,
+    /// A revert of a running VM in progress: snapshot of the current state
+    /// and/or orderly shutdown before the revert itself.
+    snapshot_revert_flow: Option<RevertFlow>,
     /// Agent session whose page is open (F4).
     agent_session: Option<SessionId>,
     /// Approval form of a session request.
@@ -496,6 +616,7 @@ impl LightVmApp {
             last_fb_update: None,
             fb_updates: 0,
             frames: 0,
+            tools_clipboard_pending: None,
             live: None,
             console_vm: None,
             ticket_request: None,
@@ -513,16 +634,26 @@ impl LightVmApp {
             applied_service: None,
             folder_picker: None,
             file_picker: None,
+            vmx_picker: None,
+            vmware_import: None,
             save_picker: None,
             report_picker: None,
             cli_config: None,
             restart: None,
+            catalog_move: None,
+            move_runner: None,
             vm_edit: None,
+            guest_support: lightvm_proto::GuestOs::runs_on_this_host_with,
             wizard: None,
             dialog: None,
             baselines_vm: None,
             baseline_dialog: None,
+            media_dialog: None,
             baseline_sent: None,
+            snapshots_vm: None,
+            snapshot_dialog: None,
+            snapshot_sent: None,
+            snapshot_revert_flow: None,
             agent_session: None,
             approve_form: None,
             revoke_dialog: None,
@@ -573,15 +704,38 @@ impl LightVmApp {
     /// Connects the supervisor started by the UI (F1-11) with the
     /// configuration used.
     pub fn set_service(&mut self, service: Service, cfg: &ServiceConfig) {
-        self.set_supervisor(Box::new(service));
+        self.set_supervisor_with_config(Box::new(service), cfg);
+    }
+
+    /// Connects a supervisor started with `cfg` (the child process, or a
+    /// stand-in in tests): the app knows its catalog and QEMU folder.
+    pub fn set_supervisor_with_config(&mut self, s: Box<dyn Supervisor>, cfg: &ServiceConfig) {
+        self.set_supervisor(s);
         self.applied_service = Some((cfg.catalog.clone(), cfg.qemu_dir.clone()));
     }
 
-    /// Connects a supervisor: the child process, or a stand-in in tests.
+    /// Connects a supervisor whose configuration the app does not know: the
+    /// child process, or a stand-in in tests.
     pub fn set_supervisor(&mut self, s: Box<dyn Supervisor>) {
         self.service = Some(s);
         self.service_error = None;
         self.section = Section::Dashboard;
+        self.applied_service = None;
+    }
+
+    /// QEMU of the running supervisor, as far as the app knows it: missing
+    /// only when the app started it with no QEMU folder.
+    pub fn supervisor_qemu(&self) -> SupervisorQemu {
+        match &self.applied_service {
+            Some((_, None)) if self.service.is_some() => {
+                if self.cli_config.is_some() {
+                    SupervisorQemu::MissingFromCommandLine
+                } else {
+                    SupervisorQemu::MissingFromSettings
+                }
+            }
+            _ => SupervisorQemu::Given,
+        }
     }
 
     /// Supervisor executable (`--service-exe`); without it, the one next to
@@ -595,9 +749,27 @@ impl LightVmApp {
         self.folder_picker = s;
     }
 
+    /// Systems the New VM wizard offers: by default those this host runs
+    /// ([`lightvm_proto::GuestOs::runs_on_this_host_with`]); tests pass another
+    /// rule to exercise the other host family.
+    pub fn set_guest_support(&mut self, s: wizard::GuestSupport) {
+        self.guest_support = s;
+    }
+
     /// ISO picker of the wizard (native in the app, fake in tests).
     pub fn set_file_picker(&mut self, s: Option<FilePicker>) {
         self.file_picker = s;
+    }
+
+    /// Picker of the `.vmx` of "Import VMware VM" (native in the app, fake
+    /// in tests).
+    pub fn set_vmx_picker(&mut self, s: Option<FilePicker>) {
+        self.vmx_picker = s;
+    }
+
+    /// The "Import VMware VM" page, if open.
+    pub fn vmware_import(&self) -> Option<&vmware_import::ImportFlow> {
+        self.vmware_import.as_ref()
     }
 
     /// Save dialog of the console screenshot (native in the app, fake in tests).
@@ -608,6 +780,12 @@ impl LightVmApp {
     /// Save dialog of the report export (native in the app, fake in tests).
     pub fn set_report_picker(&mut self, s: Option<ReportPicker>) {
         self.report_picker = s;
+    }
+
+    /// Runner of the catalog move: by default `lightvm-service
+    /// --move-catalog`; tests pass a fake.
+    pub fn set_move_runner(&mut self, r: Option<catalog_move::MoveRunner>) {
+        self.move_runner = r;
     }
 
     /// Supervisor configuration given on the command line: it stays in use
@@ -637,7 +815,7 @@ impl LightVmApp {
         Ok(ServiceConfig {
             executable,
             catalog,
-            qemu_dir: self.settings.qemu_dir.clone(),
+            qemu_dir: self.settings.effective_qemu_dir(),
             runtime_dir: None,
             audit_log: None,
             policy: self.settings.ui_loss_policy,
@@ -695,6 +873,10 @@ impl LightVmApp {
         self.dialog = None;
         self.baselines_vm = None;
         self.baseline_dialog = None;
+        self.snapshots_vm = None;
+        self.snapshot_dialog = None;
+        self.snapshot_revert_flow = None;
+        self.media_dialog = None;
         self.agent_session = None;
         self.approve_form = None;
         self.revoke_dialog = None;
@@ -756,12 +938,18 @@ impl LightVmApp {
     }
 
     fn supervisor_ui_state(&mut self) -> SupervisorUiState {
+        let mut s = self.supervisor_ui_state_base();
+        s.move_catalog = self.move_availability(s.running_vms).map(|_| ());
+        s
+    }
+
+    fn supervisor_ui_state_base(&mut self) -> SupervisorUiState {
         let current = match &self.cli_config {
             Some(c) => Some((c.catalog.clone(), c.qemu_dir.clone())),
             None => self
                 .settings
                 .effective_catalog()
-                .map(|c| (c, self.settings.qemu_dir.clone())),
+                .map(|c| (c, self.settings.effective_qemu_dir())),
         };
         let folder_picker = self.folder_picker.is_some();
         let command_line = self
@@ -778,6 +966,7 @@ impl LightVmApp {
                 pending_changes: false,
                 folder_picker,
                 command_line,
+                move_catalog: Ok(()),
             };
         }
         match &mut self.service {
@@ -794,6 +983,7 @@ impl LightVmApp {
                     pending_changes: current != self.applied_service,
                     folder_picker,
                     command_line,
+                    move_catalog: Ok(()),
                 }
             }
             None => SupervisorUiState {
@@ -812,6 +1002,7 @@ impl LightVmApp {
                 pending_changes: false,
                 folder_picker,
                 command_line,
+                move_catalog: Ok(()),
             },
         }
     }
@@ -839,6 +1030,7 @@ impl LightVmApp {
                 self.settings.qemu_dir = None;
                 self.save_settings();
             }
+            SupervisorAction::MoveCatalog => self.begin_catalog_move(),
             SupervisorAction::Restart => self.restart_in_background(ctx, true),
             SupervisorAction::Stop => self.restart_in_background(ctx, false),
         }
@@ -979,9 +1171,12 @@ impl LightVmApp {
     pub fn dialog_open(&self) -> bool {
         self.dialog.is_some()
             || self.baseline_dialog.is_some()
+            || self.snapshot_dialog.is_some()
+            || self.media_dialog.is_some()
             || self.revoke_dialog.is_some()
             || self.pairing_dialog.is_some()
             || self.report_dialog.is_some()
+            || self.catalog_move.is_some()
     }
 
     /// Report screenshot shown on the session page, if any.
@@ -1002,6 +1197,11 @@ impl LightVmApp {
     /// VM whose Baselines page is open, if any.
     pub fn baselines_vm(&self) -> Option<VmId> {
         self.baselines_vm
+    }
+
+    /// VM whose Snapshots page is open, if any.
+    pub fn snapshots_vm(&self) -> Option<VmId> {
+        self.snapshots_vm
     }
 
     /// Fixes the instant used for the generated baseline labels (tests and
@@ -1161,10 +1361,13 @@ impl LightVmApp {
 
         self.confirm_dialog_ui(ui);
         self.baseline_dialog_ui(ui);
+        self.snapshot_dialog_ui(ui);
+        self.media_dialog_ui(ui);
         self.revoke_dialog_ui(ui);
         self.pairing_dialog_ui(ui);
         self.report_dialog_ui(ui);
         self.close_dialog_ui(ui, &ctx);
+        self.catalog_move_ui(ui, &ctx);
         self.emergency_stop_over_dialogs(&ctx);
         // Second defence: no widget writes the host clipboard.
         clipboard::strip_clipboard_output(&ctx);
@@ -1195,6 +1398,7 @@ impl LightVmApp {
                         if s == Section::Dashboard && self.section == s {
                             // Back to the VM list from a VM's page.
                             self.baselines_vm = None;
+                            self.snapshots_vm = None;
                         }
                         if s == Section::Agents && self.section == s {
                             self.agent_session = None;
@@ -1261,6 +1465,9 @@ impl LightVmApp {
     fn supervisor_summary(&mut self) -> (String, theme::Tone) {
         if self.restart.is_some() {
             return ("Supervisor restarting".into(), theme::Tone::Warning);
+        }
+        if self.catalog_move_running() {
+            return ("Moving the catalog".into(), theme::Tone::Warning);
         }
         let Some(s) = &mut self.service else {
             let tone = if self.service_error.is_some() {
@@ -2061,27 +2268,54 @@ impl LightVmApp {
         let state = srv.state();
         let active = alive && state.connected;
 
+        // The advance of a running-VM revert is not lost by leaving the
+        // Snapshots page (it keeps watching the offered snapshot, the
+        // orderly stop, then the revert).
+        self.snapshot_revert_flow_step(&state);
+
         if self.wizard.is_some() {
             self.wizard_page(ui, &state, active);
+            return;
+        }
+        if self.vmware_import.is_some() {
+            self.vmware_import_page(ui, &state, active);
             return;
         }
         if let Some(vm_id) = self.baselines_vm {
             self.baselines_page(ui, &state, vm_id, active);
             return;
         }
+        if let Some(vm_id) = self.snapshots_vm {
+            self.snapshots_page(ui, &state, vm_id, active);
+            return;
+        }
 
-        match dashboard_ui(ui, &state, pid, alive) {
+        let qemu = self.supervisor_qemu();
+        match dashboard_with_qemu_ui(ui, &state, pid, alive, qemu) {
             Some(DashboardAction::Command(c)) => self.send(c),
+            Some(DashboardAction::QemuSettings) => self.section = Section::Settings,
             Some(DashboardAction::NewVm) => {
                 self.vm_edit = None;
-                self.wizard = Some(wizard::Wizard::new(state.host));
+                self.wizard = Some(wizard::Wizard::with_guest_support(
+                    state.host,
+                    self.guest_support,
+                ));
                 self.send(ServiceCommand::ListMedia);
+            }
+            Some(DashboardAction::ImportVmware) => {
+                self.vm_edit = None;
+                self.choose_vmx(true);
             }
             Some(DashboardAction::Console(id)) => self.open_console(id),
             Some(DashboardAction::Baselines(id)) => {
                 self.vm_edit = None;
                 self.baselines_vm = Some(id);
                 self.send(ServiceCommand::ListBaselines(id));
+            }
+            Some(DashboardAction::Snapshots(id)) => {
+                self.vm_edit = None;
+                self.snapshots_vm = Some(id);
+                self.send(ServiceCommand::ListSnapshots(id));
             }
             Some(DashboardAction::Edit(id)) => {
                 self.vm_edit = state.vm(id).map(|v| {
@@ -2211,6 +2445,438 @@ impl LightVmApp {
                 }
             }
             None => {}
+        }
+    }
+
+    /// The advance of a revert of a running VM (ADR-0032): the offered
+    /// snapshot of the current state, then the orderly shutdown, then the
+    /// revert itself (it needs the VM off). Runs on every page of the
+    /// Dashboard section, so it is not lost by leaving the page.
+    fn snapshot_revert_flow_step(&mut self, state: &ServiceState) {
+        let Some(f) = &mut self.snapshot_revert_flow else {
+            return;
+        };
+        let vm_id = f.vm_id;
+        match f.waiting {
+            RevertWaiting::Take => {
+                let done = state
+                    .snapshot
+                    .as_ref()
+                    .filter(|r| r.vm_id == vm_id && matches!(r.op, SnapshotOp::Take));
+                match done.map(|r| &r.status) {
+                    Some(RequestStatus::Done(_)) => {
+                        f.waiting = RevertWaiting::Stop;
+                        self.send(ServiceCommand::Stop(vm_id));
+                    }
+                    // The snapshot was not taken: the failure is shown on
+                    // the page; the VM still runs, the flow stops.
+                    Some(RequestStatus::Failed(_)) => self.snapshot_revert_flow = None,
+                    _ => {}
+                }
+            }
+            RevertWaiting::Stop => {
+                if state.vm(vm_id).is_some_and(|v| v.state == VmState::Stopped) {
+                    let snapshot_id = f.snapshot_id;
+                    self.snapshot_sent = Some((vm_id, Instant::now()));
+                    self.send(ServiceCommand::RevertSnapshot { vm_id, snapshot_id });
+                    self.snapshot_revert_flow = None;
+                }
+            }
+        }
+    }
+
+    fn snapshots_page(
+        &mut self,
+        ui: &mut egui::Ui,
+        state: &ServiceState,
+        vm_id: VmId,
+        active: bool,
+    ) {
+        let Some(vm) = state.vm(vm_id) else {
+            // Deleted meanwhile.
+            self.snapshots_vm = None;
+            return;
+        };
+        let request = state.snapshot.as_ref().filter(|r| r.vm_id == vm_id);
+        let any_pending = state
+            .snapshot
+            .as_ref()
+            .is_some_and(|r| r.status.is_pending());
+        let running = vm
+            .baselines
+            .operation
+            .as_ref()
+            .is_some_and(snapshots::is_snapshot_op)
+            || request
+                .is_some_and(|r| r.status.is_pending() && !matches!(r.op, SnapshotOp::Rename(_)));
+        if !running && !any_pending && self.snapshot_revert_flow.is_none() {
+            self.snapshot_sent = None;
+        }
+        let elapsed = self
+            .snapshot_sent
+            .filter(|(id, _)| *id == vm_id && running)
+            .map(|(_, t)| t.elapsed());
+        if running || self.snapshot_revert_flow.is_some() {
+            // Elapsed time and the advance of the revert flow, without
+            // polling faster than once a second.
+            ui.ctx().request_repaint_after(Duration::from_secs(1));
+        }
+        let list = state.snapshots.get(&vm_id);
+        let env = snapshots::SnapshotsEnv {
+            vm,
+            list,
+            request,
+            any_pending,
+            active,
+            available: dashboard::baselines_available(state),
+            elapsed,
+        };
+        let open = |kind| SnapshotDialog {
+            vm_id,
+            name: vm.name.as_str().to_owned(),
+            kind,
+            sent: None,
+            focus: true,
+        };
+        let find = |id: SnapshotId| {
+            list.and_then(|l| l.tree.as_ref())
+                .and_then(|t| t.snapshots.iter().find(|s| s.snapshot_id == id))
+        };
+        match snapshots::snapshots_ui(ui, &env) {
+            Some(snapshots::SnapshotAction::Back) => self.snapshots_vm = None,
+            Some(snapshots::SnapshotAction::EmergencyStop) => {
+                self.send(ServiceCommand::EmergencyStop);
+            }
+            Some(snapshots::SnapshotAction::Refresh) => {
+                self.send(ServiceCommand::Refresh);
+                self.send(ServiceCommand::ListSnapshots(vm_id));
+            }
+            Some(snapshots::SnapshotAction::Take) => {
+                let items = list
+                    .and_then(|l| l.tree.as_ref())
+                    .map_or(&[][..], |t| t.snapshots.as_slice());
+                let label = snapshots::auto_label(items, self.now());
+                self.snapshot_dialog = Some(open(SnapshotConfirm::Take {
+                    name: label.as_str().to_owned(),
+                    description: String::new(),
+                }));
+            }
+            Some(snapshots::SnapshotAction::Revert(id)) => {
+                if let Some(s) = find(id) {
+                    self.snapshot_dialog = Some(open(SnapshotConfirm::Revert {
+                        id,
+                        label: s.name.as_str().to_owned(),
+                        vm_running: vm.state == VmState::Running,
+                        shut_down: false,
+                        snapshot_current: false,
+                    }));
+                }
+            }
+            Some(snapshots::SnapshotAction::Delete(id)) => {
+                if let Some(s) = find(id) {
+                    self.snapshot_dialog = Some(open(SnapshotConfirm::Delete {
+                        id,
+                        label: s.name.as_str().to_owned(),
+                    }));
+                }
+            }
+            Some(snapshots::SnapshotAction::Rename(id)) => {
+                if let Some(s) = find(id) {
+                    self.snapshot_dialog = Some(open(SnapshotConfirm::Rename {
+                        id,
+                        name: s.name.as_str().to_owned(),
+                        description: s.description.clone(),
+                    }));
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// Confirmation of a snapshot take, revert, deletion or rename
+    /// (ADR-0032); for a revert of a running VM, the offer to shut it down
+    /// normally first and to take a snapshot of the current state before it.
+    fn snapshot_dialog_ui(&mut self, ui: &egui::Ui) {
+        let now_ts = self.now();
+        let Some(d) = &mut self.snapshot_dialog else {
+            return;
+        };
+        let state = self.service.as_ref().map(|s| s.state()).unwrap_or_default();
+        let vm = state.vm(d.vm_id);
+        let list = state.snapshots.get(&d.vm_id);
+        // The label of the offered snapshot of the current state (the
+        // running-VM revert), computed without the dialog borrowed.
+        let keep_label = list
+            .and_then(|l| l.tree.as_ref())
+            .map(|t| snapshots::auto_label(&t.snapshots, now_ts));
+        let request = state
+            .snapshot
+            .as_ref()
+            .filter(|r| r.vm_id == d.vm_id && d.kind.matches(&r.op));
+        let long = !matches!(d.kind, SnapshotConfirm::Rename { .. });
+        let mut error = None;
+        let mut pending = false;
+        if let Some(sent) = d.sent {
+            match request.map(|r| (&r.op, &r.status)) {
+                Some((_, RequestStatus::Pending)) => {
+                    let started = vm.is_some_and(|v| {
+                        v.baselines
+                            .operation
+                            .as_ref()
+                            .is_some_and(snapshots::is_snapshot_op)
+                    });
+                    if long && (started || sent.elapsed() >= SNAPSHOT_DIALOG_WAIT) {
+                        // Running: the progress is on the page.
+                        self.snapshot_dialog = None;
+                        return;
+                    }
+                    pending = true;
+                    ui.ctx().request_repaint_after(Duration::from_millis(250));
+                }
+                Some((_, RequestStatus::Done(_))) => {
+                    self.snapshot_dialog = None;
+                    return;
+                }
+                Some((op, RequestStatus::Failed(f))) => {
+                    error = Some(snapshots::error_text(op, f));
+                }
+                _ => {}
+            }
+        }
+        let other_pending = d.sent.is_none()
+            && state
+                .snapshot
+                .as_ref()
+                .is_some_and(|r| r.status.is_pending());
+        let exists = |id: &SnapshotId| {
+            list.and_then(|l| l.tree.as_ref())
+                .and_then(|t| t.snapshots.iter().find(|s| &s.snapshot_id == id))
+        };
+        let refusal = match (vm, &d.kind) {
+            (None, _) => Some("The VM no longer exists."),
+            (Some(v), _) if v.baselines.operation.is_some() && !pending => {
+                Some("A storage operation is already in progress on this VM.")
+            }
+            _ if other_pending => Some("Another snapshot operation is in progress."),
+            (
+                _,
+                SnapshotConfirm::Revert { id, .. }
+                | SnapshotConfirm::Delete { id, .. }
+                | SnapshotConfirm::Rename { id, .. },
+            ) if exists(id).is_none() => Some("This snapshot no longer exists."),
+            _ => None,
+        };
+        if error.is_none() && !pending {
+            error = refusal.map(str::to_owned);
+        }
+        let name = &d.name;
+        let running_now = vm.is_some_and(|v| v.state == VmState::Running);
+        let spec: Option<dialogs::ConfirmSpec> = match &d.kind {
+            SnapshotConfirm::Take { .. } => Some(dialogs::ConfirmSpec {
+                title: format!("Take a snapshot of \u{201c}{name}\u{201d}?"),
+                body: if running_now {
+                    "The VM is running: the disk is snapshotted exactly as the guest left it, like a power cut at that instant (crash-consistent), with a thumbnail of the screen. No memory is saved: reverting to it later restarts the guest from that disk state with a normal boot."
+                        .to_owned()
+                } else {
+                    "The VM's disk state is saved exactly as it is, with a copy of the UEFI variables. No memory is saved: reverting to it later restarts the guest from that disk state with a normal boot."
+                        .to_owned()
+                },
+                confirm: "Take snapshot".into(),
+                destructive: false,
+            }),
+            SnapshotConfirm::Revert { label, .. } => Some(dialogs::ConfirmSpec {
+                title: format!("Revert to \u{201c}{label}\u{201d}?"),
+                body: format!(
+                    "The current state of \u{201c}{name}\u{201d} is discarded: everything written to the disk since \u{201c}{label}\u{201d} and the UEFI variables changed after it are lost. No memory is ever saved by a snapshot: the guest starts from the saved disk state with a normal boot. Other snapshots are kept.\n\nThis cannot be undone."
+                ),
+                confirm: if running_now {
+                    "Shut down and revert".into()
+                } else {
+                    "Discard and revert".into()
+                },
+                destructive: true,
+            }),
+            SnapshotConfirm::Delete { label, .. } => Some(dialogs::ConfirmSpec {
+                title: format!("Delete snapshot \u{201c}{label}\u{201d}?"),
+                body: "It is removed from the VM's disk. The other snapshots keep their state; the snapshot the VM's current state descends from stays usable. This cannot be undone."
+                    .to_owned(),
+                confirm: "Delete snapshot".into(),
+                destructive: true,
+            }),
+            SnapshotConfirm::Rename { .. } => Some(dialogs::ConfirmSpec {
+                title: format!("Rename snapshot of \u{201c}{name}\u{201d}?"),
+                body: "A new name and description. Nothing changes on the disk.".to_owned(),
+                confirm: "Save".into(),
+                destructive: false,
+            }),
+        };
+        let Some(spec) = spec else { return };
+        let mut ready = true;
+        let content = |ui: &mut egui::Ui, enabled: bool| {
+            ui.add_space(10.0);
+            match &mut d.kind {
+                SnapshotConfirm::Take { name, description }
+                | SnapshotConfirm::Rename {
+                    name, description, ..
+                } => {
+                    ui.label(egui::RichText::new("Name").color(theme::Palette::of(ui).text_weak));
+                    ui.add_enabled(
+                        enabled,
+                        egui::TextEdit::singleline(name).desired_width(360.0),
+                    );
+                    ui.label(
+                        egui::RichText::new("Description (optional)")
+                            .color(theme::Palette::of(ui).text_weak),
+                    );
+                    ui.add_enabled(
+                        enabled,
+                        egui::TextEdit::multiline(description)
+                            .desired_width(360.0)
+                            .desired_rows(2),
+                    );
+                    ready = Label::parse(name.trim()).is_ok()
+                        && lightvm_proto::ipc::validate_snapshot_description(description).is_ok();
+                }
+                SnapshotConfirm::Revert {
+                    shut_down,
+                    snapshot_current,
+                    ..
+                } if running_now => {
+                    ui.label(
+                        egui::RichText::new("The VM is running, so first:")
+                            .color(theme::Palette::of(ui).text_weak),
+                    );
+                    ui.add_enabled(
+                        enabled,
+                        egui::Checkbox::new(
+                            shut_down,
+                            format!("Shut down \u{201c}{name}\u{201d} normally first (a revert needs the VM off)"),
+                        ),
+                    );
+                    if let Some(keep) = &keep_label {
+                        ui.add_enabled(
+                            enabled,
+                            egui::Checkbox::new(
+                                snapshot_current,
+                                format!(
+                                    "Before that, take a snapshot of the current state (\u{201c}{}\u{201d})",
+                                    keep.as_str()
+                                ),
+                            ),
+                        );
+                    }
+                    ready = *shut_down;
+                }
+                _ => {}
+            }
+            ready
+        };
+        let focus = std::mem::replace(&mut d.focus, false);
+        let choice = dialogs::confirm_custom(
+            ui,
+            "lightvm_snapshot_dialog",
+            &spec,
+            pending,
+            error.as_deref(),
+            focus,
+            content,
+        );
+        match choice {
+            Some(dialogs::Choice::Cancel) => self.snapshot_dialog = None,
+            Some(dialogs::Choice::Confirm) if refusal.is_none() => {
+                let vm_id = d.vm_id;
+                let now = Instant::now();
+                match &d.kind {
+                    SnapshotConfirm::Take { name, description } => {
+                        let Ok(name) = Label::parse(name.trim()) else {
+                            return;
+                        };
+                        let description = description.clone();
+                        d.sent = Some(now);
+                        self.snapshot_sent = Some((vm_id, now));
+                        self.send(ServiceCommand::TakeSnapshot {
+                            vm_id,
+                            name,
+                            description,
+                        });
+                    }
+                    SnapshotConfirm::Revert {
+                        id,
+                        label,
+                        vm_running,
+                        snapshot_current,
+                        ..
+                    } => {
+                        let id = *id;
+                        let label = label.clone();
+                        let running = *vm_running;
+                        let snapshot_current = *snapshot_current;
+                        if running {
+                            // The dialog closes: the flow (offered snapshot,
+                            // orderly stop, then the revert) runs on the page.
+                            if snapshot_current {
+                                let keep = keep_label
+                                    .clone()
+                                    .unwrap_or_else(|| snapshots::auto_label(&[], now_ts));
+                                self.send(ServiceCommand::TakeSnapshot {
+                                    vm_id,
+                                    name: keep,
+                                    description: format!(
+                                        "Before the revert to \u{201c}{label}\u{201d}"
+                                    ),
+                                });
+                                self.snapshot_revert_flow = Some(RevertFlow {
+                                    vm_id,
+                                    snapshot_id: id,
+                                    waiting: RevertWaiting::Take,
+                                });
+                            } else {
+                                self.send(ServiceCommand::Stop(vm_id));
+                                self.snapshot_revert_flow = Some(RevertFlow {
+                                    vm_id,
+                                    snapshot_id: id,
+                                    waiting: RevertWaiting::Stop,
+                                });
+                            }
+                            self.snapshot_dialog = None;
+                            return;
+                        }
+                        d.sent = Some(now);
+                        self.snapshot_sent = Some((vm_id, now));
+                        self.send(ServiceCommand::RevertSnapshot {
+                            vm_id,
+                            snapshot_id: id,
+                        });
+                    }
+                    SnapshotConfirm::Delete { id, .. } => {
+                        let id = *id;
+                        d.sent = Some(now);
+                        self.send(ServiceCommand::DeleteSnapshot {
+                            vm_id,
+                            snapshot_id: id,
+                        });
+                    }
+                    SnapshotConfirm::Rename {
+                        id,
+                        name,
+                        description,
+                    } => {
+                        let id = *id;
+                        let Ok(name) = Label::parse(name.trim()) else {
+                            return;
+                        };
+                        let description = description.clone();
+                        d.sent = Some(now);
+                        self.send(ServiceCommand::RenameSnapshot {
+                            vm_id,
+                            snapshot_id: id,
+                            name,
+                            description,
+                        });
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -2432,6 +3098,74 @@ impl LightVmApp {
         }
     }
 
+    /// Native picker of the `.vmx`, then the preview request. With `open`
+    /// the page opens even when nothing is chosen (it then says why no
+    /// picker is available, or offers to choose again).
+    fn choose_vmx(&mut self, open: bool) {
+        let path = self
+            .vmx_picker
+            .as_mut()
+            .and_then(|f| f("Choose the .vmx file of the VMware VM"));
+        match path {
+            Some(path) => {
+                self.vmware_import = Some(vmware_import::ImportFlow::new(path.clone()));
+                self.send(ServiceCommand::PreviewVmwareImport(path));
+            }
+            None if open && self.vmx_picker.is_none() => {
+                // No picker on this platform: the page explains it.
+                self.vmware_import =
+                    Some(vmware_import::ImportFlow::new(std::path::PathBuf::new()));
+            }
+            None => {}
+        }
+    }
+
+    fn vmware_import_page(&mut self, ui: &mut egui::Ui, state: &ServiceState, active: bool) {
+        let Some(flow) = &mut self.vmware_import else {
+            return;
+        };
+        let names: Vec<String> = state
+            .vms
+            .iter()
+            .map(|v| v.name.as_str().to_owned())
+            .collect();
+        // A flow without a file (no picker): show the page without the
+        // state of an earlier preview.
+        let idle = service::VmwareImportState::default();
+        let vmware = if flow.path.as_os_str().is_empty() {
+            &idle
+        } else {
+            &state.vmware
+        };
+        let env = vmware_import::ImportEnv {
+            state: vmware,
+            existing_names: &names,
+            active,
+            file_picker: self.vmx_picker.is_some(),
+        };
+        match vmware_import::import_ui(ui, flow, &env) {
+            Some(vmware_import::ImportAction::Close) => self.vmware_import = None,
+            Some(vmware_import::ImportAction::ChooseOther) => self.choose_vmx(false),
+            Some(vmware_import::ImportAction::Retry) => {
+                let path = flow.path.clone();
+                self.send(ServiceCommand::PreviewVmwareImport(path));
+            }
+            Some(vmware_import::ImportAction::Import {
+                path,
+                name,
+                display,
+            }) => self.send(ServiceCommand::ImportVmware {
+                path,
+                name,
+                display,
+            }),
+            Some(vmware_import::ImportAction::CancelImport) => {
+                self.send(ServiceCommand::CancelVmwareImport);
+            }
+            None => {}
+        }
+    }
+
     fn confirm_dialog_ui(&mut self, ui: &egui::Ui) {
         let Some(d) = &mut self.dialog else { return };
         let state = self.service.as_ref().map(|s| s.state()).unwrap_or_default();
@@ -2560,6 +3294,11 @@ impl LightVmApp {
     /// the close dialog opens.
     fn handle_close_request(&mut self, ctx: &egui::Context) {
         if !ctx.input(|i| i.viewport().close_requested()) || self.allow_close {
+            return;
+        }
+        // A catalog move is cancelled from its dialog, not by closing.
+        if self.catalog_move_running() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             return;
         }
         let running = self.reachable_active_vms().len();
@@ -2826,13 +3565,22 @@ impl LightVmApp {
             if let Some(live) = &mut self.live {
                 live.set_input_blocked(agent.is_some());
             }
+            // The guest stopped on a vCPU error: input cannot reach it; the
+            // notice says why instead of the bare refusal code.
+            if let Some(h) = state
+                .as_ref()
+                .and_then(|s| s.vms.iter().find(|v| v.vm_id == vm_id))
+                .and_then(dashboard::vcpu_halt)
+            {
+                input_error = Some(dashboard::vcpu_halt_text(&h));
+            }
             if !self.fullscreen {
                 theme::page_header(
                     ui,
                     &format!("Console · {name}"),
                     &format!(
-                        "Click the screen to send keyboard and mouse to the guest; {} gives them back.",
-                        console::LEAVE_CHORD
+                        "Click the screen to capture keyboard and mouse for the guest; {} gives them back.",
+                        console::RELEASE_CHORD
                     ),
                     |_| {},
                 );
@@ -2857,6 +3605,7 @@ impl LightVmApp {
                 }
                 ui.add_space(4.0);
             }
+            self.tools_clipboard_ui(ui, ctx, vm_id, state.as_ref(), agent.is_none());
             let (layout, fullscreen) = (self.settings.keyboard_layout, self.fullscreen);
             let modal_open = self.dialog_open() || self.closing.is_some();
             let action = self.live.as_mut().and_then(|live| {
@@ -2892,6 +3641,104 @@ impl LightVmApp {
         page(ui, "lightvm_page_console", |ui| {
             theme::page_header(ui, "Console", CONSOLE_DESCRIPTION, |_| {});
             self.console_empty_state(ui, state.as_ref());
+        });
+    }
+
+    fn tools_clipboard_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        vm_id: VmId,
+        state: Option<&ServiceState>,
+        input_owned: bool,
+    ) {
+        use lightvm_proto::{ToolCall, ToolReply};
+        use service::RequestStatus;
+        let Some(state) = state else {
+            self.tools_clipboard_pending = None;
+            return;
+        };
+        let focused = ctx.input(|i| i.viewport().focused.unwrap_or(false));
+        let Some(vm) = state
+            .vm(vm_id)
+            .filter(|v| v.config.tools.enabled && v.config.tools.clipboard)
+        else {
+            self.tools_clipboard_pending = None;
+            return;
+        };
+        let Some(run_id) = vm.run_id else {
+            self.tools_clipboard_pending = None;
+            return;
+        };
+        if let Some(target) = self.tools_clipboard_pending {
+            if target != (vm_id, run_id) || !focused || !input_owned {
+                self.tools_clipboard_pending = None;
+            } else if let Some((v, r, status)) = &state.tools
+                && (*v, *r) == target
+            {
+                match status {
+                    RequestStatus::Done(ToolReply::Clipboard { text }) => {
+                        let result =
+                            arboard::Clipboard::new().and_then(|mut c| c.set_text(text.clone()));
+                        self.screenshot_status = Some((
+                            if result.is_ok() {
+                                "Guest text copied to the host clipboard".into()
+                            } else {
+                                "Host clipboard is unavailable".into()
+                            },
+                            if result.is_ok() {
+                                theme::Tone::Positive
+                            } else {
+                                theme::Tone::Warning
+                            },
+                        ));
+                        self.tools_clipboard_pending = None;
+                    }
+                    RequestStatus::Failed(f) => {
+                        self.screenshot_status = Some((f.message.clone(), theme::Tone::Warning));
+                        self.tools_clipboard_pending = None;
+                    }
+                    _ => (),
+                }
+            }
+        }
+        let pending = state.tools.as_ref().is_some_and(|(_, _, s)| s.is_pending());
+        ui.add_enabled_ui(focused && input_owned && !pending, |ui| {
+            ui.horizontal(|ui| {
+                if ui
+                    .button("Host text → Guest clipboard")
+                    .on_hover_text("Read the host clipboard once and send text to this guest")
+                    .clicked()
+                {
+                    match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
+                        Ok(text) if text.len() <= 64 * 1024 && !text.contains('\0') => {
+                            self.send(ServiceCommand::GuestTools {
+                                vm_id,
+                                run_id,
+                                call: ToolCall::ClipboardWrite { text },
+                            });
+                        }
+                        _ => {
+                            self.screenshot_status = Some((
+                                "Host clipboard text is unavailable or exceeds 64 KiB".into(),
+                                theme::Tone::Warning,
+                            ));
+                        }
+                    }
+                }
+                if ui
+                    .button("Guest text → Host clipboard")
+                    .on_hover_text("Read guest clipboard text once and replace the host clipboard")
+                    .clicked()
+                {
+                    self.tools_clipboard_pending = Some((vm_id, run_id));
+                    self.send(ServiceCommand::GuestTools {
+                        vm_id,
+                        run_id,
+                        call: ToolCall::ClipboardRead,
+                    });
+                }
+            });
         });
     }
 
@@ -3111,6 +3958,8 @@ impl LightVmApp {
             self.save_settings();
         }
 
+        self.media_section(ui);
+
         if self.simulated_console {
             ui.add_space(14.0);
             theme::group_title(ui, "Diagnostics");
@@ -3122,6 +3971,38 @@ impl LightVmApp {
                     |ui| ui.checkbox(&mut self.animate, "Update the simulated framebuffer"),
                 );
             });
+        }
+    }
+
+    /// Settings → Installation media: imported ISOs and their deletion.
+    fn media_section(&mut self, ui: &mut egui::Ui) {
+        let Some(st) = self.state() else { return };
+        ui.add_space(14.0);
+        theme::group_title(ui, "Installation media");
+        let deleting = st.delete_media.is_pending();
+        let chosen = theme::card(ui, |ui| {
+            media_library::media_ui(ui, &st.media, &st.vms, st.connected, deleting)
+        });
+        if let Some(id) = chosen
+            && let Some(m) = st.media.records.iter().find(|m| m.id == id)
+        {
+            self.media_dialog = Some(media_library::DeleteDialog::new(m));
+        }
+    }
+
+    /// Confirmation of a media deletion; stays open with the reason if the
+    /// supervisor refuses it.
+    fn media_dialog_ui(&mut self, ui: &egui::Ui) {
+        let Some(d) = &mut self.media_dialog else {
+            return;
+        };
+        let state = self.service.as_ref().map(|s| s.state()).unwrap_or_default();
+        match media_library::dialog_ui(ui, d, &state) {
+            media_library::DialogOutcome::Keep => {}
+            media_library::DialogOutcome::Close => self.media_dialog = None,
+            media_library::DialogOutcome::Delete(id) => {
+                self.send(ServiceCommand::DeleteMedia(id));
+            }
         }
     }
 
@@ -3267,8 +4148,8 @@ fn agent_input_notice(ui: &mut egui::Ui, client: Option<&str>, taking: bool) -> 
     let p = theme::Palette::of(ui);
     let mut clicked = false;
     egui::Frame::new()
-        .fill(p.warning.linear_multiply(0.12))
-        .corner_radius(egui::CornerRadius::same(6))
+        .fill(p.warning.linear_multiply(0.08))
+        .stroke(egui::Stroke::new(1.0, p.warning.linear_multiply(0.4)))
         .inner_margin(egui::Margin::symmetric(12, 6))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -3316,24 +4197,22 @@ fn page(ui: &mut egui::Ui, id: &str, content: impl FnOnce(&mut egui::Ui)) {
         });
 }
 
-/// Brand in the sidebar: an accent square with a stylised screen and the
-/// product name.
+/// Brand in the sidebar: an accent square with a stylised pixel screen and
+/// the product name in the pixel face.
 fn brand(ui: &mut egui::Ui) {
     let p = theme::Palette::of(ui);
     ui.horizontal(|ui| {
         ui.add_space(6.0);
         let (r, _) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::hover());
         let painter = ui.painter();
-        painter.rect_filled(r, egui::CornerRadius::same(6), p.accent);
-        let screen = egui::Rect::from_center_size(r.center(), egui::vec2(12.0, 9.0));
-        painter.rect_stroke(
-            screen,
-            egui::CornerRadius::same(2),
-            egui::Stroke::new(1.5, p.on_accent),
-            egui::StrokeKind::Middle,
-        );
+        painter.rect_filled(r, 0.0, p.accent);
+        let screen = egui::Rect::from_center_size(r.center(), egui::vec2(12.0, 8.0));
+        painter.rect_filled(screen, 0.0, p.on_accent);
+        let inner = screen.shrink(2.0);
+        painter.rect_filled(inner, 0.0, p.accent);
         ui.add_space(4.0);
-        ui.label(egui::RichText::new("LightVM").size(17.0).color(p.text));
+        let font = theme::pixel_font(ui, 22.0);
+        ui.label(egui::RichText::new("LightVM").font(font).color(p.text));
     });
 }
 

@@ -45,15 +45,16 @@ use std::sync::Arc;
 
 use lightvm_proto::ipc::{
     AgentCall, AgentVmView, BaselineSummary, InputOwner, ResponseBody, SCREENSHOT_CHUNK_BYTES,
-    SessionInfo, StorageOperation, VmBaselines, VmSummary,
+    SessionInfo, SnapshotSummary, SnapshotTree, StorageOperation, VcpuHalt, VmBaselines,
+    VmSnapshots, VmSummary,
 };
 use lightvm_proto::{
     Actor, Admission, AuditAction, AuditOutcome, BackendObservation, BaselineId, Caller,
     Capability, DisplayGeometry, ErrorCode, Grant, HostCapacity, InputEvent, Label, Lease,
-    MediaEntry, MediaKind, MediaRecord, OperationId, OperationKind, OperationRecord,
+    MediaEntry, MediaId, MediaKind, MediaRecord, OperationId, OperationKind, OperationRecord,
     OperationStatus, PolicyLayer, PublicError, ResourceLimits, RevocationReport, RunId, Screenshot,
-    SessionId, SessionState, SessionToken, TerminationCause, VmAction, VmConfig, VmId, VmRecord,
-    VmRequest, VmState,
+    SessionId, SessionState, SessionToken, SnapshotId, TerminationCause, VmAction, VmConfig, VmId,
+    VmRecord, VmRequest, VmState,
 };
 use vm_core::ports::{AuditSink, CatalogStore, IdGenerator, VmBackend};
 use vm_core::{Core, CoreConfig, DispatchOutcome, VmStatus};
@@ -69,6 +70,15 @@ pub type SubmitOutcome = (Admission, Option<OperationRecord>);
 
 /// VM operations served by the supervisor thread.
 pub trait VmEngine: Send + 'static {
+    fn tools_call(
+        &mut self,
+        _caller: &Caller,
+        _vm: VmId,
+        _run: RunId,
+        _call: lightvm_proto::ToolCall,
+    ) -> Result<lightvm_proto::ToolReply, PublicError> {
+        Err(PublicError::unsupported("guest Tools unavailable"))
+    }
     /// List of the VMs visible to the caller.
     fn list_vms(&mut self, caller: &Caller) -> Result<Vec<VmSummary>, PublicError>;
     /// Status of a VM.
@@ -131,6 +141,11 @@ pub trait VmEngine: Send + 'static {
         copied: ImportCopied,
         reason: PublicError,
     ) -> PublicError;
+    /// Deletion of an imported medium no VM configuration uses (a managed
+    /// copy is removed with it, a file used in place is kept).
+    fn delete_media(&mut self, _caller: &Caller, _media_id: MediaId) -> Result<(), PublicError> {
+        Err(PublicError::unsupported("media deletion not available"))
+    }
     /// Deletion of a stopped VM with its files.
     fn delete_vm(
         &mut self,
@@ -193,6 +208,35 @@ pub trait VmEngine: Send + 'static {
         _baseline_id: BaselineId,
     ) -> Result<(), PublicError> {
         Err(PublicError::unsupported("baselines not available"))
+    }
+    /// User snapshots of a VM as a tree (UI only, ADR-0032). Take, revert,
+    /// delete and promote are storage jobs ([`Self::begin_baseline_job`]).
+    fn list_snapshots(
+        &mut self,
+        _caller: &Caller,
+        _vm_id: VmId,
+    ) -> Result<SnapshotTree, PublicError> {
+        Err(PublicError::unsupported("snapshots not available"))
+    }
+    /// New name and description of a user snapshot (UI only).
+    fn update_snapshot(
+        &mut self,
+        _caller: &Caller,
+        _vm_id: VmId,
+        _snapshot_id: SnapshotId,
+        _name: Label,
+        _description: String,
+    ) -> Result<SnapshotSummary, PublicError> {
+        Err(PublicError::unsupported("snapshots not available"))
+    }
+    /// Thumbnail PNG of a user snapshot, if one was kept (UI only).
+    fn snapshot_thumbnail(
+        &mut self,
+        _caller: &Caller,
+        _vm_id: VmId,
+        _snapshot_id: SnapshotId,
+    ) -> Result<Option<Vec<u8>>, PublicError> {
+        Ok(None)
     }
     /// `true`: the file checks of a start (media and baseline hashes) are
     /// left to the caller as [`StartJob`]s ([`Self::take_start_jobs`]) and
@@ -273,6 +317,16 @@ pub trait VmEngine: Send + 'static {
     fn input_owner_changes(&mut self) -> Vec<(VmId, InputOwner)> {
         Vec::new()
     }
+    /// ADR-0033: brings the allowed endpoints of every running VM on the
+    /// endpoint allowlist in line with its sessions (connections to
+    /// endpoints no longer allowed are reset), audits the network records
+    /// of the backend and returns them for the session reports.
+    fn sync_network(&mut self) -> Vec<NetworkRecord> {
+        Vec::new()
+    }
+    fn sync_tools(&mut self) -> Vec<ToolsRecord> {
+        Vec::new()
+    }
     /// Audit of a session lifecycle step decided by the service.
     /// Facts of a VM for a session report (F5): name, configuration and
     /// revision, current baseline, current run.
@@ -305,6 +359,51 @@ pub trait VmEngine: Send + 'static {
     /// QEMU diagnostics of the VM's current run (raw text, last part).
     fn qemu_log(&mut self, _vm_id: VmId) -> Option<String> {
         None
+    }
+
+    // ----- VMware import (ADR-0030) ---------------------------------------
+
+    /// First step of a VMware preview or import (supervisor thread): user
+    /// only (a refusal is audited `vm_import` denied); the context for the
+    /// examination on a worker.
+    fn vmware_context(
+        &mut self,
+        _caller: &Caller,
+    ) -> Result<crate::vmware::VmwareContext, PublicError> {
+        Err(PublicError::unsupported("VMware import not available"))
+    }
+    /// An import refused by the examination of the VMware files (audited
+    /// `vm_import` denied).
+    fn vmware_denied(&mut self, _caller: &Caller, _error: &PublicError) {}
+    /// Core checks of the configuration, storage budget, then the journal
+    /// intent of the import; returns where to write the converted disk.
+    fn vmware_begin(
+        &mut self,
+        _caller: &Caller,
+        _config: &VmConfig,
+        _required_bytes: u64,
+        _free_bytes: Option<u64>,
+    ) -> Result<VmImportSlot, PublicError> {
+        Err(PublicError::unsupported("VMware import not available"))
+    }
+    /// Publishes the converted disk with the VM row and registers the VM.
+    fn vmware_finish(
+        &mut self,
+        _caller: &Caller,
+        _slot: VmImportSlot,
+        _config: VmConfig,
+    ) -> Result<VmRecord, PublicError> {
+        Err(PublicError::unsupported("VMware import not available"))
+    }
+    /// Rolls an import back (cancellation, failure); audited `failed`;
+    /// returns `reason`.
+    fn vmware_abort(
+        &mut self,
+        _caller: &Caller,
+        _slot: VmImportSlot,
+        reason: PublicError,
+    ) -> PublicError {
+        reason
     }
 
     fn record_event(
@@ -344,6 +443,7 @@ pub trait SessionGate: Send + Sync + 'static {
 /// Session approved in the app, for [`VmEngine::create_session`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewSession {
+    pub tools: lightvm_proto::ToolGrant,
     /// The single VM of the grant.
     pub vm_id: VmId,
     /// Granted capabilities.
@@ -364,6 +464,8 @@ pub struct NewSession {
     pub client_name: String,
     /// Purpose declared by the agent.
     pub purpose: String,
+    /// Network endpoints granted with `network.endpoints` (ADR-0033).
+    pub network_endpoints: BTreeSet<String>,
 }
 
 /// Facts of a VM for a session report, see [`VmEngine::report_context`].
@@ -419,6 +521,155 @@ pub trait ImageTool: Send + Sync + std::fmt::Debug + 'static {
     fn firmware_vars_template(&self) -> Option<PathBuf> {
         None
     }
+    /// `qemu-img info --backing-chain --output=json -f vmdk` of a VMware
+    /// disk whose chain was validated (ADR-0030).
+    fn vmdk_chain_info(
+        &self,
+        _top: &Path,
+        _cancel: &dyn Fn() -> bool,
+    ) -> Result<String, PublicError> {
+        Err(PublicError::unsupported(
+            "VMware import not available on this backend",
+        ))
+    }
+    /// Conversion of a VMware disk (chain flattened) into the new QCOW2
+    /// file `dst`, with the percentage of progress (ADR-0030).
+    fn convert_vmdk(
+        &self,
+        _src: &Path,
+        _dst: &Path,
+        _cancel: &dyn Fn() -> bool,
+        _progress: &mut dyn FnMut(u8),
+    ) -> Result<(), PublicError> {
+        Err(PublicError::unsupported(
+            "VMware import not available on this backend",
+        ))
+    }
+    /// Free bytes of the volume holding `dir`, if measurable.
+    fn free_bytes(&self, _dir: &Path) -> Option<u64> {
+        None
+    }
+    /// `qemu-img snapshot -c/-a/-d <tag>` on the VM's own disk with the VM
+    /// off (ADR-0032).
+    fn internal_snapshot(
+        &self,
+        _disk: &Path,
+        _action: DiskSnapshotAction,
+        _tag: &str,
+        _cancel: &dyn Fn() -> bool,
+    ) -> Result<(), PublicError> {
+        Err(PublicError::unsupported(
+            "snapshots not available on this backend",
+        ))
+    }
+    /// Standalone copy of the internal snapshot `tag` of `src` into the new
+    /// file `dst` (promotion of a snapshot to a baseline, ADR-0032).
+    fn convert_snapshot(
+        &self,
+        _src: &Path,
+        _tag: &str,
+        _dst: &Path,
+        _cancel: &dyn Fn() -> bool,
+    ) -> Result<(), PublicError> {
+        Err(PublicError::unsupported(
+            "snapshots not available on this backend",
+        ))
+    }
+    /// `true` when the storage helper (ADR-0030, an approved image found by
+    /// the probe) can prepare converted Windows disks.
+    fn storage_helper_available(&self) -> bool {
+        false
+    }
+    /// Runs the storage helper on the converted disk `disk` (a journal
+    /// temporary nobody else has open): exports `keys`, after importing
+    /// `reg` when given (ADR-0030, `qemu_backend::storage_helper`).
+    fn run_storage_helper(
+        &self,
+        _disk: &Path,
+        _keys: &[String],
+        _reg: Option<&str>,
+        _cancel: &dyn Fn() -> bool,
+    ) -> Result<qemu_backend::storage_helper::HelperReport, PublicError> {
+        Err(PublicError::unsupported("storage helper not available"))
+    }
+}
+
+/// Internal snapshot operation on a disk with the VM off (ADR-0032).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiskSnapshotAction {
+    /// New internal snapshot of the current state.
+    Create,
+    /// The current state becomes the snapshot's.
+    Apply,
+    /// Removal of the snapshot.
+    Delete,
+}
+
+/// Wraps the result of a snapshot's disk operation for the finishing step
+/// (ADR-0032).
+pub type SnapshotFinish = Box<dyn FnOnce(Result<(), PublicError>) -> Box<dyn Any + Send> + Send>;
+
+/// First step of a user snapshot operation on the catalog (ADR-0032): the
+/// journal intent is recorded; the disk operation on `disk` with `tag` is
+/// then done by the engine (QMP while the VM runs, `qemu-img` on a worker
+/// with the VM off) and its result handed to `finish`, whose output goes to
+/// [`BaselinePort::finish_storage_job`] or
+/// [`BaselinePort::abort_storage_job`] (both settle from the disk).
+pub struct SnapshotStep {
+    /// The VM's own disk.
+    pub disk: PathBuf,
+    /// Name of the internal snapshot in the disk.
+    pub tag: String,
+    /// Wraps the result of the disk operation for the finishing step.
+    pub finish: SnapshotFinish,
+}
+
+impl std::fmt::Debug for SnapshotStep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SnapshotStep({})", self.tag)
+    }
+}
+
+/// Catalog side of a VMware import (ADR-0030): journal intent `import_vm`,
+/// then the converted disk and the VM row published together. The default
+/// is a catalog without imports.
+pub trait VmImportPort {
+    /// Catalog root (the converted disk lands below it).
+    fn catalog_root(&self) -> Option<PathBuf> {
+        None
+    }
+    /// Records the import of VM `vm` and returns where the converted disk
+    /// is written.
+    fn begin_vm_import(&mut self, _vm: VmId) -> Result<VmImportSlot, PublicError> {
+        Err(PublicError::unsupported(
+            "VMware import not available on this catalog",
+        ))
+    }
+    /// Publishes the converted disk of `slot` and writes the VM row.
+    fn finish_vm_import(&mut self, _slot: VmImportSlot, _vm: &VmRecord) -> Result<(), PublicError> {
+        Err(PublicError::unsupported(
+            "VMware import not available on this catalog",
+        ))
+    }
+    /// Rolls the import back (temporary and VM directory removed).
+    fn abort_vm_import(&mut self, _slot: VmImportSlot) {}
+}
+
+/// A VMware import recorded in the catalog, between
+/// [`VmImportPort::begin_vm_import`] and its end.
+pub struct VmImportSlot {
+    /// VM being created.
+    pub vm_id: VmId,
+    /// Where the converted disk is written (journal temporary).
+    pub temp_path: PathBuf,
+    /// Catalog-specific state.
+    pub inner: Box<dyn Any + Send>,
+}
+
+impl std::fmt::Debug for VmImportSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "VmImportSlot({})", self.vm_id)
+    }
 }
 
 /// Verified and guarded files of a VM's current state for a start (F3).
@@ -466,21 +717,61 @@ pub enum BaselineRequest {
         /// Baseline.
         baseline_id: BaselineId,
     },
+    /// `take_snapshot` (ADR-0032).
+    TakeSnapshot {
+        /// VM.
+        vm_id: VmId,
+        /// Name.
+        name: Label,
+        /// Description.
+        description: String,
+    },
+    /// `revert_snapshot` (ADR-0032).
+    RevertSnapshot {
+        /// VM.
+        vm_id: VmId,
+        /// Snapshot.
+        snapshot_id: SnapshotId,
+    },
+    /// `delete_snapshot` (ADR-0032).
+    DeleteSnapshot {
+        /// VM.
+        vm_id: VmId,
+        /// Snapshot.
+        snapshot_id: SnapshotId,
+    },
+    /// `promote_snapshot` (ADR-0032): a baseline from a snapshot taken off.
+    PromoteSnapshot {
+        /// VM.
+        vm_id: VmId,
+        /// Snapshot.
+        snapshot_id: SnapshotId,
+        /// Label of the new baseline.
+        label: Label,
+    },
 }
 
 impl BaselineRequest {
     /// VM of the request.
     pub fn vm_id(&self) -> VmId {
         match self {
-            Self::Create { vm_id, .. } | Self::Restore { vm_id, .. } => *vm_id,
+            Self::Create { vm_id, .. }
+            | Self::Restore { vm_id, .. }
+            | Self::TakeSnapshot { vm_id, .. }
+            | Self::RevertSnapshot { vm_id, .. }
+            | Self::DeleteSnapshot { vm_id, .. }
+            | Self::PromoteSnapshot { vm_id, .. } => *vm_id,
         }
     }
 
     /// Kind of the core operation.
     pub fn kind(&self) -> OperationKind {
         match self {
-            Self::Create { .. } => OperationKind::Snapshot,
+            Self::Create { .. } | Self::PromoteSnapshot { .. } => OperationKind::Snapshot,
             Self::Restore { .. } => OperationKind::Restore,
+            Self::TakeSnapshot { .. } => OperationKind::UserSnapshot,
+            Self::RevertSnapshot { .. } => OperationKind::UserSnapshotRevert,
+            Self::DeleteSnapshot { .. } => OperationKind::UserSnapshotDelete,
         }
     }
 }
@@ -549,6 +840,25 @@ pub enum BaselineOutcome {
         /// Baseline.
         baseline_id: BaselineId,
     },
+    /// User snapshot taken (ADR-0032).
+    SnapshotTaken(SnapshotSummary),
+    /// VM reverted to a user snapshot: `record` is the VM's new record (the
+    /// snapshot's configuration, new revision).
+    SnapshotReverted {
+        /// VM.
+        vm_id: VmId,
+        /// Snapshot.
+        snapshot_id: SnapshotId,
+        /// New record of the VM.
+        record: Box<VmRecord>,
+    },
+    /// User snapshot deleted.
+    SnapshotDeleted {
+        /// VM.
+        vm_id: VmId,
+        /// Snapshot.
+        snapshot_id: SnapshotId,
+    },
 }
 
 /// Baselines on a catalog (F3). The defaults describe a catalog without
@@ -591,9 +901,14 @@ pub trait BaselinePort {
     ) -> Result<BaselineOutcome, PublicError> {
         Err(PublicError::unsupported("baselines not available"))
     }
-    /// Discards the result of a work.
-    fn abort_storage_job(&mut self, _done: Box<dyn Any + Send>) -> Result<(), PublicError> {
-        Ok(())
+    /// Discards the result of a work. A user snapshot operation is settled
+    /// from the disk instead: `Some` when its disk operation had completed
+    /// and the result is kept.
+    fn abort_storage_job(
+        &mut self,
+        _done: Box<dyn Any + Send>,
+    ) -> Result<Option<BaselineOutcome>, PublicError> {
+        Ok(None)
     }
     /// Deletes a baseline with its files.
     fn delete_baseline(&mut self, _vm: VmId, _baseline: BaselineId) -> Result<(), PublicError> {
@@ -609,9 +924,100 @@ pub trait BaselinePort {
     }
     /// Records whether a run ended with an observed clean guest shutdown.
     fn record_exit(&self, _run: RunId, _clean: bool) {}
+
+    // ----- user snapshots (ADR-0032) ---------------------------------------
+    // Settled by `finish_storage_job` / `abort_storage_job` like the
+    // baseline jobs; the defaults describe a catalog without snapshots.
+
+    /// Snapshot tree of a VM (`available` and the reason filled by the
+    /// catalog's own checks: overlay of a baseline, no disk yet, TPM).
+    fn snapshot_tree(&self, _vm: &VmRecord) -> Result<SnapshotTree, PublicError> {
+        Ok(SnapshotTree {
+            available: false,
+            unavailable_reason: Some("snapshots not available on this catalog".into()),
+            ..SnapshotTree::default()
+        })
+    }
+    /// Snapshot facts of a VM for [`VmSummary`].
+    fn snapshot_facts(&self, _vm: VmId) -> VmSnapshots {
+        VmSnapshots::default()
+    }
+    /// Configuration saved with a snapshot, and whether it was taken while
+    /// the VM ran.
+    fn snapshot_config(
+        &self,
+        _vm: VmId,
+        _snapshot: SnapshotId,
+    ) -> Result<(VmConfig, bool), PublicError> {
+        Err(PublicError::unsupported("snapshots not available"))
+    }
+    /// First step of a take: budget and free space, journal intent, copy of
+    /// the UEFI variables (the run's file while running) and thumbnail.
+    fn begin_take_snapshot(
+        &mut self,
+        _vm: &VmRecord,
+        _name: &Label,
+        _description: &str,
+        _running: bool,
+        _thumbnail: Option<Vec<u8>>,
+        _reserve_bytes: u64,
+    ) -> Result<SnapshotStep, PublicError> {
+        Err(PublicError::unsupported("snapshots not available"))
+    }
+    /// First step of a revert (VM off): journal intent with the new record
+    /// of the VM (`record`, computed by the core), copy of the snapshot's
+    /// UEFI variables.
+    fn begin_revert_snapshot(
+        &mut self,
+        _vm: &VmRecord,
+        _snapshot: SnapshotId,
+        _record: VmRecord,
+    ) -> Result<SnapshotStep, PublicError> {
+        Err(PublicError::unsupported("snapshots not available"))
+    }
+    /// First step of a deletion.
+    fn begin_delete_snapshot(
+        &mut self,
+        _vm: &VmRecord,
+        _snapshot: SnapshotId,
+    ) -> Result<SnapshotStep, PublicError> {
+        Err(PublicError::unsupported("snapshots not available"))
+    }
+    /// New name and description.
+    fn update_snapshot(
+        &mut self,
+        _vm: VmId,
+        _snapshot: SnapshotId,
+        _name: &Label,
+        _description: &str,
+    ) -> Result<SnapshotSummary, PublicError> {
+        Err(PublicError::unsupported("snapshots not available"))
+    }
+    /// Thumbnail PNG of a snapshot, if one was kept.
+    fn snapshot_thumbnail(
+        &self,
+        _vm: VmId,
+        _snapshot: SnapshotId,
+    ) -> Result<Option<Vec<u8>>, PublicError> {
+        Ok(None)
+    }
+    /// First step of the promotion of a snapshot taken off to a baseline
+    /// (ADR-0005 rules): as [`Self::begin_create_baseline`] with the
+    /// snapshot's disk state, UEFI variables and configuration.
+    fn begin_promote_snapshot(
+        &mut self,
+        _vm: &VmRecord,
+        _snapshot: SnapshotId,
+        _label: &Label,
+        _tool: Arc<dyn ImageTool>,
+        _cancel: CancelCheck,
+    ) -> Result<StorageWork, PublicError> {
+        Err(PublicError::unsupported("snapshots not available"))
+    }
 }
 
-/// Copy of a media import, to run on a worker thread; its result goes back
+/// Worker step of a media import (open, checks, hash: ADR-0029, nothing is
+/// copied), to run on a worker thread; its result goes back
 /// to [`VmEngine::finish_import`] on the supervisor thread.
 pub struct ImportJob(Box<dyn FnOnce() -> ImportCopied + Send>);
 
@@ -621,7 +1027,7 @@ impl ImportJob {
         Self(Box::new(f))
     }
 
-    /// Runs the copy (blocking).
+    /// Runs the step (blocking).
     pub fn run(self) -> ImportCopied {
         (self.0)()
     }
@@ -642,20 +1048,24 @@ impl std::fmt::Debug for ImportCopied {
     }
 }
 
-/// Media import in two steps on a catalog (the copy runs between them,
+/// Media import in two steps on a catalog (the hash runs between them,
 /// outside the catalog).
 pub trait MediaImportPort {
-    /// Opens the source, checks it and records the intent.
+    /// Reserves the import; the returned job opens, checks and hashes the
+    /// source.
     fn begin_import(
         &mut self,
         source: &Path,
         kind: MediaKind,
         declared_origin: &Label,
     ) -> Result<ImportJob, PublicError>;
-    /// Publishes the copy made by the job.
+    /// Records the medium checked and hashed by the job.
     fn finish_import(&mut self, copied: ImportCopied) -> Result<MediaEntry, PublicError>;
-    /// Discards the copy made by the job without publishing it.
+    /// Discards the outcome of the job without recording anything.
     fn abort_import(&mut self, copied: ImportCopied) -> Result<(), PublicError>;
+    /// A start found the file of a medium used in place missing (ADR-0029):
+    /// the registry marks it `missing`. Best effort, no outcome.
+    fn mark_media_missing(&self, _id: MediaId) {}
 }
 
 /// Data for a console ticket.
@@ -669,11 +1079,108 @@ pub struct ConsoleTarget {
     pub geometry: Option<DisplayGeometry>,
 }
 
+/// Automatic reset decided by the backend for a guest whose virtual CPUs
+/// stopped on an unrecoverable error (audit `vm_auto_reset`, actor `system`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutoReset {
+    /// VM.
+    pub vm_id: VmId,
+    /// Run.
+    pub run_id: RunId,
+    /// `succeeded` (reset and resumed), `failed` (QMP refused) or `denied`
+    /// (limit reached: the guest is left stopped).
+    pub outcome: AuditOutcome,
+    /// Code of a failure or denial.
+    pub error: Option<ErrorCode>,
+}
+
+/// Bounded metadata emitted by a run-owned Tools channel.
+#[derive(Clone, Debug)]
+pub struct ToolsRecord {
+    pub vm_id: VmId,
+    pub run_id: RunId,
+    pub action: AuditAction,
+    pub outcome: AuditOutcome,
+    pub detail: lightvm_proto::ToolAudit,
+}
+impl ToolsRecord {
+    pub(crate) fn file(
+        vm_id: VmId,
+        run_id: RunId,
+        record: lightvm_tools::files::FileRecord,
+    ) -> Self {
+        Self {
+            vm_id,
+            run_id,
+            action: AuditAction::ToolsTransfer,
+            outcome: if record.outcome == "completed" {
+                AuditOutcome::Succeeded
+            } else {
+                AuditOutcome::Failed
+            },
+            detail: lightvm_proto::ToolAudit {
+                feature: "share.write".into(),
+                share: Some(record.share),
+                name: Some(record.path.components().join("/")),
+                bytes: Some(record.bytes),
+                reason: Some(format!("{}:{}", record.operation, record.outcome)),
+            },
+        }
+    }
+}
+
 /// VM backend as seen by the engine: the core's `VmBackend` port plus the
 /// asynchronous observations (process exit not requested by the core).
 pub trait BackendPort: VmBackend + Send + 'static {
+    fn take_tools_records(&mut self) -> Vec<ToolsRecord> {
+        Vec::new()
+    }
+    fn suspend_tools(&mut self, _vm: VmId) {}
+    fn set_tools_policy(&mut self, _vm: VmId, _run: RunId, _policy: crate::tools::Policy) {}
+    fn tools_call(
+        &mut self,
+        _vm: VmId,
+        _run: RunId,
+        _command: lightvm_tools::control::Command,
+    ) -> Result<lightvm_tools::control::Reply, PublicError> {
+        Err(PublicError::unsupported(
+            "guest Tools channel is not available",
+        ))
+    }
     /// Accumulated observations to apply to the core with `Core::observe`.
     fn drain_observations(&mut self) -> Vec<(VmId, BackendObservation)>;
+    /// The guest of the run is stopped on a virtual CPU error and was not
+    /// restarted automatically (the process is alive): shown in
+    /// [`VmSummary::vcpu_halt`].
+    fn vcpu_halt(&self, _vm_id: VmId, _run_id: RunId) -> Option<VcpuHalt> {
+        None
+    }
+    /// Automatic resets decided since the last call, for the audit.
+    fn take_auto_resets(&mut self) -> Vec<AutoReset> {
+        Vec::new()
+    }
+    /// Guests this backend can run on this host (ADR-0007, ADR-0028): by
+    /// default the ones the host accelerates
+    /// ([`lightvm_proto::GuestOs::runs_on_this_host_with`]).
+    fn guest_support(&self) -> vm_core::resources::GuestSupport {
+        lightvm_proto::GuestOs::runs_on_this_host_with
+    }
+    /// ADR-0033: sets the endpoints allowed on the run's network (names
+    /// normalized). `true` if the set changed (the first call of a run
+    /// included).
+    fn set_network_allowed(
+        &mut self,
+        _vm_id: VmId,
+        _run_id: RunId,
+        _allowed: &BTreeSet<String>,
+    ) -> bool {
+        false
+    }
+    /// ADR-0033: network records of the runs since the last call (set-up,
+    /// connections that ended, refused attempts).
+    fn take_network_records(&mut self) -> Vec<NetworkRecord> {
+        Vec::new()
+    }
     /// Display socket of the run (QEMU `vnc.sock`), if the backend has one.
     fn display_socket(&self, _vm_id: VmId, _run_id: RunId) -> Option<PathBuf> {
         None
@@ -693,6 +1200,33 @@ pub trait BackendPort: VmBackend + Send + 'static {
         None
     }
 
+    /// Disk-only internal snapshot `tag` of the running VM's own disk (QMP
+    /// `blockdev-snapshot-internal-sync`, ADR-0032).
+    fn snapshot_disk(
+        &mut self,
+        _vm_id: VmId,
+        _run_id: RunId,
+        _tag: &str,
+    ) -> Result<(), PublicError> {
+        Err(PublicError::unsupported(
+            "snapshots of a running VM not available on this backend",
+        ))
+    }
+    /// Deletion of the internal snapshot `tag` of the running VM's disk.
+    fn delete_disk_snapshot(
+        &mut self,
+        _vm_id: VmId,
+        _run_id: RunId,
+        _tag: &str,
+    ) -> Result<(), PublicError> {
+        Err(PublicError::unsupported(
+            "snapshots of a running VM not available on this backend",
+        ))
+    }
+    /// Small PNG of the screen of a running VM for a snapshot thumbnail.
+    fn snapshot_thumbnail(&mut self, _vm_id: VmId, _run_id: RunId) -> Option<Vec<u8>> {
+        None
+    }
     fn take_screenshot(&mut self, _vm_id: VmId, _run_id: RunId) -> Option<(Screenshot, Vec<u8>)> {
         None
     }
@@ -757,6 +1291,9 @@ fn summary(s: VmStatus, disk_used_bytes: Option<u64>, mut baselines: VmBaselines
     baselines.operation = match s.storage_operation {
         Some(OperationKind::Snapshot) => Some(StorageOperation::CreateBaseline),
         Some(OperationKind::Restore) => Some(StorageOperation::RestoreBaseline),
+        Some(OperationKind::UserSnapshot) => Some(StorageOperation::TakeSnapshot),
+        Some(OperationKind::UserSnapshotRevert) => Some(StorageOperation::RevertSnapshot),
+        Some(OperationKind::UserSnapshotDelete) => Some(StorageOperation::DeleteSnapshot),
         _ => None,
     };
     VmSummary {
@@ -768,8 +1305,17 @@ fn summary(s: VmStatus, disk_used_bytes: Option<u64>, mut baselines: VmBaselines
         config_revision: s.config_revision,
         disk_used_bytes,
         baselines,
+        snapshots: VmSnapshots::default(),
         start: None,
+        vcpu_halt: None,
     }
+}
+
+#[derive(Debug)]
+struct ToolTree {
+    run: RunId,
+    id: u64,
+    elements: BTreeSet<u32>,
 }
 
 /// Engine over `vm_core::Core` with the system clock and identifiers.
@@ -784,6 +1330,9 @@ where
     ids: SystemIds,
     /// State and run of every VM at the last [`VmEngine::state_changes`].
     last: BTreeMap<VmId, (VmState, Option<RunId>)>,
+    /// VMs whose guest was stopped on a vCPU error at the last
+    /// [`VmEngine::state_changes`].
+    last_halted: BTreeSet<VmId>,
     /// Last display geometry refresh per VM (run, instant): debounce.
     last_refresh: BTreeMap<VmId, (RunId, std::time::Instant)>,
     /// Graceful stops forwarded and still running in the backend: VM â†’
@@ -813,6 +1362,27 @@ where
     /// Storage operations of agent sessions in progress (F5): operation →
     /// session, to record the baselines a session created.
     agent_storage: BTreeMap<OperationId, SessionId>,
+    /// Runs an agent session targeted (ADR-0033): their network never
+    /// widens again after the session ends.
+    net_tainted: BTreeMap<VmId, RunId>,
+    tool_trees: BTreeMap<(VmId, Option<SessionId>), ToolTree>,
+}
+
+/// A network event of a run (ADR-0033), audited by the engine and recorded
+/// in the reports of the sessions of the VM.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetworkRecord {
+    /// VM.
+    pub vm_id: VmId,
+    /// Run.
+    pub run_id: RunId,
+    /// `network_setup`, `network_connection`, `network_denied` or
+    /// `network_policy`.
+    pub action: AuditAction,
+    /// Outcome.
+    pub outcome: AuditOutcome,
+    /// Details.
+    pub detail: lightvm_proto::NetworkAudit,
 }
 
 /// Service-side data of an agent session.
@@ -868,7 +1438,7 @@ where
 
 impl<S, A, B, M> CoreEngine<S, A, B, M>
 where
-    S: CatalogStore + MediaImportPort + BaselinePort + Send + 'static,
+    S: CatalogStore + MediaImportPort + BaselinePort + VmImportPort + Send + 'static,
     A: AuditSink + Send + 'static,
     B: BackendPort,
     M: MediaGuardPort + Send + 'static,
@@ -883,6 +1453,7 @@ where
         config: CoreConfig,
     ) -> Result<Self, PublicError> {
         let mut core = Core::new(store, SystemClock, SystemIds::default(), audit, config);
+        core.set_guest_support(backend.guest_support());
         core.load_catalog()?;
         // A freshly started supervisor owns no processes: those of a previous
         // supervisor terminated with its Job Object (ADR-0009).
@@ -899,6 +1470,7 @@ where
             inspector,
             ids: SystemIds::default(),
             last: BTreeMap::new(),
+            last_halted: BTreeSet::new(),
             last_refresh: BTreeMap::new(),
             pending_stops: BTreeMap::new(),
             offload: false,
@@ -910,6 +1482,8 @@ where
             last_owners: BTreeMap::new(),
             gate: None,
             gate_reports: BTreeMap::new(),
+            net_tainted: BTreeMap::new(),
+            tool_trees: BTreeMap::new(),
             agent_storage: BTreeMap::new(),
         };
         let _ = e.state_changes();
@@ -968,6 +1542,10 @@ where
         }
         for (vm_id, obs) in self.backend.drain_observations() {
             let _ = self.core.observe(vm_id, obs);
+        }
+        for r in self.backend.take_auto_resets() {
+            self.core
+                .record_auto_reset(r.vm_id, r.run_id, r.outcome, r.error);
         }
         self.record_exits();
         self.settle_pending_stops();
@@ -1055,9 +1633,23 @@ where
             }
             _ => None,
         };
+        let vcpu_halt = match (s.state, s.run_id) {
+            (VmState::Running, Some(run)) => self.backend.vcpu_halt(s.vm_id, run),
+            _ => None,
+        };
+        let snapshots = self.core.store().snapshot_facts(s.vm_id);
         let mut out = summary(s, used, baselines);
+        out.snapshots = snapshots;
         out.start = start;
+        out.vcpu_halt = vcpu_halt;
         out
+    }
+
+    /// Guests stopped on a virtual CPU error, for the change detection of
+    /// [`VmEngine::state_changes`].
+    fn halted(&self, vm: &VmStatus) -> bool {
+        matches!((vm.state, vm.run_id), (VmState::Running, Some(run))
+            if self.backend.vcpu_halt(vm.vm_id, run).is_some())
     }
 
     /// Starts in progress (checks running on a worker).
@@ -1089,6 +1681,9 @@ where
             match self.inspector.open_for_start(&entry) {
                 Ok(g) => media.push((entry, g)),
                 Err(e) => {
+                    if e.code == ErrorCode::NotFound {
+                        self.core.store().mark_media_missing(entry.record.id);
+                    }
                     drop(disks);
                     self.core.finish_dispatch(vm_id, d.operation_id, Err(e))?;
                     return Ok(None);
@@ -1282,6 +1877,7 @@ where
             .or_else(|| s.grant.vm_allowlist.iter().next().copied())?;
         let live = s.state != SessionState::Terminated;
         Some(SessionInfo {
+            tools: s.grant.tools.clone(),
             session_id: id,
             vm_id,
             connection_id: meta.filter(|_| live).map(|m| m.connection_id),
@@ -1290,6 +1886,7 @@ where
             state: s.state,
             termination: s.termination,
             capabilities: s.grant.capabilities.clone(),
+            network_endpoints: s.grant.network_endpoints.iter().cloned().collect(),
             quotas: s.grant.quotas,
             usage: lightvm_proto::ipc::SessionUsage {
                 operations: s.usage.operations,
@@ -1303,7 +1900,35 @@ where
         })
     }
 
+    /// Granted endpoints of `session` on a VM with `config`, as the agent
+    /// uses them inside the guest (ADR-0033).
+    fn agent_endpoints(
+        &self,
+        config: &VmConfig,
+        session: SessionId,
+    ) -> Vec<lightvm_proto::ipc::AgentEndpointView> {
+        let Some(s) = self.core.sessions().get(session) else {
+            return Vec::new();
+        };
+        if !s.grant.capabilities.contains(&Capability::NetworkEndpoints)
+            || config.network == lightvm_proto::NetworkProfile::Offline
+        {
+            return Vec::new();
+        }
+        config
+            .endpoints
+            .iter()
+            .filter(|e| s.grant.network_endpoints.contains(&e.key()))
+            .map(|e| lightvm_proto::ipc::AgentEndpointView {
+                name: e.name.clone(),
+                virtual_ip: e.virtual_ip,
+                port: e.port,
+            })
+            .collect()
+    }
+
     fn agent_view(&self, st: VmStatus, session: SessionId) -> AgentVmView {
+        let network_endpoints = self.agent_endpoints(&st.config, session);
         AgentVmView {
             vm_id: st.vm_id,
             name: st.name,
@@ -1314,6 +1939,7 @@ where
                 == InputOwner::Agent {
                     session_id: session,
                 },
+            network_endpoints,
         }
     }
 
@@ -1438,6 +2064,128 @@ where
     }
 }
 
+impl<S, A, B, M> CoreEngine<S, A, B, M>
+where
+    S: CatalogStore + MediaImportPort + BaselinePort + VmImportPort + Send + 'static,
+    A: AuditSink + Send + 'static,
+    B: BackendPort,
+    M: MediaGuardPort + Send + 'static,
+{
+    /// User snapshot take, revert or delete (ADR-0032): core checks (user
+    /// only, no agent session on the VM, VM off, or running for take and
+    /// delete), journal intent on the catalog, then the disk operation:
+    /// while the VM runs it is done here through QMP (the guest is paused
+    /// by QEMU for its duration) and the returned work only hands the result
+    /// over; with the VM off the work runs `qemu-img` on the worker. Either
+    /// way the catalog settles it from the disk when the work comes back.
+    fn begin_snapshot_job(
+        &mut self,
+        caller: &Caller,
+        req: BaselineRequest,
+        tool: Option<Arc<dyn ImageTool>>,
+        cancel: CancelCheck,
+    ) -> Result<StorageJob, PublicError> {
+        let vm_id = req.vm_id();
+        let kind = req.kind();
+        if let BaselineRequest::TakeSnapshot { description, .. } = &req {
+            lightvm_proto::ipc::validate_snapshot_description(description).map_err(|m| {
+                PublicError::invalid_argument(m).with_detail("field", "description")
+            })?;
+        }
+        // A revert gives the VM the snapshot's configuration: computed (and
+        // checked against the current limits) before anything is written.
+        let reverted = match &req {
+            BaselineRequest::RevertSnapshot { snapshot_id, .. }
+                if matches!(caller, Caller::User) =>
+            {
+                let (config, _) = self.core.store().snapshot_config(vm_id, *snapshot_id)?;
+                Some(self.core.reverted_record(vm_id, config)?)
+            }
+            _ => None,
+        };
+        let reserve = self
+            .core
+            .config()
+            .host
+            .reserved_storage_gib
+            .saturating_mul(1 << 30);
+        // The thumbnail of a running VM is taken before the operation.
+        let thumbnail = match (&req, self.core.vm_status(&Caller::User, vm_id)) {
+            (BaselineRequest::TakeSnapshot { .. }, Ok(st))
+                if st.state == VmState::Running && matches!(caller, Caller::User) =>
+            {
+                st.run_id
+                    .and_then(|run| self.backend.snapshot_thumbnail(vm_id, run))
+            }
+            _ => None,
+        };
+        let backend = &mut self.backend;
+        let (operation_id, work) =
+            self.core
+                .begin_snapshot_operation(caller, vm_id, kind, |store, vm, run| {
+                    let step = match &req {
+                        BaselineRequest::TakeSnapshot {
+                            name, description, ..
+                        } => store.begin_take_snapshot(
+                            vm,
+                            name,
+                            description,
+                            run.is_some(),
+                            thumbnail,
+                            reserve,
+                        )?,
+                        BaselineRequest::RevertSnapshot { snapshot_id, .. } => {
+                            let record = reverted.ok_or_else(|| {
+                                PublicError::infrastructure("reverted configuration missing")
+                            })?;
+                            store.begin_revert_snapshot(vm, *snapshot_id, record)?
+                        }
+                        BaselineRequest::DeleteSnapshot { snapshot_id, .. } => {
+                            store.begin_delete_snapshot(vm, *snapshot_id)?
+                        }
+                        _ => return Err(PublicError::invalid_argument("not a snapshot operation")),
+                    };
+                    let SnapshotStep { disk, tag, finish } = step;
+                    let work: StorageWork = match run {
+                        Some(run) => {
+                            let r = match &req {
+                                BaselineRequest::TakeSnapshot { .. } => {
+                                    backend.snapshot_disk(vm.id, run, &tag)
+                                }
+                                _ => backend.delete_disk_snapshot(vm.id, run, &tag),
+                            };
+                            Box::new(move || finish(r))
+                        }
+                        None => {
+                            let action = match &req {
+                                BaselineRequest::TakeSnapshot { .. } => DiskSnapshotAction::Create,
+                                BaselineRequest::RevertSnapshot { .. } => DiskSnapshotAction::Apply,
+                                _ => DiskSnapshotAction::Delete,
+                            };
+                            match tool {
+                                Some(tool) => Box::new(move || {
+                                    let c = || cancel();
+                                    finish(tool.internal_snapshot(&disk, action, &tag, &c))
+                                }),
+                                None => {
+                                    let e = PublicError::unsupported(
+                                        "snapshots need qemu-img: configure the QEMU folder",
+                                    );
+                                    Box::new(move || finish(Err(e)))
+                                }
+                            }
+                        }
+                    };
+                    Ok(work)
+                })?;
+        Ok(StorageJob {
+            vm_id,
+            operation_id,
+            work,
+        })
+    }
+}
+
 fn chunk_count(len: usize) -> u32 {
     u32::try_from(len.div_ceil(SCREENSHOT_CHUNK_BYTES as usize)).unwrap_or(u32::MAX)
 }
@@ -1453,11 +2201,123 @@ fn shot_reply(shot: &StoredShot) -> ResponseBody {
 
 impl<S, A, B, M> VmEngine for CoreEngine<S, A, B, M>
 where
-    S: CatalogStore + MediaImportPort + BaselinePort + Send + 'static,
+    S: CatalogStore + MediaImportPort + BaselinePort + VmImportPort + Send + 'static,
     A: AuditSink + Send + 'static,
     B: BackendPort,
     M: MediaGuardPort + Send + 'static,
 {
+    fn tools_call(
+        &mut self,
+        caller: &Caller,
+        vm: VmId,
+        run: RunId,
+        call: lightvm_proto::ToolCall,
+    ) -> Result<lightvm_proto::ToolReply, PublicError> {
+        use lightvm_proto::{ToolCall, ToolReply};
+        self.apply_observations();
+        self.sync_gates();
+        let cap = call.capability();
+        let actor = caller.actor();
+        let detail = lightvm_proto::ToolAudit {
+            feature: cap.as_str().into(),
+            ..Default::default()
+        };
+        let result = (|| {
+            self.core.authorize_tools(caller, vm, run, cap)?;
+            let session = match caller {
+                Caller::Agent { session_id, .. } => Some(*session_id),
+                _ => None,
+            };
+            let key = (vm, session);
+            if let ToolCall::UiInvoke { tree, element, .. } = &call
+                && !self
+                    .tool_trees
+                    .get(&key)
+                    .is_some_and(|t| t.run == run && t.id == *tree && t.elements.contains(element))
+            {
+                return Err(PublicError::state_conflict(
+                    "UI element does not belong to the last returned tree",
+                ));
+            }
+            let tainted = self.net_tainted.get(&vm) == Some(&run);
+            let (capabilities, grant, expires) = self.core.tools_permissions(vm, !tainted);
+            self.backend.set_tools_policy(
+                vm,
+                run,
+                crate::tools::Policy {
+                    capabilities,
+                    grant,
+                    expires,
+                },
+            );
+            let command = lightvm_tools::control::Command::from(call.clone());
+            command.validate().map_err(|_| {
+                PublicError::invalid_argument("invalid Tools request or size limit")
+            })?;
+            self.core.admit_tools(caller, vm, run, cap)?;
+            self.core.record_tools(
+                actor,
+                vm,
+                run,
+                AuditAction::ToolsCall,
+                AuditOutcome::Accepted,
+                detail.clone(),
+            );
+            let mut reply = self.backend.tools_call(vm, run, command)?;
+            self.sync_gates();
+            self.core.authorize_tools(caller, vm, run, cap)?;
+            reply
+                .validate_for(&call)
+                .map_err(|_| PublicError::infrastructure("guest returned invalid Tools data"))?;
+            if let ToolReply::Error { code } = reply {
+                return Err(PublicError::unsupported(
+                    "guest Tools operation is unavailable or refused",
+                )
+                .with_detail("guest_code", code));
+            }
+            loop {
+                let size = serde_json::to_vec(&reply)
+                    .map_err(|_| PublicError::infrastructure("Tools reply encoding failed"))?
+                    .len();
+                if size <= 48 * 1024 {
+                    break;
+                }
+                match &mut reply {
+                    ToolReply::Tree {
+                        nodes, truncated, ..
+                    } if !nodes.is_empty() => {
+                        nodes.truncate(nodes.len().saturating_sub(1).min(nodes.len() * 3 / 4));
+                        *truncated = true;
+                    }
+                    _ => return Err(PublicError::resource_limit("Tools reply exceeds IPC limit")),
+                }
+            }
+            if let ToolReply::Tree { tree, nodes, .. } = &reply {
+                self.tool_trees.insert(
+                    key,
+                    ToolTree {
+                        run,
+                        id: *tree,
+                        elements: nodes.iter().map(|n| n.id).collect(),
+                    },
+                );
+            }
+            Ok(reply)
+        })();
+        self.core.record_tools(
+            actor,
+            vm,
+            run,
+            AuditAction::ToolsCall,
+            if result.is_ok() {
+                AuditOutcome::Succeeded
+            } else {
+                AuditOutcome::Denied
+            },
+            detail,
+        );
+        result
+    }
     fn list_vms(&mut self, caller: &Caller) -> Result<Vec<VmSummary>, PublicError> {
         self.apply_observations();
         let vms = self.core.list_vms(caller)?;
@@ -1580,11 +2440,21 @@ where
         for vm in vms {
             seen.insert(vm.vm_id);
             let now = (vm.state, vm.run_id);
-            if self.last.insert(vm.vm_id, now) != Some(now) {
+            // A guest that stops on a vCPU error (or runs again) keeps the
+            // `running` state: the change is published as a state event so
+            // the clients re-read the summary (`vcpu_halt`).
+            let halted = self.halted(&vm);
+            let halt_changed = if halted {
+                self.last_halted.insert(vm.vm_id)
+            } else {
+                self.last_halted.remove(&vm.vm_id)
+            };
+            if self.last.insert(vm.vm_id, now) != Some(now) || halt_changed {
                 out.push((vm.vm_id, vm.state));
             }
         }
         self.last.retain(|id, _| seen.contains(id));
+        self.last_halted.retain(|id| seen.contains(id));
         out
     }
 
@@ -1641,6 +2511,13 @@ where
             Err(e) => e,
             Ok(_) => PublicError::infrastructure("import cancelled"),
         }
+    }
+
+    fn delete_media(&mut self, caller: &Caller, media_id: MediaId) -> Result<(), PublicError> {
+        // Configurations are current: a VM created or changed just before
+        // is seen by the core's check.
+        self.apply_observations();
+        self.core.delete_media(caller, media_id)
     }
 
     fn delete_vm(
@@ -1738,6 +2615,21 @@ where
         let tool = self.backend.image_tool();
         let vm_id = req.vm_id();
         let kind = req.kind();
+        if matches!(
+            req,
+            BaselineRequest::TakeSnapshot { .. }
+                | BaselineRequest::RevertSnapshot { .. }
+                | BaselineRequest::DeleteSnapshot { .. }
+        ) {
+            return self.begin_snapshot_job(caller, req, tool, cancel);
+        }
+        if matches!(req, BaselineRequest::PromoteSnapshot { .. })
+            && matches!(caller, Caller::Agent { .. })
+        {
+            return Err(PublicError::permission_denied(
+                "snapshots are not available to agent sessions",
+            ));
+        }
         let (operation_id, work) =
             self.core
                 .begin_storage_operation(caller, vm_id, kind, |store, vm, _op| {
@@ -1753,6 +2645,10 @@ where
                         BaselineRequest::Restore { baseline_id, .. } => {
                             store.begin_restore_baseline(vm, *baseline_id, tool, cancel)
                         }
+                        BaselineRequest::PromoteSnapshot {
+                            snapshot_id, label, ..
+                        } => store.begin_promote_snapshot(vm, *snapshot_id, label, tool, cancel),
+                        _ => Err(PublicError::invalid_argument("not a baseline operation")),
                     }
                 })?;
         if let Caller::Agent { session_id, .. } = caller {
@@ -1772,10 +2668,17 @@ where
             result,
         } = done;
         let session = self.agent_storage.remove(&operation_id);
+        // A revert to a user snapshot gives the VM the snapshot's
+        // configuration: it becomes the core's record (ADR-0032).
         let r = self
             .core
-            .finish_storage_operation(vm_id, operation_id, |store| {
-                store.finish_storage_job(result)
+            .finish_snapshot_operation(vm_id, operation_id, |store| {
+                let outcome = store.finish_storage_job(result)?;
+                let record = match &outcome {
+                    BaselineOutcome::SnapshotReverted { record, .. } => Some((**record).clone()),
+                    _ => None,
+                };
+                Ok((outcome, record))
             });
         if let (Ok(BaselineOutcome::Created(b)), Some(s)) = (&r, session)
             && let Some(m) = self.session_meta.get_mut(&s)
@@ -1794,17 +2697,35 @@ where
         self.agent_storage.remove(&operation_id);
         let r = self
             .core
-            .finish_storage_operation(vm_id, operation_id, |store| {
-                if let Err(e) = store.abort_storage_job(result) {
-                    crate::diag!(
-                        "lightvm-service: cancelled baseline operation not rolled back: {e}"
-                    );
+            .finish_snapshot_operation(vm_id, operation_id, |store| {
+                match store.abort_storage_job(result) {
+                    Err(e) => {
+                        crate::diag!(
+                            "lightvm-service: cancelled storage operation not rolled back: {e}"
+                        );
+                        Err(reason)
+                    }
+                    Ok(None) => Err(reason),
+                    // A user snapshot operation is settled from the disk: a
+                    // disk operation that completed before the cancellation
+                    // is kept (and audited as succeeded).
+                    Ok(Some(outcome)) => {
+                        let record = match &outcome {
+                            BaselineOutcome::SnapshotReverted { record, .. } => {
+                                Some((**record).clone())
+                            }
+                            _ => None,
+                        };
+                        Ok((outcome, record))
+                    }
                 }
-                Err::<BaselineOutcome, _>(reason)
             });
         match r {
             Err(e) => e,
-            Ok(_) => PublicError::infrastructure("operation cancelled"),
+            Ok(_) => PublicError::state_conflict(
+                "operation cancelled after the disk operation had completed: its result is kept",
+            )
+            .with_detail("reason", "completed_before_cancel"),
         }
     }
 
@@ -1817,6 +2738,52 @@ where
         self.apply_observations();
         self.core.delete_baseline_with(caller, vm_id, |store| {
             store.delete_baseline(vm_id, baseline_id)
+        })
+    }
+
+    fn list_snapshots(
+        &mut self,
+        caller: &Caller,
+        vm_id: VmId,
+    ) -> Result<SnapshotTree, PublicError> {
+        self.apply_observations();
+        let reason = self.core.snapshot_unavailable_reason(vm_id);
+        let mut tree = self.core.snapshot_access(caller, vm_id, false, |store| {
+            let vm = store
+                .get_vm(vm_id)?
+                .ok_or_else(|| PublicError::not_found("VM does not exist"))?;
+            store.snapshot_tree(&vm)
+        })?;
+        if let Some(r) = reason {
+            tree.available = false;
+            tree.unavailable_reason = Some(r.to_owned());
+        }
+        Ok(tree)
+    }
+
+    fn update_snapshot(
+        &mut self,
+        caller: &Caller,
+        vm_id: VmId,
+        snapshot_id: SnapshotId,
+        name: Label,
+        description: String,
+    ) -> Result<SnapshotSummary, PublicError> {
+        lightvm_proto::ipc::validate_snapshot_description(&description)
+            .map_err(|m| PublicError::invalid_argument(m).with_detail("field", "description"))?;
+        self.core.snapshot_access(caller, vm_id, true, |store| {
+            store.update_snapshot(vm_id, snapshot_id, &name, &description)
+        })
+    }
+
+    fn snapshot_thumbnail(
+        &mut self,
+        caller: &Caller,
+        vm_id: VmId,
+        snapshot_id: SnapshotId,
+    ) -> Result<Option<Vec<u8>>, PublicError> {
+        self.core.snapshot_access(caller, vm_id, false, |store| {
+            store.snapshot_thumbnail(vm_id, snapshot_id)
         })
     }
 
@@ -1843,14 +2810,32 @@ where
 
     fn create_session(&mut self, new: NewSession) -> Result<CreatedSession, PublicError> {
         self.apply_observations();
+        // Disconnect first; a refused approval may leave integrations off
+        // briefly, but can never leave manual shares open to a new agent.
+        self.backend.suspend_tools(new.vm_id);
         let spec = vm_core::session::SessionSpec {
+            tools: new.tools,
             vm_allowlist: [new.vm_id].into_iter().collect(),
             capabilities: new.capabilities,
             quotas: new.quotas,
             expires_at: new.expires_at,
             lease_millis: new.lease_ms,
+            network_endpoints: new.network_endpoints,
         };
         let (grant, lease) = self.core.create_session(spec, new.token)?;
+        if let Some(run) = self.core.current_run(new.vm_id) {
+            self.net_tainted.insert(new.vm_id, run);
+            let (capabilities, grant, expires) = self.core.tools_permissions(new.vm_id, false);
+            self.backend.set_tools_policy(
+                new.vm_id,
+                run,
+                crate::tools::Policy {
+                    capabilities,
+                    grant,
+                    expires,
+                },
+            );
+        }
         let id = grant.session_id;
         let initial_baseline = self.core.store().baseline_facts(new.vm_id).current;
         self.session_meta.insert(
@@ -1983,6 +2968,13 @@ where
         let session_id = *session_id;
         self.sync_gates();
         match call {
+            AgentCall::GuestTools {
+                vm_id,
+                run_id,
+                call,
+            } => self
+                .tools_call(caller, vm_id, run_id, call)
+                .map(|reply| ResponseBody::GuestTools { reply }),
             AgentCall::ListVms => {
                 self.apply_observations();
                 let vms = self.core.list_vms(caller)?;
@@ -2173,6 +3165,82 @@ where
         self.backend.qemu_log(vm_id, run)
     }
 
+    fn vmware_context(
+        &mut self,
+        caller: &Caller,
+    ) -> Result<crate::vmware::VmwareContext, PublicError> {
+        if matches!(caller, Caller::Agent { .. }) {
+            let e = PublicError::permission_denied("VM import not available to agent sessions");
+            self.core.record_import_denied(caller, &e);
+            return Err(e);
+        }
+        let tool = self.backend.image_tool().ok_or_else(|| {
+            PublicError::unsupported("VMware import needs qemu-img: configure the QEMU folder")
+        })?;
+        let catalog_root = self.core.store().catalog_root().ok_or_else(|| {
+            PublicError::unsupported("VMware import not available on this catalog")
+        })?;
+        let l = self.core.creation_limits();
+        Ok(crate::vmware::VmwareContext {
+            tool,
+            limits: vmware_import::HostLimits {
+                max_vcpus: l.max_vcpus,
+                max_memory_mib: l.max_memory_mib,
+                max_disk_gib: l.max_disk_gib,
+            },
+            catalog_root,
+        })
+    }
+
+    fn vmware_denied(&mut self, caller: &Caller, error: &PublicError) {
+        self.core.record_import_denied(caller, error);
+    }
+
+    fn vmware_begin(
+        &mut self,
+        caller: &Caller,
+        config: &VmConfig,
+        required_bytes: u64,
+        free_bytes: Option<u64>,
+    ) -> Result<VmImportSlot, PublicError> {
+        self.apply_observations();
+        let reserve = self
+            .core
+            .config()
+            .host
+            .reserved_storage_gib
+            .saturating_mul(1 << 30);
+        let (_, slot) = self.core.begin_import(caller, config, |store, vm_id| {
+            crate::vmware::check_space(required_bytes, free_bytes, reserve)?;
+            store.begin_vm_import(vm_id)
+        })?;
+        Ok(slot)
+    }
+
+    fn vmware_finish(
+        &mut self,
+        caller: &Caller,
+        slot: VmImportSlot,
+        config: VmConfig,
+    ) -> Result<VmRecord, PublicError> {
+        let vm_id = slot.vm_id;
+        self.core
+            .finish_import(caller, vm_id, config, |store, rec| {
+                store.finish_vm_import(slot, rec)
+            })
+    }
+
+    fn vmware_abort(
+        &mut self,
+        caller: &Caller,
+        slot: VmImportSlot,
+        reason: PublicError,
+    ) -> PublicError {
+        let vm_id = slot.vm_id;
+        self.core
+            .abort_import(caller, vm_id, |store| store.abort_vm_import(slot), reason)
+    }
+
     fn session_changes(&mut self) -> Vec<(SessionId, SessionState, Option<TerminationCause>)> {
         let mut out = Vec::new();
         for s in self.core.sessions().all() {
@@ -2185,6 +3253,99 @@ where
             if *state == SessionState::Terminated {
                 self.shots.remove(id);
             }
+        }
+        out
+    }
+
+    fn sync_tools(&mut self) -> Vec<ToolsRecord> {
+        let records = self.backend.take_tools_records();
+        for r in &records {
+            let actor = self
+                .core
+                .sessions()
+                .live_for_vm(r.vm_id)
+                .first()
+                .map_or(Actor::User, |id| Actor::Agent { session_id: *id });
+            self.core.record_tools(
+                actor,
+                r.vm_id,
+                r.run_id,
+                r.action,
+                r.outcome,
+                r.detail.clone(),
+            );
+        }
+        let runs = self.current_runs();
+        self.tool_trees.retain(|(vm, session), tree| {
+            runs.iter().any(|(v, r)| v == vm && *r == Some(tree.run))
+                && session.is_none_or(|s| {
+                    self.core
+                        .sessions()
+                        .get(s)
+                        .is_some_and(|s| s.state == SessionState::Active)
+                })
+        });
+        records
+    }
+
+    fn sync_network(&mut self) -> Vec<NetworkRecord> {
+        let mut out = Vec::new();
+        let runs: Vec<(VmId, RunId)> = self
+            .current_runs()
+            .into_iter()
+            .filter_map(|(vm, run)| run.map(|r| (vm, r)))
+            .collect();
+        self.net_tainted
+            .retain(|vm, run| runs.iter().any(|(v, r)| v == vm && r == run));
+        for (vm_id, run_id) in runs {
+            let sessions = self.core.sessions().live_for_vm(vm_id);
+            if !sessions.is_empty() {
+                self.net_tainted.insert(vm_id, run_id);
+            }
+            let tainted = self.net_tainted.get(&vm_id) == Some(&run_id);
+            let (capabilities, grant, expires) = self.core.tools_permissions(vm_id, !tainted);
+            self.backend.set_tools_policy(
+                vm_id,
+                run_id,
+                crate::tools::Policy {
+                    capabilities,
+                    grant,
+                    expires,
+                },
+            );
+            if self.core.run_network(vm_id) != Some(lightvm_proto::NetworkProfile::Endpoints) {
+                continue;
+            }
+            let allowed = self.core.allowed_endpoints(vm_id, tainted);
+            if self.backend.set_network_allowed(vm_id, run_id, &allowed) {
+                let list: Vec<&str> = allowed.iter().map(String::as_str).collect();
+                out.push(NetworkRecord {
+                    vm_id,
+                    run_id,
+                    action: AuditAction::NetworkPolicy,
+                    outcome: AuditOutcome::Succeeded,
+                    detail: lightvm_proto::NetworkAudit {
+                        reason: Some(if list.is_empty() {
+                            "allowed: none".to_owned()
+                        } else {
+                            format!("allowed: {}", list.join(", "))
+                        }),
+                        ..lightvm_proto::NetworkAudit::default()
+                    },
+                });
+            }
+        }
+        out.extend(self.backend.take_network_records());
+        for r in &out {
+            let session = self.core.sessions().live_for_vm(r.vm_id).first().copied();
+            self.core.record_network(
+                r.vm_id,
+                Some(r.run_id),
+                session,
+                r.action,
+                r.outcome,
+                r.detail.clone(),
+            );
         }
         out
     }

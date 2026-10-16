@@ -209,21 +209,29 @@ async fn pairing_file(u: &mut Client, svc: &Svc) -> PathBuf {
         .to_string(),
     )
     .unwrap();
+    // The app writes the file with mode 0600.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
     p
 }
 
 fn all_caps() -> CapabilitySet {
-    Capability::ALL.into_iter().collect()
+    Capability::VM_CONTROLS.into_iter().collect()
 }
 
 fn approval(vm: VmId, caps: CapabilitySet, give_input: bool) -> SessionApproval {
     SessionApproval {
+        tools: Default::default(),
         vm_id: vm,
         capabilities: caps,
         duration_s: 3600,
         quotas: None,
         lease_ms: None,
         give_input,
+        network_endpoints: Vec::new(),
     }
 }
 
@@ -383,13 +391,18 @@ async fn session(
     let p = pairing_file(u, svc).await;
     let mut m = Mcp::spawn(Some(&p));
     m.initialize("2025-11-25");
-    let r = m.ok("session_request", json!({"purpose": "F5 protocol test"}));
+    let r = m.ok(
+        "session_request",
+        json!({"purpose": "F5 protocol test", "network_endpoints": ["sql.lan"]}),
+    );
     assert_eq!(r["state"], "pending");
     let code = r["verification_code"].as_str().unwrap().to_owned();
     let req = match ok(u, Request::ListSessionRequests).await {
         ResponseBody::SessionRequests { requests } => requests.into_iter().next().unwrap(),
         other => panic!("{other:?}"),
     };
+    // ADR-0033: the endpoints the client asks for reach the app as a hint.
+    assert_eq!(req.requested_endpoints, ["sql.lan"]);
     assert_eq!(
         req.verification_code, code,
         "same code in the app and the client"

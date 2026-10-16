@@ -35,18 +35,93 @@
     "created_at"
   ],
   "$defs": {
+    "DiskController": {
+      "description": "Main disk controller of an imported VM (ADR-0030): the controller the\nguest was installed on, so that its boot driver finds the disk.",
+      "oneOf": [
+        {
+          "description": "`virtio-blk-pci` (Linux guests only).",
+          "type": "string",
+          "const": "virtio"
+        },
+        {
+          "description": "SATA AHCI (q35 ICH9 controller).",
+          "type": "string",
+          "const": "ahci"
+        },
+        {
+          "description": "Parallel IDE (PIIX controller of the i440fx board).",
+          "type": "string",
+          "const": "ide"
+        },
+        {
+          "description": "NVMe.",
+          "type": "string",
+          "const": "nvme"
+        },
+        {
+          "description": "VMware paravirtual SCSI (`pvscsi`).",
+          "type": "string",
+          "const": "pvscsi"
+        },
+        {
+          "description": "LSI Logic SAS 1068 (`mptsas1068`, VMware `lsisas1068`).",
+          "type": "string",
+          "const": "lsi_sas1068"
+        }
+      ]
+    },
+    "DisplayAdapter": {
+      "description": "Display adapter of an imported VM (ADR-0030).",
+      "oneOf": [
+        {
+          "description": "The adapter of the guest profile (ADR-0027: `VGA` for Windows,\n`virtio-vga` for Linux).",
+          "type": "string",
+          "const": "standard"
+        },
+        {
+          "description": "VMware SVGA II (`vmware-svga`), for a Windows guest that has the\nVMware Tools display driver.",
+          "type": "string",
+          "const": "vmware_svga"
+        }
+      ]
+    },
     "Firmware": {
-      "description": "Guest firmware. In the MVP only UEFI with managed NVRAM state (ROADMAP 8).",
+      "description": "Guest firmware. Linux guests use UEFI with managed NVRAM state (ROADMAP 8,\nADR-0011); legacy Windows guests use SeaBIOS, which has no NVRAM\n(ADR-0027). [`GuestOs::allowed_firmware`] says which applies.",
       "oneOf": [
         {
           "description": "UEFI (OVMF) with per-VM NVRAM.",
           "type": "string",
           "const": "uefi"
+        },
+        {
+          "description": "Legacy BIOS (SeaBIOS from the verified QEMU build), no NVRAM.",
+          "type": "string",
+          "const": "bios"
+        }
+      ]
+    },
+    "GuestArch": {
+      "description": "Architecture of an installation medium, as detected from its contents.",
+      "oneOf": [
+        {
+          "description": "32-bit x86.",
+          "type": "string",
+          "const": "x86"
+        },
+        {
+          "description": "x86_64.",
+          "type": "string",
+          "const": "x86_64"
+        },
+        {
+          "description": "ARM64 (AArch64).",
+          "type": "string",
+          "const": "aarch64"
         }
       ]
     },
     "GuestOs": {
-      "description": "Declared guest operating system. In the MVP the reference is Ubuntu LTS\nx86_64 with the version and checksum pinned in F0 (ROADMAP 4).",
+      "description": "Declared guest operating system. In the MVP the reference is Ubuntu LTS\nx86_64 with the version and checksum pinned in F0 (ROADMAP 4). The\nWindows variants (ADR-0027, ROADMAP R2c) select a hardware profile with\ndevices the guest has inbox drivers for; they are manual, offline guests\nand their compatibility cells stay \"not verified\" until real evidence.",
       "oneOf": [
         {
           "description": "Ubuntu LTS x86_64 (MVP reference guest).",
@@ -57,7 +132,89 @@
           "description": "Other Linux x86_64: manageable manually, without compatibility guarantees.",
           "type": "string",
           "const": "other_linux_x86_64"
+        },
+        {
+          "description": "Windows XP (NT 5.1, and XP x64 / NT 5.2): legacy BIOS, i440fx, PIIX IDE.",
+          "type": "string",
+          "const": "windows_xp"
+        },
+        {
+          "description": "Windows Vista (NT 6.0): legacy BIOS, q35, AHCI.",
+          "type": "string",
+          "const": "windows_vista"
+        },
+        {
+          "description": "Windows 7 (NT 6.1): legacy BIOS, q35, AHCI.",
+          "type": "string",
+          "const": "windows7"
+        },
+        {
+          "description": "Windows 8.1 (NT 6.3): UEFI (x64) or legacy BIOS (32-bit), q35, AHCI.",
+          "type": "string",
+          "const": "windows81"
+        },
+        {
+          "description": "Windows 10 (NT 10.0, build < 22000): UEFI (x64) or legacy BIOS\n(32-bit), q35, AHCI.",
+          "type": "string",
+          "const": "windows10"
+        },
+        {
+          "description": "Windows 11 on ARM64 (build 22000 and later): macOS/HVF hosts only,\n`virt`, UEFI with Secure Boot, TPM 2.0 (ADR-0028).",
+          "type": "string",
+          "const": "windows11_arm64"
         }
+      ]
+    },
+    "ImportSource": {
+      "description": "Where an imported VM came from (ADR-0030).",
+      "oneOf": [
+        {
+          "description": "VMware Workstation or Player (`.vmx` + VMDK), converted to QCOW2.",
+          "type": "string",
+          "const": "vmware"
+        }
+      ]
+    },
+    "ImportedHardware": {
+      "description": "Hardware of a VM imported from VMware (ADR-0030), in\n[`VmConfig::imported`]. Fixed at import: a configuration change cannot\nalter it.",
+      "type": "object",
+      "properties": {
+        "arch": {
+          "description": "Architecture of the guest, from the VMware guest type.",
+          "$ref": "#/$defs/GuestArch"
+        },
+        "cores_per_socket": {
+          "description": "vCPUs per socket of the source VM (`cpuid.coresPerSocket`): client\neditions of Windows use at most one or two sockets. `None` = one\nsocket per vCPU, as for VMs created in LightVM.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "disk_controller": {
+          "description": "Controller of the main disk.",
+          "$ref": "#/$defs/DiskController"
+        },
+        "display": {
+          "description": "Display adapter.",
+          "$ref": "#/$defs/DisplayAdapter",
+          "default": "standard"
+        },
+        "source": {
+          "description": "Origin of the VM.",
+          "$ref": "#/$defs/ImportSource"
+        },
+        "storage_driver_preparation": {
+          "description": "The source disk was on a controller LightVM cannot keep (VMware\n`lsilogic`, or NVMe with legacy BIOS) and the guest is Windows: the\nstorage driver of [`Self::disk_controller`] must be enabled for boot\nin the guest before it can start from this disk (ADR-0030). Cleared\nwhen the import enabled it in the converted disk (storage helper);\nstill set when the user must prepare the guest in VMware\n(`docs/USER_GUIDE.md`).",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "arch",
+        "disk_controller"
       ]
     },
     "MediaId": {
@@ -66,15 +223,118 @@
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     },
+    "NetworkEndpoint": {
+      "description": "An endpoint of the allowlist (ADR-0033), approved by the user in the VM\nsettings: inside the guest `name` (DNS) or `virtual_ip`, port `port`;\non the host side the TCP service `host:port`. Only TCP is carried.",
+      "type": "object",
+      "properties": {
+        "host": {
+          "description": "Host name or IP address of the real service, resolved by the\nsupervisor when the run starts (the address used is recorded).",
+          "type": "string"
+        },
+        "name": {
+          "description": "Name the guest uses (DNS host name syntax, no wildcard; compared\nwithout regard to case). Also resolves as `name.lightvm.internal`.",
+          "type": "string"
+        },
+        "port": {
+          "description": "TCP port, the same inside the guest and on the host (1..=65535).",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "virtual_ip": {
+          "description": "Virtual address in the guest network\n([`FIRST_ENDPOINT_IP`]..=[`LAST_ENDPOINT_IP`]).",
+          "type": "string",
+          "format": "ipv4"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "host",
+        "port",
+        "virtual_ip"
+      ]
+    },
     "NetworkProfile": {
-      "description": "Network profile. In the MVP the only allowed value is `offline` (ADR-0004): no\nguest NIC, default network devices excluded, no forwarding.",
+      "description": "Network mode of a VM (ADR-0033). `offline` stays the default (ADR-0004):\nno guest NIC, default network devices excluded, no forwarding.",
       "oneOf": [
         {
           "description": "No NIC.",
           "type": "string",
           "const": "offline"
+        },
+        {
+          "description": "QEMU user-mode network (like VMware NAT): the guest reaches the host,\nthe LAN and the Internet. Manual use only: a run started while an\nagent session targets the VM gets the endpoint allowlist (when the\nsession was granted `network.endpoints`) or no NIC, and a session is\nrefused on a VM running with NAT.",
+          "type": "string",
+          "const": "nat"
+        },
+        {
+          "description": "Endpoint allowlist: the guest NIC is attached to the supervisor's\nown network, where only the endpoints of [`VmConfig::endpoints`]\nanswer (each a virtual address and port mapped to one approved\n`host:port`). In manual use every endpoint of the VM is allowed; in\nan agent session only those of the grant.",
+          "type": "string",
+          "const": "endpoints"
         }
       ]
+    },
+    "ToolShare": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "root": {
+          "description": "Host folder chosen explicitly in the user UI. Never sent to agents\nor the guest; the supervisor opens it without following links.",
+          "type": "string"
+        },
+        "writable": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "root"
+      ]
+    },
+    "ToolsConfig": {
+      "type": "object",
+      "properties": {
+        "clipboard": {
+          "type": "boolean",
+          "default": false
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "files_transfer": {
+          "type": "boolean",
+          "default": false
+        },
+        "shares": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ToolShare"
+          }
+        },
+        "ui_act": {
+          "type": "boolean",
+          "default": false
+        },
+        "ui_inspect": {
+          "type": "boolean",
+          "default": false
+        },
+        "usb_devices": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
     },
     "UtcTimestamp": {
       "description": "RFC 3339 UTC instant with Z suffix, millisecond precision.",
@@ -82,7 +342,7 @@
       "format": "date-time"
     },
     "VmConfig": {
-      "description": "VM configuration requested by the user. No field is a path or\na QEMU option: media are referenced by [`MediaId`] of the approved registry.",
+      "description": "VM configuration requested by the user. Media reference the approved\nregistry. Tools share roots are explicit user-approved folder settings\n(ADR-0031); no agent request or QEMU option is interpreted as a host path.",
       "type": "object",
       "properties": {
         "data_media": {
@@ -102,14 +362,32 @@
           "format": "uint64",
           "minimum": 0
         },
+        "endpoints": {
+          "description": "Endpoints of the endpoint allowlist (ADR-0033), approved by the\nuser; used by the `endpoints` mode and grantable to agent sessions\n(`network.endpoints`). Kept when the mode is another one.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NetworkEndpoint"
+          }
+        },
         "firmware": {
-          "description": "Firmware; in the MVP only `uefi`.",
+          "description": "Firmware; must be one of [`GuestOs::allowed_firmware`].",
           "$ref": "#/$defs/Firmware",
           "default": "uefi"
         },
         "guest_os": {
           "description": "Declared guest operating system.",
           "$ref": "#/$defs/GuestOs"
+        },
+        "imported": {
+          "description": "Hardware of a VM imported from VMware (ADR-0030), fixed at import:\ndisk controller, display adapter and CPU topology of the source VM.\n`None` for every VM created in LightVM (the profile of ADR-0027\napplies unchanged).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ImportedHardware"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "install_media": {
           "description": "Installation media from the media registry (kind `install_iso`).",
@@ -141,9 +419,13 @@
           "$ref": "#/$defs/VmName"
         },
         "network": {
-          "description": "Network profile; in the MVP only `offline`.",
+          "description": "Network mode (ADR-0033); `offline` by default.",
           "$ref": "#/$defs/NetworkProfile",
           "default": "offline"
+        },
+        "tools": {
+          "description": "Off by default. User-only settings for host integration.",
+          "$ref": "#/$defs/ToolsConfig"
         },
         "vcpus": {
           "description": "Number of vCPUs (not a CPU percentage limit: ROADMAP 7.2).",

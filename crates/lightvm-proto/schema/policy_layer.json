@@ -26,6 +26,18 @@
       "description": "Authorizable action on a VM. Serialized names follow the MCP catalog\n(ROADMAP 9); `vm.input` covers mouse and keyboard.",
       "oneOf": [
         {
+          "type": "string",
+          "enum": [
+            "share.read",
+            "share.write",
+            "clipboard",
+            "files.transfer",
+            "usb",
+            "ui.inspect",
+            "ui.act"
+          ]
+        },
+        {
           "description": "List filtered by the grant.",
           "type": "string",
           "const": "vm.list"
@@ -74,6 +86,11 @@
           "description": "Authorized LightVM events and QEMU logs.",
           "type": "string",
           "const": "vm.logs"
+        },
+        {
+          "description": "Network endpoints of the VM's allowlist (ADR-0033, ADR-0034): the\ngrant lists which ones ([`Grant::network_endpoints`]). Without it\nthe session's VM runs without network.",
+          "type": "string",
+          "const": "network.endpoints"
         }
       ]
     },

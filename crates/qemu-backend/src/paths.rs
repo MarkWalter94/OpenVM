@@ -87,14 +87,33 @@ impl ManagedPath {
 /// supervisor; the backend does not build paths from caller text, except for
 /// fixed file names inside the returned directories.
 pub trait ManagedPaths: Send + Sync {
-    /// Approved `qemu-system-x86_64` executable.
+    /// Private, per-run Tools bootstrap ISO, prepared by the supervisor.
+    fn tools_iso(&self, _run: &RunId) -> Result<Option<ManagedPath>> {
+        Ok(None)
+    }
+    /// Approved QEMU system emulator of this host (`qemu-system-x86_64`, or
+    /// `qemu-system-aarch64` on Apple Silicon, ADR-0028).
     fn qemu_system(&self) -> Result<ManagedPath>;
 
-    /// UEFI firmware code (opened read-only as pflash0).
+    /// UEFI firmware code (opened read-only as pflash0). Used only by the
+    /// UEFI profiles.
     fn firmware_code(&self) -> Result<ManagedPath>;
 
-    /// Per-run copy of the UEFI variables (pflash1, writable).
-    fn firmware_vars(&self, run: &RunId) -> Result<ManagedPath>;
+    /// Per-run copy of the UEFI variables (pflash1, writable). Required
+    /// (`Some`) by the UEFI profiles and refused by the SeaBIOS ones, which
+    /// have no NVRAM (`None`).
+    fn firmware_vars(&self, run: &RunId) -> Result<Option<ManagedPath>>;
+
+    /// SeaBIOS image (`share/bios-256k.bin` found and hashed by the probe,
+    /// [`crate::probe::BiosInfo`]), passed with `-bios`. Used only by the
+    /// SeaBIOS profiles; [`crate::QemuRun::start`] verifies that it is the
+    /// file verified by the probe.
+    fn seabios(&self) -> Result<ManagedPath> {
+        Err(BackendError::Unsupported {
+            what: "SeaBIOS firmware".into(),
+            hint: "no SeaBIOS image provided for this run".into(),
+        })
+    }
 
     /// VM disk for this run (overlay), if any.
     fn disk(&self, run: &RunId) -> Result<Option<ManagedPath>>;
@@ -111,30 +130,54 @@ pub trait ManagedPaths: Send + Sync {
         Ok(None)
     }
 
-    /// Approved medium from the media registry (read-only managed copy).
+    /// Approved medium from the media registry (read-only managed copy, or
+    /// the user's file used in place after the supervisor's checks, ADR-0029).
     fn media(&self, media: &MediaId) -> Result<ManagedPath>;
 
     /// Run directory (stdout/stderr logs).
     fn run_dir(&self, run: &RunId) -> Result<ManagedPath>;
 
-    /// Private run directory (ACL limited to the supervisor user): QMP and
-    /// VNC sockets, temporary `screendump` files.
+    /// Private run directory (ACL limited to the supervisor user): QMP,
+    /// VNC and TPM sockets, temporary `screendump` files.
     fn private_dir(&self, run: &RunId) -> Result<ManagedPath>;
+
+    /// Approved swtpm executable (found and hashed by the probe,
+    /// [`crate::probe::SwtpmInfo`]). Used only by the TPM profiles
+    /// (ADR-0028); [`crate::QemuRun::start`] verifies that it is the file
+    /// verified by the probe.
+    fn swtpm(&self) -> Result<ManagedPath> {
+        Err(BackendError::Unsupported {
+            what: "TPM emulator".into(),
+            hint: "no swtpm provided for this run".into(),
+        })
+    }
+
+    /// Per-VM swtpm state directory (`vms/<vm_id>/tpm`, mode 0700),
+    /// required by the TPM profiles. `None`: no TPM state for this run.
+    fn tpm_state_dir(&self, _run: &RunId) -> Result<Option<ManagedPath>> {
+        Ok(None)
+    }
 }
 
 /// Fixed names of the files created by the backend in the managed directories.
-pub(crate) mod names {
+pub mod names {
     pub(crate) const QMP_SOCKET: &str = "qmp.sock";
     pub(crate) const VNC_SOCKET: &str = "vnc.sock";
     pub(crate) const STDOUT: &str = "qemu.stdout.log";
     pub(crate) const STDERR: &str = "qemu.stderr.log";
+    /// swtpm control socket (private directory, ADR-0028).
+    pub const TPM_SOCKET: &str = "tpm.sock";
+    /// `-netdev stream` socket of the supervisor network (ADR-0033).
+    pub const NET_SOCKET: &str = "net.sock";
+    pub(crate) const SWTPM_LOG: &str = "swtpm.log";
+    pub(crate) const SWTPM_STDOUT: &str = "swtpm.stdout.log";
+    pub(crate) const SWTPM_STDERR: &str = "swtpm.stderr.log";
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod tests {
     use super::*;
 
-    #[cfg(windows)]
     #[test]
     fn verify_and_join() {
         let p = ManagedPath::verify(r"C:\Windows\Temp\lightvm-test-dir").unwrap();

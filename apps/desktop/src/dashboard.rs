@@ -4,14 +4,53 @@
 //! chosen [`DashboardAction`], so it can be tested without processes.
 
 use egui::WidgetType;
-use lightvm_proto::ipc::{StartPhase, StartProgress, VmSummary};
+use lightvm_proto::ipc::{StartPhase, StartProgress, VcpuHalt, VcpuHaltReason, VmSummary};
 use lightvm_proto::{GuestOs, VmId, VmState};
 
-use crate::service::{BaselineList, ServiceCommand, ServiceState};
+use crate::service::{BaselineList, ServiceCommand, ServiceState, SnapshotList};
 use crate::theme::{self, Tone};
 
 /// Description under the Dashboard title.
 pub const DESCRIPTION: &str = "Virtual machines of the local catalog.";
+
+/// QEMU of the running supervisor, as far as the app knows it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SupervisorQemu {
+    /// A QEMU folder was given to the supervisor, or the app does not know
+    /// its configuration (a stand-in supervisor): nothing to report.
+    #[default]
+    Given,
+    /// Started by the app with no QEMU folder chosen in Settings or found on
+    /// the host.
+    MissingFromSettings,
+    /// Started from the command line (`--catalog`) without `--qemu-dir`.
+    MissingFromCommandLine,
+}
+
+impl SupervisorQemu {
+    /// Why VMs cannot start, if they cannot.
+    pub fn missing_reason(self) -> Option<&'static str> {
+        match self {
+            Self::Given => None,
+            Self::MissingFromSettings => Some(NO_QEMU),
+            Self::MissingFromCommandLine => Some(NO_QEMU_COMMAND_LINE),
+        }
+    }
+}
+
+/// Notice and Start hover text when the app started the supervisor without
+/// a QEMU folder.
+pub const NO_QEMU: &str = "QEMU was not found: VMs cannot start. Choose the QEMU folder in Settings → QEMU distribution, then restart the supervisor.";
+
+/// Notice and Start hover text when the supervisor was started from the
+/// command line without `--qemu-dir`.
+pub const NO_QEMU_COMMAND_LINE: &str = "The supervisor was started from the command line without --qemu-dir: VMs cannot start. Start LightVM again adding --qemu-dir with the QEMU folder.";
+
+/// Outcome line shown instead of "capability not available on this host"
+/// when a start was refused and the supervisor has no QEMU.
+pub fn start_refused_outcome(reason: &str) -> String {
+    format!("Last action: start refused. {reason}")
+}
 
 /// Actions that ask for a confirmation before being sent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,14 +81,20 @@ pub enum DashboardAction {
     Command(ServiceCommand),
     /// Open the "New VM" wizard.
     NewVm,
+    /// Choose a `.vmx` and open the "Import VMware VM" page (ADR-0030).
+    ImportVmware,
     /// Open the console of a running VM.
     Console(VmId),
     /// Open the settings panel of a VM.
     Edit(VmId),
     /// Open the Baselines page of a VM (F3).
     Baselines(VmId),
+    /// Open the Snapshots page of a VM (ADR-0032).
+    Snapshots(VmId),
     /// Ask a confirmation.
     Confirm(Confirm),
+    /// Open Settings, where the QEMU folder is chosen.
+    QemuSettings,
 }
 
 /// Text and tone of the state of a VM.
@@ -69,6 +114,12 @@ pub fn os_label(os: GuestOs) -> &'static str {
     match os {
         GuestOs::UbuntuLtsX86_64 => "Ubuntu LTS",
         GuestOs::OtherLinuxX86_64 => "Other Linux",
+        GuestOs::WindowsXp => "Windows XP",
+        GuestOs::WindowsVista => "Windows Vista",
+        GuestOs::Windows7 => "Windows 7",
+        GuestOs::Windows81 => "Windows 8.1",
+        GuestOs::Windows10 => "Windows 10",
+        GuestOs::Windows11Arm64 => "Windows 11",
     }
 }
 
@@ -137,6 +188,33 @@ pub fn start_fraction(p: &StartProgress) -> Option<f32> {
         .then(|| (p.verified_bytes.min(p.total_bytes) as f64 / p.total_bytes as f64) as f32)
 }
 
+/// Guest of a running VM stopped on a virtual CPU error (the QEMU process is
+/// alive, the guest does not run), if the supervisor reports one.
+pub fn vcpu_halt(v: &VmSummary) -> Option<VcpuHalt> {
+    v.vcpu_halt.filter(|_| v.state == VmState::Running)
+}
+
+/// Short label of a [`VcpuHalt`] (pill and console notice title).
+pub const VCPU_HALT_LABEL: &str = "Stopped on a virtual CPU error";
+
+/// What happened to a guest stopped on a virtual CPU error, and what to do.
+pub fn vcpu_halt_text(h: &VcpuHalt) -> String {
+    let what = match h.reason {
+        VcpuHaltReason::InternalError if h.automatic_resets > 0 => format!(
+            "{VCPU_HALT_LABEL}: the guest hit an unrecoverable error again after {} automatic restart{}.",
+            h.automatic_resets,
+            if h.automatic_resets == 1 { "" } else { "s" }
+        ),
+        VcpuHaltReason::InternalError => {
+            format!("{VCPU_HALT_LABEL}: the guest hit an unrecoverable error.")
+        }
+        VcpuHaltReason::GuestPanicked => "The guest reported a crash and is stopped.".to_owned(),
+    };
+    format!(
+        "{what} Keyboard and mouse cannot reach it. Reset it, or force stop it and start it again."
+    )
+}
+
 /// Space on the host above which the VM disk is considered to hold an
 /// installed system (a fresh disk occupies a few MiB).
 pub const INSTALLED_DISK_BYTES: u64 = 1 << 30;
@@ -178,16 +256,18 @@ fn vm_row(
     ui: &mut egui::Ui,
     v: &VmSummary,
     active: bool,
-    baselines: (Option<&BaselineList>, bool),
+    baselines: (Option<&BaselineList>, Option<&SnapshotList>, bool),
+    no_qemu: Option<&str>,
     choice: &mut Option<DashboardAction>,
 ) {
     let p = theme::Palette::of(ui);
     let name = v.name.as_str();
     let (state_text, tone) = vm_state(v.state);
-    let (list, baselines_available) = baselines;
+    let (list, snapshots, baselines_available) = baselines;
     // A baseline operation in progress: the VM is busy.
     let busy = v.baselines.operation;
     let busy_hover = "A baseline operation is in progress on this VM";
+    let halt = vcpu_halt(v);
     ui.horizontal(|ui| {
         ui.set_min_height(46.0);
         let left = (ui.available_width() - ACTIONS_WIDTH - 12.0).max(150.0);
@@ -203,6 +283,9 @@ fn vm_row(
                             .truncate(),
                     );
                     theme::pill(ui, state_text, tone);
+                    if halt.is_some() {
+                        theme::pill(ui, "vCPU error", Tone::Danger);
+                    }
                     if let Some(op) = busy {
                         theme::pill(ui, crate::baselines::operation_label(op), Tone::Warning);
                     }
@@ -232,7 +315,14 @@ fn vm_row(
                         ui.label(egui::RichText::new(&text).small().color(p.text));
                     });
                 }
-                if let Some(line) = crate::baselines::dashboard_line(v, list) {
+                let mut line = crate::baselines::dashboard_line(v, list);
+                if let Some(s) = crate::snapshots::dashboard_line(v, snapshots) {
+                    line = Some(match line {
+                        Some(l) => format!("{l} \u{b7} {s}"),
+                        None => s,
+                    });
+                }
+                if let Some(line) = line {
                     ui.add(
                         egui::Label::new(egui::RichText::new(line).small().color(p.text_weak))
                             .wrap(),
@@ -253,11 +343,15 @@ fn vm_row(
                     } else if busy.is_some() {
                         busy_hover
                     } else {
-                        "Start the VM"
+                        // Without QEMU the supervisor refuses every start.
+                        no_qemu.unwrap_or("Start the VM")
                     };
                     if action_button(
                         ui,
-                        active && v.state == VmState::Stopped && busy.is_none(),
+                        active
+                            && v.state == VmState::Stopped
+                            && busy.is_none()
+                            && no_qemu.is_none(),
                         theme::primary(ui, "Start"),
                         &format!("Start {name}"),
                         hover,
@@ -325,6 +419,22 @@ fn vm_row(
                         if b.clicked() {
                             *choice = Some(DashboardAction::Baselines(v.vm_id));
                         }
+                        let s = ui
+                            .add_enabled(baselines_available, egui::Button::new("Snapshots\u{2026}"))
+                            .on_hover_text(
+                                "Named points of the disk, as in VMware: take, revert to, delete; no memory is saved",
+                            )
+                            .on_disabled_hover_text(
+                                "Not available: the supervisor has no QEMU disk image tool",
+                            );
+                        theme::accessible_name(
+                            &s,
+                            WidgetType::Button,
+                            &format!("Snapshots of {name}"),
+                        );
+                        if s.clicked() {
+                            *choice = Some(DashboardAction::Snapshots(v.vm_id));
+                        }
                         ui.separator();
                         let delete = ui
                             .add_enabled(
@@ -346,6 +456,31 @@ fn vm_row(
             },
         );
     });
+    if let Some(h) = halt {
+        theme::notice(ui, &vcpu_halt_text(&h), Tone::Danger);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            if action_button(
+                ui,
+                active && v.run_id.is_some(),
+                egui::Button::new("Reset…"),
+                &format!("Reset {name}"),
+                "Restarts the guest, like the reset button",
+            ) {
+                *choice = Some(DashboardAction::Confirm(Confirm::Reset(v.vm_id)));
+            }
+            if action_button(
+                ui,
+                active,
+                egui::Button::new("Force stop…"),
+                &format!("Force stop {name}"),
+                "Terminates the VM at once; then start it again",
+            ) {
+                *choice = Some(DashboardAction::Confirm(Confirm::ForceStop(v.vm_id)));
+            }
+        });
+        ui.add_space(4.0);
+    }
     if install_media_pending(v) {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
@@ -373,13 +508,27 @@ fn vm_row(
 }
 
 /// Dashboard with the supervisor: connection state, catalog VMs with their
-/// actions, Emergency Stop and "New VM".
+/// actions, Emergency Stop and "New VM". The QEMU of the supervisor is not
+/// known here: see [`dashboard_with_qemu_ui`].
 pub fn dashboard_ui(
     ui: &mut egui::Ui,
     state: &ServiceState,
     pid: u32,
     alive: bool,
 ) -> Option<DashboardAction> {
+    dashboard_with_qemu_ui(ui, state, pid, alive, SupervisorQemu::Given)
+}
+
+/// [`dashboard_ui`] knowing whether the supervisor has a QEMU folder: without
+/// one, a notice explains why VMs cannot start and Start is disabled.
+pub fn dashboard_with_qemu_ui(
+    ui: &mut egui::Ui,
+    state: &ServiceState,
+    pid: u32,
+    alive: bool,
+    qemu: SupervisorQemu,
+) -> Option<DashboardAction> {
+    let no_qemu = qemu.missing_reason();
     let p = theme::Palette::of(ui);
     let mut choice = None;
     let active = alive && state.connected;
@@ -404,6 +553,15 @@ pub fn dashboard_ui(
             .clicked()
         {
             choice = Some(DashboardAction::NewVm);
+        }
+        if ui
+            .add_enabled(active, egui::Button::new(crate::vmware_import::TITLE))
+            .on_hover_text(
+                "Convert a VMware Workstation or Player VM (.vmx) into a new VM; the VMware files are not modified",
+            )
+            .clicked()
+        {
+            choice = Some(DashboardAction::ImportVmware);
         }
     });
 
@@ -440,13 +598,29 @@ pub fn dashboard_ui(
         ui.add_space(8.0);
         theme::notice(ui, &state.connection, Tone::Danger);
     }
+    if let Some(reason) = no_qemu {
+        ui.add_space(8.0);
+        theme::notice(ui, reason, Tone::Warning);
+        if qemu == SupervisorQemu::MissingFromSettings {
+            ui.add_space(4.0);
+            let r = ui.button("Open Settings");
+            theme::accessible_name(&r, WidgetType::Button, "Open the QEMU settings");
+            if r.clicked() {
+                choice = Some(DashboardAction::QemuSettings);
+            }
+        }
+    }
     if let Some(e) = &state.last_outcome {
+        // Without QEMU, a refused start says why instead of "capability not
+        // available on this host".
+        let text = match no_qemu {
+            Some(reason) if state.start_unavailable_outcome.as_ref() == Some(e) => {
+                start_refused_outcome(reason)
+            }
+            _ => format!("Last action: {e}"),
+        };
         ui.add_space(6.0);
-        ui.label(
-            egui::RichText::new(format!("Last action: {e}"))
-                .small()
-                .color(p.text_weak),
-        );
+        ui.label(egui::RichText::new(text).small().color(p.text_weak));
     }
 
     ui.add_space(18.0);
@@ -464,8 +638,14 @@ pub fn dashboard_ui(
             if i > 0 {
                 theme::divider(ui);
             }
-            let baselines = (state.baselines.get(&v.vm_id), baselines_available(state));
-            ui.push_id(v.vm_id, |ui| vm_row(ui, v, active, baselines, &mut choice));
+            let baselines = (
+                state.baselines.get(&v.vm_id),
+                state.snapshots.get(&v.vm_id),
+                baselines_available(state),
+            );
+            ui.push_id(v.vm_id, |ui| {
+                vm_row(ui, v, active, baselines, no_qemu, &mut choice)
+            });
         }
     });
     choice

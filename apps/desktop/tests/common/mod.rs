@@ -132,21 +132,26 @@ pub(crate) fn vm(n: u8, name: &str, state: VmState) -> VmSummary {
         state,
         run_id: state.has_process().then(|| run_id(n)),
         config: lightvm_proto::VmConfig {
+            tools: Default::default(),
             name: VmName::parse(name).unwrap(),
             guest_os: lightvm_proto::GuestOs::UbuntuLtsX86_64,
             vcpus: 2,
             memory_mib: 4096,
             disk_gib: 32,
             network: lightvm_proto::NetworkProfile::Offline,
+            endpoints: Vec::new(),
             install_media: None,
             data_media: None,
             firmware: lightvm_proto::Firmware::Uefi,
             limits: Default::default(),
+            imported: None,
         },
         config_revision: 3,
         disk_used_bytes: Some(5_637_144_576),
         baselines: Default::default(),
+        snapshots: Default::default(),
         start: Default::default(),
+        vcpu_halt: None,
     }
 }
 
@@ -158,6 +163,38 @@ pub(crate) fn media(n: u8, kind: MediaKind, origin: &str) -> MediaRecord {
         size_bytes: 3_213_064_192,
         declared_origin: Label::parse(origin).unwrap(),
         approved_at: UtcTimestamp::from_unix_millis(1_760_000_000_000 + i64::from(n)).unwrap(),
+        detected_guest: None,
+        // ADR-0029: the user's file, used in place.
+        location: Some(format!("D:\\ISO\\{origin}")),
+        missing: false,
+    }
+}
+
+/// Medium with a read-only managed copy (imported by an earlier version).
+pub(crate) fn managed_media(n: u8, kind: MediaKind, origin: &str) -> MediaRecord {
+    MediaRecord {
+        location: None,
+        ..media(n, kind, origin)
+    }
+}
+
+/// Installation media in which the supervisor detected `os`.
+pub(crate) fn detected_media(
+    n: u8,
+    origin: &str,
+    os: lightvm_proto::GuestOs,
+    arch: Option<lightvm_proto::GuestArch>,
+    build: Option<u32>,
+    edition: Option<&str>,
+) -> MediaRecord {
+    MediaRecord {
+        detected_guest: Some(lightvm_proto::DetectedGuest {
+            os,
+            arch,
+            build,
+            edition: edition.map(|e| Label::parse(e).unwrap()),
+        }),
+        ..media(n, MediaKind::InstallIso, origin)
     }
 }
 
@@ -178,7 +215,7 @@ pub(crate) fn connected(vms: Vec<VmSummary>) -> ServiceState {
                     MediaKind::InstallIso,
                     "ubuntu-24.04.3-live-server-amd64.iso",
                 ),
-                media(2, MediaKind::DataIso, "tools.iso"),
+                managed_media(2, MediaKind::DataIso, "tools.iso"),
             ],
             error: None,
         },
@@ -228,6 +265,67 @@ pub(crate) fn deterministic_frame(w: usize, h: usize) -> egui::ColorImage {
 
 pub(crate) fn baseline_id(n: u8) -> lightvm_proto::BaselineId {
     lightvm_proto::BaselineId::from_unix_millis(1_760_000_300_000 + u64::from(n), [n; 10])
+}
+
+pub(crate) fn snapshot_id(n: u8) -> lightvm_proto::SnapshotId {
+    lightvm_proto::SnapshotId::from_unix_millis(1_760_000_500_000 + u64::from(n), [n; 10])
+}
+
+/// User snapshot `n` of VM `vm` (ADR-0032): `name`, on top of `parent`
+/// (`None` = a root), taken `running`/`clean`, 16 GiB disk, 1 MiB of own
+/// files, created 2026-10-10 00:00 UTC plus `n` hours.
+pub(crate) fn snapshot(
+    n: u8,
+    vm: u8,
+    name: &str,
+    parent: Option<lightvm_proto::SnapshotId>,
+    running: bool,
+    clean: bool,
+) -> lightvm_proto::ipc::SnapshotSummary {
+    lightvm_proto::ipc::SnapshotSummary {
+        snapshot_id: snapshot_id(n),
+        vm_id: vm_id(vm),
+        parent,
+        name: Label::parse(name).unwrap(),
+        description: String::new(),
+        created_at: UtcTimestamp::from_unix_millis(1_791_619_200_000 + i64::from(n) * 3_600_000)
+            .unwrap(),
+        taken_while_running: running,
+        clean_shutdown: clean,
+        firmware_saved: true,
+        has_thumbnail: running,
+        disk_gib: 16,
+        config_revision: 3,
+        files_bytes: 1 << 20,
+    }
+}
+
+/// Snapshot tree of VM `vm` with the given snapshots, oldest first; the
+/// current state descends from `current` (`None` = never taken).
+pub(crate) fn snapshot_tree(
+    vm: u8,
+    current: Option<lightvm_proto::SnapshotId>,
+    snapshots: Vec<lightvm_proto::ipc::SnapshotSummary>,
+) -> lightvm_proto::ipc::SnapshotTree {
+    let _ = vm;
+    lightvm_proto::ipc::SnapshotTree {
+        snapshots,
+        current,
+        available: true,
+        unavailable_reason: None,
+    }
+}
+
+/// Snapshots of VM 1 as last read: two snapshots, the current state an
+/// overlay of the second.
+pub(crate) fn snapshots_list() -> lightvm_desktop::service::SnapshotList {
+    let a = snapshot(1, 1, "Clean install", None, false, true);
+    let b = snapshot(2, 1, "Before the update", Some(snapshot_id(1)), true, false);
+    lightvm_desktop::service::SnapshotList {
+        loaded: true,
+        tree: Some(snapshot_tree(1, Some(snapshot_id(2)), vec![a, b])),
+        error: None,
+    }
 }
 
 /// Verified baseline of VM `vm`, not current, not in use: 3 GiB on the
@@ -283,6 +381,7 @@ pub(crate) fn session_request(id: u64, client: &str) -> lightvm_proto::ipc::Sess
             Capability::VmReset,
         ]
         .into(),
+        requested_endpoints: Vec::new(),
         verification_code: "482-913".into(),
         requested_at: at(-48),
         expires_at: at(252),
@@ -299,6 +398,7 @@ pub(crate) fn session(
 ) -> lightvm_proto::ipc::SessionInfo {
     use lightvm_proto::Capability;
     lightvm_proto::ipc::SessionInfo {
+        tools: Default::default(),
         session_id: session_id(n),
         vm_id: vm_id(vm),
         connection_id: (state != lightvm_proto::SessionState::Terminated).then_some(7),
@@ -313,6 +413,7 @@ pub(crate) fn session(
             Capability::VmInput,
         ]
         .into(),
+        network_endpoints: Vec::new(),
         quotas: lightvm_proto::ipc::AGENT_DEFAULT_QUOTAS,
         usage: lightvm_proto::ipc::SessionUsage {
             operations: 12,
@@ -368,6 +469,7 @@ pub(crate) fn report(
         }],
     };
     SessionReport {
+        tools: Default::default(),
         report_format: lightvm_proto::report::REPORT_FORMAT.into(),
         session_id: session_id(n),
         vm_id: vm_id(vm),
@@ -405,6 +507,7 @@ pub(crate) fn report(
             Capability::VmInput,
         ]
         .into(),
+        network_endpoints: Vec::new(),
         quotas: lightvm_proto::ipc::AGENT_DEFAULT_QUOTAS,
         expires_at: at(52 * 60),
         versions: ReportVersions {
@@ -489,4 +592,119 @@ pub(crate) fn shot_image() -> lightvm_desktop::service::ShotImage {
         size: [4, 3],
         rgba: Arc::new([200u8, 40, 40, 255].repeat(12)),
     }
+}
+
+/// Preview of a VMware Windows 7 x64 VM on an LSI Logic disk with two
+/// snapshot levels (ADR-0030): storage driver warning, SVGA offered.
+pub(crate) fn vmware_preview_lsilogic() -> lightvm_proto::ipc::VmwareImportPreview {
+    use lightvm_proto::ipc::{
+        ImportWarning, ImportWarningKind, NotImported, NotImportedItem, VmwareController,
+        VmwareDiskPreview, VmwareImportPreview,
+    };
+    use lightvm_proto::{
+        DiskController, DisplayAdapter, Firmware, GuestArch, GuestOs, ImportSource,
+        ImportedHardware, NetworkProfile, VmConfig,
+    };
+    let not = |item, detail: Option<&str>| NotImported {
+        item,
+        detail: detail.map(str::to_owned),
+    };
+    VmwareImportPreview {
+        vmx_file: "Windows 7 x64.vmx".into(),
+        display_name: Some("Windows 7 x64 - VS2010".into()),
+        vmware_guest_os: "windows7-64".into(),
+        config: VmConfig {
+            tools: Default::default(),
+            name: VmName::parse("Windows 7 x64 - VS2010").unwrap(),
+            guest_os: GuestOs::Windows7,
+            vcpus: 2,
+            memory_mib: 4096,
+            disk_gib: 60,
+            network: NetworkProfile::Offline,
+            endpoints: Vec::new(),
+            install_media: None,
+            data_media: None,
+            firmware: Firmware::Bios,
+            limits: Default::default(),
+            imported: Some(ImportedHardware {
+                source: ImportSource::Vmware,
+                arch: GuestArch::X86_64,
+                disk_controller: DiskController::Ahci,
+                display: DisplayAdapter::Standard,
+                cores_per_socket: Some(2),
+                storage_driver_preparation: true,
+            }),
+        },
+        disk: VmwareDiskPreview {
+            file_name: "Windows 7 x64-000002.vmdk".into(),
+            slot: "scsi0:0".into(),
+            vmware_controller: VmwareController::LsiLogic,
+            create_type: "monolithicSparse".into(),
+            virtual_size_bytes: 60 << 30,
+            allocated_bytes: 23_622_320_128,
+            snapshot_levels: 2,
+        },
+        required_bytes: 23_622_320_128,
+        free_bytes: Some(180 << 30),
+        not_imported: vec![
+            not(NotImportedItem::Network, Some("ethernet0")),
+            not(NotImportedItem::SharedFolders, None),
+            not(NotImportedItem::Usb, None),
+            not(NotImportedItem::Sound, None),
+            not(NotImportedItem::Snapshots, Some("2")),
+            not(NotImportedItem::CdRom, Some("en_visual_studio_2010.iso")),
+            not(NotImportedItem::VmwareToolsFeatures, None),
+        ],
+        warnings: vec![ImportWarning {
+            kind: ImportWarningKind::StorageDriverPreparation,
+            detail: None,
+        }],
+        vmware_svga_offered: true,
+        vmware_tools_hint: true,
+    }
+}
+
+/// Preview of a VMware Linux VM on PVSCSI, UEFI, no snapshot (ADR-0030).
+pub(crate) fn vmware_preview_linux() -> lightvm_proto::ipc::VmwareImportPreview {
+    use lightvm_proto::ipc::{
+        ImportWarning, ImportWarningKind, NotImported, NotImportedItem, VmwareController,
+        VmwareDiskPreview,
+    };
+    use lightvm_proto::{DiskController, Firmware, GuestOs, ImportedHardware};
+    let mut p = vmware_preview_lsilogic();
+    p.vmx_file = "debian12.vmx".into();
+    p.display_name = Some("debian12".into());
+    p.vmware_guest_os = "debian12-64".into();
+    p.config.name = VmName::parse("debian12").unwrap();
+    p.config.guest_os = GuestOs::OtherLinuxX86_64;
+    p.config.memory_mib = 2048;
+    p.config.disk_gib = 20;
+    p.config.firmware = Firmware::Uefi;
+    p.config.imported = p.config.imported.map(|h| ImportedHardware {
+        disk_controller: DiskController::Pvscsi,
+        cores_per_socket: None,
+        storage_driver_preparation: false,
+        ..h
+    });
+    p.disk = VmwareDiskPreview {
+        file_name: "debian12.vmdk".into(),
+        slot: "scsi0:0".into(),
+        vmware_controller: VmwareController::Pvscsi,
+        create_type: "twoGbMaxExtentSparse".into(),
+        virtual_size_bytes: 20 << 30,
+        allocated_bytes: 3_489_660_928,
+        snapshot_levels: 0,
+    };
+    p.required_bytes = 3_489_660_928;
+    p.not_imported = vec![NotImported {
+        item: NotImportedItem::Network,
+        detail: Some("ethernet0".into()),
+    }];
+    p.warnings = vec![ImportWarning {
+        kind: ImportWarningKind::NewUefiVariables,
+        detail: None,
+    }];
+    p.vmware_svga_offered = false;
+    p.vmware_tools_hint = false;
+    p
 }

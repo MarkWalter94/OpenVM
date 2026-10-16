@@ -83,6 +83,9 @@ fn app(state: ServiceState) -> (LightVmApp, common::Handles) {
     let mut app = LightVmApp::new(false);
     app.set_supervisor(fake);
     app.rendering = glow_info();
+    // The reference snapshots show an x86 host (the wizard lists the x86
+    // systems), whatever the build host.
+    app.set_guest_support(|os, _| !os.is_aarch64());
     // Fixed path: the default one depends on the user's profile.
     app.set_settings(
         UiSettings {
@@ -109,6 +112,10 @@ fn harness(app: LightVmApp, size: egui::Vec2) -> Harness<'static, LightVmApp> {
 }
 
 #[test]
+#[cfg_attr(
+    not(windows),
+    ignore = "WARP fallback: the status bar label names WARP only on Windows"
+)]
 fn snapshot_status_bar_degraded() {
     let _serial = serial();
     let info = warp_fallback_info();
@@ -133,6 +140,10 @@ fn snapshot_status_bar_glow() {
 }
 
 #[test]
+#[cfg_attr(
+    not(windows),
+    ignore = "WARP fallback: the status bar label names WARP only on Windows"
+)]
 fn snapshot_console_synthetic_frame() {
     let _serial = serial();
     let (fake, _hs) = FakeSupervisor::new(connected(vec![vm(1, "ubuntu-dev", VmState::Running)]));
@@ -224,7 +235,7 @@ fn snapshot_wizard_steps() {
     let _serial = serial();
     let (mut app, _hs) = app(catalog());
     app.set_file_picker(Some(Box::new(|_t: &str| None)));
-    let mut h = harness(app, egui::vec2(1100.0, 640.0));
+    let mut h = harness(app, egui::vec2(1100.0, 760.0));
     open_wizard(&mut h);
     h.get_by_role(Role::TextInput).type_text("ubuntu-dev");
     h.run();
@@ -236,18 +247,98 @@ fn snapshot_wizard_steps() {
     h.run();
     h.snapshot("wizard_name");
     next(&mut h);
-    next(&mut h);
     h.get_by_label("ubuntu-24.04.3-live-server-amd64.iso")
         .click();
     h.run();
     h.snapshot("wizard_install_media");
     next(&mut h);
+    h.get_by_label("Step 3 of 7: System");
+    // Not recognized: nothing preselected, Next disabled until a choice.
+    h.snapshot("wizard_system_unrecognized");
+    h.get_by_label("Ubuntu LTS (x86-64), the reference system")
+        .click();
+    h.run();
     next(&mut h);
+    next(&mut h);
+    h.get_by_label("Step 5 of 7: Resources");
     h.snapshot("wizard_resources");
     next(&mut h);
+    h.get_by_label("Step 6 of 7: Network");
     h.snapshot("wizard_network");
     next(&mut h);
+    h.get_by_label("Step 7 of 7: Summary");
     h.snapshot("wizard_summary");
+}
+
+/// ADR-0027: Windows media detected at import, firmware choice, summary
+/// with the hardware profile; dark and light themes.
+#[test]
+fn snapshot_wizard_windows() {
+    let _serial = serial();
+    let mut state = catalog();
+    state.media.records.push(common::detected_media(
+        5,
+        "Win10_22H2_English_x64.iso",
+        lightvm_proto::GuestOs::Windows10,
+        Some(lightvm_proto::GuestArch::X86_64),
+        Some(19045),
+        Some("Windows 10 Pro"),
+    ));
+    let (app, _hs) = app(state);
+    let mut h = harness(app, egui::vec2(1100.0, 820.0));
+    open_wizard(&mut h);
+    h.get_by_role(Role::TextInput).type_text("win10");
+    h.run();
+    next(&mut h);
+    h.get_by_label("Win10_22H2_English_x64.iso").click();
+    h.run();
+    next(&mut h);
+    h.snapshot("wizard_system_windows");
+    h.state_mut().set_theme(UiTheme::Light);
+    h.run();
+    h.snapshot("wizard_system_windows_light");
+    h.state_mut().set_theme(UiTheme::Dark);
+    h.run();
+    for _ in 0..4 {
+        next(&mut h);
+    }
+    h.get_by_label("Step 7 of 7: Summary");
+    h.snapshot("wizard_summary_windows");
+}
+
+/// ADR-0027: Windows Vista x64 media on a Windows host, Vista chosen by
+/// hand: the System step says why the VM cannot be created.
+#[test]
+fn snapshot_wizard_vista_x64() {
+    let _serial = serial();
+    let mut state = catalog();
+    state.media.records.push(common::detected_media(
+        9,
+        "vista_x64.iso",
+        lightvm_proto::GuestOs::WindowsVista,
+        Some(lightvm_proto::GuestArch::X86_64),
+        Some(6003),
+        None,
+    ));
+    let (mut app, _hs) = app(state);
+    app.set_guest_support(|os, arch| {
+        !os.is_aarch64()
+            && !(os == lightvm_proto::GuestOs::WindowsVista
+                && arch == Some(lightvm_proto::GuestArch::X86_64))
+    });
+    let mut h = harness(app, egui::vec2(1100.0, 820.0));
+    open_wizard(&mut h);
+    h.get_by_role(Role::TextInput).type_text("vista");
+    h.run();
+    next(&mut h);
+    h.get_by_label("vista_x64.iso").click();
+    h.run();
+    next(&mut h);
+    h.get_by_role_and_label(Role::RadioButton, "Windows Vista")
+        .click();
+    h.run();
+    h.get_by_label(lightvm_desktop::wizard::VISTA_X64_NOT_SUPPORTED);
+    h.snapshot("wizard_system_vista_x64");
 }
 
 #[test]
@@ -279,12 +370,25 @@ fn snapshot_dialog_close() {
     h.snapshot("dialog_close");
 }
 
+fn fixed_qemu_settings() -> UiSettings {
+    UiSettings {
+        qemu_dir: Some(std::path::PathBuf::from("/opt/qemu-11.1")),
+        catalog: Some(std::path::PathBuf::from("/srv/lightvm/catalog")),
+        ..UiSettings::default()
+    }
+}
+
 #[test]
 fn snapshot_settings() {
     let _serial = serial();
     let (mut app, _hs) = app(catalog());
+    // Chosen QEMU and catalog folders: the page does not depend on what this
+    // host has installed (Homebrew QEMU is found automatically on macOS) nor
+    // on the user profile path.
+    app.set_settings(fixed_qemu_settings(), None, None);
     app.set_section(Section::Settings);
-    let mut h = harness(app, egui::vec2(1100.0, 2300.0));
+    // Tall enough for the whole page, Installation media included.
+    let mut h = harness(app, egui::vec2(1100.0, 2560.0));
     h.snapshot("settings");
 }
 
@@ -292,6 +396,10 @@ fn snapshot_settings() {
 fn snapshot_settings_light_theme() {
     let _serial = serial();
     let (mut app, _hs) = app(catalog());
+    // Chosen QEMU and catalog folders: the page does not depend on what this
+    // host has installed (Homebrew QEMU is found automatically on macOS) nor
+    // on the user profile path.
+    app.set_settings(fixed_qemu_settings(), None, None);
     app.set_section(Section::Settings);
     app.set_theme(UiTheme::Light);
     let mut h = harness(app, egui::vec2(1100.0, 700.0));
@@ -813,4 +921,55 @@ fn snapshot_report_dialogs() {
         .click_accesskit();
     h.run();
     h.snapshot("dialog_report_delete");
+}
+
+/// "Import VMware VM" page opened with a fake `.vmx` picker.
+fn open_vmware_import() -> (Harness<'static, LightVmApp>, common::Handles) {
+    let (mut app, hs) = app(catalog());
+    app.set_vmx_picker(Some(Box::new(|_t: &str| {
+        Some(std::path::PathBuf::from(
+            r"D:\VMs\Windows 7 x64\Windows 7 x64.vmx",
+        ))
+    })));
+    let mut h = harness(app, egui::vec2(1100.0, 1500.0));
+    h.get_by_role_and_label(Role::Button, "Import VMware VM")
+        .click();
+    // The examination shows a spinner: fixed number of steps.
+    h.run_steps(4);
+    (h, hs)
+}
+
+/// ADR-0030: preview of a Windows VM on LSI Logic (storage driver warning,
+/// display choice).
+#[test]
+fn snapshot_vmware_import_lsilogic() {
+    use lightvm_desktop::service::RequestStatus;
+    let _serial = serial();
+    let (mut h, hs) = open_vmware_import();
+    hs.update(|s| {
+        s.vmware.preview = RequestStatus::Done(Box::new(common::vmware_preview_lsilogic()));
+    });
+    h.run_steps(4);
+    h.snapshot("vmware_import_preview_lsilogic");
+}
+
+/// ADR-0030: preview of a Linux VM on PVSCSI, then the progress of the
+/// conversion.
+#[test]
+fn snapshot_vmware_import_linux_progress() {
+    use lightvm_desktop::service::RequestStatus;
+    let _serial = serial();
+    let (mut h, hs) = open_vmware_import();
+    hs.update(|s| {
+        s.vmware.preview = RequestStatus::Done(Box::new(common::vmware_preview_linux()));
+    });
+    h.run_steps(4);
+    h.snapshot("vmware_import_preview_linux");
+    h.get_by_role_and_label(Role::Button, "Import").click();
+    h.run_steps(4);
+    hs.update(|s| {
+        s.vmware.progress = Some((lightvm_proto::ipc::VmwareImportPhase::Converting, 42));
+    });
+    h.run_steps(4);
+    h.snapshot("vmware_import_progress");
 }

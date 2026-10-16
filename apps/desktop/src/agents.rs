@@ -74,6 +74,9 @@ pub fn capability_text(c: Capability) -> &'static str {
             Capability::VmSnapshot => "Create a baseline with the VM off",
             Capability::VmRestore => "Restore a baseline with the VM off",
             Capability::VmLogs => "Read LightVM events and QEMU logs",
+            Capability::NetworkEndpoints => {
+                "Reach the network endpoints listed below from inside the guest"
+            }
             _ => c.as_str(),
         },
     }
@@ -182,6 +185,10 @@ pub struct ApproveForm {
     pub lease_ms: u32,
     /// Hand keyboard and mouse to the agent at once.
     pub give_input: bool,
+    /// Network endpoints of the VM granted (normalized names, ADR-0033).
+    pub endpoints: BTreeSet<String>,
+    /// Named Tools shares approved for this session.
+    pub tools: lightvm_proto::ToolGrant,
     /// The user confirmed that the agent shows the same code.
     pub code_matches: bool,
     /// The approval was sent.
@@ -224,6 +231,8 @@ impl ApproveForm {
             quotas: QuotaPreset::Standard,
             lease_ms: LEASES[0].0,
             give_input: false,
+            endpoints: BTreeSet::new(),
+            tools: Default::default(),
             code_matches: false,
             sent: false,
         }
@@ -235,17 +244,25 @@ impl ApproveForm {
         if self.caps.is_empty() || !self.code_matches {
             return None;
         }
+        // ADR-0033: `network.endpoints` exactly when endpoints are ticked.
+        let mut caps: lightvm_proto::CapabilitySet = self.caps.iter().copied().collect();
+        caps.remove(&Capability::NetworkEndpoints);
+        if !self.endpoints.is_empty() {
+            caps.insert(Capability::NetworkEndpoints);
+        }
         let quotas = match self.quotas {
             QuotaPreset::Standard => None,
             q => Some(q.quotas()),
         };
         Some(SessionApproval {
+            tools: self.tools.clone(),
             vm_id,
-            capabilities: self.caps.iter().copied().collect(),
+            capabilities: caps,
             duration_s: self.duration_s,
             quotas,
             lease_ms: (self.lease_ms != LEASES[0].0).then_some(self.lease_ms),
             give_input: self.give_input && self.caps.contains(&Capability::VmInput),
+            network_endpoints: self.endpoints.iter().cloned().collect(),
         })
     }
 }
@@ -618,6 +635,69 @@ fn access_ui(ui: &mut egui::Ui, env: &AgentsEnv<'_>, choice: &mut Option<AgentAc
     );
 }
 
+/// Network endpoints the session may reach (ADR-0033): those of the chosen
+/// VM, none ticked unless the user ticks them.
+fn network_grant_ui(ui: &mut egui::Ui, env: &AgentsEnv<'_>, f: &mut ApproveForm, editable: bool) {
+    use lightvm_proto::{NetworkEndpoint, NetworkProfile, VmState};
+    let vm =
+        f.vm.and_then(|id| env.state.vms.iter().find(|v| v.vm_id == id));
+    let endpoints: &[NetworkEndpoint] = vm.map_or(&[], |v| v.config.endpoints.as_slice());
+    f.endpoints
+        .retain(|n| endpoints.iter().any(|e| e.key() == *n));
+    theme::row(
+        ui,
+        "Network",
+        Some(
+            "The guest reaches only the endpoints ticked here, each one TCP service approved in the VM settings. Nothing ticked: the VM runs without network for this session.",
+        ),
+        |ui| {
+            let Some(v) = vm else {
+                small(ui, "Choose the VM first.");
+                return;
+            };
+            if v.config.network == NetworkProfile::Offline || endpoints.is_empty() {
+                small(
+                    ui,
+                    "This VM has no network endpoints (VM settings, Network): it runs without network for the session.",
+                );
+                return;
+            }
+            if v.config.network == NetworkProfile::Nat && v.state != VmState::Stopped {
+                theme::notice(
+                    ui,
+                    "This VM is running with NAT networking, which agent sessions never use: stop it first, or the approval is refused.",
+                    Tone::Warning,
+                );
+            }
+            for e in endpoints {
+                let key = e.key();
+                let mut on = f.endpoints.contains(&key);
+                let text = format!(
+                    "{} \u{2192} {}:{} (inside the guest {}:{})",
+                    e.name, e.host, e.port, e.virtual_ip, e.port
+                );
+                if ui
+                    .add_enabled(editable, egui::Checkbox::new(&mut on, text))
+                    .changed()
+                {
+                    if on {
+                        f.endpoints.insert(key);
+                    } else {
+                        f.endpoints.remove(&key);
+                    }
+                }
+            }
+            if !f.endpoints.is_empty() {
+                theme::notice(
+                    ui,
+                    "An allowed endpoint receives whatever the guest sends to it.",
+                    Tone::Warning,
+                );
+            }
+        },
+    );
+}
+
 fn requested_text(env: &AgentsEnv<'_>, r: &SessionRequestInfo) -> String {
     let vms = if r.requested_vms.is_empty() {
         "no VM in particular".to_owned()
@@ -637,7 +717,14 @@ fn requested_text(env: &AgentsEnv<'_>, r: &SessionRequestInfo) -> String {
             .collect::<Vec<_>>()
             .join("; ")
     };
-    format!("Asks for {vms}: {caps}.")
+    if r.requested_endpoints.is_empty() {
+        format!("Asks for {vms}: {caps}.")
+    } else {
+        format!(
+            "Asks for {vms}: {caps}. Network endpoints asked for: {}.",
+            r.requested_endpoints.join(", ")
+        )
+    }
 }
 
 /// The verification code, large, with its accessible name.
@@ -784,6 +871,10 @@ fn approve_form_ui(
             }
         },
     );
+    theme::divider(ui);
+    network_grant_ui(ui, env, f, editable);
+    theme::divider(ui);
+    tools_grant_ui(ui, env, f, editable);
     theme::divider(ui);
     let input = f.caps.contains(&Capability::VmInput);
     if !input {
@@ -1346,6 +1437,16 @@ pub fn session_page_ui(
                             });
                         }
                     });
+                    theme::row(ui, "Network", None, |ui| {
+                        if s.network_endpoints.is_empty() {
+                            ui.label("No network: the VM runs offline for this session");
+                        } else {
+                            ui.label(format!(
+                                "Only these endpoints: {}",
+                                s.network_endpoints.join(", ")
+                            ));
+                        }
+                    });
                     theme::row(ui, "Time", None, |ui| {
                         ui.label(format!(
                             "From {} to {}",
@@ -1505,6 +1606,87 @@ pub fn banner_ui(
     choice
 }
 
+fn tools_grant_ui(ui: &mut egui::Ui, env: &AgentsEnv<'_>, f: &mut ApproveForm, editable: bool) {
+    use lightvm_proto::Capability::*;
+    let config =
+        f.vm.and_then(|id| env.state.vms.iter().find(|v| v.vm_id == id))
+            .map(|v| &v.config.tools);
+    let Some(config) = config.filter(|c| c.enabled) else {
+        f.tools = Default::default();
+        f.caps.retain(|c| !c.is_integration());
+        return;
+    };
+    small(
+        ui,
+        "Guest Tools: every permission starts off. Shared folders expose the selected host files to this guest.",
+    );
+    for (cap, enabled, label) in [
+        (
+            Clipboard,
+            config.clipboard,
+            "Read and write guest clipboard text",
+        ),
+        (
+            FilesTransfer,
+            config.files_transfer,
+            "Transfer guest inbox/outbox files",
+        ),
+        (
+            UiInspect,
+            config.ui_inspect,
+            "Inspect guest application controls",
+        ),
+        (
+            UiAct,
+            config.ui_act,
+            "Act on guest controls (requires input ownership)",
+        ),
+    ] {
+        let mut on = enabled && f.caps.contains(&cap);
+        ui.add_enabled(editable && enabled, egui::Checkbox::new(&mut on, label));
+        if on {
+            f.caps.insert(cap);
+        } else {
+            f.caps.remove(&cap);
+        }
+    }
+    if f.caps.contains(&UiAct) {
+        f.caps.insert(UiInspect);
+        f.caps.insert(VmInput);
+    }
+    f.tools
+        .shares
+        .retain(|name, _| config.shares.iter().any(|s| &s.name == name));
+    for share in &config.shares {
+        ui.horizontal(|ui| {
+            let mut read = f.tools.shares.contains_key(&share.name);
+            let mut write =
+                f.tools.shares.get(&share.name).copied().unwrap_or(false) && share.writable;
+            ui.add_enabled(
+                editable,
+                egui::Checkbox::new(&mut read, format!("Shared folder: {}", share.name)),
+            );
+            ui.add_enabled(
+                editable && read && share.writable,
+                egui::Checkbox::new(&mut write, "Write"),
+            );
+            if read {
+                f.tools.shares.insert(share.name.clone(), write);
+            } else {
+                f.tools.shares.remove(&share.name);
+            }
+        });
+    }
+    f.caps.remove(&ShareRead);
+    f.caps.remove(&ShareWrite);
+    if !f.tools.shares.is_empty() {
+        f.caps.insert(ShareRead);
+    }
+    if f.tools.shares.values().any(|write| *write) {
+        f.caps.insert(ShareWrite);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1545,6 +1727,7 @@ mod tests {
             requested_vms: vec![],
             requested_capabilities: [Capability::VmReset, Capability::VmStop, Capability::VmInput]
                 .into(),
+            requested_endpoints: Vec::new(),
             verification_code: "123-456".into(),
             requested_at: UtcTimestamp::from_unix_millis(0).unwrap(),
             expires_at: UtcTimestamp::from_unix_millis(300_000).unwrap(),

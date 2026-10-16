@@ -58,7 +58,8 @@ try {
     $pkg = Join-Path $work 'package'
     New-Item -ItemType Directory -Force -Path $pkg | Out-Null
     $payload = @('lightvm-desktop.exe', 'lightvm-service.exe', 'lightvm-mcp.exe', 'README.md', 'USER_GUIDE.md',
-        'LICENSE.txt', 'THIRD-PARTY-LICENSES.txt', 'SBOM.cdx.json', 'BUILDINFO.txt')
+        'LICENSE.txt', 'THIRD-PARTY-LICENSES.txt', 'SBOM.cdx.json', 'BUILDINFO.txt', 'tools/TOOLS.EXE', 'tools/TOOLS.PY', 'tools/TOOLS.EXE.sha256', 'tools/TOOLS.PY.sha256', 'tools/README.txt', 'tools/LICENSE.txt')
+    New-Item -ItemType Directory -Force -Path (Join-Path $pkg 'tools') | Out-Null
     foreach ($f in $payload) { Set-Content -LiteralPath (Join-Path $pkg $f) -Value "dummy $f" -Encoding ascii }
     Copy-Item -LiteralPath (Join-Path $scripts 'install.ps1') -Destination $pkg
     Copy-Item -LiteralPath (Join-Path $scripts 'uninstall.ps1') -Destination $pkg

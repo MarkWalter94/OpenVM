@@ -11,7 +11,9 @@
 use std::fmt;
 use std::str::FromStr;
 
-pub use lightvm_proto::{BaselineId, GrantId, MediaId, OperationId, RunId, SessionId, VmId};
+pub use lightvm_proto::{
+    BaselineId, GrantId, MediaId, OperationId, RunId, SessionId, SnapshotId, VmId,
+};
 
 macro_rules! local_id {
     ($(#[$doc:meta])* $name:ident) => {
@@ -82,6 +84,7 @@ storage_id!(
     MediaId,
     SessionId,
     GrantId,
+    SnapshotId,
     DiskId,
     FirmwareId,
     ArtifactId

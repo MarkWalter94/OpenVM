@@ -1,6 +1,6 @@
 # ADR-0004 — Offline MVP profile with no NIC and no host shares
 
-- Status: Accepted
+- Status: Accepted; Offline remains the default, NAT (manual use) and endpoint allowlist (grantable) added by ADR-0033
 - Date: 2026-10-09
 - Owner: to be assigned
 

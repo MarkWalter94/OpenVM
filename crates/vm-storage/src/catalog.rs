@@ -142,6 +142,21 @@ impl Catalog {
         Ok(cat)
     }
 
+    /// Writes the whole WAL into the database file and closes the
+    /// connection, keeping the single-instance lock: the database file is
+    /// then complete on its own and nobody else can open the catalog
+    /// (catalog move, [`crate::move_catalog`]).
+    pub(crate) fn close_keep_lock(self) -> Result<CatalogLock> {
+        self.conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .db()?;
+        let Self { conn, _lock, .. } = self;
+        conn.close().map_err(|(_, e)| StorageError::Sqlite(e))?;
+        Ok(_lock)
+    }
+
     /// Outcome of opening.
     pub fn open_report(&self) -> Option<&OpenReport> {
         self.report.as_ref()
@@ -309,6 +324,89 @@ impl Catalog {
                 read_only: spec.read_only,
             })
         })
+    }
+
+    /// Records a `pending` user snapshot intent (ADR-0032) with its JSON
+    /// payload: only one group of open intents per VM
+    /// ([`StorageError::VmBusy`]). The temporary is a directory created
+    /// here (`tmp/<kind>-<uuid>.part/`); the file rules of
+    /// [`Self::begin_intent`] do not apply: these intents are settled by
+    /// `snapshot.rs` from the disk's QCOW2 snapshot table.
+    pub(crate) fn begin_snapshot_intent(
+        &mut self,
+        kind: IntentKind,
+        vm: &VmId,
+        target_id: &str,
+        final_path: Option<ManagedPath>,
+        payload: &serde_json::Value,
+    ) -> Result<Intent> {
+        if !kind.is_snapshot() {
+            return Err(StorageError::StateConflict(
+                "not a snapshot intent kind".into(),
+            ));
+        }
+        let temp_rel = ManagedPath::parse(&format!(
+            "{TMP_DIR}/{}-{}.part",
+            kind.as_str(),
+            uuid::Uuid::now_v7().simple()
+        ))?;
+        let temp_path = self.layout.resolve(&temp_rel)?;
+        let final_abs = final_path
+            .as_ref()
+            .map(|p| self.layout.resolve(p))
+            .transpose()?;
+        let payload = payload.to_string();
+        let intent = self.with_tx(|tx| {
+            check_vm_free(tx, Some(vm), None)?;
+            let now = now_rfc3339();
+            tx.conn()
+                .execute(
+                    "INSERT INTO journal(kind, state, vm_id, operation_id, target_kind, target_id,
+                                         temp_path, final_path, payload, created_at, updated_at)
+                     VALUES (?1, 'pending', ?2, NULL, 'snapshot', ?3, ?4, ?5, ?6, ?7, ?7)",
+                    params![
+                        kind,
+                        vm.sql(),
+                        target_id,
+                        temp_rel.as_str(),
+                        final_path.as_ref().map(ManagedPath::as_str),
+                        payload,
+                        now
+                    ],
+                )
+                .db()?;
+            Ok(Intent {
+                id: tx.conn().last_insert_rowid(),
+                kind,
+                vm_id: Some(vm.to_string()),
+                operation_id: None,
+                target_kind: TargetKind::Snapshot,
+                target_id: Some(target_id.to_owned()),
+                temp_rel: temp_rel.clone(),
+                final_rel: final_path.clone(),
+                temp_path: temp_path.clone(),
+                final_path: final_abs.clone(),
+                read_only: false,
+            })
+        })?;
+        if let Err(e) = std::fs::create_dir(&intent.temp_path) {
+            let err = StorageError::io(&intent.temp_path, e);
+            let _ =
+                self.set_intent_state(intent.id, IntentState::Aborted, Some("temp_not_created"));
+            return Err(err);
+        }
+        Ok(intent)
+    }
+
+    /// JSON payload of an intent (user snapshot intents, schema v10).
+    pub(crate) fn intent_payload(&self, id: i64) -> Result<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT payload FROM journal WHERE intent_id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .db()
     }
 
     /// Completes the filesystem part and moves to `applied`.
@@ -632,6 +730,14 @@ impl Catalog {
                     // manifest must be removed.
                     remove_baseline_leftovers(&self.layout, rel)?;
                 }
+                // An import that did not commit leaves no VM directory
+                // (created by `begin_intent`) behind.
+                if i.kind == IntentKind::ImportVm
+                    && !row_exists
+                    && let Some(rel) = &i.final_rel
+                {
+                    remove_empty_parent(&self.layout, rel);
+                }
                 if parts.is_empty() {
                     parts.push("nothing_to_undo");
                 }
@@ -843,7 +949,12 @@ pub(crate) fn build_vm_manifest(tx: &Tx<'_>, vm: &VmId) -> Result<VmManifest> {
     })
 }
 
-fn set_state_tx(tx: &Tx<'_>, id: i64, state: IntentState, resolution: Option<&str>) -> Result<()> {
+pub(crate) fn set_state_tx(
+    tx: &Tx<'_>,
+    id: i64,
+    state: IntentState,
+    resolution: Option<&str>,
+) -> Result<()> {
     tx.conn()
         .execute(
             "UPDATE journal SET state = ?1, resolution = coalesce(?2, resolution), updated_at = ?3
@@ -884,6 +995,7 @@ pub(crate) fn target_exists(tx: &Tx<'_>, kind: TargetKind, id: Option<&str>) -> 
         TargetKind::Artifact => return tx.artifact_exists(id),
         TargetKind::Media => "SELECT 1 FROM media WHERE media_id = ?1",
         TargetKind::Vm => "SELECT 1 FROM vms WHERE vm_id = ?1",
+        TargetKind::Snapshot => "SELECT 1 FROM snapshots WHERE snapshot_id = ?1",
         TargetKind::None => return Ok(false),
     };
     tx.exists(sql, id)
@@ -961,7 +1073,7 @@ fn deletion_precheck(tx: &Tx<'_>, kind: TargetKind, id: Option<&str>) -> Result<
                 .map_err(|_| StorageError::Constraint("invalid vm_id".into()))?;
             crate::vm_delete::check_deletable(tx, &vm)?;
         }
-        TargetKind::Artifact | TargetKind::None => {}
+        TargetKind::Artifact | TargetKind::Snapshot | TargetKind::None => {}
     }
     Ok(())
 }
@@ -1050,7 +1162,7 @@ fn remove_baseline_leftovers(layout: &CatalogLayout, disk_rel: &ManagedPath) -> 
 }
 
 #[allow(clippy::permissions_set_readonly_false)]
-fn force_remove_file(p: &Path, meta: std::fs::Metadata) -> Result<()> {
+pub(crate) fn force_remove_file(p: &Path, meta: std::fs::Metadata) -> Result<()> {
     // Bases and media are made read-only (mitigation F0-02 §8.4): the
     // attribute must be cleared before removing an orphaned managed file.
     let mut perm = meta.permissions();
@@ -1061,7 +1173,7 @@ fn force_remove_file(p: &Path, meta: std::fs::Metadata) -> Result<()> {
     std::fs::remove_file(p).map_err(|e| StorageError::io(p, e))
 }
 
-fn remove_dir_no_links(dir: &Path) -> Result<()> {
+pub(crate) fn remove_dir_no_links(dir: &Path) -> Result<()> {
     for entry in std::fs::read_dir(dir).map_err(|e| StorageError::io(dir, e))? {
         let entry = entry.map_err(|e| StorageError::io(dir, e))?;
         let p = entry.path();

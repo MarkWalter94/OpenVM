@@ -1,4 +1,4 @@
-//! Approved media registry as a model (ROADMAP 6.3; ADR-0008).
+//! Approved media registry as a model (ROADMAP 6.3; ADR-0008, ADR-0029).
 //!
 //! A selected path does not authorize whatever file replaces it: before
 //! each use the core compares the hash, size and OS identity observed on the
@@ -10,10 +10,12 @@
 //! in a controlled, read-only directory): a responsibility of storage and backend.
 
 use lightvm_proto::{
-    FileIdentity, MediaEntry, MediaKind, MediaRecord, PublicError, Sha256Digest, UtcTimestamp,
+    FileIdentity, MediaEntry, MediaKind, MediaLocation, MediaRecord, PublicError, Sha256Digest,
+    UtcTimestamp,
 };
 
-/// Facts observed on the managed copy, computed on the open file.
+/// Facts observed on the file of an approved medium, computed on the open
+/// file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ObservedMediaFacts {
     /// SHA-256 of the content.
@@ -51,32 +53,44 @@ impl VerifiedMedia {
     }
 }
 
-fn mismatch(what: &'static str) -> PublicError {
-    PublicError::permission_denied("medium differs from the approved one")
+fn mismatch(entry: &MediaEntry, what: &'static str) -> PublicError {
+    let message = match entry.location.file_name() {
+        // ADR-0029: the user's own file can be changed between runs; the
+        // remedy is to select it again (the name only, never the path).
+        Some(name) => format!(
+            "the ISO file \u{201c}{name}\u{201d} changed since it was selected: import it again to use it"
+        ),
+        None => "medium differs from the approved one".to_owned(),
+    };
+    PublicError::permission_denied(message)
         .with_detail("reason", "media_identity_mismatch")
         .with_detail("field", what)
 }
 
 /// Compares the observed facts with the registry. Any difference (hash,
-/// size, recorded OS identity, writability) denies use.
+/// size, recorded OS identity) denies use; so does a managed copy that
+/// lost its read-only attribute. A file used in place (ADR-0029) belongs to
+/// the user and is normally writable: what keeps it unchanged during the
+/// run is the guard handle the facts were read through (share mode), so
+/// its writability is not a reason to refuse.
 pub fn verify_media(
     entry: &MediaEntry,
     observed: &ObservedMediaFacts,
     now: UtcTimestamp,
 ) -> Result<VerifiedMedia, PublicError> {
     if observed.size_bytes != entry.record.size_bytes {
-        return Err(mismatch("size_bytes"));
+        return Err(mismatch(entry, "size_bytes"));
     }
     if observed.sha256 != entry.record.sha256 {
-        return Err(mismatch("sha256"));
+        return Err(mismatch(entry, "sha256"));
     }
     if let Some(expected) = entry.file_identity
         && observed.file_identity != Some(expected)
     {
-        return Err(mismatch("file_identity"));
+        return Err(mismatch(entry, "file_identity"));
     }
-    if !observed.read_only {
-        return Err(mismatch("read_only"));
+    if matches!(entry.location, MediaLocation::Managed(_)) && !observed.read_only {
+        return Err(mismatch(entry, "read_only"));
     }
     Ok(VerifiedMedia {
         entry: entry.clone(),

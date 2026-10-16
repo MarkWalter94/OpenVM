@@ -13,6 +13,7 @@
 pub mod audit;
 pub mod backend;
 pub mod catalog;
+pub mod network;
 
 use lightvm_proto::UtcTimestamp;
 use vm_core::ports::{Clock, IdGenerator};

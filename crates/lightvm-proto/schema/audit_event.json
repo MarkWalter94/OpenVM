@@ -38,6 +38,17 @@
         }
       ]
     },
+    "network": {
+      "description": "Network details (`network_*` events).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/NetworkAudit"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "operation_id": {
       "description": "Operation involved.",
       "anyOf": [
@@ -86,6 +97,16 @@
       "anyOf": [
         {
           "$ref": "#/$defs/TerminationCause"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "tools": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ToolAudit"
         },
         {
           "type": "null"
@@ -164,6 +185,14 @@
     "AuditAction": {
       "description": "Type of recorded action.",
       "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "tools_call",
+            "tools_transfer",
+            "tools_policy"
+          ]
+        },
         {
           "description": "VM creation.",
           "type": "string",
@@ -328,6 +357,61 @@
           "description": "Deletion of a session report and its screenshots (F5).",
           "type": "string",
           "const": "report_delete"
+        },
+        {
+          "description": "Deletion of an imported medium from the registry (user only): a\nmanaged copy is removed with it, a file used in place is kept.",
+          "type": "string",
+          "const": "media_delete"
+        },
+        {
+          "description": "Automatic reset of a guest whose virtual CPUs stopped on an\nunrecoverable error (QEMU `internal-error`, for example a triple fault\nunder WHPX), as hardware would reset: `succeeded` (reset and resumed),\n`failed` (QMP refused), `denied` with `resource_limit` (too many in a\nshort time: the guest is left stopped for the user). Actor `system`.",
+          "type": "string",
+          "const": "vm_auto_reset"
+        },
+        {
+          "description": "Import of a VMware VM by conversion (user only, ADR-0030): denied\n(checks of the `.vmx` and its disks, limits), failed (conversion,\ncancellation) or succeeded (VM created with its converted disk).\nNever the path of the source files.",
+          "type": "string",
+          "const": "vm_import"
+        },
+        {
+          "description": "User snapshot taken (ADR-0032, user only): with the VM off, or while\nit runs (disk state only, like a power cut at that instant).",
+          "type": "string",
+          "const": "snapshot_take"
+        },
+        {
+          "description": "Revert of a VM to a user snapshot with the VM off (ADR-0032): disk,\nfirmware state and configuration of the snapshot.",
+          "type": "string",
+          "const": "snapshot_revert"
+        },
+        {
+          "description": "Deletion of a user snapshot (ADR-0032); its children keep their\nstate and move to its parent.",
+          "type": "string",
+          "const": "snapshot_delete"
+        },
+        {
+          "description": "Rename or new description of a user snapshot (ADR-0032; never the\ntexts).",
+          "type": "string",
+          "const": "snapshot_update"
+        },
+        {
+          "description": "Network of a run set up (ADR-0033): `network.mode`, and for the\nendpoint allowlist one event per endpoint with the host address it\nwas resolved to at the start (`failed` if it could not be resolved:\nthat endpoint refuses every connection).",
+          "type": "string",
+          "const": "network_setup"
+        },
+        {
+          "description": "A guest connection through the endpoint allowlist ended (ADR-0033):\nendpoint, addresses and byte counts, never the content.",
+          "type": "string",
+          "const": "network_connection"
+        },
+        {
+          "description": "A guest connection attempt refused by the endpoint allowlist\n(`denied`; the first ones of each run, later ones only counted).",
+          "type": "string",
+          "const": "network_denied"
+        },
+        {
+          "description": "The endpoints allowed on a running VM changed (session started or\nended, revocation, expiry, Emergency Stop): connections to endpoints\nno longer allowed were reset.",
+          "type": "string",
+          "const": "network_policy"
         }
       ]
     },
@@ -369,6 +453,18 @@
     "Capability": {
       "description": "Authorizable action on a VM. Serialized names follow the MCP catalog\n(ROADMAP 9); `vm.input` covers mouse and keyboard.",
       "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "share.read",
+            "share.write",
+            "clipboard",
+            "files.transfer",
+            "usb",
+            "ui.inspect",
+            "ui.act"
+          ]
+        },
         {
           "description": "List filtered by the grant.",
           "type": "string",
@@ -418,6 +514,11 @@
           "description": "Authorized LightVM events and QEMU logs.",
           "type": "string",
           "const": "vm.logs"
+        },
+        {
+          "description": "Network endpoints of the VM's allowlist (ADR-0033, ADR-0034): the\ngrant lists which ones ([`Grant::network_endpoints`]). Without it\nthe session's VM runs without network.",
+          "type": "string",
+          "const": "network.endpoints"
         }
       ]
     },
@@ -475,6 +576,65 @@
           "const": "unauthenticated"
         }
       ]
+    },
+    "NetworkAudit": {
+      "description": "Network details of a `network_*` audit event (ADR-0033). Addresses and\ncounts only: never data carried by the connection.",
+      "type": "object",
+      "properties": {
+        "bytes_from_guest": {
+          "description": "Bytes from the guest to the endpoint.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "bytes_to_guest": {
+          "description": "Bytes from the endpoint to the guest.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "destination": {
+          "description": "Destination inside the guest network (`10.0.2.101:1433`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "endpoint": {
+          "description": "Endpoint name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "description": "Network mode of the run (`offline`, `nat`, `endpoints`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "description": "How it ended or why it was refused (`closed`, `revoked`,\n`not_allowed`...), or the allowed endpoints for `network_policy`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "target": {
+          "description": "Host address the connection was opened to (or the endpoint\nresolved to).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
     },
     "OperationId": {
       "description": "OperationId: version 7 UUID, lowercase with hyphens.",
@@ -552,6 +712,43 @@
           "type": "string",
           "const": "restored"
         }
+      ]
+    },
+    "ToolAudit": {
+      "type": "object",
+      "properties": {
+        "bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "feature": {
+          "type": "string"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "share": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "feature"
       ]
     },
     "UtcTimestamp": {

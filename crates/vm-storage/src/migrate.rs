@@ -62,6 +62,26 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "0006_baseline_state.sql",
         sql: include_str!("../migrations/0006_baseline_state.sql"),
     },
+    Migration {
+        version: 7,
+        name: "0007_media_detected_guest.sql",
+        sql: include_str!("../migrations/0007_media_detected_guest.sql"),
+    },
+    Migration {
+        version: 8,
+        name: "0008_media_in_place.sql",
+        sql: include_str!("../migrations/0008_media_in_place.sql"),
+    },
+    Migration {
+        version: 9,
+        name: "0009_import_vm.sql",
+        sql: include_str!("../migrations/0009_import_vm.sql"),
+    },
+    Migration {
+        version: 10,
+        name: "0010_user_snapshots.sql",
+        sql: include_str!("../migrations/0010_user_snapshots.sql"),
+    },
 ];
 
 /// Latest schema version known to this binary.
@@ -206,19 +226,16 @@ pub fn migrate_to(conn: &mut Connection, db_path: &Path, target: u32) -> Result<
         None
     };
     ensure_version_table(conn)?;
-    for m in MIGRATIONS
-        .iter()
-        .filter(|m| m.version > from && m.version <= target)
-    {
-        let tx = conn.transaction().db()?;
-        tx.execute_batch(m.sql).db()?;
-        tx.execute(
-            "INSERT INTO schema_version(version, name, sql_sha256, applied_at) VALUES (?1, ?2, ?3, ?4)",
-            params![m.version, m.name, sql_sha256(m.sql), now_rfc3339()],
-        )
-        .db()?;
-        tx.commit().db()?;
-    }
+    // Foreign keys off while the migrations run (the pragma has no effect
+    // inside a transaction): a migration that rebuilds a referenced table
+    // (0008, `media`) drops the old one, which with the keys on is an
+    // implicit DELETE refused by `ON DELETE RESTRICT`. This is SQLite's
+    // documented procedure for table rebuilds; the integrity of every
+    // reference is checked right after (`foreign_key_check`).
+    conn.execute_batch("PRAGMA foreign_keys=OFF;").db()?;
+    let applied = apply_migrations(conn, from, target);
+    conn.execute_batch("PRAGMA foreign_keys=ON;").db()?;
+    applied?;
     let fk_violations: i64 = conn
         .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
             r.get(0)
@@ -234,6 +251,25 @@ pub fn migrate_to(conn: &mut Connection, db_path: &Path, target: u32) -> Result<
         to_version: target,
         backup,
     })
+}
+
+/// Applies the migrations after `from` up to `target`, each in its own
+/// transaction with its `schema_version` row.
+fn apply_migrations(conn: &mut Connection, from: u32, target: u32) -> Result<()> {
+    for m in MIGRATIONS
+        .iter()
+        .filter(|m| m.version > from && m.version <= target)
+    {
+        let tx = conn.transaction().db()?;
+        tx.execute_batch(m.sql).db()?;
+        tx.execute(
+            "INSERT INTO schema_version(version, name, sql_sha256, applied_at) VALUES (?1, ?2, ?3, ?4)",
+            params![m.version, m.name, sql_sha256(m.sql), now_rfc3339()],
+        )
+        .db()?;
+        tx.commit().db()?;
+    }
+    Ok(())
 }
 
 fn verify_applied(conn: &Connection, from: u32) -> Result<()> {

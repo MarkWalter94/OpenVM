@@ -3,7 +3,14 @@
 //! Contract with the parent (no secrets in the arguments, ROADMAP 9):
 //! - structured arguments: `--catalog <dir>` (required),
 //!   `--qemu-dir <dir>` (approved QEMU distribution; without it, starting VMs
-//!   is rejected with `unsupported`), `--audit-log <file>` (default in the
+//!   is rejected with `unsupported`; the folder of the Windows build, or a
+//!   Unix prefix such as Homebrew's `/opt/homebrew` with `bin/` and
+//!   `share/qemu/`), `--firmware-dir <dir>` (project AArch64 firmware,
+//!   ADR-0028; default `<state dir>/firmware`), `--swtpm <file>` (default:
+//!   `swtpm` in the QEMU folder), `--approved-hashes <file>` (development
+//!   approvals of QEMU, firmware and swtpm hashes; default
+//!   `<state dir>/approved-dev.sha256` when present; the state dir is the
+//!   one of the default audit log), `--audit-log <file>` (default in the
 //!   user profile), `--runtime-dir <dir>` (IPC socket on Unix and private
 //!   directories of the QEMU sockets), `--parent-watch stdin|none`,
 //!   `--parent-loss-policy kill-vms|shutdown-vms|keep-vms` (default
@@ -31,6 +38,12 @@
 //! is frozen: no credential, no UI, no supervisor thread involved. Exit
 //! codes: 0 completed (end of every process observed), 5 not completed,
 //! 6 no running service reachable for the catalog.
+//!
+//! Catalog move (Settings → Move catalog…):
+//! `lightvm-service --move-catalog --catalog <dir> --to <new dir>
+//! [--keep-source]` moves the whole catalog with no supervisor running;
+//! JSON progress lines on stdout, `shutdown` on stdin cancels (contract and
+//! exit codes in `lightvm_service::catalog_move`).
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -49,9 +62,10 @@ use lightvm_service::supervisor::{Backend, ParentLossPolicy};
 use lightvm_service::{ServiceConfig, start};
 
 const USAGE: &str = "usage: lightvm-service --catalog <dir> [--qemu-dir <dir>] \
-[--audit-log <file>] [--runtime-dir <dir>] [--parent-watch stdin|none] \
+[--firmware-dir <dir>] [--storage-helper-dir <dir>] [--swtpm <file>] [--approved-hashes <file>] [--audit-log <file>] [--runtime-dir <dir>] [--parent-watch stdin|none] \
 [--parent-loss-policy kill-vms|shutdown-vms|keep-vms] [--parent-loss-powerdown-s N]
-       lightvm-service --emergency-stop --catalog <dir>";
+       lightvm-service --emergency-stop --catalog <dir>
+       lightvm-service --move-catalog --catalog <dir> --to <new dir> [--keep-source]";
 
 /// Message for a catalog already in use (same text as the service lock).
 const ALREADY_RUNNING: &str = "another instance of lightvm-service is already using this catalog";
@@ -60,23 +74,37 @@ const ALREADY_RUNNING: &str = "another instance of lightvm-service is already us
 struct Args {
     catalog: PathBuf,
     qemu_dir: Option<PathBuf>,
+    firmware_dir: Option<PathBuf>,
+    storage_helper_dir: Option<PathBuf>,
+    swtpm: Option<PathBuf>,
+    approved_hashes: Option<PathBuf>,
     audit_log: Option<PathBuf>,
     runtime_dir: Option<PathBuf>,
     parent_watch: bool,
     parent_loss_policy: ParentLossPolicy,
     emergency_stop: bool,
+    /// `--move-catalog --to <dir>`: new root of the catalog.
+    move_to: Option<PathBuf>,
+    keep_source: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
     let mut it = std::env::args_os().skip(1);
     let mut catalog = None;
     let mut qemu_dir = None;
+    let mut firmware_dir = None;
+    let mut storage_helper_dir = None;
+    let mut swtpm = None;
+    let mut approved_hashes = None;
     let mut audit_log = None;
     let mut runtime_dir = None;
     let mut parent_watch = true;
     let mut parent_loss: Option<String> = None;
     let mut powerdown_s: u32 = 10;
     let mut emergency_stop = false;
+    let mut move_catalog = false;
+    let mut move_to = None;
+    let mut keep_source = false;
     while let Some(a) = it.next() {
         let a = a
             .into_string()
@@ -85,6 +113,10 @@ fn parse_args() -> Result<Args, String> {
         match a.as_str() {
             "--catalog" => catalog = Some(PathBuf::from(value()?)),
             "--qemu-dir" => qemu_dir = Some(PathBuf::from(value()?)),
+            "--firmware-dir" => firmware_dir = Some(PathBuf::from(value()?)),
+            "--storage-helper-dir" => storage_helper_dir = Some(PathBuf::from(value()?)),
+            "--swtpm" => swtpm = Some(PathBuf::from(value()?)),
+            "--approved-hashes" => approved_hashes = Some(PathBuf::from(value()?)),
             "--audit-log" => audit_log = Some(PathBuf::from(value()?)),
             "--runtime-dir" => runtime_dir = Some(PathBuf::from(value()?)),
             "--parent-watch" => {
@@ -108,6 +140,9 @@ fn parse_args() -> Result<Args, String> {
                     .ok_or("--parent-loss-powerdown-s: expected a number of seconds")?;
             }
             "--emergency-stop" => emergency_stop = true,
+            "--move-catalog" => move_catalog = true,
+            "--to" => move_to = Some(PathBuf::from(value()?)),
+            "--keep-source" => keep_source = true,
             "--version" => {
                 println!("lightvm-service {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
@@ -120,6 +155,11 @@ fn parse_args() -> Result<Args, String> {
         }
     }
     let catalog = catalog.ok_or("--catalog is required")?;
+    if move_catalog != move_to.is_some() || (keep_source && !move_catalog) {
+        return Err(
+            "--move-catalog requires --to (and --to, --keep-source only go with it)".into(),
+        );
+    }
     let parent_loss_policy = match parent_loss.as_deref() {
         None | Some("kill-vms") => ParentLossPolicy::KillVms,
         Some("shutdown-vms") => ParentLossPolicy::ShutdownVms { powerdown_s },
@@ -133,11 +173,17 @@ fn parse_args() -> Result<Args, String> {
     Ok(Args {
         catalog,
         qemu_dir,
+        firmware_dir,
+        storage_helper_dir,
+        swtpm,
+        approved_hashes,
         audit_log,
         runtime_dir,
         parent_watch,
         parent_loss_policy,
         emergency_stop,
+        move_to,
+        keep_source,
     })
 }
 
@@ -186,6 +232,27 @@ fn emergency_command(catalog: &std::path::Path) -> ExitCode {
     }
 }
 
+/// `--move-catalog`: moves the catalog (no supervisor started); stdin
+/// `shutdown` or EOF cancels (contract in `lightvm_service::catalog_move`).
+fn move_command(from: &std::path::Path, to: &std::path::Path, keep_source: bool) -> ExitCode {
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = cancel.clone();
+    if let Err(e) = parent::watch_stdin(move |_| {
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    }) {
+        lightvm_service::diag!("lightvm-service: stdin watch not started: {e}");
+        return ExitCode::from(lightvm_service::catalog_move::EXIT_FAILED);
+    }
+    let code = lightvm_service::catalog_move::run(
+        from,
+        to,
+        keep_source,
+        &mut std::io::stdout().lock(),
+        &cancel,
+    );
+    ExitCode::from(code)
+}
+
 /// Engine and host composed from the real adapters, and the root of the
 /// per-run display sockets.
 type Composed = (Box<dyn VmEngine>, Box<dyn Backend>, PathBuf);
@@ -211,11 +278,7 @@ fn private_root(
     if fits(&candidate) {
         return Ok(candidate);
     }
-    let short = std::env::temp_dir().join(format!(
-        "{}{}",
-        lightvm_service::display::FALLBACK_ROOT_PREFIX,
-        std::process::id()
-    ));
+    let short = lightvm_service::display::fallback_root();
     if !fits(&short) {
         return Err((
             4,
@@ -228,6 +291,42 @@ fn private_root(
         short.display()
     );
     Ok(short)
+}
+
+/// Firmware directory, swtpm, storage helper folder (ADR-0030) and
+/// development approvals (ADR-0028): from the
+/// arguments, else the defaults under the user state directory. An
+/// approvals file given explicitly must exist and be valid; the default one
+/// is used only when present (and must then be valid too).
+fn configure_aarch64_and_approvals(setup: &mut QemuSetup, args: &Args) -> Result<(), (u8, String)> {
+    let state = default_state_dir();
+    setup.firmware_dir = args
+        .firmware_dir
+        .clone()
+        .or_else(|| state.as_ref().map(|d| d.join("firmware")));
+    setup.swtpm.clone_from(&args.swtpm);
+    // Storage helper of the VMware import (ADR-0030): optional, separate
+    // GPL image built by packaging/storage-helper.
+    setup.storage_helper_dir = args
+        .storage_helper_dir
+        .clone()
+        .or_else(|| state.as_ref().map(|d| d.join("storage-helper")));
+    let approvals = match (&args.approved_hashes, &state) {
+        (Some(p), _) => Some(p.clone()),
+        (None, Some(d)) => Some(d.join("approved-dev.sha256")).filter(|p| p.is_file()),
+        (None, None) => None,
+    };
+    if let Some(p) = approvals {
+        let text = std::fs::read_to_string(&p)
+            .map_err(|e| (4, format!("approved hashes {}: {e}", p.display())))?;
+        let n = backend::load_approvals(&mut setup.probe, &text)
+            .map_err(|e| (4, format!("approved hashes {}: {e}", p.display())))?;
+        lightvm_service::diag!(
+            "lightvm-service: {n} development hash approvals from {} (not approved for release)",
+            p.display()
+        );
+    }
+    Ok(())
 }
 
 fn compose(args: &Args) -> Result<Composed, (u8, String)> {
@@ -261,7 +360,8 @@ fn compose(args: &Args) -> Result<Composed, (u8, String)> {
     let display_dir = private_root.join("d");
     match &args.qemu_dir {
         Some(dir) => {
-            let setup = QemuSetup::new(dir.clone(), root, private_root);
+            let mut setup = QemuSetup::new(dir.clone(), root, private_root);
+            configure_aarch64_and_approvals(&mut setup, args)?;
             let (host, vm_backend, capacity) =
                 backend::probe(setup).map_err(|e| (4, format!("backend QEMU: {e}")))?;
             let engine =
@@ -297,6 +397,9 @@ fn main() -> ExitCode {
     };
     if args.emergency_stop {
         return emergency_command(&args.catalog);
+    }
+    if let Some(to) = &args.move_to {
+        return move_command(&args.catalog, to, args.keep_source);
     }
     let (engine, host, display_dir) = match compose(&args) {
         Ok(x) => x,

@@ -185,7 +185,15 @@ fn settings_supervisor_chooses_folders_without_text_fields() {
     h.get_by_role_and_label(Role::Button, "Settings").click();
     h.run();
     h.get_by_label("not started");
-    h.get_by_label("not set: VMs cannot be started");
+    // On macOS a Homebrew QEMU, if installed, is used without a choice.
+    match lightvm_desktop::settings::detected_qemu_dir() {
+        Some(d) => {
+            h.get_by_label(&format!("{} (found automatically)", d.display()));
+        }
+        None => {
+            h.get_by_label("not set: VMs cannot be started");
+        }
+    }
     // Two visible "Browse…" buttons, distinguished by the accessible name.
     h.get_by_role_and_label(Role::Button, "Choose the catalog folder")
         .click();

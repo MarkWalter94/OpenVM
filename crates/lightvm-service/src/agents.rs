@@ -63,6 +63,7 @@ struct Pending {
 
 #[derive(Debug)]
 struct Bound {
+    vm_id: Option<VmId>,
     connection_id: ConnectionId,
     gate: Gate,
 }
@@ -122,6 +123,18 @@ fn utc_after(d: Duration) -> UtcTimestamp {
 }
 
 impl AgentRegistry {
+    pub(crate) fn session_vm(&self, id: SessionId) -> Option<VmId> {
+        lock(&self.inner).sessions.get(&id).and_then(|b| b.vm_id)
+    }
+    pub(crate) fn connection_vm(&self, id: ConnectionId) -> Option<VmId> {
+        let inner = lock(&self.inner);
+        inner
+            .conns
+            .get(&id)
+            .and_then(|c| c.session)
+            .and_then(|s| inner.sessions.get(&s))
+            .and_then(|b| b.vm_id)
+    }
     /// Registry with the switch off and the given request lifetime.
     pub fn new(ttl: Duration) -> Self {
         Self {
@@ -185,6 +198,7 @@ impl AgentRegistry {
     }
 
     /// New pending request of a connection.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn open_request(
         &self,
         connection_id: ConnectionId,
@@ -193,6 +207,7 @@ impl AgentRegistry {
         purpose: &str,
         requested_vms: Vec<VmId>,
         requested_capabilities: CapabilitySet,
+        requested_endpoints: Vec<String>,
     ) -> Result<(SessionRequestInfo, Closed), PublicError> {
         if !self.enabled() {
             return Err(
@@ -231,6 +246,11 @@ impl AgentRegistry {
             purpose: truncate(purpose, MAX_PURPOSE_CHARS),
             requested_vms: requested_vms.into_iter().take(16).collect(),
             requested_capabilities,
+            requested_endpoints: requested_endpoints
+                .into_iter()
+                .take(lightvm_proto::MAX_NETWORK_ENDPOINTS)
+                .map(|n| truncate(&n, lightvm_proto::MAX_ENDPOINT_NAME_CHARS))
+                .collect(),
             verification_code: code,
             requested_at: UtcTimestamp::now(),
             expires_at: utc_after(self.ttl),
@@ -340,6 +360,12 @@ impl AgentRegistry {
         inner.sessions.insert(
             session_id,
             Bound {
+                vm_id: match &granted {
+                    ResponseBody::SessionGranted { grant, .. } => {
+                        grant.vm_allowlist.first().copied()
+                    }
+                    _ => None,
+                },
                 connection_id: conn,
                 gate: Gate::Active,
             },
@@ -593,7 +619,15 @@ mod tests {
         let r = AgentRegistry::new(Duration::from_secs(60));
         let _rx = r.register_conn(1);
         let e = r
-            .open_request(1, None, "a", "b", Vec::new(), CapabilitySet::new())
+            .open_request(
+                1,
+                None,
+                "a",
+                "b",
+                Vec::new(),
+                CapabilitySet::new(),
+                Vec::new(),
+            )
             .unwrap_err();
         assert_eq!(e.code, lightvm_proto::ErrorCode::PermissionDenied);
         r.set_enabled(true);
@@ -605,18 +639,35 @@ mod tests {
                 "p",
                 Vec::new(),
                 CapabilitySet::new(),
+                vec!["SQL.lan".into()],
             )
             .unwrap();
         assert_eq!(info.client_name, "name");
         assert_eq!(info.verification_code.len(), 7);
         assert!(
-            r.open_request(1, None, "a", "b", Vec::new(), CapabilitySet::new())
-                .is_err()
+            r.open_request(
+                1,
+                None,
+                "a",
+                "b",
+                Vec::new(),
+                CapabilitySet::new(),
+                Vec::new()
+            )
+            .is_err()
         );
         // Unknown connection.
         assert!(
-            r.open_request(2, None, "a", "b", Vec::new(), CapabilitySet::new())
-                .is_err()
+            r.open_request(
+                2,
+                None,
+                "a",
+                "b",
+                Vec::new(),
+                CapabilitySet::new(),
+                Vec::new()
+            )
+            .is_err()
         );
     }
 
@@ -625,7 +676,15 @@ mod tests {
         let r = reg();
         let _rx = r.register_conn(1);
         let (info, _) = r
-            .open_request(1, None, "a", "b", Vec::new(), CapabilitySet::new())
+            .open_request(
+                1,
+                None,
+                "a",
+                "b",
+                Vec::new(),
+                CapabilitySet::new(),
+                Vec::new(),
+            )
             .unwrap();
         assert!(r.deny(info.request_id, "denied"));
         assert!(r.list().0.is_empty());
@@ -648,7 +707,15 @@ mod tests {
         r.set_enabled(true);
         let _rx = r.register_conn(1);
         let (info, _) = r
-            .open_request(1, None, "a", "b", Vec::new(), CapabilitySet::new())
+            .open_request(
+                1,
+                None,
+                "a",
+                "b",
+                Vec::new(),
+                CapabilitySet::new(),
+                Vec::new(),
+            )
             .unwrap();
         std::thread::sleep(Duration::from_millis(5));
         let (list, closed) = r.list();
@@ -664,7 +731,15 @@ mod tests {
         let r = reg();
         let mut end = r.register_conn(1);
         let (info, _) = r
-            .open_request(1, None, "a", "b", Vec::new(), CapabilitySet::new())
+            .open_request(
+                1,
+                None,
+                "a",
+                "b",
+                Vec::new(),
+                CapabilitySet::new(),
+                Vec::new(),
+            )
             .unwrap();
         r.begin_approval(info.request_id).unwrap();
         // Not approvable twice while in progress.
@@ -710,12 +785,28 @@ mod tests {
         let r = reg();
         let _rx = r.register_conn(1);
         let (info, _) = r
-            .open_request(1, None, "a", "b", Vec::new(), CapabilitySet::new())
+            .open_request(
+                1,
+                None,
+                "a",
+                "b",
+                Vec::new(),
+                CapabilitySet::new(),
+                Vec::new(),
+            )
             .unwrap();
         assert_eq!(r.connection_closed(1), (Some(info.request_id), None));
         let _rx = r.register_conn(2);
         let (info, _) = r
-            .open_request(2, None, "a", "b", Vec::new(), CapabilitySet::new())
+            .open_request(
+                2,
+                None,
+                "a",
+                "b",
+                Vec::new(),
+                CapabilitySet::new(),
+                Vec::new(),
+            )
             .unwrap();
         r.begin_approval(info.request_id).unwrap();
         let s = SessionId::from_unix_millis(1, [2; 10]);

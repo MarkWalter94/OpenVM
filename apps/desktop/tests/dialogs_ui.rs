@@ -116,6 +116,56 @@ fn reset_and_force_stop_ask_and_carry_the_run() {
     assert!(!h.state().dialog_open());
 }
 
+/// A guest stopped on a virtual CPU error (the VM stays `running`): the
+/// Dashboard says so with a notice and offers reset and force stop; the
+/// reset carries the run. Without the halt nothing is shown.
+#[test]
+fn vcpu_halt_notice_offers_reset_and_force_stop() {
+    use lightvm_proto::ipc::{VcpuHalt, VcpuHaltReason};
+    let mut v = vm(2, "vista", VmState::Running);
+    v.vcpu_halt = Some(VcpuHalt {
+        reason: VcpuHaltReason::InternalError,
+        automatic_resets: 3,
+    });
+    let (mut h, hs) = harness(connected(vec![v]));
+    h.run_steps(4);
+    h.get_by_label(
+        "Stopped on a virtual CPU error: the guest hit an unrecoverable error again after 3 \
+         automatic restarts. Keyboard and mouse cannot reach it. Reset it, or force stop it and \
+         start it again.",
+    );
+    h.get_by_label("vCPU error");
+    h.get_by_role_and_label(Role::Button, "Reset vista").click();
+    h.run_steps(4);
+    h.get_by_label("Reset “vista”?");
+    h.get_by_role_and_label(Role::Button, "Reset").click();
+    h.run_steps(4);
+    h.get_by_role_and_label(Role::Button, "Force stop vista")
+        .click();
+    h.run_steps(4);
+    h.get_by_label("Force stop “vista”?");
+    h.get_by_role_and_label(Role::Button, "Force stop").click();
+    h.run_steps(4);
+    assert_eq!(
+        hs.actions(),
+        [
+            ServiceCommand::Reset {
+                vm_id: common::vm_id(2),
+                run_id: common::run_id(2)
+            },
+            ServiceCommand::ForceStop(common::vm_id(2)),
+        ]
+    );
+    // The reset cleared the halt: no notice.
+    hs.update(|s| s.vms[0].vcpu_halt = None);
+    h.run_steps(4);
+    assert!(
+        h.query_by_label_contains("Stopped on a virtual CPU error")
+            .is_none()
+    );
+    assert!(h.query_by_label("vCPU error").is_none());
+}
+
 /// The VM state changes while the dialog is open: the action is refused.
 #[test]
 fn stale_confirmation_is_refused() {

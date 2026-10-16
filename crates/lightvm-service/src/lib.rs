@@ -28,6 +28,7 @@ macro_rules! diag {
     }};
 }
 
+pub mod catalog_move;
 pub mod client;
 pub mod credential;
 pub mod frame;
@@ -57,6 +58,10 @@ pub mod server;
 pub mod start;
 #[cfg(feature = "supervisor")]
 pub mod supervisor;
+#[cfg(feature = "supervisor")]
+pub mod tools;
+#[cfg(feature = "supervisor")]
+pub mod vmware;
 
 #[cfg(feature = "supervisor")]
 #[doc(hidden)]

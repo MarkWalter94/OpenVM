@@ -8,7 +8,9 @@
 //!    devices);
 //! 2. protective opening of the files ([`crate::storage_guard`]);
 //! 3. removal of orphan sockets, spawn in the run's container (Job
-//!    Object), QEMU with `-S`;
+//!    Object, or the watchdog process group on Unix): first swtpm for the
+//!    TPM profiles (ADR-0028), waiting for its control socket, then QEMU
+//!    with `-S`;
 //! 4. QMP connection (sole client, socket in the private directory);
 //! 5. verification of the active accelerator (`query-accelerators`) and of the absence
 //!    of NICs (empty `info network` and no PCI device of the network class);
@@ -21,17 +23,22 @@
 //! OS primitives without going through the QMP queue. [`QemuRun::reconcile`] compares
 //! process and QMP; [`QemuRun::close`] closes the Job Object after the exit.
 
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use lightvm_proto::{
-    BackendObservation, DisplayGeometry, InputEvent, ObservationSource, ObservedState, RunId,
-    UtcTimestamp, VmState,
+    BackendObservation, DisplayGeometry, InputEvent, KeyAction, ObservationSource, ObservedState,
+    QCode, RunId, UtcTimestamp, VmState, ipc::VcpuHalt,
 };
 use tokio::sync::{broadcast, watch};
 
-use crate::cmdline::{QemuCommand, VmLaunchSpec};
+use crate::boot_prompt::{
+    BOOT_PROMPT_INTERVAL, BOOT_PROMPT_KEY, BOOT_PROMPT_WINDOW, BootKeyEnd, BootKeyReport,
+    press_boot_prompt_key,
+};
+use crate::cmdline::{FirmwareKind, GuestNetwork, QemuCommand, TpmCommand, VmLaunchSpec};
 use crate::error::{BackendError, Result};
 use crate::input::{PressedInput, validate_events};
 use crate::paths::{ManagedPath, ManagedPaths};
@@ -46,6 +53,9 @@ use crate::qmp::{
 };
 use crate::screenshot::{CapturedScreenshot, RgbImage};
 use crate::storage_guard::StorageGuards;
+use crate::vcpu_fault::{
+    VcpuFaultEvent, VcpuFaultPolicy, VcpuFaults, reset_and_resume, watch_vcpu_faults,
+};
 
 pub use crate::process::EMERGENCY_EXIT_CODE;
 
@@ -95,6 +105,9 @@ pub struct RunConfig {
     pub max_screenshot_bytes: u64,
     /// Leaves the vCPUs paused after the checks (no `cont`).
     pub leave_paused: bool,
+    /// Automatic reset of a guest whose vCPUs stop on an error
+    /// ([`crate::vcpu_fault`]).
+    pub vcpu_faults: VcpuFaultPolicy,
 }
 
 impl Default for RunConfig {
@@ -105,6 +118,7 @@ impl Default for RunConfig {
             screendump_timeout: Duration::from_secs(10),
             max_screenshot_bytes: 32 * 1024 * 1024,
             leave_paused: false,
+            vcpu_faults: VcpuFaultPolicy::default(),
         }
     }
 }
@@ -246,6 +260,101 @@ fn remove_sockets(cmd: &QemuCommand) {
     if let Some(v) = &cmd.vnc_socket {
         let _ = std::fs::remove_file(v.as_path());
     }
+    if let Some(t) = &cmd.tpm {
+        let _ = std::fs::remove_file(t.socket.as_path());
+    }
+}
+
+/// Maximum wait for the swtpm control socket.
+const SWTPM_SOCKET_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Node name of the VM's own disk on the command line (`-blockdev
+/// ...,node-name=disk0`, see `cmdline.rs`).
+const PRIMARY_DISK_NODE: &str = "disk0";
+
+/// Longest wait of an internal snapshot command: QEMU updates the reference
+/// counts of every allocated cluster with the guest paused.
+const INTERNAL_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Name of an internal snapshot: what the supervisor generates (a UUID),
+/// nothing else reaches QMP or `qemu-img`.
+pub fn check_snapshot_name(name: &str) -> Result<()> {
+    let ok = !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase() || b == b'-');
+    if ok {
+        Ok(())
+    } else {
+        Err(BackendError::StateConflict(
+            "invalid internal snapshot name".into(),
+        ))
+    }
+}
+
+/// Starts swtpm in `container` and waits for its control socket. The socket
+/// is only checked for existence, never connected to: with `--terminate`
+/// swtpm exits when its first control connection closes, which must be
+/// QEMU's. A reaper thread waits for the process so that it never lingers
+/// as a zombie counted as active by the container.
+async fn start_swtpm(
+    container: &Arc<dyn ProcessContainer>,
+    run_id: RunId,
+    tpm: &TpmCommand,
+) -> Result<()> {
+    let req = SpawnRequest {
+        run_id,
+        program: tpm.program.clone(),
+        args: tpm.args.clone(),
+        env: minimal_environment(),
+        stdout: tpm.stdout.clone(),
+        stderr: tpm.stderr.clone(),
+    };
+    let child = {
+        let c = container.clone();
+        tokio::task::spawn_blocking(move || c.spawn(&req))
+            .await
+            .map_err(|e| BackendError::Io(std::io::Error::other(e.to_string())))??
+    };
+    if let Err(e) = container.verify_membership(&child) {
+        let _ = container.kill_all(EMERGENCY_EXIT_CODE);
+        return Err(e);
+    }
+    let child = Arc::new(child);
+    let deadline = Instant::now() + SWTPM_SOCKET_TIMEOUT;
+    loop {
+        if let Some(code) = child.try_exit_code()? {
+            let mut tail = read_stderr_tail(&tpm.stderr);
+            if tail.is_empty() {
+                tail = read_stderr_tail(&tpm.log);
+            }
+            return Err(BackendError::StartupFailed {
+                exit_code: Some(code),
+                stderr_tail: format!("swtpm exited before QEMU started: {tail}"),
+            });
+        }
+        if tpm.socket.as_path().exists() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            let _ = container.kill_all(EMERGENCY_EXIT_CODE);
+            return Err(BackendError::StartupFailed {
+                exit_code: None,
+                stderr_tail: format!(
+                    "swtpm control socket not created within {SWTPM_SOCKET_TIMEOUT:?}"
+                ),
+            });
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    std::thread::Builder::new()
+        .name("swtpm-reaper".into())
+        .spawn(move || {
+            let _ = child.wait(None);
+        })
+        .map_err(BackendError::Io)?;
+    Ok(())
 }
 
 fn read_stderr_tail(p: &ManagedPath) -> String {
@@ -269,6 +378,12 @@ pub(crate) async fn launch(
     }
     remove_sockets(cmd);
     let container = new_container(&cmd.limits)?;
+    if let Some(tpm) = &cmd.tpm
+        && let Err(e) = start_swtpm(&container, cmd.run_id, tpm).await
+    {
+        remove_sockets(cmd);
+        return Err(e);
+    }
     let req = SpawnRequest {
         run_id: cmd.run_id,
         program: cmd.program.clone(),
@@ -467,12 +582,55 @@ pub fn check_no_nic(info_network: &str, pci_network: &[PciNetworkDevice]) -> Res
     Ok(())
 }
 
+/// Check of the network of a run (ADR-0033) on the data of `info network`
+/// and `query-pci`: no NIC for [`GuestNetwork::None`]; otherwise exactly one
+/// PCI network device, one NIC front end and one back end of the expected
+/// type (`user` for NAT, `stream` for the supervisor's network) and nothing
+/// else.
+pub fn check_network(
+    expected: GuestNetwork,
+    info_network: &str,
+    pci_network: &[PciNetworkDevice],
+) -> Result<()> {
+    let backend = match expected {
+        GuestNetwork::None => return check_no_nic(info_network, pci_network),
+        GuestNetwork::Nat => "type=user",
+        GuestNetwork::Supervisor | GuestNetwork::NatTools => "type=stream",
+    };
+    let types: Vec<&str> = info_network
+        .split(['\n', ','])
+        .map(str::trim)
+        .filter(|t| t.starts_with("type="))
+        .collect();
+    let ok = if expected == GuestNetwork::NatTools {
+        pci_network.len() == 2
+            && types.len() == 4
+            && types.iter().filter(|t| **t == "type=nic").count() == 2
+            && types.contains(&"type=user")
+            && types.contains(&"type=stream")
+    } else {
+        pci_network.len() == 1
+            && types.len() == 2
+            && types.contains(&"type=nic")
+            && types.contains(&backend)
+    };
+    if !ok {
+        return Err(BackendError::UnexpectedNetwork(format!(
+            "expected one NIC on {backend}: info network={:?}, network-class PCI={pci_network:?}",
+            info_network.trim()
+        )));
+    }
+    Ok(())
+}
+
 /// A VM run.
 #[derive(Debug)]
 pub struct QemuRun {
     run_id: RunId,
     identity: ProcessIdentity,
-    qmp: QmpClient,
+    /// Shared with the boot prompt presses ([`Self::boot_prompt_keys`]), which
+    /// must not keep the run itself alive.
+    qmp: Arc<QmpClient>,
     state_tx: Arc<watch::Sender<ProcessState>>,
     emergency: EmergencyStop,
     private_dir: ManagedPath,
@@ -482,6 +640,12 @@ pub struct QemuRun {
     accelerator: AcceleratorsInfo,
     cfg: RunConfig,
     guards: StorageGuards,
+    /// When the vCPUs were started (`cont`), if they were.
+    vcpus_started: Option<Instant>,
+    /// Faults of the guest's vCPUs ([`crate::vcpu_fault`]).
+    faults: Arc<VcpuFaults>,
+    /// Watcher of the vCPU faults, aborted with the run.
+    fault_watch: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl QemuRun {
@@ -493,7 +657,10 @@ impl QemuRun {
         paths: &dyn ManagedPaths,
         cfg: RunConfig,
     ) -> Result<Self> {
-        match &caps.accelerator {
+        // ADR-0007: the probe must have verified the machine family and
+        // firmware kind of this profile.
+        let probed = caps.accelerator_for(spec.profile.probe_target());
+        match probed {
             AcceleratorStatus::Available { accelerator, .. }
                 if *accelerator == spec.accelerator => {}
             AcceleratorStatus::Available { accelerator, .. } => {
@@ -511,23 +678,75 @@ impl QemuRun {
                 ));
             }
             AcceleratorStatus::Unavailable { .. } => {
-                return Err(BackendError::AcceleratorUnavailable(
-                    caps.accelerator.clone(),
-                ));
+                return Err(BackendError::AcceleratorUnavailable(probed.clone()));
             }
             AcceleratorStatus::NotProbed => {
-                return Err(BackendError::StateConflict(
-                    "accelerator not verified: run the probe first".into(),
-                ));
+                let t = spec.profile.probe_target();
+                return Err(BackendError::StateConflict(format!(
+                    "accelerator not verified with the {} machine and {} firmware: run the \
+                     probe first",
+                    t.family.label(),
+                    t.firmware.label()
+                )));
             }
         }
         caps.machine(spec.machine.as_str())?;
-        caps.cpu_model(spec.cpu.as_str())?;
-        if !caps.missing_devices.is_empty() {
+        caps.check_cpu(&spec.cpu)?;
+        let mut missing = caps.missing_devices(&spec.profile);
+        if spec.network != GuestNetwork::None
+            && let Some(nic) = spec.profile.nic()
+            && !caps.devices.contains(nic.qemu_name())
+        {
+            missing.push(nic.qemu_name());
+        }
+        if spec.network != GuestNetwork::None
+            && spec.profile.nic().is_none()
+            && paths.tools_iso(&spec.run_id)?.is_some()
+            && !caps.devices.contains("virtio-net-pci")
+        {
+            missing.push("virtio-net-pci");
+        }
+        if !missing.is_empty() {
             return Err(BackendError::Unsupported {
-                what: format!("devices {}", caps.missing_devices.join(", ")),
-                hint: "the QEMU binary does not include the required devices".into(),
+                what: format!("devices {}", missing.join(", ")),
+                hint: "the QEMU binary does not include the devices of the hardware profile".into(),
             });
+        }
+        if spec.profile.firmware() == FirmwareKind::SeaBios {
+            // Only the image hashed by the probe, with the verified hash.
+            let verified = caps.verified_seabios()?;
+            if paths.seabios()?.as_path() != verified.path.as_path() {
+                return Err(BackendError::StateConflict(
+                    "the run's SeaBIOS image is not the one verified by the probe".into(),
+                ));
+            }
+        }
+        if spec.profile.firmware() == FirmwareKind::UefiAarch64 {
+            // ADR-0028: only the firmware code hashed by the probe, with an
+            // approved hash.
+            let verified = caps.verified_aarch64_firmware()?;
+            if paths.firmware_code()?.as_path() != verified.code.path.as_path() {
+                return Err(BackendError::StateConflict(
+                    "the run's AArch64 firmware is not the one verified by the probe".into(),
+                ));
+            }
+        }
+        if spec.profile.needs_tpm() {
+            let verified = caps.verified_swtpm()?;
+            if paths.swtpm()?.as_path() != verified.path.as_path() {
+                return Err(BackendError::StateConflict(
+                    "the run's swtpm is not the one verified by the probe".into(),
+                ));
+            }
+            let state = paths.tpm_state_dir(&spec.run_id)?.ok_or_else(|| {
+                BackendError::invalid("tpm_state", "the TPM profile needs the VM's TPM state")
+            })?;
+            if !state.as_path().is_dir() {
+                return Err(BackendError::invalid(
+                    "tpm_state",
+                    "the VM's TPM state directory does not exist",
+                ));
+            }
         }
         let command = spec.build(paths)?;
         if command.program != caps.qemu_system {
@@ -537,7 +756,7 @@ impl QemuRun {
         }
         let run = &spec.run_id;
         let readonly = paths.protected_readonly(run)?;
-        let mut no_delete = vec![paths.firmware_vars(run)?];
+        let mut no_delete: Vec<ManagedPath> = paths.firmware_vars(run)?.into_iter().collect();
         if let Some(d) = paths.disk(run)? {
             no_delete.push(d);
         }
@@ -553,7 +772,7 @@ impl QemuRun {
         let run = Self {
             run_id: spec.run_id,
             identity,
-            qmp: launched.qmp,
+            qmp: Arc::new(launched.qmp),
             state_tx: launched.state_tx,
             emergency,
             private_dir: command.private_dir.clone(),
@@ -564,8 +783,11 @@ impl QemuRun {
                 enabled: String::new(),
                 present: vec![],
             },
+            faults: Arc::new(VcpuFaults::new(cfg.vcpu_faults)),
             cfg,
             guards,
+            vcpus_started: None,
+            fault_watch: None,
         };
         match run.post_start_checks(spec).await {
             Ok(acc) => {
@@ -573,6 +795,7 @@ impl QemuRun {
                 run.accelerator = acc;
                 if !run.cfg.leave_paused {
                     run.qmp.cont().await?;
+                    run.vcpus_started = Some(Instant::now());
                 }
                 run.state_tx.send_if_modified(|s| {
                     if matches!(s, ProcessState::Starting) {
@@ -588,6 +811,11 @@ impl QemuRun {
                         stderr_tail: read_stderr_tail(&run.command.stderr),
                     });
                 }
+                run.fault_watch = Some(tokio::spawn(watch_vcpu_faults(
+                    run.qmp.clone(),
+                    run.state_tx.subscribe(),
+                    run.faults.clone(),
+                )));
                 Ok(run)
             }
             Err(e) => {
@@ -613,8 +841,15 @@ impl QemuRun {
                 },
             ));
         }
-        self.verify_no_nic().await?;
+        let info = self.qmp.network_diagnostics().await?;
+        let pci = self.qmp.pci_network_devices().await?;
+        check_network(spec.network, &info, &pci)?;
         Ok(acc)
+    }
+
+    /// `-netdev stream` socket of the supervisor network, if the run has one.
+    pub fn net_socket(&self) -> Option<&std::path::Path> {
+        self.command.net_socket.as_ref().map(ManagedPath::as_path)
     }
 
     /// Verifies that the guest has no network interfaces: empty `info network`
@@ -826,10 +1061,27 @@ impl QemuRun {
         Ok(self.qmp.network_diagnostics().await?)
     }
 
-    /// `system_reset`.
+    /// `system_reset`; a guest whose vCPUs were stopped on an error
+    /// (`internal-error`, `guest-panicked`) or before start is resumed with
+    /// `cont` after the reset ([`crate::vcpu_fault::reset_and_resume`]), and
+    /// its halt is cleared.
     pub async fn reset(&self) -> Result<()> {
         self.ensure_running()?;
-        Ok(self.qmp.system_reset().await?)
+        reset_and_resume(&self.qmp).await?;
+        self.faults.cleared();
+        Ok(())
+    }
+
+    /// The guest's vCPUs are stopped on an error and were not reset
+    /// automatically (limit reached, failed reset or guest panic).
+    pub fn vcpu_halt(&self) -> Option<VcpuHalt> {
+        self.faults.halt()
+    }
+
+    /// Decisions of the vCPU fault watcher since the last call (automatic
+    /// resets, halts), for the owner's log and audit.
+    pub fn take_vcpu_fault_events(&self) -> Vec<VcpuFaultEvent> {
+        self.faults.take_events()
     }
 
     /// Screenshot via `screendump` (file chosen by the backend in the private
@@ -864,6 +1116,45 @@ impl QemuRun {
         .await?;
         *lock(&self.geometry) = Some(r.0.geometry);
         Ok(r)
+    }
+
+    /// Disk-only internal snapshot `name` of the VM's own disk while it runs
+    /// (ADR-0032, QMP `blockdev-snapshot-internal-sync` on the `disk0`
+    /// node). The disk state is crash-consistent: like after a power cut at
+    /// that instant. `name` must be a snapshot identifier chosen by the
+    /// supervisor (`[0-9a-f-]`, at most 64 characters).
+    pub async fn snapshot_disk(&self, name: &str) -> Result<()> {
+        self.ensure_running()?;
+        check_snapshot_name(name)?;
+        self.qmp
+            .snapshot_internal(PRIMARY_DISK_NODE, name, INTERNAL_SNAPSHOT_TIMEOUT)
+            .await?;
+        Ok(())
+    }
+
+    /// Deletes the internal snapshot `name` of the VM's own disk while it
+    /// runs (QMP `blockdev-snapshot-delete-internal-sync`, ADR-0032).
+    pub async fn delete_disk_snapshot(&self, name: &str) -> Result<()> {
+        self.ensure_alive()?;
+        check_snapshot_name(name)?;
+        self.qmp
+            .snapshot_delete_internal(PRIMARY_DISK_NODE, name, INTERNAL_SNAPSHOT_TIMEOUT)
+            .await?;
+        Ok(())
+    }
+
+    /// Small PNG of the screen (at most `max_w` × `max_h`, aspect kept) for
+    /// a snapshot thumbnail; `None` if it does not fit in `max_png_bytes`.
+    pub async fn thumbnail(
+        &self,
+        max_w: u32,
+        max_h: u32,
+        max_png_bytes: usize,
+    ) -> Result<Option<Vec<u8>>> {
+        let (_, rgb) = self.screenshot_rgb().await?;
+        let small = crate::screenshot::downscale(&rgb, max_w, max_h);
+        let png = crate::screenshot::encode_png(&small)?;
+        Ok((png.len() <= max_png_bytes).then_some(png))
     }
 
     /// Geometry of the last screenshot (or of the last
@@ -942,6 +1233,52 @@ impl QemuRun {
         }
         self.qmp.input_send_event(&events).await?;
         Ok(events.len())
+    }
+
+    /// Presses [`BOOT_PROMPT_KEY`] (down and up) once every
+    /// [`BOOT_PROMPT_INTERVAL`] for [`BOOT_PROMPT_WINDOW`] after the vCPUs
+    /// started, to answer the CD prompt of the Windows UEFI media
+    /// ([`crate::boot_prompt`]). The caller decides whether it applies
+    /// ([`crate::boot_prompt::boot_prompt_key_needed`]) and spawns the
+    /// returned future on its runtime: it holds the QMP client and the state
+    /// observer, never the run, ends early as soon as the run leaves the
+    /// running state and never fails (rejected presses are only counted).
+    /// The presses bypass the console's geometry check (keys only) and the
+    /// pressed-key register (each press is released in the same batch).
+    pub fn boot_prompt_keys(&self) -> impl Future<Output = BootKeyReport> + Send + 'static {
+        let qmp = self.qmp.clone();
+        let state = self.state_tx.subscribe();
+        let started = self.vcpus_started;
+        let events: Option<Vec<InputEvent>> = QCode::parse(BOOT_PROMPT_KEY).ok().map(|qcode| {
+            vec![
+                InputEvent::Key(KeyAction {
+                    qcode: qcode.clone(),
+                    down: true,
+                }),
+                InputEvent::Key(KeyAction { qcode, down: false }),
+            ]
+        });
+        async move {
+            let (Some(started), Some(events)) = (started, events) else {
+                return BootKeyReport {
+                    sent: 0,
+                    failed: 0,
+                    end: BootKeyEnd::Skipped,
+                };
+            };
+            press_boot_prompt_key(
+                started,
+                BOOT_PROMPT_WINDOW,
+                BOOT_PROMPT_INTERVAL,
+                state,
+                || {
+                    let qmp = qmp.clone();
+                    let events = events.clone();
+                    async move { Ok(qmp.input_send_event(&events).await?) }
+                },
+            )
+            .await
+        }
     }
 
     /// Waits for the process exit up to `timeout`.
@@ -1092,6 +1429,9 @@ impl QemuRun {
 
 impl Drop for QemuRun {
     fn drop(&mut self) {
+        if let Some(w) = self.fault_watch.take() {
+            w.abort();
+        }
         // Losing the object means losing control of the run:
         // the process is terminated (closing the Job Object with the last
         // reference to the container would do it anyway).
@@ -1117,6 +1457,18 @@ mod tests {
             description: "Ethernet controller".into(),
         }];
         assert!(check_no_nic("", &pci).is_err());
+        // ADR-0033: one NIC on the expected back end, nothing else.
+        let nat = "e1000.0: index=0,type=nic,model=e1000,macaddr=52:54:00:12:34:56\r\n \\ net0: index=0,type=user,net=10.0.2.0,restrict=off\r\n";
+        let stream = "e1000.0: index=0,type=nic,model=e1000,macaddr=52:54:00:12:34:56\r\n \\ net0: index=0,type=stream,listening\r\n";
+        assert!(check_network(GuestNetwork::Nat, nat, &pci).is_ok());
+        assert!(check_network(GuestNetwork::Supervisor, stream, &pci).is_ok());
+        assert!(check_network(GuestNetwork::Supervisor, nat, &pci).is_err());
+        assert!(check_network(GuestNetwork::Nat, stream, &pci).is_err());
+        assert!(check_network(GuestNetwork::Nat, nat, &[]).is_err());
+        assert!(check_network(GuestNetwork::None, nat, &pci).is_err());
+        assert!(check_network(GuestNetwork::None, "", &[]).is_ok());
+        let two = format!("{nat}hub0port1: index=0,type=user,net=10.0.3.0\r\n");
+        assert!(check_network(GuestNetwork::Nat, &two, &pci).is_err());
     }
 
     #[test]

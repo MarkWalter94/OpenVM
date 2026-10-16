@@ -28,12 +28,18 @@ path = "src/bin/lightvm-ipc-probe.rs"
 # `qemu-backend` stays in the supervisor only (ADR-0024).
 [features]
 default = ["supervisor"]
-supervisor = ["dep:lightvm-fixture", "dep:png", "dep:qemu-backend", "dep:sha2", "dep:socket2", "dep:vm-core", "dep:vm-storage"]
+supervisor = ["dep:guest-detect", "dep:guest-net", "dep:lightvm-fixture", "dep:lightvm-tools", "dep:png", "dep:qemu-backend", "dep:sha2", "dep:socket2", "dep:vm-core", "dep:vm-storage", "dep:vmware-import"]
 
 # Exact versions and lockfile (ROADMAP 6.3); no git dependencies.
 [dependencies]
 getrandom = { version = "=0.4.3", features = ["std"] }
+# Guest OS detection on the managed copy of an installation ISO at import
+# (ADR-0027).
+guest-detect = { path = "../guest-detect", optional = true }
+# Supervisor network of the endpoint allowlist (ADR-0033).
+guest-net = { path = "../guest-net", optional = true }
 lightvm-proto = { path = "../lightvm-proto" }
+lightvm-tools = { path = "../lightvm-tools", optional = true }
 # F5: ADR-0019 pixel verifier run on the stored screenshots of a session
 # report (`verify_session`), and PNG decoding for it (same version as
 # qemu-backend).
@@ -50,6 +56,9 @@ socket2 = { version = "=0.6.5", features = ["all"], optional = true }
 tokio = { version = "=1.53.2", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 vm-core = { path = "../vm-core", optional = true }
 vm-storage = { path = "../vm-storage", optional = true }
+# Import of VMware VMs (ADR-0030): bounded readers of the .vmx and VMDK
+# descriptors, run on the files the user chose.
+vmware-import = { path = "../vmware-import", optional = true }
 
 # Named pipe with a security descriptor through safe APIs (no `unsafe` in the
 # crate): `interprocess` wraps CreateNamedPipeW and the SDDL conversion;
@@ -66,6 +75,8 @@ rustix = { version = "=1.1.5", features = ["process"] }
 rustix = { version = "=1.1.5", features = ["event", "process"] }
 
 [dev-dependencies]
+# Synthetic Windows / Linux installation images for the import tests.
+guest-detect = { path = "../guest-detect", features = ["test-images"] }
 # End-to-end console test through the display ticket (tests only).
 rfb-client = { path = "../rfb-client" }
 tokio = { version = "=1.53.2", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
@@ -95,6 +106,10 @@ name = "f3_real"
 required-features = ["supervisor"]
 
 [[test]]
+name = "macos_real"
+required-features = ["supervisor"]
+
+[[test]]
 name = "f4"
 required-features = ["supervisor"]
 
@@ -104,4 +119,28 @@ required-features = ["supervisor"]
 
 [[test]]
 name = "f5_reports"
+required-features = ["supervisor"]
+
+[[test]]
+name = "user_snapshots"
+required-features = ["supervisor"]
+
+[[test]]
+name = "windows_guests"
+required-features = ["supervisor"]
+
+[[test]]
+name = "windows_real"
+required-features = ["supervisor"]
+
+[[test]]
+name = "vmware_import"
+required-features = ["supervisor"]
+
+[[test]]
+name = "vmware_import_real"
+required-features = ["supervisor"]
+
+[[test]]
+name = "network"
 required-features = ["supervisor"]

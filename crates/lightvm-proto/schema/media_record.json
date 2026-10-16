@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "MediaRecord",
-  "description": "Approved media, as seen by clients: no host path.",
+  "description": "Approved media, as seen by clients. Sent only to the `ui` role\n(`list_media`, `import_media`): agent sessions never receive it.",
   "type": "object",
   "properties": {
     "approved_at": {
@@ -12,6 +12,17 @@
       "description": "Origin declared by the user (text, never interpreted).",
       "$ref": "#/$defs/Label"
     },
+    "detected_guest": {
+      "description": "Guest detected from the contents at import (installation ISOs only;\n`None` = not recognized, data medium, or imported before detection).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DetectedGuest"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "id": {
       "description": "Identifier.",
       "$ref": "#/$defs/MediaId"
@@ -20,12 +31,23 @@
       "description": "Kind of media.",
       "$ref": "#/$defs/MediaKind"
     },
+    "location": {
+      "description": "Where the ISO is, shown to the user (ADR-0029): absolute path of the\nuser's own file, used in place and never copied. `None` for a\nread-only copy kept in the catalog (media imported before ADR-0029).\nInformative text: no request carries it back.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "missing": {
+      "description": "The file was not found at [`Self::location`] the last time it was\nlooked for (moved, renamed, deleted, or its drive is not connected):\nno VM can use the medium until the file is back there or the ISO is\nimported again.",
+      "type": "boolean"
+    },
     "sha256": {
-      "description": "SHA-256 of the managed copy, computed at approval.",
+      "description": "SHA-256 of the file, computed at approval and re-verified before\nevery start.",
       "$ref": "#/$defs/Sha256Digest"
     },
     "size_bytes": {
-      "description": "Size in bytes of the managed copy.",
+      "description": "Size in bytes of the file.",
       "type": "integer",
       "format": "uint64",
       "minimum": 0
@@ -40,6 +62,116 @@
     "approved_at"
   ],
   "$defs": {
+    "DetectedGuest": {
+      "description": "Guest detected from the contents of an installation ISO at import\n(ADR-0027). A hint for the wizard, never a guarantee: the user confirms\nor corrects it, and nothing in the guest is trusted because of it.",
+      "type": "object",
+      "properties": {
+        "arch": {
+          "description": "Detected architecture, if the medium says.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GuestArch"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "build": {
+          "description": "Build number (for example 6002 for Vista SP2, 19045 for Windows 10\n22H2), if the medium says.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "edition": {
+          "description": "Edition or product name read from the medium (text, never interpreted).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Label"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "os": {
+          "description": "Detected operating system.",
+          "$ref": "#/$defs/GuestOs"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "os"
+      ]
+    },
+    "GuestArch": {
+      "description": "Architecture of an installation medium, as detected from its contents.",
+      "oneOf": [
+        {
+          "description": "32-bit x86.",
+          "type": "string",
+          "const": "x86"
+        },
+        {
+          "description": "x86_64.",
+          "type": "string",
+          "const": "x86_64"
+        },
+        {
+          "description": "ARM64 (AArch64).",
+          "type": "string",
+          "const": "aarch64"
+        }
+      ]
+    },
+    "GuestOs": {
+      "description": "Declared guest operating system. In the MVP the reference is Ubuntu LTS\nx86_64 with the version and checksum pinned in F0 (ROADMAP 4). The\nWindows variants (ADR-0027, ROADMAP R2c) select a hardware profile with\ndevices the guest has inbox drivers for; they are manual, offline guests\nand their compatibility cells stay \"not verified\" until real evidence.",
+      "oneOf": [
+        {
+          "description": "Ubuntu LTS x86_64 (MVP reference guest).",
+          "type": "string",
+          "const": "ubuntu_lts_x86_64"
+        },
+        {
+          "description": "Other Linux x86_64: manageable manually, without compatibility guarantees.",
+          "type": "string",
+          "const": "other_linux_x86_64"
+        },
+        {
+          "description": "Windows XP (NT 5.1, and XP x64 / NT 5.2): legacy BIOS, i440fx, PIIX IDE.",
+          "type": "string",
+          "const": "windows_xp"
+        },
+        {
+          "description": "Windows Vista (NT 6.0): legacy BIOS, q35, AHCI.",
+          "type": "string",
+          "const": "windows_vista"
+        },
+        {
+          "description": "Windows 7 (NT 6.1): legacy BIOS, q35, AHCI.",
+          "type": "string",
+          "const": "windows7"
+        },
+        {
+          "description": "Windows 8.1 (NT 6.3): UEFI (x64) or legacy BIOS (32-bit), q35, AHCI.",
+          "type": "string",
+          "const": "windows81"
+        },
+        {
+          "description": "Windows 10 (NT 10.0, build < 22000): UEFI (x64) or legacy BIOS\n(32-bit), q35, AHCI.",
+          "type": "string",
+          "const": "windows10"
+        },
+        {
+          "description": "Windows 11 on ARM64 (build 22000 and later): macOS/HVF hosts only,\n`virt`, UEFI with Secure Boot, TPM 2.0 (ADR-0028).",
+          "type": "string",
+          "const": "windows11_arm64"
+        }
+      ]
+    },
     "Label": {
       "description": "Text declared by the user, without control characters; never interpreted.",
       "type": "string",

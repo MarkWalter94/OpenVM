@@ -70,9 +70,24 @@ fn runtime_base(opts: &EndpointOptions) -> PathBuf {
     }
 }
 
+/// Length of the socket file name `svc-<16 hex>.sock` plus the separator.
+const SOCKET_NAME_LEN: usize = 26;
+
 impl Listener {
     pub(super) fn bind(opts: &EndpointOptions) -> io::Result<Self> {
-        let base = runtime_base(opts);
+        let mut base = runtime_base(opts);
+        // macOS has no XDG_RUNTIME_DIR and long catalog or temporary paths:
+        // a base that cannot hold the socket falls back to a short private
+        // directory instead of refusing the start.
+        if base.as_os_str().len() + SOCKET_NAME_LEN > MAX_SOCKET_PATH {
+            let short = super::fallback_root();
+            crate::diag!(
+                "lightvm-service: path {} too long for the IPC socket, private directory {}",
+                base.display(),
+                short.display()
+            );
+            base = short;
+        }
         ensure_private_dir(&base)?;
         let path = base.join(format!("svc-{}.sock", &super::random_suffix()?[..16]));
         let endpoint = path
@@ -132,7 +147,8 @@ pub(super) async fn connect(endpoint: &str) -> io::Result<BoxedStream> {
     Ok(Box::new(s))
 }
 
-#[cfg(test)]
+// The test helpers live with the supervisor.
+#[cfg(all(test, feature = "supervisor"))]
 mod tests {
     use super::*;
 
@@ -144,6 +160,28 @@ mod tests {
         assert_eq!(fs::metadata(&p).unwrap().mode() & 0o777, 0o700);
         fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(ensure_private_dir(&p).is_err());
+    }
+
+    #[test]
+    fn long_runtime_dir_falls_back_to_a_short_private_dir() {
+        let d = crate::test_support::temp_dir("long-runtime");
+        let long = d.join("x".repeat(MAX_SOCKET_PATH));
+        let opts = EndpointOptions {
+            runtime_dir: Some(long.clone()),
+            catalog_dir: long,
+        };
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let l = rt.block_on(async { Listener::bind(&opts) }).unwrap();
+        assert!(l.endpoint().len() <= MAX_SOCKET_PATH, "{}", l.endpoint());
+        let root = crate::transport::fallback_root();
+        assert!(Path::new(l.endpoint()).starts_with(&root));
+        drop(l);
+        // Only the socket is removed by the listener; the directory is left
+        // to the stale-root sweep of a later service, removed here instead.
+        let _ = fs::remove_dir(&root);
     }
 
     #[test]

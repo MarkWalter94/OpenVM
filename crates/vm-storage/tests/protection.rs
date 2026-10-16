@@ -10,16 +10,18 @@ mod common;
 
 use std::path::PathBuf;
 
-use vm_storage::{BaselineId, Catalog, RunId, StorageError, VmId, WriterProbe};
+use vm_storage::{BaselineId, Catalog, RunId, StorageError, VmId};
 
 struct Fx {
     _dir: tempfile::TempDir,
     cat: Catalog,
+    #[cfg_attr(not(windows), allow(dead_code))]
     vm: VmId,
     baseline: BaselineId,
     run: RunId,
     base: PathBuf,
     base_vars: PathBuf,
+    #[cfg_attr(not(windows), allow(dead_code))]
     overlay: PathBuf,
 }
 
@@ -129,6 +131,8 @@ fn ended_run_cannot_be_guarded() {
 mod windows {
     use std::fs::OpenOptions;
     use std::os::windows::fs::OpenOptionsExt;
+
+    use vm_storage::WriterProbe;
 
     use super::*;
 

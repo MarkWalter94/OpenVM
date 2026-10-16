@@ -170,6 +170,7 @@ async fn agent(svc: &Svc, u: &mut Client, vm: VmId, lease_ms: Option<u32>) -> Ag
             purpose: "Run the fixture\u{1b}[31m and [report](https://example.invalid)".into(),
             requested_vms: vec![vm],
             requested_capabilities: CapabilitySet::new(),
+            requested_endpoints: Vec::new(),
         },
     )
     .await
@@ -199,12 +200,14 @@ async fn agent(svc: &Svc, u: &mut Client, vm: VmId, lease_ms: Option<u32>) -> Ag
         Request::ApproveSession {
             request_id,
             approval: SessionApproval {
+                tools: Default::default(),
                 vm_id: vm,
                 capabilities: caps,
                 duration_s: 3600,
                 quotas: None,
                 lease_ms,
                 give_input: true,
+                network_endpoints: Vec::new(),
             },
         },
     )

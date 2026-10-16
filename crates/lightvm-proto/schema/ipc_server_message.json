@@ -226,6 +226,33 @@
         "at"
       ]
     },
+    "AgentEndpointView": {
+      "description": "A granted network endpoint as the agent sees it: what to use inside the\nguest (never the host side).",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "DNS name inside the guest.",
+          "type": "string"
+        },
+        "port": {
+          "description": "TCP port.",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "virtual_ip": {
+          "description": "Virtual address inside the guest.",
+          "type": "string",
+          "format": "ipv4"
+        }
+      },
+      "required": [
+        "name",
+        "virtual_ip",
+        "port"
+      ]
+    },
     "AgentVmView": {
       "description": "A VM as seen by an agent session (no host details).",
       "type": "object",
@@ -248,6 +275,13 @@
         "name": {
           "description": "Name.",
           "$ref": "#/$defs/VmName"
+        },
+        "network_endpoints": {
+          "description": "Network of the VM for this session (ADR-0033): the granted\nendpoints with the address and port to use inside the guest. Empty\n= the VM runs without network for this session.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AgentEndpointView"
+          }
         },
         "run_id": {
           "description": "Current run.",
@@ -274,6 +308,41 @@
         "name",
         "state",
         "input_owner"
+      ]
+    },
+    "AuditOutcome": {
+      "description": "Recorded outcome.",
+      "oneOf": [
+        {
+          "description": "Accepted (queued).",
+          "type": "string",
+          "const": "accepted"
+        },
+        {
+          "description": "Forwarded to the backend.",
+          "type": "string",
+          "const": "forwarded"
+        },
+        {
+          "description": "Completed.",
+          "type": "string",
+          "const": "succeeded"
+        },
+        {
+          "description": "Failed.",
+          "type": "string",
+          "const": "failed"
+        },
+        {
+          "description": "Denied: no effect.",
+          "type": "string",
+          "const": "denied"
+        },
+        {
+          "description": "Discarded before forwarding: no effect.",
+          "type": "string",
+          "const": "discarded"
+        }
       ]
     },
     "BaselineId": {
@@ -437,6 +506,18 @@
       "description": "Authorizable action on a VM. Serialized names follow the MCP catalog\n(ROADMAP 9); `vm.input` covers mouse and keyboard.",
       "oneOf": [
         {
+          "type": "string",
+          "enum": [
+            "share.read",
+            "share.write",
+            "clipboard",
+            "files.transfer",
+            "usb",
+            "ui.inspect",
+            "ui.act"
+          ]
+        },
+        {
           "description": "List filtered by the grant.",
           "type": "string",
           "const": "vm.list"
@@ -485,6 +566,11 @@
           "description": "Authorized LightVM events and QEMU logs.",
           "type": "string",
           "const": "vm.logs"
+        },
+        {
+          "description": "Network endpoints of the VM's allowlist (ADR-0033, ADR-0034): the\ngrant lists which ones ([`Grant::network_endpoints`]). Without it\nthe session's VM runs without network.",
+          "type": "string",
+          "const": "network.endpoints"
         }
       ]
     },
@@ -577,6 +663,101 @@
         "run_id",
         "socket_path",
         "token"
+      ]
+    },
+    "DetectedGuest": {
+      "description": "Guest detected from the contents of an installation ISO at import\n(ADR-0027). A hint for the wizard, never a guarantee: the user confirms\nor corrects it, and nothing in the guest is trusted because of it.",
+      "type": "object",
+      "properties": {
+        "arch": {
+          "description": "Detected architecture, if the medium says.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GuestArch"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "build": {
+          "description": "Build number (for example 6002 for Vista SP2, 19045 for Windows 10\n22H2), if the medium says.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "edition": {
+          "description": "Edition or product name read from the medium (text, never interpreted).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Label"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "os": {
+          "description": "Detected operating system.",
+          "$ref": "#/$defs/GuestOs"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "os"
+      ]
+    },
+    "DiskController": {
+      "description": "Main disk controller of an imported VM (ADR-0030): the controller the\nguest was installed on, so that its boot driver finds the disk.",
+      "oneOf": [
+        {
+          "description": "`virtio-blk-pci` (Linux guests only).",
+          "type": "string",
+          "const": "virtio"
+        },
+        {
+          "description": "SATA AHCI (q35 ICH9 controller).",
+          "type": "string",
+          "const": "ahci"
+        },
+        {
+          "description": "Parallel IDE (PIIX controller of the i440fx board).",
+          "type": "string",
+          "const": "ide"
+        },
+        {
+          "description": "NVMe.",
+          "type": "string",
+          "const": "nvme"
+        },
+        {
+          "description": "VMware paravirtual SCSI (`pvscsi`).",
+          "type": "string",
+          "const": "pvscsi"
+        },
+        {
+          "description": "LSI Logic SAS 1068 (`mptsas1068`, VMware `lsisas1068`).",
+          "type": "string",
+          "const": "lsi_sas1068"
+        }
+      ]
+    },
+    "DisplayAdapter": {
+      "description": "Display adapter of an imported VM (ADR-0030).",
+      "oneOf": [
+        {
+          "description": "The adapter of the guest profile (ADR-0027: `VGA` for Windows,\n`virtio-vga` for Linux).",
+          "type": "string",
+          "const": "standard"
+        },
+        {
+          "description": "VMware SVGA II (`vmware-svga`), for a Windows guest that has the\nVMware Tools display driver.",
+          "type": "string",
+          "const": "vmware_svga"
+        }
       ]
     },
     "DisplayGeometry": {
@@ -686,12 +867,17 @@
       ]
     },
     "Firmware": {
-      "description": "Guest firmware. In the MVP only UEFI with managed NVRAM state (ROADMAP 8).",
+      "description": "Guest firmware. Linux guests use UEFI with managed NVRAM state (ROADMAP 8,\nADR-0011); legacy Windows guests use SeaBIOS, which has no NVRAM\n(ADR-0027). [`GuestOs::allowed_firmware`] says which applies.",
       "oneOf": [
         {
           "description": "UEFI (OVMF) with per-VM NVRAM.",
           "type": "string",
           "const": "uefi"
+        },
+        {
+          "description": "Legacy BIOS (SeaBIOS from the verified QEMU build), no NVRAM.",
+          "type": "string",
+          "const": "bios"
         }
       ]
     },
@@ -715,6 +901,14 @@
           "description": "Identifier.",
           "$ref": "#/$defs/GrantId"
         },
+        "network_endpoints": {
+          "description": "Network endpoints of the VM the session may use (names as in the VM\nsettings, normalized to lower case), with\n[`Capability::NetworkEndpoints`]; empty otherwise (ADR-0033).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
         "policy_revision": {
           "description": "Revision of the policy the grant was issued with.",
           "$ref": "#/$defs/PolicyRevision"
@@ -726,6 +920,9 @@
         "session_id": {
           "description": "Session it is bound to.",
           "$ref": "#/$defs/SessionId"
+        },
+        "tools": {
+          "$ref": "#/$defs/ToolGrant"
         },
         "vm_allowlist": {
           "description": "Allowed VMs (explicit allowlist; empty = no VM).",
@@ -752,8 +949,28 @@
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     },
+    "GuestArch": {
+      "description": "Architecture of an installation medium, as detected from its contents.",
+      "oneOf": [
+        {
+          "description": "32-bit x86.",
+          "type": "string",
+          "const": "x86"
+        },
+        {
+          "description": "x86_64.",
+          "type": "string",
+          "const": "x86_64"
+        },
+        {
+          "description": "ARM64 (AArch64).",
+          "type": "string",
+          "const": "aarch64"
+        }
+      ]
+    },
     "GuestOs": {
-      "description": "Declared guest operating system. In the MVP the reference is Ubuntu LTS\nx86_64 with the version and checksum pinned in F0 (ROADMAP 4).",
+      "description": "Declared guest operating system. In the MVP the reference is Ubuntu LTS\nx86_64 with the version and checksum pinned in F0 (ROADMAP 4). The\nWindows variants (ADR-0027, ROADMAP R2c) select a hardware profile with\ndevices the guest has inbox drivers for; they are manual, offline guests\nand their compatibility cells stay \"not verified\" until real evidence.",
       "oneOf": [
         {
           "description": "Ubuntu LTS x86_64 (MVP reference guest).",
@@ -764,6 +981,36 @@
           "description": "Other Linux x86_64: manageable manually, without compatibility guarantees.",
           "type": "string",
           "const": "other_linux_x86_64"
+        },
+        {
+          "description": "Windows XP (NT 5.1, and XP x64 / NT 5.2): legacy BIOS, i440fx, PIIX IDE.",
+          "type": "string",
+          "const": "windows_xp"
+        },
+        {
+          "description": "Windows Vista (NT 6.0): legacy BIOS, q35, AHCI.",
+          "type": "string",
+          "const": "windows_vista"
+        },
+        {
+          "description": "Windows 7 (NT 6.1): legacy BIOS, q35, AHCI.",
+          "type": "string",
+          "const": "windows7"
+        },
+        {
+          "description": "Windows 8.1 (NT 6.3): UEFI (x64) or legacy BIOS (32-bit), q35, AHCI.",
+          "type": "string",
+          "const": "windows81"
+        },
+        {
+          "description": "Windows 10 (NT 10.0, build < 22000): UEFI (x64) or legacy BIOS\n(32-bit), q35, AHCI.",
+          "type": "string",
+          "const": "windows10"
+        },
+        {
+          "description": "Windows 11 on ARM64 (build 22000 and later): macOS/HVF hosts only,\n`virt`, UEFI with Secure Boot, TPM 2.0 (ADR-0028).",
+          "type": "string",
+          "const": "windows11_arm64"
         }
       ]
     },
@@ -838,6 +1085,133 @@
           "type": "string",
           "const": "png"
         }
+      ]
+    },
+    "ImportSource": {
+      "description": "Where an imported VM came from (ADR-0030).",
+      "oneOf": [
+        {
+          "description": "VMware Workstation or Player (`.vmx` + VMDK), converted to QCOW2.",
+          "type": "string",
+          "const": "vmware"
+        }
+      ]
+    },
+    "ImportWarning": {
+      "description": "Warning of a VMware import, in [`VmwareImportPreview`].",
+      "type": "object",
+      "properties": {
+        "detail": {
+          "description": "Values for the message (for example the VMware value and the one\nLightVM uses), shown as text.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "description": "What.",
+          "$ref": "#/$defs/ImportWarningKind"
+        }
+      },
+      "required": [
+        "kind"
+      ]
+    },
+    "ImportWarningKind": {
+      "description": "Kind of [`ImportWarning`].",
+      "oneOf": [
+        {
+          "description": "Windows on a controller LightVM cannot keep (an LSI Logic parallel\ncontroller, which QEMU does not emulate, or an NVMe boot disk with\nlegacy BIOS, which SeaBIOS cannot boot): Windows may not start (stop\n0x7B) until the storage driver of the new controller is enabled in\nthe guest, and the storage helper is not available for the automatic\npreparation (manual preparation, `docs/USER_GUIDE.md`).",
+          "type": "string",
+          "const": "storage_driver_preparation"
+        },
+        {
+          "description": "As [`Self::StorageDriverPreparation`], but LightVM enables the\nguest's own driver of the new controller in the converted disk with\nthe storage helper (offline `SYSTEM` hive edit; the VMware VM is not\nchanged).",
+          "type": "string",
+          "const": "storage_driver_enabled"
+        },
+        {
+          "description": "A controller QEMU does not emulate on a Linux guest: the disk is\nattached to the profile's controller (the initramfs must have its\ndriver, as standard distributions do).",
+          "type": "string",
+          "const": "controller_replaced"
+        },
+        {
+          "description": "The guest memory was raised to the minimum of the guest system.",
+          "type": "string",
+          "const": "memory_raised"
+        },
+        {
+          "description": "The guest memory was lowered to the host limit.",
+          "type": "string",
+          "const": "memory_lowered"
+        },
+        {
+          "description": "The vCPUs were lowered to the host limit.",
+          "type": "string",
+          "const": "vcpus_lowered"
+        },
+        {
+          "description": "The VMware CPU topology could not be kept (one socket per vCPU).",
+          "type": "string",
+          "const": "topology_changed"
+        },
+        {
+          "description": "VMware uses the same guest type for Windows 8 and 8.1: LightVM\nsupports 8.1 only.",
+          "type": "string",
+          "const": "windows8_or81"
+        },
+        {
+          "description": "UEFI guest: the firmware starts with a new variable store, so the\nboot entries of VMware are not carried over (the default loader of\nthe disk is used).",
+          "type": "string",
+          "const": "new_uefi_variables"
+        },
+        {
+          "description": "A disk of the snapshot chain is marked dirty (not closed cleanly).",
+          "type": "string",
+          "const": "dirty_disk"
+        }
+      ]
+    },
+    "ImportedHardware": {
+      "description": "Hardware of a VM imported from VMware (ADR-0030), in\n[`VmConfig::imported`]. Fixed at import: a configuration change cannot\nalter it.",
+      "type": "object",
+      "properties": {
+        "arch": {
+          "description": "Architecture of the guest, from the VMware guest type.",
+          "$ref": "#/$defs/GuestArch"
+        },
+        "cores_per_socket": {
+          "description": "vCPUs per socket of the source VM (`cpuid.coresPerSocket`): client\neditions of Windows use at most one or two sockets. `None` = one\nsocket per vCPU, as for VMs created in LightVM.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "disk_controller": {
+          "description": "Controller of the main disk.",
+          "$ref": "#/$defs/DiskController"
+        },
+        "display": {
+          "description": "Display adapter.",
+          "$ref": "#/$defs/DisplayAdapter",
+          "default": "standard"
+        },
+        "source": {
+          "description": "Origin of the VM.",
+          "$ref": "#/$defs/ImportSource"
+        },
+        "storage_driver_preparation": {
+          "description": "The source disk was on a controller LightVM cannot keep (VMware\n`lsilogic`, or NVMe with legacy BIOS) and the guest is Windows: the\nstorage driver of [`Self::disk_controller`] must be enabled for boot\nin the guest before it can start from this disk (ADR-0030). Cleared\nwhen the import enabled it in the converted disk (storage helper);\nstill set when the user must prepare the guest in VMware\n(`docs/USER_GUIDE.md`).",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "arch",
+        "disk_controller"
       ]
     },
     "InputOwner": {
@@ -972,7 +1346,7 @@
       ]
     },
     "MediaRecord": {
-      "description": "Approved media, as seen by clients: no host path.",
+      "description": "Approved media, as seen by clients. Sent only to the `ui` role\n(`list_media`, `import_media`): agent sessions never receive it.",
       "type": "object",
       "properties": {
         "approved_at": {
@@ -983,6 +1357,17 @@
           "description": "Origin declared by the user (text, never interpreted).",
           "$ref": "#/$defs/Label"
         },
+        "detected_guest": {
+          "description": "Guest detected from the contents at import (installation ISOs only;\n`None` = not recognized, data medium, or imported before detection).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DetectedGuest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "id": {
           "description": "Identifier.",
           "$ref": "#/$defs/MediaId"
@@ -991,12 +1376,23 @@
           "description": "Kind of media.",
           "$ref": "#/$defs/MediaKind"
         },
+        "location": {
+          "description": "Where the ISO is, shown to the user (ADR-0029): absolute path of the\nuser's own file, used in place and never copied. `None` for a\nread-only copy kept in the catalog (media imported before ADR-0029).\nInformative text: no request carries it back.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "missing": {
+          "description": "The file was not found at [`Self::location`] the last time it was\nlooked for (moved, renamed, deleted, or its drive is not connected):\nno VM can use the medium until the file is back there or the ISO is\nimported again.",
+          "type": "boolean"
+        },
         "sha256": {
-          "description": "SHA-256 of the managed copy, computed at approval.",
+          "description": "SHA-256 of the file, computed at approval and re-verified before\nevery start.",
           "$ref": "#/$defs/Sha256Digest"
         },
         "size_bytes": {
-          "description": "Size in bytes of the managed copy.",
+          "description": "Size in bytes of the file.",
           "type": "integer",
           "format": "uint64",
           "minimum": 0
@@ -1011,13 +1407,205 @@
         "approved_at"
       ]
     },
+    "NetworkAudit": {
+      "description": "Network details of a `network_*` audit event (ADR-0033). Addresses and\ncounts only: never data carried by the connection.",
+      "type": "object",
+      "properties": {
+        "bytes_from_guest": {
+          "description": "Bytes from the guest to the endpoint.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "bytes_to_guest": {
+          "description": "Bytes from the endpoint to the guest.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "destination": {
+          "description": "Destination inside the guest network (`10.0.2.101:1433`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "endpoint": {
+          "description": "Endpoint name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "description": "Network mode of the run (`offline`, `nat`, `endpoints`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "description": "How it ended or why it was refused (`closed`, `revoked`,\n`not_allowed`...), or the allowed endpoints for `network_policy`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "target": {
+          "description": "Host address the connection was opened to (or the endpoint\nresolved to).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "NetworkEndpoint": {
+      "description": "An endpoint of the allowlist (ADR-0033), approved by the user in the VM\nsettings: inside the guest `name` (DNS) or `virtual_ip`, port `port`;\non the host side the TCP service `host:port`. Only TCP is carried.",
+      "type": "object",
+      "properties": {
+        "host": {
+          "description": "Host name or IP address of the real service, resolved by the\nsupervisor when the run starts (the address used is recorded).",
+          "type": "string"
+        },
+        "name": {
+          "description": "Name the guest uses (DNS host name syntax, no wildcard; compared\nwithout regard to case). Also resolves as `name.lightvm.internal`.",
+          "type": "string"
+        },
+        "port": {
+          "description": "TCP port, the same inside the guest and on the host (1..=65535).",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "virtual_ip": {
+          "description": "Virtual address in the guest network\n([`FIRST_ENDPOINT_IP`]..=[`LAST_ENDPOINT_IP`]).",
+          "type": "string",
+          "format": "ipv4"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "host",
+        "port",
+        "virtual_ip"
+      ]
+    },
     "NetworkProfile": {
-      "description": "Network profile. In the MVP the only allowed value is `offline` (ADR-0004): no\nguest NIC, default network devices excluded, no forwarding.",
+      "description": "Network mode of a VM (ADR-0033). `offline` stays the default (ADR-0004):\nno guest NIC, default network devices excluded, no forwarding.",
       "oneOf": [
         {
           "description": "No NIC.",
           "type": "string",
           "const": "offline"
+        },
+        {
+          "description": "QEMU user-mode network (like VMware NAT): the guest reaches the host,\nthe LAN and the Internet. Manual use only: a run started while an\nagent session targets the VM gets the endpoint allowlist (when the\nsession was granted `network.endpoints`) or no NIC, and a session is\nrefused on a VM running with NAT.",
+          "type": "string",
+          "const": "nat"
+        },
+        {
+          "description": "Endpoint allowlist: the guest NIC is attached to the supervisor's\nown network, where only the endpoints of [`VmConfig::endpoints`]\nanswer (each a virtual address and port mapped to one approved\n`host:port`). In manual use every endpoint of the VM is allowed; in\nan agent session only those of the grant.",
+          "type": "string",
+          "const": "endpoints"
+        }
+      ]
+    },
+    "NotImported": {
+      "description": "Part of a VMware VM that is not imported, in [`VmwareImportPreview`].",
+      "type": "object",
+      "properties": {
+        "detail": {
+          "description": "Detail from the `.vmx` (for example a file name or a count), shown\nas text.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "item": {
+          "description": "What.",
+          "$ref": "#/$defs/NotImportedItem"
+        }
+      },
+      "required": [
+        "item"
+      ]
+    },
+    "NotImportedItem": {
+      "description": "Kind of [`NotImported`].",
+      "oneOf": [
+        {
+          "description": "Network adapters: LightVM VMs are offline (ADR-0004).",
+          "type": "string",
+          "const": "network"
+        },
+        {
+          "description": "Shared folders: recreated later through LightVM Tools (ADR-0031).",
+          "type": "string",
+          "const": "shared_folders"
+        },
+        {
+          "description": "USB controllers and devices: recreated later through LightVM Tools.",
+          "type": "string",
+          "const": "usb"
+        },
+        {
+          "description": "Sound card.",
+          "type": "string",
+          "const": "sound"
+        },
+        {
+          "description": "3D acceleration.",
+          "type": "string",
+          "const": "accelerated3d"
+        },
+        {
+          "description": "Intermediate snapshots (only the current state is converted).",
+          "type": "string",
+          "const": "snapshots"
+        },
+        {
+          "description": "A hard disk other than the main one.",
+          "type": "string",
+          "const": "other_disk"
+        },
+        {
+          "description": "A CD/DVD drive (an ISO can be imported as a data medium).",
+          "type": "string",
+          "const": "cd_rom"
+        },
+        {
+          "description": "Floppy drive.",
+          "type": "string",
+          "const": "floppy"
+        },
+        {
+          "description": "Serial port.",
+          "type": "string",
+          "const": "serial_port"
+        },
+        {
+          "description": "Parallel port.",
+          "type": "string",
+          "const": "parallel_port"
+        },
+        {
+          "description": "Virtual printer.",
+          "type": "string",
+          "const": "printer"
+        },
+        {
+          "description": "VMware Tools features (clipboard, drag and drop, time sync):\nrecreated later through LightVM Tools (ADR-0031).",
+          "type": "string",
+          "const": "vmware_tools_features"
         }
       ]
     },
@@ -1079,6 +1667,21 @@
           "description": "Emergency Stop (priority path, outside the queue).",
           "type": "string",
           "const": "emergency_stop"
+        },
+        {
+          "description": "User snapshot taken, VM off or running (ADR-0032; outside the queue).",
+          "type": "string",
+          "const": "user_snapshot"
+        },
+        {
+          "description": "Revert to a user snapshot with the VM off (ADR-0032; outside the\nqueue).",
+          "type": "string",
+          "const": "user_snapshot_revert"
+        },
+        {
+          "description": "Deletion of a user snapshot (ADR-0032; outside the queue).",
+          "type": "string",
+          "const": "user_snapshot_delete"
         }
       ]
     },
@@ -1739,6 +2342,54 @@
           ]
         },
         {
+          "description": "Network event of the session's VM (ADR-0033): a connection through\nthe endpoint allowlist ended, an attempt was refused, or the run's\nnetwork was set up (`kind` of the audit: `network_setup`,\n`network_connection`, `network_denied`, `network_policy`).",
+          "type": "object",
+          "properties": {
+            "action": {
+              "description": "Audit action name.",
+              "type": "string"
+            },
+            "detail": {
+              "description": "Details (addresses and counts, never content).",
+              "$ref": "#/$defs/NetworkAudit"
+            },
+            "kind": {
+              "type": "string",
+              "const": "network"
+            }
+          },
+          "required": [
+            "kind",
+            "action",
+            "detail"
+          ]
+        },
+        {
+          "description": "Tools metadata, never file contents or clipboard/UI values.",
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string"
+            },
+            "detail": {
+              "$ref": "#/$defs/ToolAudit"
+            },
+            "kind": {
+              "type": "string",
+              "const": "tools"
+            },
+            "outcome": {
+              "$ref": "#/$defs/AuditOutcome"
+            }
+          },
+          "required": [
+            "kind",
+            "action",
+            "outcome",
+            "detail"
+          ]
+        },
+        {
           "description": "Service note (plain text).",
           "type": "object",
           "properties": {
@@ -1821,6 +2472,22 @@
     "ResponseBody": {
       "description": "Results of the operations.",
       "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "guest_tools"
+            },
+            "reply": {
+              "$ref": "#/$defs/ToolReply"
+            }
+          },
+          "required": [
+            "kind",
+            "reply"
+          ]
+        },
         {
           "description": "Response to `ping`.",
           "type": "object",
@@ -2117,6 +2784,24 @@
           ]
         },
         {
+          "description": "Response to `delete_media`.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "media_deleted"
+            },
+            "media_id": {
+              "description": "Deleted medium.",
+              "$ref": "#/$defs/MediaId"
+            }
+          },
+          "required": [
+            "kind",
+            "media_id"
+          ]
+        },
+        {
           "description": "Response to `delete_vm`.",
           "type": "object",
           "properties": {
@@ -2240,6 +2925,125 @@
             "kind",
             "vm_id",
             "baseline_id"
+          ]
+        },
+        {
+          "description": "Response to `list_snapshots`.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "snapshots"
+            },
+            "tree": {
+              "description": "Snapshot tree.",
+              "$ref": "#/$defs/SnapshotTree"
+            },
+            "vm_id": {
+              "description": "VM.",
+              "$ref": "#/$defs/VmId"
+            }
+          },
+          "required": [
+            "kind",
+            "vm_id",
+            "tree"
+          ]
+        },
+        {
+          "description": "Response to `take_snapshot` and `update_snapshot`.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "snapshot"
+            },
+            "snapshot": {
+              "description": "The snapshot.",
+              "$ref": "#/$defs/SnapshotSummary"
+            }
+          },
+          "required": [
+            "kind",
+            "snapshot"
+          ]
+        },
+        {
+          "description": "Response to `revert_snapshot`: the VM is now at the snapshot.",
+          "type": "object",
+          "properties": {
+            "config_revision": {
+              "description": "Configuration revision after the revert.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "snapshot_reverted"
+            },
+            "snapshot_id": {
+              "description": "Snapshot reverted to.",
+              "$ref": "#/$defs/SnapshotId"
+            },
+            "vm_id": {
+              "description": "VM.",
+              "$ref": "#/$defs/VmId"
+            }
+          },
+          "required": [
+            "kind",
+            "vm_id",
+            "snapshot_id",
+            "config_revision"
+          ]
+        },
+        {
+          "description": "Response to `delete_snapshot`.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "snapshot_deleted"
+            },
+            "snapshot_id": {
+              "description": "Deleted snapshot.",
+              "$ref": "#/$defs/SnapshotId"
+            },
+            "vm_id": {
+              "description": "VM.",
+              "$ref": "#/$defs/VmId"
+            }
+          },
+          "required": [
+            "kind",
+            "vm_id",
+            "snapshot_id"
+          ]
+        },
+        {
+          "description": "Response to `get_snapshot_thumbnail`.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "snapshot_thumbnail"
+            },
+            "png_base64": {
+              "description": "PNG, standard base64 with padding; `None` if none was kept.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "snapshot_id": {
+              "description": "Snapshot.",
+              "$ref": "#/$defs/SnapshotId"
+            }
+          },
+          "required": [
+            "kind",
+            "snapshot_id"
           ]
         },
         {
@@ -2915,6 +3719,60 @@
             "kind",
             "report"
           ]
+        },
+        {
+          "description": "Response to `preview_vmware_import`.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "vmware_import_preview"
+            },
+            "preview": {
+              "description": "What would be imported.",
+              "$ref": "#/$defs/VmwareImportPreview"
+            }
+          },
+          "required": [
+            "kind",
+            "preview"
+          ]
+        },
+        {
+          "description": "Response to `import_vmware`: the VM exists with its converted disk.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "vmware_imported"
+            },
+            "vm": {
+              "description": "New VM.",
+              "$ref": "#/$defs/VmRecord"
+            }
+          },
+          "required": [
+            "kind",
+            "vm"
+          ]
+        },
+        {
+          "description": "Response to `cancel_vmware_import`.",
+          "type": "object",
+          "properties": {
+            "cancelled": {
+              "description": "`true` if an import was in progress and is being cancelled.",
+              "type": "boolean"
+            },
+            "kind": {
+              "type": "string",
+              "const": "vmware_import_cancel"
+            }
+          },
+          "required": [
+            "kind",
+            "cancelled"
+          ]
         }
       ]
     },
@@ -3109,6 +3967,24 @@
           ]
         },
         {
+          "description": "The user snapshots of a VM changed (taken, reverted, deleted,\nrenamed, operation started or ended): re-read `list_snapshots`\n(ADR-0032).",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "snapshots_changed"
+            },
+            "vm_id": {
+              "description": "VM.",
+              "$ref": "#/$defs/VmId"
+            }
+          },
+          "required": [
+            "kind",
+            "vm_id"
+          ]
+        },
+        {
           "description": "Events lost because the client was too slow.",
           "type": "object",
           "properties": {
@@ -3263,6 +4139,32 @@
             "kind",
             "session_id"
           ]
+        },
+        {
+          "description": "Progress of the VMware import in progress (ADR-0030); published at\nmost a few times per second. The end is the reply to\n`import_vmware`.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "vmware_import_progress"
+            },
+            "percent": {
+              "description": "Percentage of the phase (0..=100).",
+              "type": "integer",
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0
+            },
+            "phase": {
+              "description": "Phase.",
+              "$ref": "#/$defs/VmwareImportPhase"
+            }
+          },
+          "required": [
+            "kind",
+            "phase",
+            "percent"
+          ]
         }
       ]
     },
@@ -3328,6 +4230,13 @@
           "description": "Expiry of the current lease.",
           "$ref": "#/$defs/UtcTimestamp"
         },
+        "network_endpoints": {
+          "description": "Granted network endpoints (`network.endpoints`, ADR-0033).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "purpose": {
           "description": "Purpose declared by the agent (plain text).",
           "type": "string"
@@ -3354,6 +4263,10 @@
               "type": "null"
             }
           ]
+        },
+        "tools": {
+          "description": "Named Tools resources granted to this session.",
+          "$ref": "#/$defs/ToolGrant"
         },
         "usage": {
           "description": "Consumption.",
@@ -3477,6 +4390,13 @@
           "description": "Declared guest OS.",
           "$ref": "#/$defs/GuestOs"
         },
+        "network_endpoints": {
+          "description": "Granted network endpoints (`network.endpoints`, ADR-0033).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "objective": {
           "description": "Objective (purpose declared by the agent and approved by the user).",
           "type": "string"
@@ -3553,6 +4473,10 @@
               "type": "null"
             }
           ]
+        },
+        "tools": {
+          "description": "Named Tools resources authorized for this session.",
+          "$ref": "#/$defs/ToolGrant"
         },
         "verdicts": {
           "description": "Verdicts in order (the last one is the current outcome).",
@@ -3749,6 +4673,13 @@
           },
           "uniqueItems": true
         },
+        "requested_endpoints": {
+          "description": "Network endpoints requested (hint, plain text).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "requested_vms": {
           "description": "VMs requested (hint).",
           "type": "array",
@@ -3858,6 +4789,136 @@
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
     },
+    "SnapshotId": {
+      "description": "SnapshotId: version 7 UUID, lowercase with hyphens.",
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "SnapshotSummary": {
+      "description": "User snapshot of a VM (ADR-0032), for the snapshot manager.",
+      "type": "object",
+      "properties": {
+        "clean_shutdown": {
+          "description": "The VM was off after an observed clean guest shutdown (or had never\nrun) when the snapshot was taken: it can become a verified baseline.",
+          "type": "boolean"
+        },
+        "config_revision": {
+          "description": "VM configuration revision when the snapshot was taken.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "created_at": {
+          "description": "Creation instant.",
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "description": {
+          "description": "Description given by the user (may be empty).",
+          "type": "string",
+          "default": ""
+        },
+        "disk_gib": {
+          "description": "Disk size of the VM at that moment (GiB), from the saved\nconfiguration.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "files_bytes": {
+          "description": "Bytes of the snapshot's own files on the host (UEFI variables and\nthumbnail). The disk clusters the snapshot keeps live inside the VM's\ndisk and are counted in the VM's disk usage.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "firmware_saved": {
+          "description": "The snapshot carries a copy of the UEFI variables.",
+          "type": "boolean"
+        },
+        "has_thumbnail": {
+          "description": "A thumbnail of the screen is available\n([`Request::GetSnapshotThumbnail`]).",
+          "type": "boolean"
+        },
+        "name": {
+          "description": "Name given by the user.",
+          "$ref": "#/$defs/Label"
+        },
+        "parent": {
+          "description": "Snapshot this one descends from; `None` = a root of the tree.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SnapshotId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "snapshot_id": {
+          "description": "Snapshot.",
+          "$ref": "#/$defs/SnapshotId"
+        },
+        "taken_while_running": {
+          "description": "Taken while the VM ran: the disk state is like after a power cut at\nthat instant (crash-consistent); `false` = taken with the VM off.",
+          "type": "boolean"
+        },
+        "vm_id": {
+          "description": "Owning VM.",
+          "$ref": "#/$defs/VmId"
+        }
+      },
+      "required": [
+        "snapshot_id",
+        "vm_id",
+        "name",
+        "created_at",
+        "taken_while_running",
+        "clean_shutdown",
+        "firmware_saved",
+        "has_thumbnail",
+        "disk_gib",
+        "config_revision",
+        "files_bytes"
+      ]
+    },
+    "SnapshotTree": {
+      "description": "User snapshots of a VM as a tree, in [`ResponseBody::Snapshots`].",
+      "type": "object",
+      "properties": {
+        "available": {
+          "description": "Snapshots are available for this VM now (it runs on its own disk);\notherwise `unavailable_reason` says why.",
+          "type": "boolean"
+        },
+        "current": {
+          "description": "Snapshot the current state descends from (\"you are here\"): the last\none taken or reverted to; `None` if the current state descends from\nno snapshot.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SnapshotId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "snapshots": {
+          "description": "Snapshots, oldest first; parents always before their children.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/SnapshotSummary"
+          }
+        },
+        "unavailable_reason": {
+          "description": "Why snapshots cannot be taken or reverted now (agent session on the\nVM, VM on an overlay of a baseline, TPM guest...), for the UI.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "available"
+      ]
+    },
     "StartPhase": {
       "description": "Phase of a start before the VM process exists.",
       "oneOf": [
@@ -3937,6 +4998,21 @@
           "description": "`restore_baseline`.",
           "type": "string",
           "const": "restore_baseline"
+        },
+        {
+          "description": "`take_snapshot` (ADR-0032).",
+          "type": "string",
+          "const": "take_snapshot"
+        },
+        {
+          "description": "`revert_snapshot` (ADR-0032).",
+          "type": "string",
+          "const": "revert_snapshot"
+        },
+        {
+          "description": "`delete_snapshot` (ADR-0032). (`promote_snapshot` shows as\n`create_baseline`.)",
+          "type": "string",
+          "const": "delete_snapshot"
         }
       ]
     },
@@ -4035,10 +5111,439 @@
         }
       ]
     },
+    "ToolAudit": {
+      "type": "object",
+      "properties": {
+        "bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "feature": {
+          "type": "string"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "share": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "feature"
+      ]
+    },
+    "ToolFileEntry": {
+      "description": "Directory entry: names and metadata, never host paths.",
+      "type": "object",
+      "properties": {
+        "directory": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        },
+        "size": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "directory",
+        "size"
+      ]
+    },
+    "ToolFileReply": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "entries": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ToolFileEntry"
+              }
+            },
+            "result": {
+              "type": "string",
+              "const": "entries"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "result",
+            "entries"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "data": {
+              "type": "string"
+            },
+            "eof": {
+              "type": "boolean"
+            },
+            "offset": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "result": {
+              "type": "string",
+              "const": "data"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "result",
+            "offset",
+            "data",
+            "eof"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "result": {
+              "type": "string",
+              "const": "transfer"
+            },
+            "transfer": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "result",
+            "transfer"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "result": {
+              "type": "string",
+              "const": "ok"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "result"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "result": {
+              "type": "string",
+              "const": "error"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "result",
+            "code"
+          ]
+        }
+      ]
+    },
+    "ToolGrant": {
+      "description": "Named subsets granted by the user. Booleans in `shares` denote write\npermission; feature capabilities remain independently required.",
+      "type": "object",
+      "properties": {
+        "shares": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "boolean"
+          }
+        },
+        "usb_devices": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "ToolReply": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "result": {
+              "type": "string",
+              "const": "ok"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "result"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "result": {
+              "type": "string",
+              "const": "clipboard"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "result",
+            "text"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "nodes": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ToolUiNode"
+              }
+            },
+            "result": {
+              "type": "string",
+              "const": "tree"
+            },
+            "tree": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "truncated": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "result",
+            "tree",
+            "nodes",
+            "truncated"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "reply": {
+              "$ref": "#/$defs/ToolFileReply"
+            },
+            "result": {
+              "type": "string",
+              "const": "file"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "result",
+            "reply"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "result": {
+              "type": "string",
+              "const": "error"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "result",
+            "code"
+          ]
+        }
+      ]
+    },
+    "ToolShare": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "root": {
+          "description": "Host folder chosen explicitly in the user UI. Never sent to agents\nor the guest; the supervisor opens it without following links.",
+          "type": "string"
+        },
+        "writable": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "root"
+      ]
+    },
+    "ToolUiNode": {
+      "type": "object",
+      "properties": {
+        "automation_id": {
+          "type": "string"
+        },
+        "control_type": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "focused": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "name": {
+          "type": "string"
+        },
+        "parent": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "rect": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "maxItems": 4,
+          "minItems": 4
+        },
+        "value": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "control_type",
+        "name",
+        "automation_id",
+        "enabled",
+        "focused",
+        "rect"
+      ]
+    },
+    "ToolsConfig": {
+      "type": "object",
+      "properties": {
+        "clipboard": {
+          "type": "boolean",
+          "default": false
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "files_transfer": {
+          "type": "boolean",
+          "default": false
+        },
+        "shares": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ToolShare"
+          }
+        },
+        "ui_act": {
+          "type": "boolean",
+          "default": false
+        },
+        "ui_inspect": {
+          "type": "boolean",
+          "default": false
+        },
+        "usb_devices": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
     "UtcTimestamp": {
       "description": "RFC 3339 UTC instant with Z suffix, millisecond precision.",
       "type": "string",
       "format": "date-time"
+    },
+    "VcpuHalt": {
+      "description": "Guest whose virtual CPUs stopped and were not restarted automatically, in\n[`VmSummary::vcpu_halt`]. A reset (`reset`) restarts the guest; a forced\nstop ends the run.",
+      "type": "object",
+      "properties": {
+        "automatic_resets": {
+          "description": "Automatic resets done in the recent window before the service gave up\n(0 when the reason is not reset automatically).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "reason": {
+          "description": "Why the virtual CPUs stopped.",
+          "$ref": "#/$defs/VcpuHaltReason"
+        }
+      },
+      "required": [
+        "reason",
+        "automatic_resets"
+      ]
+    },
+    "VcpuHaltReason": {
+      "description": "Cause of a [`VcpuHalt`].",
+      "oneOf": [
+        {
+          "description": "Unrecoverable virtual CPU error reported by the accelerator (QEMU\nrun state `internal-error`; for example a guest triple fault under\nWHPX, which real hardware would answer with a reset).",
+          "type": "string",
+          "const": "internal_error"
+        },
+        {
+          "description": "The guest reported a panic (QEMU run state `guest-panicked`).",
+          "type": "string",
+          "const": "guest_panicked"
+        }
+      ]
     },
     "Verdict": {
       "description": "A verdict on the session, with its source and rationale.",
@@ -4130,7 +5635,7 @@
       }
     },
     "VmConfig": {
-      "description": "VM configuration requested by the user. No field is a path or\na QEMU option: media are referenced by [`MediaId`] of the approved registry.",
+      "description": "VM configuration requested by the user. Media reference the approved\nregistry. Tools share roots are explicit user-approved folder settings\n(ADR-0031); no agent request or QEMU option is interpreted as a host path.",
       "type": "object",
       "properties": {
         "data_media": {
@@ -4150,14 +5655,32 @@
           "format": "uint64",
           "minimum": 0
         },
+        "endpoints": {
+          "description": "Endpoints of the endpoint allowlist (ADR-0033), approved by the\nuser; used by the `endpoints` mode and grantable to agent sessions\n(`network.endpoints`). Kept when the mode is another one.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NetworkEndpoint"
+          }
+        },
         "firmware": {
-          "description": "Firmware; in the MVP only `uefi`.",
+          "description": "Firmware; must be one of [`GuestOs::allowed_firmware`].",
           "$ref": "#/$defs/Firmware",
           "default": "uefi"
         },
         "guest_os": {
           "description": "Declared guest operating system.",
           "$ref": "#/$defs/GuestOs"
+        },
+        "imported": {
+          "description": "Hardware of a VM imported from VMware (ADR-0030), fixed at import:\ndisk controller, display adapter and CPU topology of the source VM.\n`None` for every VM created in LightVM (the profile of ADR-0027\napplies unchanged).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ImportedHardware"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "install_media": {
           "description": "Installation media from the media registry (kind `install_iso`).",
@@ -4189,9 +5712,13 @@
           "$ref": "#/$defs/VmName"
         },
         "network": {
-          "description": "Network profile; in the MVP only `offline`.",
+          "description": "Network mode (ADR-0033); `offline` by default.",
           "$ref": "#/$defs/NetworkProfile",
           "default": "offline"
+        },
+        "tools": {
+          "description": "Off by default. User-only settings for host integration.",
+          "$ref": "#/$defs/ToolsConfig"
         },
         "vcpus": {
           "description": "Number of vCPUs (not a CPU percentage limit: ROADMAP 7.2).",
@@ -4288,6 +5815,30 @@
         "created_at"
       ]
     },
+    "VmSnapshots": {
+      "description": "User snapshot facts of a VM, in [`VmSummary`] (ADR-0032).",
+      "type": "object",
+      "properties": {
+        "count": {
+          "description": "Number of user snapshots.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
+        "current": {
+          "description": "Snapshot the current state descends from (\"you are here\"), if any.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SnapshotId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
     "VmState": {
       "description": "Lifecycle state of a VM.",
       "oneOf": [
@@ -4370,6 +5921,13 @@
             }
           ]
         },
+        "snapshots": {
+          "description": "User snapshots of the VM (ADR-0032). Additive field: older clients\nignore it.",
+          "$ref": "#/$defs/VmSnapshots",
+          "default": {
+            "count": 0
+          }
+        },
         "start": {
           "description": "Sub-status of a start in progress (state `starting`): verification of\nthe approved media and of the baseline before QEMU is launched\n(ADR-0008, ADR-0025). Absent outside a start, and for a start with\nnothing to verify. Additive field: older clients ignore it.",
           "anyOf": [
@@ -4385,6 +5943,17 @@
           "description": "Current state as seen by the core (derived from the process and QMP).",
           "$ref": "#/$defs/VmState"
         },
+        "vcpu_halt": {
+          "description": "The guest's virtual CPUs stopped on an error and stay stopped (state\n`running`: the QEMU process is alive, the guest is not). Absent while\nthe guest runs. Additive field: older clients ignore it.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VcpuHalt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "vm_id": {
           "description": "VM.",
           "$ref": "#/$defs/VmId"
@@ -4396,6 +5965,197 @@
         "state",
         "config",
         "config_revision"
+      ]
+    },
+    "VmwareController": {
+      "description": "Disk controller of a VMware VM.",
+      "oneOf": [
+        {
+          "description": "IDE.",
+          "type": "string",
+          "const": "ide"
+        },
+        {
+          "description": "SATA (AHCI).",
+          "type": "string",
+          "const": "sata"
+        },
+        {
+          "description": "NVMe.",
+          "type": "string",
+          "const": "nvme"
+        },
+        {
+          "description": "SCSI, VMware paravirtual (`pvscsi`).",
+          "type": "string",
+          "const": "pvscsi"
+        },
+        {
+          "description": "SCSI, LSI Logic parallel (`lsilogic`): not emulated by QEMU.",
+          "type": "string",
+          "const": "lsi_logic"
+        },
+        {
+          "description": "SCSI, LSI Logic SAS (`lsisas1068`).",
+          "type": "string",
+          "const": "lsi_sas1068"
+        },
+        {
+          "description": "SCSI, BusLogic (`buslogic`): not emulated by QEMU.",
+          "type": "string",
+          "const": "bus_logic"
+        }
+      ]
+    },
+    "VmwareDiskPreview": {
+      "description": "Main disk of a VMware VM, in [`VmwareImportPreview`].",
+      "type": "object",
+      "properties": {
+        "allocated_bytes": {
+          "description": "Bytes allocated by the files of the chain on the host.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "create_type": {
+          "description": "`createType` of the current VMDK.",
+          "type": "string"
+        },
+        "file_name": {
+          "description": "File name of the current VMDK (top of the snapshot chain).",
+          "type": "string"
+        },
+        "slot": {
+          "description": "VMware slot of the disk (`scsi0:0`, `sata0:1`, `ide0:0`, `nvme0:0`).",
+          "type": "string"
+        },
+        "snapshot_levels": {
+          "description": "Snapshot levels flattened into the converted disk (0 = no snapshot).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "virtual_size_bytes": {
+          "description": "Virtual size of the disk.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "vmware_controller": {
+          "description": "Controller of the disk in VMware.",
+          "$ref": "#/$defs/VmwareController"
+        }
+      },
+      "required": [
+        "file_name",
+        "slot",
+        "vmware_controller",
+        "create_type",
+        "virtual_size_bytes",
+        "allocated_bytes",
+        "snapshot_levels"
+      ]
+    },
+    "VmwareImportPhase": {
+      "description": "Phase of a VMware import, in [`ServiceEvent::VmwareImportProgress`].",
+      "oneOf": [
+        {
+          "description": "Examination of the `.vmx` and of the disk chain.",
+          "type": "string",
+          "const": "checking"
+        },
+        {
+          "description": "`qemu-img convert` running.",
+          "type": "string",
+          "const": "converting"
+        },
+        {
+          "description": "The storage driver of the new controller being enabled in the\nconverted disk (storage helper, ADR-0030).",
+          "type": "string",
+          "const": "preparing_disk"
+        },
+        {
+          "description": "Check of the converted disk and creation of the VM.",
+          "type": "string",
+          "const": "finishing"
+        }
+      ]
+    },
+    "VmwareImportPreview": {
+      "description": "Outcome of the examination of a VMware VM (ADR-0030), for the UI. The\ntexts come from the user's files: they are shown, never interpreted.\nNo path is included, only file names.",
+      "type": "object",
+      "properties": {
+        "config": {
+          "description": "Configuration the import would create; the name is a suggestion\nfrom the VMware display name, the display the standard adapter.",
+          "$ref": "#/$defs/VmConfig"
+        },
+        "disk": {
+          "description": "Main disk.",
+          "$ref": "#/$defs/VmwareDiskPreview"
+        },
+        "display_name": {
+          "description": "`displayName` of the VMware VM, if present.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "free_bytes": {
+          "description": "Free bytes on the catalog volume, if measured.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "not_imported": {
+          "description": "What is not imported.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/NotImported"
+          }
+        },
+        "required_bytes": {
+          "description": "Bytes needed on the catalog volume for the converted disk\n(estimate: the data of the disk chain, at most its virtual size).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "vmware_guest_os": {
+          "description": "VMware guest type as written in the `.vmx` (`guestOS`).",
+          "type": "string"
+        },
+        "vmware_svga_offered": {
+          "description": "The VMware SVGA display adapter can be chosen (Windows guests).",
+          "type": "boolean",
+          "default": false
+        },
+        "vmware_tools_hint": {
+          "description": "The `.vmx` says the VMware Tools were installed in the guest (hint).",
+          "type": "boolean",
+          "default": false
+        },
+        "vmx_file": {
+          "description": "File name of the `.vmx`.",
+          "type": "string"
+        },
+        "warnings": {
+          "description": "Warnings the user should read before importing.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ImportWarning"
+          }
+        }
+      },
+      "required": [
+        "vmx_file",
+        "vmware_guest_os",
+        "config",
+        "disk",
+        "required_bytes"
       ]
     }
   }

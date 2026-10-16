@@ -1,13 +1,14 @@
 //! Settings of a VM (ADR-0017): resources (vCPU, RAM, disk), attached media
 //! (installation and data ISO from the approved registry) and execution
-//! limits (CPU cap, memory margin, storage budget). They can be changed only
-//! while the VM is stopped; the disk can only grow. No text fields: sliders
-//! without a value box and choice menus. The limits are enforced by the
+//! limits (CPU cap, memory margin, storage budget) and the network (ADR-0033:
+//! mode and endpoint list). They can be changed only while the VM is stopped;
+//! the disk can only grow. Sliders without a value box and choice menus; the
+//! only text fields are those of the network endpoints (name, host, port). The limits are enforced by the
 //! supervisor, the UI only proposes them.
 
 use lightvm_proto::{
     MAX_MEMORY_MARGIN_MIB, MIN_CPU_MAX_PERCENT, MIN_MEMORY_MARGIN_MIB, MediaId, MediaKind,
-    VmConfig, VmId, VmLimits,
+    NetworkEndpoint, NetworkProfile, VmConfig, VmId, VmLimits,
 };
 
 use crate::service::MediaState;
@@ -39,6 +40,9 @@ pub struct VmEdit {
     pub original: VmConfig,
     /// Edited configuration.
     pub config: VmConfig,
+    /// Text of the port field of each endpoint (parsed into the
+    /// configuration as the user types).
+    pub ports: Vec<String>,
 }
 
 impl VmEdit {
@@ -48,6 +52,11 @@ impl VmEdit {
             vm_id,
             revision,
             original: config.clone(),
+            ports: config
+                .endpoints
+                .iter()
+                .map(|e| e.port.to_string())
+                .collect(),
             config,
         }
     }
@@ -113,17 +122,20 @@ impl VmChanges {
 /// 2 vCPU, 2048 MiB, 16 GiB disk, offline profile, UEFI, default limits.
 pub fn default_config(name: &str) -> Result<VmConfig, String> {
     Ok(VmConfig {
+        tools: Default::default(),
         name: lightvm_proto::VmName::parse(name)
             .map_err(|e| format!("invalid VM name \"{name}\": {e}"))?,
         guest_os: lightvm_proto::GuestOs::UbuntuLtsX86_64,
         vcpus: 2,
         memory_mib: 2048,
         disk_gib: 16,
-        network: lightvm_proto::NetworkProfile::Offline,
+        network: NetworkProfile::Offline,
+        endpoints: Vec::new(),
         install_media: None,
         data_media: None,
         firmware: lightvm_proto::Firmware::Uefi,
         limits: VmLimits::default(),
+        imported: None,
     })
 }
 
@@ -218,6 +230,162 @@ fn media_row(
     });
 }
 
+/// Text of a network mode in the menu.
+pub fn network_mode_text(m: NetworkProfile) -> &'static str {
+    match m {
+        NetworkProfile::Offline => "Offline (no network adapter)",
+        NetworkProfile::Nat => "NAT (manual use only)",
+        NetworkProfile::Endpoints => "Endpoint allowlist",
+    }
+}
+
+/// What is wrong with the network settings, if anything (the checks of the
+/// supervisor, run here to keep "Save" disabled).
+pub fn network_error(c: &VmConfig) -> Option<String> {
+    if c.network != NetworkProfile::Offline && c.guest_os.is_aarch64() {
+        return Some("Windows 11 ARM64 guests can only be offline.".into());
+    }
+    lightvm_proto::validate_network(c.network, &c.endpoints)
+        .err()
+        .map(|e| e.message)
+}
+
+/// Network group (ADR-0033): the mode, and the endpoints of the allowlist
+/// (name used inside the guest, host and TCP port of the real service; the
+/// virtual address is assigned here).
+fn network_ui(ui: &mut egui::Ui, c: &mut VmConfig, ports: &mut Vec<String>) {
+    let p = theme::Palette::of(ui);
+    group_caption(ui, "Network");
+    ports.resize(c.endpoints.len(), String::new());
+    theme::row(
+        ui,
+        "Mode",
+        Some(
+            "Agent sessions never use NAT: they get the endpoints granted to them, or no network.",
+        ),
+        |ui| {
+            let r = egui::ComboBox::from_id_salt("lightvm_network_mode")
+                .selected_text(network_mode_text(c.network))
+                .show_ui(ui, |ui| {
+                    for m in [
+                        NetworkProfile::Offline,
+                        NetworkProfile::Nat,
+                        NetworkProfile::Endpoints,
+                    ] {
+                        ui.selectable_value(&mut c.network, m, network_mode_text(m));
+                    }
+                });
+            theme::accessible_name(&r.response, WidgetType::ComboBox, "Network mode");
+        },
+    );
+    match c.network {
+        NetworkProfile::Offline => {}
+        NetworkProfile::Nat => {
+            theme::notice(
+                ui,
+                "NAT: the guest reaches this computer, the local network and the Internet, like VMware NAT. While an agent session uses the VM it starts with the session's endpoints or without network, and a session cannot start while the VM runs with NAT.",
+                Tone::Warning,
+            );
+        }
+        NetworkProfile::Endpoints => {
+            theme::notice(
+                ui,
+                "Endpoint allowlist: the guest reaches only the endpoints below (TCP only), by name or by virtual address; nothing else on this computer, the local network or the Internet. Every endpoint receives whatever the guest sends to it.",
+                Tone::Accent,
+            );
+        }
+    }
+    if c.network == NetworkProfile::Offline {
+        return;
+    }
+    let mut remove = None;
+    for (i, e) in c.endpoints.iter_mut().enumerate() {
+        ui.horizontal_wrapped(|ui| {
+            let name = ui.add(
+                egui::TextEdit::singleline(&mut e.name)
+                    .hint_text("name, e.g. sql.lan")
+                    .desired_width(130.0),
+            );
+            theme::accessible_name(
+                &name,
+                WidgetType::TextEdit,
+                &format!("Name of endpoint {}", i + 1),
+            );
+            ui.label("\u{2192}");
+            let host = ui.add(
+                egui::TextEdit::singleline(&mut e.host)
+                    .hint_text("host, e.g. 127.0.0.1")
+                    .desired_width(150.0),
+            );
+            theme::accessible_name(
+                &host,
+                WidgetType::TextEdit,
+                &format!("Host of endpoint {}", i + 1),
+            );
+            ui.label(":");
+            let port = ui.add(
+                egui::TextEdit::singleline(&mut ports[i])
+                    .hint_text("port")
+                    .desired_width(56.0),
+            );
+            theme::accessible_name(
+                &port,
+                WidgetType::TextEdit,
+                &format!("Port of endpoint {}", i + 1),
+            );
+            e.port = ports[i].trim().parse().unwrap_or(0);
+            ui.label(
+                egui::RichText::new(format!("guest {}", e.virtual_ip))
+                    .small()
+                    .color(p.text_weak),
+            );
+            let r = ui.add(theme::subtle("Remove"));
+            theme::accessible_name(
+                &r,
+                WidgetType::Button,
+                &format!("Remove endpoint {}", i + 1),
+            );
+            if r.clicked() {
+                remove = Some(i);
+            }
+        });
+    }
+    if let Some(i) = remove {
+        c.endpoints.remove(i);
+        ports.remove(i);
+    }
+    ui.horizontal(|ui| {
+        let next = lightvm_proto::next_endpoint_ip(&c.endpoints);
+        let full = c.endpoints.len() >= lightvm_proto::MAX_NETWORK_ENDPOINTS || next.is_none();
+        if ui
+            .add_enabled(!full, theme::subtle("Add endpoint"))
+            .clicked()
+            && let Some(ip) = next
+        {
+            c.endpoints.push(NetworkEndpoint {
+                name: String::new(),
+                host: String::new(),
+                port: 0,
+                virtual_ip: ip,
+            });
+            ports.push(String::new());
+        }
+    });
+    if let Some(e) = network_error(c) {
+        theme::notice(ui, &e, Tone::Danger);
+    }
+    ui.add(
+        egui::Label::new(
+            egui::RichText::new(
+                "Only TCP is carried. SQL Server must listen on a fixed TCP port: a named instance found through the SQL Browser (UDP 1434) is not reachable.",
+            )
+            .small()
+            .color(p.text_weak),
+        )
+        .wrap(),
+    );
+}
+
 /// VM settings panel. `stopped`: the VM is stopped and editable; `max_vcpu`:
 /// logical processors of the host; `media`: approved media, for the Media
 /// group.
@@ -276,6 +444,31 @@ pub fn vm_settings_ui(
                     |v| format!("{v} GiB"),
                 )
             });
+            if let Some(h) = c.imported {
+                // ADR-0030: fixed at import, shown read-only and sent back
+                // unchanged.
+                theme::divider(ui);
+                group_caption(ui, "Imported from VMware");
+                let p = theme::Palette::of(ui);
+                let mut text = format!(
+                    "Disk controller: {} · display: {}",
+                    crate::vmware_import::controller_label(h.disk_controller),
+                    crate::vmware_import::display_label(h.display, c.guest_os)
+                );
+                if let Some(k) = h.cores_per_socket.filter(|k| *k > 1) {
+                    text.push_str(&format!(
+                        " · {k} cores per socket (the vCPUs stay a multiple of {k})"
+                    ));
+                }
+                ui.add(egui::Label::new(egui::RichText::new(text).color(p.text_weak)).wrap());
+                if h.storage_driver_preparation {
+                    theme::notice(
+                        ui,
+                        crate::vmware_import::STORAGE_DRIVER_WARNING,
+                        Tone::Warning,
+                    );
+                }
+            }
             theme::divider(ui);
             group_caption(ui, "Media");
             media_row(
@@ -294,6 +487,10 @@ pub fn vm_settings_ui(
                 MediaKind::DataIso,
                 media,
             );
+            theme::divider(ui);
+            network_ui(ui, c, &mut m.ports);
+            theme::divider(ui);
+            tools_ui(ui, &mut c.tools);
             theme::divider(ui);
             group_caption(ui, "Execution limits, enforced by the supervisor");
             let l = &mut c.limits;
@@ -372,8 +569,9 @@ pub fn vm_settings_ui(
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let changed = m.config != m.original;
+                let valid = network_error(&m.config).is_none();
                 let save = theme::primary(ui, "Save settings");
-                if ui.add_enabled(stopped && changed, save).clicked() {
+                if ui.add_enabled(stopped && changed && valid, save).clicked() {
                     outcome = Some(EditOutcome::Save);
                 }
                 if ui.button("Close").clicked() {
@@ -385,22 +583,92 @@ pub fn vm_settings_ui(
     outcome
 }
 
+/// Explicit host integration; folders are selected by the user, never an agent.
+fn tools_ui(ui: &mut egui::Ui, tools: &mut lightvm_proto::ToolsConfig) {
+    group_caption(ui, "LightVM Tools");
+    ui.checkbox(&mut tools.enabled, "Enable LightVM Tools for this VM");
+    ui.label("Install the guest component from the LIGHTVM_TOOLS CD. Agent access requires a separate session approval.");
+    ui.add_enabled_ui(tools.enabled, |ui| {
+        ui.checkbox(&mut tools.clipboard, "Allow clipboard text");
+        ui.checkbox(
+            &mut tools.files_transfer,
+            "Allow transfers to guest inbox and from guest outbox",
+        );
+        ui.checkbox(
+            &mut tools.ui_inspect,
+            "Allow inspection of guest application controls",
+        );
+        ui.add_enabled(
+            tools.ui_inspect,
+            egui::Checkbox::new(
+                &mut tools.ui_act,
+                "Allow actions on guest application controls",
+            ),
+        );
+        if !tools.ui_inspect {
+            tools.ui_act = false;
+        }
+        ui.label("Shared host folders (read-only unless Write is ticked)");
+        let mut remove = None;
+        for (i, share) in tools.shares.iter_mut().enumerate() {
+            ui.push_id(i, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut share.name)
+                            .hint_text("Share name")
+                            .desired_width(120.0),
+                    );
+                    ui.label(&share.root);
+                    ui.checkbox(&mut share.writable, "Write");
+                    if ui.button("Remove").clicked() {
+                        remove = Some(i);
+                    }
+                });
+            });
+        }
+        if let Some(i) = remove {
+            tools.shares.remove(i);
+        }
+        if tools.shares.len() < 32
+            && ui.button("Add shared folder…").clicked()
+            && let Some(mut picker) = crate::native_folder_picker()
+            && let Some(folder) = picker("Choose a host folder to share with this VM")
+        {
+            let name = (1..=1000)
+                .map(|n| format!("Share{n}"))
+                .find(|n| !tools.shares.iter().any(|s| s.name.eq_ignore_ascii_case(n)))
+                .unwrap_or_else(|| "Share".into());
+            tools.shares.push(lightvm_proto::ToolShare {
+                name,
+                root: folder.to_string_lossy().into_owned(),
+                writable: false,
+            });
+        }
+        if let Err(e) = tools.validate() {
+            theme::notice(ui, &e.message, Tone::Warning);
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn cfg() -> VmConfig {
         VmConfig {
+            tools: Default::default(),
             name: lightvm_proto::VmName::parse("test").unwrap(),
             guest_os: lightvm_proto::GuestOs::UbuntuLtsX86_64,
             vcpus: 2,
             memory_mib: 2048,
             disk_gib: 16,
-            network: lightvm_proto::NetworkProfile::Offline,
+            network: NetworkProfile::Offline,
+            endpoints: Vec::new(),
             install_media: None,
             data_media: None,
             firmware: lightvm_proto::Firmware::Uefi,
             limits: VmLimits::default(),
+            imported: None,
         }
     }
 

@@ -7,9 +7,12 @@
 //! - [`probe`]: [`probe::probe_host`] runs the approved QEMU binary
 //!   (`--version`, `-accel help`, `-machine help`, `-device help`, `-cpu help`,
 //!   `qemu-img --version`/`--help`) with a timeout and produces [`HostCapabilities`];
-//!   [`probe::probe_accelerator`] actually starts QEMU paused and queries
-//!   `query-accelerators` via QMP ([`AcceleratorStatus`]).
-//! - [`cmdline`]: typed [`VmLaunchSpec`] → `Vec<OsString>` arguments;
+//!   [`probe::probe_accelerator`] actually starts QEMU paused with the machine
+//!   family and firmware kind of a hardware profile and queries
+//!   `query-accelerators` via QMP ([`AcceleratorStatus`], cached per
+//!   [`ProbeTarget`] in [`HostCapabilities`]).
+//! - [`cmdline`]: typed [`VmLaunchSpec`] with a closed [`DeviceProfile`]
+//!   (ADR-0027) → `Vec<OsString>` arguments;
 //!   paths come only from [`ManagedPaths`] as already verified
 //!   [`ManagedPath`]s, text values are tokens of a restricted alphabet.
 //! - [`qmp`]: asynchronous (tokio) [`QmpClient`] over a Unix socket, typed
@@ -23,6 +26,13 @@
 //!   escalation and an [`EmergencyStop`] independent of the QMP queue.
 //! - [`storage_guard`]: file exclusion through share mode (F0-05).
 //! - [`screenshot`]: `screendump` PPM → PNG with limits and cleanup.
+//! - [`boot_prompt`]: automatic key at the "Press any key to boot from CD or
+//!   DVD" prompt of the Windows UEFI media, for a disk without an installed
+//!   system only.
+//! - [`vcpu_fault`]: a guest whose virtual CPUs stop on an error
+//!   (`internal-error`, for example a triple fault under WHPX) is reset and
+//!   resumed as hardware would, within a rate limit, then left stopped and
+//!   reported.
 //!
 //! # `unsafe` code
 //!
@@ -50,6 +60,7 @@
 //! ([`input`]), screenshot with the PNG bytes ([`CapturedScreenshot`]), process
 //! states and reports ([`run`]).
 
+pub mod boot_prompt;
 pub mod cmdline;
 pub mod error;
 pub mod image;
@@ -62,16 +73,22 @@ pub mod qmp;
 pub mod run;
 pub mod screenshot;
 pub mod storage_guard;
+pub mod storage_helper;
 mod sys;
 pub mod validate;
+pub mod vcpu_fault;
 
 pub use cmdline::{
-    Accelerator, CpuModel, DiskFormat, DiskSpec, MachineType, QemuCommand, VmLaunchSpec,
+    Accelerator, CdromBus, CpuModel, CpuPolicy, DeviceProfile, DiskBus, DiskFormat, DiskSpec,
+    DisplayDevice, FirmwareKind, GUEST_MAC, GuestNetwork, MachineFamily, MachineType, NicModel,
+    PointerDevice, ProbeFirmware, ProbeTarget, QemuCommand, TpmCommand, VmLaunchSpec,
 };
 pub use error::BackendError;
 pub use paths::{ManagedPath, ManagedPaths};
 pub use prepare::{HostResources, RunDirs};
-pub use probe::{AcceleratorStatus, HostCapabilities, ProbeConfig};
+pub use probe::{
+    Aarch64FirmwareInfo, AcceleratorStatus, BiosInfo, HostCapabilities, ProbeConfig, SwtpmInfo,
+};
 pub use process::{
     ContainmentMechanism, ExitCodeClass, IdentityStatus, JobLimitReport, JobLimits,
     ProcessContainer, ProcessIdentity,
@@ -82,3 +99,4 @@ pub use run::{
     RunConfig, ShutdownPolicy, StopPhase,
 };
 pub use screenshot::CapturedScreenshot;
+pub use vcpu_fault::{VcpuFaultEvent, VcpuFaultPolicy, VcpuFaults};

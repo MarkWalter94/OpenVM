@@ -192,6 +192,7 @@ fn screenshot_over_byte_quota_fails_without_updating_geometry() {
     let vm = h.create_vm("a");
     let run = h.start(vm);
     let spec = SessionSpec {
+        tools: Default::default(),
         vm_allowlist: [vm].into_iter().collect(),
         capabilities: ALL_CAPS.into_iter().collect(),
         quotas: Quotas {
@@ -200,6 +201,7 @@ fn screenshot_over_byte_quota_fails_without_updating_geometry() {
         },
         expires_at: UtcTimestamp::from_unix_millis(T0 + 60_000).unwrap(),
         lease_millis: 10_000,
+        network_endpoints: Default::default(),
     };
     let (grant, _) = h
         .core
@@ -501,7 +503,7 @@ fn empty_media_cannot_be_registered() {
             sha256: Sha256Digest::from_bytes([1; 32]),
             size_bytes: 0,
             declared_origin: Label::parse("empty").unwrap(),
-            managed_path: ManagedRelPath::parse("media/empty.iso").unwrap(),
+            location: MediaLocation::Managed(ManagedRelPath::parse("media/empty.iso").unwrap()),
             file_identity: None,
         })
         .unwrap_err();
@@ -625,11 +627,13 @@ fn agent_session_limit_and_rejected_sessions_are_audited() {
     let vm = h.create_vm("a");
     h.session(&[vm], &ALL_CAPS, 1);
     let spec = SessionSpec {
+        tools: Default::default(),
         vm_allowlist: [vm].into_iter().collect(),
         capabilities: ALL_CAPS.into_iter().collect(),
         quotas: Quotas::UNBOUNDED,
         expires_at: UtcTimestamp::from_unix_millis(T0 + 60_000).unwrap(),
         lease_millis: 10_000,
+        network_endpoints: Default::default(),
     };
     denied(
         ErrorCode::ResourceLimit,

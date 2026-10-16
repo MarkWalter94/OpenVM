@@ -442,10 +442,7 @@ impl Drop for DisplayRegistry {
     }
 }
 
-/// Prefix of the fallback private roots in the temporary directory
-/// (`lightvm-p-<pid>`, used when the catalog path is too long for the
-/// AF_UNIX sockets).
-pub const FALLBACK_ROOT_PREFIX: &str = "lightvm-p-";
+pub use crate::transport::{FALLBACK_ROOT_PREFIX, fallback_root};
 
 /// Removes the fallback private roots (`<dir>/lightvm-p-<pid>`) left by
 /// previous services whose process is no longer running (sockets and

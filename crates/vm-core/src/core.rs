@@ -27,12 +27,13 @@ use std::collections::{BTreeMap, VecDeque};
 use lightvm_proto::ipc::InputOwner;
 use lightvm_proto::{
     Actor, Admission, AuditAction, AuditEvent, AuditOutcome, BackendObservation, Caller,
-    Capability, DisplayGeometry, EffectivePolicy, ErrorCode, FileIdentity, Grant, HostCapacity,
-    InputEvent, Label, Lease, ManagedRelPath, MediaEntry, MediaKind, MediaRecord, OperationId,
-    OperationKind, OperationRecord, OperationStatus, PolicyLayer, PolicyRevision, PublicError,
-    ResourceLimits, RevocationReport, RunEndReason, RunId, RunRecord, Screenshot, SessionId,
-    SessionState, SessionToken, Sha256Digest, TerminationCause, UtcTimestamp, VmAction, VmConfig,
-    VmId, VmRecord, VmRequest, VmState,
+    Capability, DisplayGeometry, EffectivePolicy, ErrorCode, FileIdentity, Grant, GuestOs,
+    HostCapacity, InputEvent, Label, Lease, MediaEntry, MediaId, MediaKind, MediaLocation,
+    MediaRecord, NetworkAudit, NetworkProfile, OperationId, OperationKind, OperationRecord,
+    OperationStatus, PolicyLayer, PolicyRevision, PublicError, ResourceLimits, RevocationReport,
+    RunEndReason, RunId, RunRecord, Screenshot, SessionId, SessionState, SessionToken,
+    Sha256Digest, TerminationCause, UtcTimestamp, VmAction, VmConfig, VmId, VmName, VmRecord,
+    VmRequest, VmState,
 };
 
 use crate::media::{check_media_kind, verify_media};
@@ -40,13 +41,17 @@ use crate::policy::{
     effective_policy, effective_resource_limits, effective_user_policy, host_layer,
 };
 use crate::ports::{AuditSink, CatalogStore, Clock, IdGenerator, MediaInspector, VmBackend};
-use crate::resources::{existing_disk_limits, validate_config};
+use crate::resources::{GuestSupport, check_guest_host, existing_disk_limits, validate_config};
 use crate::session::{SessionRegistry, SessionSpec, discard_code_for};
 
 /// Hard limit of queued operations per VM, independent of quotas.
 pub const MAX_QUEUE_LEN: usize = 256;
 /// Finished operations remembered per VM for idempotency purposes.
 pub const IDEMPOTENCY_WINDOW: usize = 1024;
+/// Refusal of a user snapshot operation while an agent session targets the
+/// VM (ADR-0032: snapshots are a manual-use feature).
+pub const SNAPSHOT_AGENT_SESSION: &str =
+    "an agent session is using this VM: snapshots are available again when it ends";
 
 /// `true` if an operation of the given kind is allowed in the given state (pure guard).
 ///
@@ -56,7 +61,8 @@ pub const IDEMPOTENCY_WINDOW: usize = 1024;
 /// | `stop` | `running` |
 /// | `force_stop` | `starting`, `running`, `stopping` |
 /// | `reset`, `screenshot`, `input` | `running` (input also `stopping` for the user: [`input_allowed_for`]) |
-/// | `create`, `snapshot`, `restore` | `stopped` |
+/// | `create`, `snapshot`, `restore`, `user_snapshot_revert` | `stopped` |
+/// | `user_snapshot`, `user_snapshot_delete` | `stopped`, `running` (ADR-0032) |
 /// | `emergency_stop` | any (priority path) |
 #[must_use]
 pub fn action_allowed_in(kind: OperationKind, state: VmState) -> bool {
@@ -64,7 +70,11 @@ pub fn action_allowed_in(kind: OperationKind, state: VmState) -> bool {
         OperationKind::Start
         | OperationKind::Create
         | OperationKind::Snapshot
-        | OperationKind::Restore => state == VmState::Stopped,
+        | OperationKind::Restore
+        | OperationKind::UserSnapshotRevert => state == VmState::Stopped,
+        OperationKind::UserSnapshot | OperationKind::UserSnapshotDelete => {
+            matches!(state, VmState::Stopped | VmState::Running)
+        }
         OperationKind::Stop
         | OperationKind::Reset
         | OperationKind::Screenshot
@@ -102,7 +112,7 @@ pub struct VmStatus {
     /// VM.
     pub vm_id: VmId,
     /// Name.
-    pub name: lightvm_proto::VmName,
+    pub name: VmName,
     /// Current state (derived from observations).
     pub state: VmState,
     /// Current run.
@@ -184,20 +194,21 @@ pub struct SessionTermination {
     pub emergency_stops: Vec<EmergencyStopPlan>,
 }
 
-/// Data to register an approved medium (managed copy already created by storage).
+/// Data to register an approved medium (file already checked and hashed by
+/// the storage).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MediaRegistration {
     /// Kind.
     pub kind: MediaKind,
-    /// SHA-256 of the managed copy.
+    /// SHA-256 of the file.
     pub sha256: Sha256Digest,
     /// Size in bytes.
     pub size_bytes: u64,
     /// Declared origin.
     pub declared_origin: Label,
-    /// Relative path of the managed copy.
-    pub managed_path: ManagedRelPath,
-    /// OS identity of the managed copy.
+    /// Managed copy or the user's file used in place (ADR-0029).
+    pub location: MediaLocation,
+    /// OS identity of the file.
     pub file_identity: Option<FileIdentity>,
 }
 
@@ -227,6 +238,8 @@ struct VmRuntime {
     pending_end: Option<RunEndReason>,
     /// Long storage operation in progress (F3), outside the queue.
     storage_op: Option<StorageOp>,
+    /// Network mode of the current run (ADR-0033), decided at its start.
+    run_network: Option<NetworkProfile>,
 }
 
 /// Storage operation in progress on a VM (baseline creation or restore):
@@ -251,6 +264,7 @@ impl VmRuntime {
             history_order: VecDeque::new(),
             pending_end: None,
             storage_op: None,
+            run_network: None,
         }
     }
 
@@ -299,12 +313,38 @@ fn audit_action_for(kind: OperationKind) -> AuditAction {
         OperationKind::Snapshot => AuditAction::BaselineCreate,
         OperationKind::Restore => AuditAction::BaselineRestore,
         OperationKind::EmergencyStop => AuditAction::EmergencyStop,
+        OperationKind::UserSnapshot => AuditAction::SnapshotTake,
+        OperationKind::UserSnapshotRevert => AuditAction::SnapshotRevert,
+        OperationKind::UserSnapshotDelete => AuditAction::SnapshotDelete,
     }
+}
+
+/// Refusal of a media deletion while VMs use it: their number and names (at
+/// most five, then how many more), detail `reason` = `media_in_use`.
+fn media_in_use(users: &[&str]) -> PublicError {
+    const SHOWN: usize = 5;
+    let mut names: Vec<String> = users
+        .iter()
+        .take(SHOWN)
+        .map(|n| format!("\u{201c}{n}\u{201d}"))
+        .collect();
+    if users.len() > SHOWN {
+        names.push(format!("{} more", users.len() - SHOWN));
+    }
+    let n = users.len();
+    PublicError::state_conflict(format!(
+        "the medium is used by {n} VM{}: {}; remove it from their settings or delete them first",
+        if n == 1 { "" } else { "s" },
+        names.join(", ")
+    ))
+    .with_detail("reason", "media_in_use")
+    .with_detail("vms", n.to_string())
 }
 
 /// Draft audit event (the core assigns `seq` and `at`).
 #[derive(Default)]
 struct Ev {
+    tools: Option<lightvm_proto::ToolAudit>,
     vm_id: Option<VmId>,
     run_id: Option<RunId>,
     operation_id: Option<OperationId>,
@@ -312,6 +352,7 @@ struct Ev {
     capability: Option<Capability>,
     error: Option<ErrorCode>,
     termination: Option<TerminationCause>,
+    network: Option<NetworkAudit>,
 }
 
 /// Supervisor core, generic over the ports.
@@ -337,6 +378,12 @@ pub struct Core<S, C, I, A> {
     input_owners: BTreeMap<VmId, SessionId>,
     /// Runs whose pressed keys and buttons must be released (owner change).
     input_releases: Vec<(VmId, RunId)>,
+    /// Guests this host can run (ADR-0007, ADR-0028); see
+    /// [`Core::set_guest_support`].
+    guest_support: GuestSupport,
+    /// VMware imports in progress (ADR-0030): identifier reserved for the
+    /// VM and its name, refused to other creations and imports meanwhile.
+    importing: BTreeMap<VmId, VmName>,
 }
 
 impl<S, C, I, A> Core<S, C, I, A>
@@ -363,6 +410,8 @@ where
             audit_failures: 0,
             input_owners: BTreeMap::new(),
             input_releases: Vec::new(),
+            guest_support: GuestOs::runs_on_this_host_with,
+            importing: BTreeMap::new(),
         }
     }
 
@@ -384,6 +433,97 @@ where
     pub fn sessions(&self) -> &SessionRegistry {
         &self.sessions
     }
+    pub fn current_run(&self, vm: VmId) -> Option<RunId> {
+        self.vms
+            .get(&vm)
+            .filter(|rt| rt.state.has_process())
+            .and_then(|rt| rt.run_id)
+    }
+
+    /// Effective Tools authority for a run. Once a session has targeted a
+    /// run, manual permissions are not restored until the next run.
+    pub fn tools_permissions(
+        &self,
+        vm: VmId,
+        manual: bool,
+    ) -> (
+        lightvm_proto::CapabilitySet,
+        lightvm_proto::ToolGrant,
+        Option<UtcTimestamp>,
+    ) {
+        let empty = || (Default::default(), Default::default(), None);
+        let Some(rt) = self.vms.get(&vm) else {
+            return empty();
+        };
+        let config = &rt.record.config.tools;
+        if !config.enabled {
+            return empty();
+        }
+        let now = self.clock.now();
+        let live = self.sessions.live_for_vm(vm);
+        if live.len() > 1 {
+            return empty();
+        }
+        if let Some(id) = live.first() {
+            let Some(s) = self.sessions.get(*id) else {
+                return empty();
+            };
+            if s.state != SessionState::Active || s.expiry_at(now).is_some() {
+                return empty();
+            }
+            let effective = effective_policy(
+                &self.config.global_policy,
+                &self.vm_layer(Some(vm)),
+                &s.grant.as_layer(),
+                &host_layer(&self.config.host),
+                self.revision,
+            );
+            let caps = effective
+                .capabilities
+                .into_iter()
+                .filter(|c| c.is_integration())
+                .collect();
+            return (
+                caps,
+                s.grant.tools.clone(),
+                Some(s.grant.expires_at.min(s.lease.expires_at)),
+            );
+        }
+        if !manual {
+            return empty();
+        }
+        let mut caps = lightvm_proto::CapabilitySet::new();
+        if !config.shares.is_empty() {
+            caps.insert(Capability::ShareRead);
+        }
+        if config.shares.iter().any(|s| s.writable) {
+            caps.insert(Capability::ShareWrite);
+        }
+        for (cap, configured) in [
+            (Capability::Clipboard, config.clipboard),
+            (Capability::FilesTransfer, config.files_transfer),
+            (Capability::UiInspect, config.ui_inspect),
+            (Capability::UiAct, config.ui_act),
+            (Capability::Usb, !config.usb_devices.is_empty()),
+        ] {
+            if configured {
+                caps.insert(cap);
+            }
+        }
+        caps.retain(|cap| self.authorize(&Caller::User, Some(vm), *cap, now).is_ok());
+        (
+            caps,
+            lightvm_proto::ToolGrant {
+                shares: config
+                    .shares
+                    .iter()
+                    .map(|s| (s.name.clone(), s.writable))
+                    .collect(),
+                usb_devices: config.usb_devices.clone(),
+            },
+            None,
+        )
+    }
     /// Current policy revision.
     pub fn policy_revision(&self) -> PolicyRevision {
         self.revision
@@ -401,6 +541,16 @@ where
     pub fn set_host_capacity(&mut self, host: HostCapacity) {
         self.config.host = host;
         self.revision = PolicyRevision(self.revision.0 + 1);
+    }
+
+    /// Replaces the rule deciding which guests this host can run (default
+    /// [`GuestOs::runs_on_this_host_with`]). Creating, modifying or starting
+    /// a VM whose guest, with the architecture detected in its installation
+    /// media, the rule refuses fails with `unsupported`. Fake backends
+    /// and tests that exercise guests of another architecture pass
+    /// [`crate::resources::any_guest`].
+    pub fn set_guest_support(&mut self, supported: GuestSupport) {
+        self.guest_support = supported;
     }
 
     /// Sets the policy of a VM. Increments the policy revision.
@@ -432,6 +582,8 @@ where
             capability: ev.capability,
             error: ev.error,
             termination: ev.termination,
+            network: ev.network,
+            tools: ev.tools,
         };
         let r = self.audit.append(&event);
         if r.is_err() {
@@ -655,6 +807,68 @@ where
         }
     }
 
+    /// Checks immediately before/after forwarding a bounded guest Tools
+    /// call. UI actions obey the same input owner as mouse and keyboard.
+    pub fn authorize_tools(
+        &self,
+        caller: &Caller,
+        vm: VmId,
+        run: RunId,
+        capability: Capability,
+    ) -> Result<(), PublicError> {
+        if !capability.is_integration() {
+            return Err(PublicError::invalid_argument("not a Tools capability"));
+        }
+        self.authorize(caller, Some(vm), capability, self.clock.now())?;
+        let rt = self
+            .vms
+            .get(&vm)
+            .ok_or_else(|| PublicError::not_found("VM does not exist"))?;
+        if rt.run_id != Some(run) || rt.state != VmState::Running {
+            return Err(PublicError::state_conflict(
+                "Tools need the current running VM",
+            ));
+        }
+        if !rt.record.config.tools.enabled {
+            return Err(PublicError::unsupported("Tools are disabled for this VM"));
+        }
+        if capability == Capability::UiAct {
+            self.check_input_owner(caller, vm)?;
+        }
+        Ok(())
+    }
+
+    /// Admits one bounded Tools operation against session operation/input quotas.
+    pub fn admit_tools(
+        &mut self,
+        caller: &Caller,
+        vm: VmId,
+        run: RunId,
+        capability: Capability,
+    ) -> Result<(), PublicError> {
+        self.authorize_tools(caller, vm, run, capability)?;
+        let effective = self.authorize(caller, Some(vm), capability, self.clock.now())?;
+        if let Caller::Agent { session_id, .. } = caller {
+            let session = self
+                .sessions
+                .get_mut(*session_id)
+                .ok_or_else(|| PublicError::permission_denied("session unavailable"))?;
+            if session.usage.operations >= effective.quotas.max_operations
+                || (capability == Capability::UiAct
+                    && session.usage.input_events >= effective.quotas.max_input_events)
+            {
+                return Err(PublicError::resource_limit(
+                    "Tools operation quota exhausted",
+                ));
+            }
+            session.usage.operations = session.usage.operations.saturating_add(1);
+            if capability == Capability::UiAct {
+                session.usage.input_events = session.usage.input_events.saturating_add(1);
+            }
+        }
+        Ok(())
+    }
+
     fn effective_limits(&self) -> ResourceLimits {
         effective_resource_limits(&self.config.global_limits, None, &self.config.host)
     }
@@ -702,10 +916,16 @@ where
             size_bytes: reg.size_bytes,
             declared_origin: reg.declared_origin,
             approved_at: self.clock.now(),
+            detected_guest: None,
+            location: match &reg.location {
+                MediaLocation::Managed(_) => None,
+                MediaLocation::Referenced(p) => Some(p.to_string_lossy().into_owned()),
+            },
+            missing: false,
         };
         let entry = MediaEntry {
             record: record.clone(),
-            managed_path: reg.managed_path,
+            location: reg.location,
             file_identity: reg.file_identity,
         };
         self.store.insert_media(&entry)?;
@@ -724,11 +944,12 @@ where
     }
 
     /// Imports a medium chosen by the user with the native picker of the UI
-    /// (ADR-0008): the catalog makes the read-only managed copy and the
-    /// registry row. User only; audited (`media_import`) without the path.
-    /// Blocking: the copy of a multi-GiB ISO takes as long as the disk (the
-    /// supervisor can split it with [`Self::begin_media_import`] and
-    /// [`Self::finish_media_import`] and copy on another thread).
+    /// (ADR-0008, ADR-0029): the catalog checks and hashes the file, which
+    /// stays where it is, and records the registry row. User only; audited
+    /// (`media_import`) without the path. Blocking: hashing a multi-GiB ISO
+    /// takes as long as the disk needs to read it (the supervisor can split
+    /// it with [`Self::begin_media_import`] and [`Self::finish_media_import`]
+    /// and hash on another thread).
     pub fn import_media(
         &mut self,
         caller: &Caller,
@@ -743,7 +964,7 @@ where
     }
 
     /// First step of a media import: denies (and audits) agent sessions,
-    /// then runs `begin` on the catalog (checks, journal intent); an error of
+    /// then runs `begin` on the catalog (checks, reservation); an error of
     /// `begin` is audited as a failed import.
     pub fn begin_media_import<T>(
         &mut self,
@@ -765,8 +986,8 @@ where
         })
     }
 
-    /// Last step of a media import: `finish` publishes the copy and the
-    /// registry row; the outcome is audited.
+    /// Last step of a media import: `finish` records the registry row; the
+    /// outcome is audited.
     pub fn finish_media_import(
         &mut self,
         caller: &Caller,
@@ -792,6 +1013,55 @@ where
                 Err(err)
             }
         }
+    }
+
+    /// Deletes an imported medium from the registry: user only; refused
+    /// (`state_conflict`, the VMs named in the message) while the
+    /// configuration of a VM uses it as installation or data media, so no
+    /// run can hold it. The catalog removes the row, and a managed copy
+    /// through its journal; a file used in place is never touched (ADR-0029).
+    /// Audited (`media_delete`).
+    pub fn delete_media(&mut self, caller: &Caller, media_id: MediaId) -> Result<(), PublicError> {
+        let actor = caller.actor();
+        if matches!(caller, Caller::Agent { .. }) {
+            let err =
+                PublicError::permission_denied("media deletion not available to agent sessions");
+            return Err(self.deny(actor, AuditAction::MediaDelete, Ev::default(), err));
+        }
+        let mut users: Vec<&str> = self
+            .vms
+            .values()
+            .filter(|rt| {
+                let c = &rt.record.config;
+                c.install_media == Some(media_id) || c.data_media == Some(media_id)
+            })
+            .map(|rt| rt.record.config.name.as_str())
+            .collect();
+        users.sort_unstable();
+        let check = match self.store.get_media(media_id) {
+            Err(e) => Err(e),
+            Ok(None) => Err(PublicError::not_found("medium not found in the registry")),
+            Ok(Some(_)) if !users.is_empty() => Err(media_in_use(&users)),
+            Ok(Some(_)) => Ok(()),
+        };
+        if let Err(err) = check {
+            return Err(self.deny(actor, AuditAction::MediaDelete, Ev::default(), err));
+        }
+        let r = self.store.remove_media(media_id);
+        let (outcome, error) = match &r {
+            Ok(()) => (AuditOutcome::Succeeded, None),
+            Err(e) => (AuditOutcome::Failed, Some(e.code)),
+        };
+        self.emit_after(
+            actor,
+            AuditAction::MediaDelete,
+            outcome,
+            Ev {
+                error,
+                ..Ev::default()
+            },
+        );
+        r
     }
 
     /// Deletes a VM: user only, VM `stopped` with no queued or forwarded
@@ -928,6 +1198,31 @@ where
         );
     }
 
+    /// Records an automatic reset decided by the backend for a guest whose
+    /// virtual CPUs stopped on an unrecoverable error (audit `vm_auto_reset`,
+    /// actor `system`): `succeeded`, `failed` with the code, or `denied` with
+    /// `resource_limit` when the backend gave up and left the guest stopped.
+    /// The VM state does not change: the process is alive.
+    pub fn record_auto_reset(
+        &mut self,
+        vm_id: VmId,
+        run_id: RunId,
+        outcome: AuditOutcome,
+        error: Option<ErrorCode>,
+    ) {
+        self.emit_after(
+            Actor::System,
+            AuditAction::VmAutoReset,
+            outcome,
+            Ev {
+                vm_id: Some(vm_id),
+                run_id: Some(run_id),
+                error,
+                ..Ev::default()
+            },
+        );
+    }
+
     /// Side-effect-free authorization check of a call (no audit, no
     /// admission): used by the supervisor to decide whether a costly
     /// preparatory step (for example re-reading the display geometry with a
@@ -936,6 +1231,33 @@ where
     pub fn is_authorized(&self, caller: &Caller, vm_id: VmId, capability: Capability) -> bool {
         self.authorize(caller, Some(vm_id), capability, self.clock.now())
             .is_ok()
+    }
+
+    /// The host must run the guest of `config` with the architecture
+    /// detected in its installation media ([`check_guest_host`]); a VM
+    /// without installation media, or whose media architecture is unknown,
+    /// is checked on the guest alone.
+    fn check_config_host(&self, config: &VmConfig) -> Result<(), PublicError> {
+        if let Some(hw) = &config.imported {
+            // An imported guest is already installed: its architecture is
+            // the VMware guest type's (ADR-0030).
+            if !(self.guest_support)(config.guest_os, Some(hw.arch)) {
+                return Err(PublicError::unsupported(
+                    "this guest system and edition cannot run on this host (for example Windows Vista 64-bit stops at boot under the Windows hypervisor, ADR-0027): the VM cannot be imported",
+                )
+                .with_detail("field", "guest_os"));
+            }
+            return check_guest_host(config.guest_os, None, self.guest_support);
+        }
+        let arch = match config.install_media {
+            Some(id) => self
+                .store
+                .get_media(id)?
+                .and_then(|m| m.record.detected_guest)
+                .and_then(|d| d.arch),
+            None => None,
+        };
+        check_guest_host(config.guest_os, arch, self.guest_support)
     }
 
     fn check_config_media(&self, config: &VmConfig) -> Result<(), PublicError> {
@@ -972,8 +1294,20 @@ where
             let err = PublicError::permission_denied("VM creation not available to agent sessions");
             return Err(self.deny(actor, AuditAction::VmCreate, ev(), err));
         }
-        let checks = validate_config(&config, &self.effective_limits())
-            .and_then(|()| self.check_config_media(&config));
+        let importing = self
+            .importing
+            .values()
+            .any(|n| n.as_str().eq_ignore_ascii_case(config.name.as_str()));
+        let checks = if importing {
+            Err(
+                PublicError::state_conflict("a VM with this name is being imported")
+                    .with_detail("field", "name"),
+            )
+        } else {
+            self.check_config_host(&config)
+                .and_then(|()| validate_config(&config, &self.effective_limits()))
+                .and_then(|()| self.check_config_media(&config))
+        };
         if let Err(err) = checks {
             return Err(self.deny(actor, AuditAction::VmCreate, ev(), err));
         }
@@ -999,12 +1333,166 @@ where
         Ok(record)
     }
 
+    // ----- import of VMware VMs (ADR-0030) -----------------------------------
+
+    /// Effective resource limits a new VM must fit (host capacity and
+    /// global limits), for the mapping of an imported VM.
+    #[must_use]
+    pub fn creation_limits(&self) -> ResourceLimits {
+        self.effective_limits()
+    }
+
+    /// Checks of a VM about to be imported, before anything is written:
+    /// user only (`permission_denied` for agent sessions), the same
+    /// configuration checks as a creation (host support, limits, imported
+    /// hardware), a name no other VM has (nor another import in progress).
+    /// A refusal is audited (`vm_import`, denied). Then `begin` prepares the
+    /// storage for the new VM's identifier (journal intent); its failure is
+    /// audited `failed`. The name stays reserved until
+    /// [`Self::finish_import`] or [`Self::abort_import`].
+    pub fn begin_import<T>(
+        &mut self,
+        caller: &Caller,
+        config: &VmConfig,
+        begin: impl FnOnce(&mut S, VmId) -> Result<T, PublicError>,
+    ) -> Result<(VmId, T), PublicError> {
+        let actor = caller.actor();
+        let ev = Ev {
+            session_id: agent_session(caller),
+            ..Ev::default()
+        };
+        if matches!(caller, Caller::Agent { .. }) {
+            let err = PublicError::permission_denied("VM import not available to agent sessions");
+            return Err(self.deny(actor, AuditAction::VmImport, ev, err));
+        }
+        let name_taken = self.name_in_use(config.name.as_str());
+        let checks = if config.imported.is_none() {
+            Err(PublicError::invalid_argument(
+                "an imported configuration needs its imported hardware",
+            ))
+        } else if name_taken {
+            Err(
+                PublicError::state_conflict("a VM with this name already exists")
+                    .with_detail("field", "name"),
+            )
+        } else {
+            self.check_config_host(config)
+                .and_then(|()| validate_config(config, &self.effective_limits()))
+                .and_then(|()| self.check_config_media(config))
+        };
+        if let Err(err) = checks {
+            return Err(self.deny(actor, AuditAction::VmImport, ev, err));
+        }
+        let vm_id = self.ids.vm_id();
+        match begin(&mut self.store, vm_id) {
+            Ok(t) => {
+                self.importing.insert(vm_id, config.name.clone());
+                Ok((vm_id, t))
+            }
+            Err(e) => {
+                self.record_import_failure(caller, &e);
+                Err(e)
+            }
+        }
+    }
+
+    /// `true` if a VM or an import in progress uses `name` (any case).
+    fn name_in_use(&self, name: &str) -> bool {
+        self.vms
+            .values()
+            .any(|rt| rt.record.config.name.as_str().eq_ignore_ascii_case(name))
+            || self
+                .importing
+                .values()
+                .any(|n| n.as_str().eq_ignore_ascii_case(name))
+    }
+
+    /// Last step of an import: `finish` writes the VM row with its
+    /// converted disk in the storage (one journaled commit), then the VM is
+    /// registered (`stopped`) and the import audited `succeeded`. A failure
+    /// of `finish` is audited `failed` and nothing is registered.
+    pub fn finish_import(
+        &mut self,
+        caller: &Caller,
+        vm_id: VmId,
+        config: VmConfig,
+        finish: impl FnOnce(&mut S, &VmRecord) -> Result<(), PublicError>,
+    ) -> Result<VmRecord, PublicError> {
+        self.importing.remove(&vm_id);
+        let record = VmRecord {
+            id: vm_id,
+            config,
+            config_revision: 1,
+            persisted_state: VmState::Stopped,
+            created_at: self.clock.now(),
+        };
+        if let Err(e) = finish(&mut self.store, &record) {
+            self.record_import_failure(caller, &e);
+            return Err(e);
+        }
+        self.vms
+            .insert(record.id, VmRuntime::new(record.clone(), VmState::Stopped));
+        self.emit_after(
+            caller.actor(),
+            AuditAction::VmImport,
+            AuditOutcome::Succeeded,
+            Ev {
+                vm_id: Some(vm_id),
+                ..Ev::default()
+            },
+        );
+        Ok(record)
+    }
+
+    /// An import that will not complete (conversion failed, cancelled,
+    /// Emergency Stop, shutdown): `abort` rolls the storage back, the name is
+    /// released and the import audited `failed` with `reason`, returned.
+    pub fn abort_import(
+        &mut self,
+        caller: &Caller,
+        vm_id: VmId,
+        abort: impl FnOnce(&mut S),
+        reason: PublicError,
+    ) -> PublicError {
+        self.importing.remove(&vm_id);
+        abort(&mut self.store);
+        self.record_import_failure(caller, &reason);
+        reason
+    }
+
+    /// Records an import that failed after its checks: audited `vm_import`
+    /// failed with the error code.
+    fn record_import_failure(&mut self, caller: &Caller, error: &PublicError) {
+        self.emit_after(
+            caller.actor(),
+            AuditAction::VmImport,
+            AuditOutcome::Failed,
+            Ev {
+                error: Some(error.code),
+                ..Ev::default()
+            },
+        );
+    }
+
+    /// Records an import refused before its configuration was known (the
+    /// `.vmx` or its disks): audited `vm_import` denied.
+    pub fn record_import_denied(&mut self, caller: &Caller, error: &PublicError) {
+        let ev = Ev {
+            session_id: agent_session(caller),
+            ..Ev::default()
+        };
+        let _ = self.deny(caller.actor(), AuditAction::VmImport, ev, error.clone());
+    }
+
     /// Modifies the configuration of a stopped VM (resources and limits,
     /// ADR-0017). User only: agent sessions do not modify VMs in
     /// F1 (the MCP tools, F5, will stay within the user's limits).
     /// Rejects VMs not stopped or with operations in progress (`state_conflict`),
     /// a different revision (`state_conflict`), a reduced disk
-    /// (`invalid_argument`) and resources beyond the effective limits.
+    /// (`invalid_argument`), a change of firmware or of operating system
+    /// other than between the Linux variants (`invalid_argument`: the
+    /// hardware profile follows them, ADR-0027) and resources beyond the
+    /// effective limits.
     pub fn update_vm_config(
         &mut self,
         caller: &Caller,
@@ -1045,16 +1533,26 @@ where
                 PublicError::state_conflict("configuration modified in the meantime")
                     .with_detail("revision", current.config_revision.to_string()),
             )
+        } else if config.tools != current.config.tools
+            && !self.sessions.live_for_vm(vm_id).is_empty()
+        {
+            Err(PublicError::state_conflict(
+                "end the agent sessions before changing Tools settings",
+            ))
         } else if config.disk_gib < current.config.disk_gib {
             Err(PublicError::invalid_argument(
                 "shrinking the disk is not supported: it can only be enlarged",
             ))
         } else {
-            validate_config(
-                &config,
-                &existing_disk_limits(self.effective_limits(), &current.config),
-            )
-            .and_then(|()| self.check_config_media(&config))
+            crate::resources::check_profile_change(&current.config, &config)
+                .and_then(|()| self.check_config_host(&config))
+                .and_then(|()| {
+                    validate_config(
+                        &config,
+                        &existing_disk_limits(self.effective_limits(), &current.config),
+                    )
+                })
+                .and_then(|()| self.check_config_media(&config))
         };
         if let Err(err) = check {
             return Err(self.deny(actor, AuditAction::VmConfigure, ev, err));
@@ -1209,6 +1707,9 @@ where
             .vms
             .get(&vm_id)
             .ok_or_else(|| PublicError::not_found("VM does not exist"))?;
+        // A catalog moved from another host may hold guests this one cannot
+        // run with acceleration.
+        self.check_config_host(&rt.record.config)?;
         // Per-VM limits recomputed at start: host capacity may have changed
         // after creation (new probe, increased reserve). The disk already
         // exists: free space only matters to create or enlarge it.
@@ -1532,6 +2033,7 @@ where
         let reason = rt.pending_end.take().unwrap_or(default_reason);
         let run = rt.run_id.take();
         rt.geometry = None;
+        rt.run_network = None;
         let queued: Vec<Pending> = rt.queue.drain(..).collect();
         if rt.state == VmState::Running && final_state == VmState::Stopped {
             self.set_state(vm_id, VmState::Stopping);
@@ -1616,11 +2118,14 @@ where
                     self.discard(vm_id, p, err.code);
                     continue;
                 }
-                let vm = self
+                let mut vm = self
                     .vms
                     .get(&vm_id)
                     .map(|rt| rt.record.clone())
                     .ok_or_else(|| PublicError::not_found("VM does not exist"))?;
+                // ADR-0033: the network of this run. The backend builds the
+                // NIC from the mode of the plan, not from the settings.
+                vm.config.network = self.start_network(vm_id, &vm.config);
                 let mut media = Vec::new();
                 let mut missing = false;
                 for id in [vm.config.install_media, vm.config.data_media]
@@ -1657,6 +2162,7 @@ where
                 if let Some(rt) = self.vms.get_mut(&vm_id) {
                     rt.run_id = Some(run);
                     rt.geometry = None;
+                    rt.run_network = Some(vm.config.network);
                 }
                 self.set_state(vm_id, VmState::Starting);
                 start = Some(StartPlan { vm, media });
@@ -2193,6 +2699,233 @@ where
         r
     }
 
+    // ----- user snapshots (ADR-0032) -------------------------------------
+
+    /// Why user snapshots of the VM cannot be changed now, for the UI:
+    /// `None` when they can (the storage adds its own reasons, such as a VM
+    /// running on an overlay of a baseline).
+    #[must_use]
+    pub fn snapshot_unavailable_reason(&self, vm_id: VmId) -> Option<&'static str> {
+        if !self.sessions.live_for_vm(vm_id).is_empty() {
+            return Some(SNAPSHOT_AGENT_SESSION);
+        }
+        None
+    }
+
+    /// Checks shared by the user snapshot requests: the user only (agent
+    /// sessions never touch snapshots: `permission_denied`), no live agent
+    /// session on the VM (`state_conflict`, reason `agent_session`), nothing
+    /// queued or forwarded and no storage operation (`vm_busy`), the VM
+    /// `stopped`, or `running` when `allow_running`. Refusals are audited
+    /// as `denied`. Returns the record and the current run.
+    fn check_snapshot_request(
+        &mut self,
+        caller: &Caller,
+        vm_id: VmId,
+        action: AuditAction,
+        allow_running: bool,
+    ) -> Result<(VmRecord, Option<RunId>), PublicError> {
+        let actor = caller.actor();
+        let ev = Ev {
+            vm_id: Some(vm_id),
+            session_id: agent_session(caller),
+            ..Ev::default()
+        };
+        if matches!(caller, Caller::Agent { .. }) {
+            let err =
+                PublicError::permission_denied("snapshots are not available to agent sessions");
+            return Err(self.deny(actor, action, ev, err));
+        }
+        let live = !self.sessions.live_for_vm(vm_id).is_empty();
+        let check = match self.vms.get(&vm_id) {
+            None => Err(PublicError::not_found("VM does not exist")),
+            Some(_) if live => Err(PublicError::state_conflict(SNAPSHOT_AGENT_SESSION)
+                .with_detail("reason", "agent_session")),
+            Some(rt) if rt.storage_op.is_some() => Err(PublicError::vm_busy(
+                "storage operation in progress on the VM",
+            )),
+            Some(rt) if !rt.queue.is_empty() || !rt.in_flight.is_empty() => {
+                Err(PublicError::vm_busy("operations in progress on the VM"))
+            }
+            Some(rt) if rt.state == VmState::Stopped => Ok((rt.record.clone(), None)),
+            Some(rt) if rt.state == VmState::Running && allow_running => {
+                Ok((rt.record.clone(), rt.run_id))
+            }
+            Some(rt) => Err(PublicError::state_conflict(if allow_running {
+                "snapshots need the VM stopped or running"
+            } else {
+                "reverting to a snapshot needs the VM stopped: shut it down first"
+            })
+            .with_detail("state", rt.state.as_str())),
+        };
+        check.map_err(|err| self.deny(actor, action, ev, err))
+    }
+
+    /// First step of a user snapshot operation (ADR-0032): `kind` is
+    /// [`OperationKind::UserSnapshot`] or [`OperationKind::UserSnapshotDelete`]
+    /// (VM `stopped` or `running`) or [`OperationKind::UserSnapshotRevert`]
+    /// (VM `stopped`). After the checks of
+    /// [`Self::check_snapshot_request`], `begin` runs on the catalog with the
+    /// VM record and its current run (journal intent); on success the VM is
+    /// busy until [`Self::finish_snapshot_operation`]. Audited: `accepted`,
+    /// or `failed` if `begin` fails.
+    pub fn begin_snapshot_operation<T>(
+        &mut self,
+        caller: &Caller,
+        vm_id: VmId,
+        kind: OperationKind,
+        begin: impl FnOnce(&mut S, &VmRecord, Option<RunId>) -> Result<T, PublicError>,
+    ) -> Result<(OperationId, T), PublicError> {
+        let allow_running = match kind {
+            OperationKind::UserSnapshot | OperationKind::UserSnapshotDelete => true,
+            OperationKind::UserSnapshotRevert => false,
+            _ => {
+                return Err(PublicError::invalid_argument(
+                    "not a snapshot operation kind",
+                ));
+            }
+        };
+        let action = audit_action_for(kind);
+        let actor = caller.actor();
+        let (vm, run) = self.check_snapshot_request(caller, vm_id, action, allow_running)?;
+        let op = self.ids.operation_id();
+        let ev = |error| Ev {
+            vm_id: Some(vm_id),
+            run_id: run,
+            operation_id: Some(op),
+            error,
+            ..Ev::default()
+        };
+        let out = match begin(&mut self.store, &vm, run) {
+            Ok(t) => t,
+            Err(err) => {
+                self.emit_after(actor, action, AuditOutcome::Failed, ev(Some(err.code)));
+                return Err(err);
+            }
+        };
+        let now = self.clock.now();
+        let record = OperationRecord {
+            id: op,
+            vm_id,
+            run_id: run,
+            session_id: None,
+            kind,
+            status: OperationStatus::Forwarded,
+            error: None,
+            requested_at: now,
+            updated_at: now,
+        };
+        let _ = self.store.upsert_operation(&record);
+        self.op_index.insert(op, vm_id);
+        if let Some(rt) = self.vms.get_mut(&vm_id) {
+            rt.storage_op = Some(StorageOp {
+                record,
+                caller: caller.clone(),
+            });
+        }
+        self.emit_after(actor, action, AuditOutcome::Accepted, ev(None));
+        Ok((op, out))
+    }
+
+    /// Last step of a user snapshot operation: `finish` settles it on the
+    /// catalog and may return the VM record written by a revert (the
+    /// snapshot's configuration, new revision), which becomes the core's.
+    /// Recorded and audited (`succeeded`/`failed`); the VM is free again.
+    pub fn finish_snapshot_operation<T>(
+        &mut self,
+        vm_id: VmId,
+        operation_id: OperationId,
+        finish: impl FnOnce(&mut S) -> Result<(T, Option<VmRecord>), PublicError>,
+    ) -> Result<T, PublicError> {
+        let mut new_record = None;
+        let r = self.finish_storage_operation(vm_id, operation_id, |store| {
+            let (t, rec) = finish(store)?;
+            new_record = rec;
+            Ok(t)
+        });
+        if let Some(rec) = new_record
+            && let Some(rt) = self.vms.get_mut(&vm_id)
+        {
+            rt.record = rec;
+            rt.geometry = None;
+        }
+        r
+    }
+
+    /// The configuration a revert to a snapshot gives the VM: the
+    /// snapshot's `config` with the VM's current name, at revision + 1.
+    /// Media no longer in the registry are detached; a configuration beyond
+    /// the current limits or for a guest this host no longer runs is
+    /// refused (`invalid_argument`/`unsupported`).
+    pub fn reverted_record(
+        &self,
+        vm_id: VmId,
+        mut config: VmConfig,
+    ) -> Result<VmRecord, PublicError> {
+        let rt = self
+            .vms
+            .get(&vm_id)
+            .ok_or_else(|| PublicError::not_found("VM does not exist"))?;
+        config.name = rt.record.config.name.clone();
+        for slot in [&mut config.install_media, &mut config.data_media] {
+            if let Some(id) = *slot
+                && self.store.get_media(id)?.is_none()
+            {
+                *slot = None;
+            }
+        }
+        self.check_config_host(&config)
+            .and_then(|()| validate_config(&config, &self.effective_limits()))
+            .and_then(|()| self.check_config_media(&config))
+            .map_err(|e| {
+                PublicError::state_conflict(format!(
+                    "the snapshot's configuration is not valid on this host any more: {}",
+                    e.message
+                ))
+                .with_detail("reason", "snapshot_config")
+            })?;
+        Ok(VmRecord {
+            config,
+            config_revision: rt.record.config_revision.saturating_add(1),
+            ..rt.record.clone()
+        })
+    }
+
+    /// Reads or renames user snapshots of a VM: the user only (audited
+    /// `snapshot_update` when `update`; a read by an agent is denied).
+    pub fn snapshot_access<T>(
+        &mut self,
+        caller: &Caller,
+        vm_id: VmId,
+        update: bool,
+        f: impl FnOnce(&mut S) -> Result<T, PublicError>,
+    ) -> Result<T, PublicError> {
+        let action = AuditAction::SnapshotUpdate;
+        let actor = caller.actor();
+        let ev = Ev {
+            vm_id: Some(vm_id),
+            session_id: agent_session(caller),
+            ..Ev::default()
+        };
+        if matches!(caller, Caller::Agent { .. }) {
+            let err =
+                PublicError::permission_denied("snapshots are not available to agent sessions");
+            return Err(self.deny(actor, action, ev, err));
+        }
+        if !self.vms.contains_key(&vm_id) {
+            return Err(PublicError::not_found("VM does not exist"));
+        }
+        let r = f(&mut self.store);
+        if update {
+            let (outcome, error) = match &r {
+                Ok(_) => (AuditOutcome::Succeeded, None),
+                Err(e) => (AuditOutcome::Failed, Some(e.code)),
+            };
+            self.emit_after(actor, action, outcome, Ev { error, ..ev });
+        }
+        r
+    }
+
     /// Read access to the catalog for a caller allowed to see the VM (the
     /// user; agents need `vm.status` on the VM).
     pub fn with_visible_vm<T>(
@@ -2353,6 +3086,19 @@ where
                 if !self.vms.contains_key(vm) {
                     return Err(PublicError::not_found("allowlist VM does not exist"));
                 }
+                self.check_session_network(*vm, &spec)?;
+                self.vms[vm]
+                    .record
+                    .config
+                    .tools
+                    .validate_grant(&spec.capabilities, &spec.tools)?;
+            }
+            if !spec.capabilities.contains(&Capability::NetworkEndpoints)
+                && !spec.network_endpoints.is_empty()
+            {
+                return Err(PublicError::invalid_argument(
+                    "network endpoints granted without the network.endpoints capability",
+                ));
             }
             Ok(())
         })();
@@ -2361,7 +3107,14 @@ where
         }
         let session_id = self.ids.session_id();
         let lease = Lease::new(session_id, now, spec.lease_millis)?;
+        // `network.endpoints` without any endpoint grants nothing: not
+        // recorded (ADR-0033).
+        let mut spec = spec;
+        if spec.network_endpoints.is_empty() {
+            spec.capabilities.remove(&Capability::NetworkEndpoints);
+        }
         let grant = Grant {
+            tools: spec.tools,
             id: self.ids.grant_id(),
             session_id,
             vm_allowlist: spec.vm_allowlist,
@@ -2369,6 +3122,7 @@ where
             expires_at: spec.expires_at,
             quotas: spec.quotas,
             policy_revision: self.revision,
+            network_endpoints: spec.network_endpoints,
         };
         self.sessions
             .insert(session_id, token, grant.clone(), lease, now);
@@ -2382,6 +3136,159 @@ where
             },
         );
         Ok((grant, lease))
+    }
+
+    /// ADR-0033 checks of a session on `vm_id`: a VM running with NAT
+    /// refuses the session (no hidden change while it runs: stop it first);
+    /// granted endpoints must be endpoints of the VM (the capability
+    /// without any endpoint is dropped by [`Self::create_session`]).
+    fn check_session_network(&self, vm_id: VmId, spec: &SessionSpec) -> Result<(), PublicError> {
+        let Some(rt) = self.vms.get(&vm_id) else {
+            return Ok(());
+        };
+        if rt.run_network == Some(NetworkProfile::Nat) {
+            return Err(PublicError::state_conflict(
+                "the VM is running with NAT networking, which agent sessions cannot use: stop the VM first (its next start uses the endpoint allowlist of the session, or no network)",
+            )
+            .with_detail("reason", "nat_running"));
+        }
+        if spec.capabilities.contains(&Capability::NetworkEndpoints) {
+            let known: std::collections::BTreeSet<String> = rt
+                .record
+                .config
+                .endpoints
+                .iter()
+                .map(lightvm_proto::NetworkEndpoint::key)
+                .collect();
+            if let Some(unknown) = spec.network_endpoints.iter().find(|n| !known.contains(*n)) {
+                return Err(PublicError::invalid_argument(format!(
+                    "`{unknown}` is not a network endpoint of the VM"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Network mode of a run of `vm_id` starting now (ADR-0033): the VM's
+    /// mode in manual use; while an agent session targets the VM, the
+    /// endpoint allowlist if a live session was granted
+    /// `network.endpoints` and the VM has endpoints, otherwise no network
+    /// (NAT is never given to a run under an agent session).
+    fn start_network(&self, vm_id: VmId, config: &VmConfig) -> NetworkProfile {
+        if config.network == NetworkProfile::Offline {
+            return NetworkProfile::Offline;
+        }
+        let sessions = self.sessions.live_for_vm(vm_id);
+        if sessions.is_empty() {
+            return config.network;
+        }
+        let granted = sessions.iter().any(|s| {
+            self.sessions.get(*s).is_some_and(|s| {
+                s.grant.capabilities.contains(&Capability::NetworkEndpoints)
+                    && !s.grant.network_endpoints.is_empty()
+            })
+        });
+        if granted && !config.endpoints.is_empty() {
+            NetworkProfile::Endpoints
+        } else {
+            NetworkProfile::Offline
+        }
+    }
+
+    /// Network mode of the VM's current run (`None` without a run).
+    #[must_use]
+    pub fn run_network(&self, vm_id: VmId) -> Option<NetworkProfile> {
+        self.vms.get(&vm_id).and_then(|rt| rt.run_network)
+    }
+
+    /// Endpoint names allowed now on the VM's network (ADR-0033): every
+    /// endpoint of the VM in manual use; the union of the endpoints granted
+    /// to the live sessions targeting it otherwise. `tainted` = an agent
+    /// session targeted the current run before: nothing is allowed until
+    /// the next start (no widening after a session ends).
+    #[must_use]
+    pub fn allowed_endpoints(
+        &self,
+        vm_id: VmId,
+        tainted: bool,
+    ) -> std::collections::BTreeSet<String> {
+        let Some(rt) = self.vms.get(&vm_id) else {
+            return std::collections::BTreeSet::new();
+        };
+        let sessions = self.sessions.live_for_vm(vm_id);
+        if sessions.is_empty() {
+            if tainted {
+                return std::collections::BTreeSet::new();
+            }
+            return rt
+                .record
+                .config
+                .endpoints
+                .iter()
+                .map(lightvm_proto::NetworkEndpoint::key)
+                .collect();
+        }
+        sessions
+            .iter()
+            .filter_map(|s| self.sessions.get(*s))
+            .filter(|s| s.grant.capabilities.contains(&Capability::NetworkEndpoints))
+            .flat_map(|s| s.grant.network_endpoints.iter().cloned())
+            .collect()
+    }
+
+    /// Records a network audit event of a run (ADR-0033): set-up, a
+    /// connection that ended, a refused attempt, a change of the allowed
+    /// endpoints. The actor is the system; the session is the one targeting
+    /// the VM, if any.
+    pub fn record_network(
+        &mut self,
+        vm_id: VmId,
+        run_id: Option<RunId>,
+        session_id: Option<SessionId>,
+        action: AuditAction,
+        outcome: AuditOutcome,
+        detail: NetworkAudit,
+    ) {
+        self.emit_after(
+            Actor::System,
+            action,
+            outcome,
+            Ev {
+                vm_id: Some(vm_id),
+                run_id,
+                session_id,
+                network: Some(detail),
+                ..Ev::default()
+            },
+        );
+    }
+
+    /// Records bounded Tools metadata without guest payloads.
+    pub fn record_tools(
+        &mut self,
+        actor: Actor,
+        vm: VmId,
+        run: RunId,
+        action: AuditAction,
+        outcome: AuditOutcome,
+        detail: lightvm_proto::ToolAudit,
+    ) {
+        let session_id = match actor {
+            Actor::Agent { session_id } => Some(session_id),
+            _ => None,
+        };
+        self.emit_after(
+            actor,
+            action,
+            outcome,
+            Ev {
+                vm_id: Some(vm),
+                run_id: Some(run),
+                session_id,
+                tools: Some(detail),
+                ..Ev::default()
+            },
+        );
     }
 
     /// Renews the lease (checked by the supervisor, not by the client).

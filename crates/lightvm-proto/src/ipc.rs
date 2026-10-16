@@ -14,12 +14,16 @@
 //!   response; unknown operations cannot be deserialized
 //!   (`malformed_message`, no effect);
 //! - no field is interpreted as a host path or option: VMs are
-//!   referenced by [`VmId`], media by registry [`crate::MediaId`]. Two
-//!   exceptions, both reserved to the `ui` role and never to agent sessions:
+//!   referenced by [`VmId`], media by registry [`crate::MediaId`]. Three
+//!   exceptions, all reserved to the `ui` role and never to agent sessions:
 //!   [`Request::ImportMedia`] carries the file the user chose with the native
-//!   picker of the UI (opened read-only as a regular file and copied into the
-//!   catalog, never passed to QEMU), and [`ConsoleTicket`] returns the path of
-//!   the per-run display socket (ADR-0013);
+//!   picker of the UI (opened read-only as a regular file, checked and hashed
+//!   by the service, then used in place: ADR-0029),
+//!   [`Request::PreviewVmwareImport`] / [`Request::ImportVmware`] carry the
+//!   `.vmx` file chosen with the picker (read as untrusted input, its disks
+//!   converted into the catalog and never modified: ADR-0030), and
+//!   [`ConsoleTicket`] returns the path of the per-run display socket
+//!   (ADR-0013);
 //! - errors are [`ReplyError`]: operational ([`crate::PublicError`]) or
 //!   protocol ([`crate::ProtocolError`]), never mixed up. Missing, malformed,
 //!   unknown or revoked credential → `unauthenticated`; insufficient role
@@ -36,8 +40,8 @@ use crate::{
     Admission, BaselineId, CapabilitySet, DisplayGeometry, Grant, HostCapacity, Label, Lease,
     MediaKind, MediaRecord, OperationId, OperationRecord, PROTOCOL_VERSION, Quotas, ReplyError,
     RevocationReport, RunId, Screenshot, SessionId, SessionState, SessionToken, Sha256Digest,
-    TerminationCause, TestOutcome, UtcTimestamp, VmConfig, VmId, VmName, VmRecord, VmRequest,
-    VmState,
+    SnapshotId, TerminationCause, TestOutcome, UtcTimestamp, VmConfig, VmId, VmName, VmRecord,
+    VmRequest, VmState,
 };
 
 /// IPC protocol versions supported by the service, in order of preference.
@@ -99,6 +103,12 @@ pub enum ClientMessage {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
+    /// User-only guest integration call; no host paths or commands.
+    GuestTools {
+        vm_id: VmId,
+        run_id: RunId,
+        call: crate::ToolCall,
+    },
     /// Liveness check.
     Ping,
     /// Capabilities of the service and the backend.
@@ -158,9 +168,11 @@ pub enum Request {
     /// Approved media of the registry (UI only).
     ListMedia,
     /// Import of an ISO chosen by the user with the native picker of the UI
-    /// (UI only, never from agent sessions): read-only managed copy, SHA-256
-    /// and registry row (ADR-0008). The path is opened as a regular file
-    /// without following links and is never passed to QEMU.
+    /// (UI only, never from agent sessions): SHA-256 and registry row, the
+    /// file is used where it is and never copied (ADR-0008, ADR-0029). The
+    /// path is opened as a regular file without following links and
+    /// checked by the service; QEMU later receives the path the system
+    /// resolved for that file, re-verified (hash) before every start.
     ImportMedia {
         /// File chosen by the user.
         source_path: String,
@@ -168,6 +180,17 @@ pub enum Request {
         media_kind: MediaKind,
         /// Origin declared by the user (free text, never interpreted).
         declared_origin: String,
+    },
+    /// Deletion of an imported medium (UI only, never from agent sessions;
+    /// the UI asks for confirmation): registry row removed; a read-only
+    /// managed copy (media imported before ADR-0029) is removed with it
+    /// through the catalog journal, a file used in place is never touched.
+    /// Refused (`state_conflict`) while the configuration of a VM uses it as
+    /// installation or data media, and (`vm_busy`) while a run holds a
+    /// managed copy open.
+    DeleteMedia {
+        /// Medium of the registry.
+        media_id: crate::MediaId,
     },
     /// Deletion of a stopped VM with its disk and run files (UI only).
     DeleteVm {
@@ -232,6 +255,82 @@ pub enum Request {
         /// Baseline of the same VM.
         baseline_id: BaselineId,
     },
+    /// User snapshots of a VM as a tree (UI only, ADR-0032).
+    ListSnapshots {
+        /// VM.
+        vm_id: VmId,
+    },
+    /// Takes a user snapshot (UI only, never from agent sessions;
+    /// ADR-0032): an internal snapshot of the VM's own disk, plus a copy of
+    /// its UEFI variables and of its configuration. With the VM off the
+    /// state is consistent; while it runs only the disk is saved, as after
+    /// a power cut at that instant (no memory: WHPX cannot save it).
+    /// Refused while an agent session targets the VM or while the VM runs
+    /// on an overlay of a baseline.
+    TakeSnapshot {
+        /// VM (`stopped` or `running`).
+        vm_id: VmId,
+        /// Name shown in the snapshot manager.
+        name: Label,
+        /// Optional description (at most [`MAX_SNAPSHOT_DESCRIPTION_CHARS`]
+        /// characters, line breaks allowed, no other control characters).
+        #[serde(default)]
+        description: String,
+    },
+    /// Reverts the VM to a user snapshot (UI only, ADR-0032): VM `stopped`
+    /// only, never a hidden shutdown. The disk, the UEFI variables and the
+    /// configuration (except the name) of the snapshot come back; the
+    /// current state since the snapshot is lost; the guest starts with a
+    /// normal boot. The reply arrives when done.
+    RevertSnapshot {
+        /// VM (must be `stopped`).
+        vm_id: VmId,
+        /// Snapshot of the same VM.
+        snapshot_id: SnapshotId,
+    },
+    /// Deletes a user snapshot (UI only, ADR-0032; VM `stopped` or
+    /// `running`): the other snapshots keep their state, its children move
+    /// to its parent.
+    DeleteSnapshot {
+        /// VM.
+        vm_id: VmId,
+        /// Snapshot of the same VM.
+        snapshot_id: SnapshotId,
+    },
+    /// Renames a user snapshot or changes its description (UI only).
+    UpdateSnapshot {
+        /// VM.
+        vm_id: VmId,
+        /// Snapshot of the same VM.
+        snapshot_id: SnapshotId,
+        /// New name.
+        name: Label,
+        /// New description.
+        #[serde(default)]
+        description: String,
+    },
+    /// Thumbnail of a snapshot taken while the VM ran (UI only): a small
+    /// PNG of the screen at that instant, if one was kept.
+    GetSnapshotThumbnail {
+        /// VM.
+        vm_id: VmId,
+        /// Snapshot of the same VM.
+        snapshot_id: SnapshotId,
+    },
+    /// Promotes a snapshot taken with the VM off to a baseline (UI only,
+    /// ADR-0032 and ADR-0005): the snapshot's disk state is materialized
+    /// into a standalone, read-only, hashed baseline with the snapshot's
+    /// UEFI variables and configuration. VM `stopped`; long like
+    /// `create_baseline`. Refused for snapshots taken while running (not a
+    /// verified state).
+    PromoteSnapshot {
+        /// VM (must be `stopped`).
+        vm_id: VmId,
+        /// Snapshot of the same VM, taken with the VM off.
+        snapshot_id: SnapshotId,
+        /// Label of the new baseline.
+        label: Label,
+    },
     /// Session request of an agent (`pairing` role only, F4): refused while
     /// the agent access switch is off. The reply carries the verification
     /// code the user compares in the app; the decision is awaited with
@@ -249,6 +348,11 @@ pub enum Request {
         /// Capabilities the agent would like (a hint for the user).
         #[serde(default)]
         requested_capabilities: CapabilitySet,
+        /// Network endpoints (names of the VM's allowlist) the agent would
+        /// like with `network.endpoints` (a hint for the user; at most
+        /// [`crate::MAX_NETWORK_ENDPOINTS`] names kept).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        requested_endpoints: Vec<String>,
     },
     /// Waits for the user's decision on a session request of this
     /// connection (`pairing` role only). Long: the reply arrives when the
@@ -377,6 +481,38 @@ pub enum Request {
         /// Session.
         session_id: SessionId,
     },
+    /// Examination of a VMware VM before its import (UI only, never from
+    /// agent sessions; ADR-0030): `vmx_path` is the `.vmx` file the user
+    /// chose with the native picker. The `.vmx` and the VMDK descriptors
+    /// are read as untrusted input, the disk chain is checked with
+    /// `qemu-img info`; nothing is written. The reply says what would be
+    /// imported, what not, and the warnings.
+    PreviewVmwareImport {
+        /// `.vmx` file chosen by the user.
+        vmx_path: String,
+    },
+    /// Import of a VMware VM by conversion (UI only, never from agent
+    /// sessions; ADR-0030). The `.vmx` and its disks are examined again (the
+    /// preview is not trusted), the storage budget is checked, then the
+    /// current state of the disk (snapshot chain flattened) is converted
+    /// into a new QCOW2 disk of the catalog; the VMware files are opened
+    /// read-only and never modified. Long: progress is published as
+    /// [`ServiceEvent::VmwareImportProgress`] and the reply arrives when the
+    /// VM exists. One import at a time; cancelled by
+    /// [`Request::CancelVmwareImport`], the Emergency Stop, the revocation or
+    /// closing of the connection and the service shutdown (nothing is
+    /// left behind).
+    ImportVmware {
+        /// `.vmx` file chosen by the user.
+        vmx_path: String,
+        /// Name of the new VM.
+        name: VmName,
+        /// Display adapter (VMware SVGA only for Windows guests).
+        #[serde(default)]
+        display: crate::DisplayAdapter,
+    },
+    /// Cancels the VMware import in progress (UI only).
+    CancelVmwareImport,
 }
 
 impl Request {
@@ -385,6 +521,7 @@ impl Request {
     pub const fn name(&self) -> &'static str {
         match self {
             Self::Ping => "ping",
+            Self::GuestTools { .. } => "guest_tools",
             Self::GetCapabilities => "get_capabilities",
             Self::ListVms => "list_vms",
             Self::VmStatus { .. } => "vm_status",
@@ -400,12 +537,20 @@ impl Request {
             Self::Shutdown => "shutdown",
             Self::ListMedia => "list_media",
             Self::ImportMedia { .. } => "import_media",
+            Self::DeleteMedia { .. } => "delete_media",
             Self::DeleteVm { .. } => "delete_vm",
             Self::OpenConsole { .. } => "open_console",
             Self::ListBaselines { .. } => "list_baselines",
             Self::CreateBaseline { .. } => "create_baseline",
             Self::RestoreBaseline { .. } => "restore_baseline",
             Self::DeleteBaseline { .. } => "delete_baseline",
+            Self::ListSnapshots { .. } => "list_snapshots",
+            Self::TakeSnapshot { .. } => "take_snapshot",
+            Self::RevertSnapshot { .. } => "revert_snapshot",
+            Self::DeleteSnapshot { .. } => "delete_snapshot",
+            Self::UpdateSnapshot { .. } => "update_snapshot",
+            Self::GetSnapshotThumbnail { .. } => "get_snapshot_thumbnail",
+            Self::PromoteSnapshot { .. } => "promote_snapshot",
             Self::RequestSession { .. } => "request_session",
             Self::AwaitSession { .. } => "await_session",
             Self::Agent { .. } => "agent",
@@ -427,6 +572,9 @@ impl Request {
             Self::VerifySession { .. } => "verify_session",
             Self::ExportSessionReport { .. } => "export_session_report",
             Self::DeleteSessionReport { .. } => "delete_session_report",
+            Self::PreviewVmwareImport { .. } => "preview_vmware_import",
+            Self::ImportVmware { .. } => "import_vmware",
+            Self::CancelVmwareImport => "cancel_vmware_import",
         }
     }
 }
@@ -474,6 +622,12 @@ pub struct SessionAuth {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "call", rename_all = "snake_case")]
 pub enum AgentCall {
+    GuestTools {
+        vm_id: VmId,
+        run_id: RunId,
+        #[serde(rename = "command")]
+        call: crate::ToolCall,
+    },
     /// VMs of the grant (`vm.list`).
     ListVms,
     /// Status of a VM of the grant (`vm.status`).
@@ -591,6 +745,7 @@ impl AgentCall {
     pub const fn name(&self) -> &'static str {
         match self {
             Self::ListVms => "list_vms",
+            Self::GuestTools { .. } => "guest_tools",
             Self::VmStatus { .. } => "vm_status",
             Self::Submit { .. } => "submit",
             Self::Screenshot { .. } => "screenshot",
@@ -611,6 +766,9 @@ impl AgentCall {
     /// `true` if the call mutates a VM (refused while the session is paused).
     #[must_use]
     pub const fn is_mutation(&self) -> bool {
+        if let Self::GuestTools { call, .. } = self {
+            return !matches!(call, crate::ToolCall::UiTree { .. });
+        }
         matches!(
             self,
             Self::Submit { .. } | Self::Snapshot { .. } | Self::Restore { .. }
@@ -621,7 +779,8 @@ impl AgentCall {
     #[must_use]
     pub fn vm_id(&self) -> Option<VmId> {
         match self {
-            Self::VmStatus { vm_id }
+            Self::GuestTools { vm_id, .. }
+            | Self::VmStatus { vm_id }
             | Self::Screenshot { vm_id, .. }
             | Self::ListBaselines { vm_id }
             | Self::Snapshot { vm_id, .. }
@@ -649,6 +808,8 @@ impl AgentCall {
 /// What the user grants when approving a session request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionApproval {
+    #[serde(default, skip_serializing_if = "crate::ToolGrant::is_empty")]
+    pub tools: crate::ToolGrant,
     /// The single VM of the session (MVP).
     pub vm_id: VmId,
     /// Granted capabilities (not empty).
@@ -665,6 +826,11 @@ pub struct SessionApproval {
     /// Hand input control of the VM to the agent at once.
     #[serde(default)]
     pub give_input: bool,
+    /// Network endpoints of the VM granted with `network.endpoints`
+    /// (names of [`crate::VmConfig::endpoints`]; required non-empty with
+    /// that capability, empty without it). ADR-0033.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub network_endpoints: Vec<String>,
 }
 
 /// Owner of the input of a VM: the user or one agent session, never both.
@@ -698,6 +864,9 @@ pub struct SessionRequestInfo {
     pub requested_vms: Vec<VmId>,
     /// Capabilities requested (hint).
     pub requested_capabilities: CapabilitySet,
+    /// Network endpoints requested (hint, plain text).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requested_endpoints: Vec<String>,
     /// Code shown to the agent and in the app.
     pub verification_code: String,
     /// Instant of the request.
@@ -720,6 +889,9 @@ pub struct SessionUsage {
 /// Agent session, for the UI.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionInfo {
+    /// Named Tools resources granted to this session.
+    #[serde(default, skip_serializing_if = "crate::ToolGrant::is_empty")]
+    pub tools: crate::ToolGrant,
     /// Session.
     pub session_id: SessionId,
     /// VM of the grant.
@@ -738,6 +910,9 @@ pub struct SessionInfo {
     pub termination: Option<TerminationCause>,
     /// Granted capabilities.
     pub capabilities: CapabilitySet,
+    /// Granted network endpoints (`network.endpoints`, ADR-0033).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub network_endpoints: Vec<String>,
     /// Granted quotas.
     pub quotas: Quotas,
     /// Consumption.
@@ -769,6 +944,23 @@ pub struct AgentVmView {
     pub geometry: Option<DisplayGeometry>,
     /// `true` if this session owns the input of the VM.
     pub input_owner: bool,
+    /// Network of the VM for this session (ADR-0033): the granted
+    /// endpoints with the address and port to use inside the guest. Empty
+    /// = the VM runs without network for this session.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub network_endpoints: Vec<AgentEndpointView>,
+}
+
+/// A granted network endpoint as the agent sees it: what to use inside the
+/// guest (never the host side).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AgentEndpointView {
+    /// DNS name inside the guest.
+    pub name: String,
+    /// Virtual address inside the guest.
+    pub virtual_ip: std::net::Ipv4Addr,
+    /// TCP port.
+    pub port: u16,
 }
 
 /// Outcome of a session request, in [`ServiceEvent::SessionRequestClosed`].
@@ -823,12 +1015,47 @@ pub struct VmSummary {
     /// Baselines and current state of the VM (F3).
     #[serde(default)]
     pub baselines: VmBaselines,
+    /// User snapshots of the VM (ADR-0032). Additive field: older clients
+    /// ignore it.
+    #[serde(default)]
+    pub snapshots: VmSnapshots,
     /// Sub-status of a start in progress (state `starting`): verification of
     /// the approved media and of the baseline before QEMU is launched
     /// (ADR-0008, ADR-0025). Absent outside a start, and for a start with
     /// nothing to verify. Additive field: older clients ignore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start: Option<StartProgress>,
+    /// The guest's virtual CPUs stopped on an error and stay stopped (state
+    /// `running`: the QEMU process is alive, the guest is not). Absent while
+    /// the guest runs. Additive field: older clients ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vcpu_halt: Option<VcpuHalt>,
+}
+
+/// Guest whose virtual CPUs stopped and were not restarted automatically, in
+/// [`VmSummary::vcpu_halt`]. A reset (`reset`) restarts the guest; a forced
+/// stop ends the run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct VcpuHalt {
+    /// Why the virtual CPUs stopped.
+    pub reason: VcpuHaltReason,
+    /// Automatic resets done in the recent window before the service gave up
+    /// (0 when the reason is not reset automatically).
+    pub automatic_resets: u32,
+}
+
+/// Cause of a [`VcpuHalt`].
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum VcpuHaltReason {
+    /// Unrecoverable virtual CPU error reported by the accelerator (QEMU
+    /// run state `internal-error`; for example a guest triple fault under
+    /// WHPX, which real hardware would answer with a reset).
+    InternalError,
+    /// The guest reported a panic (QEMU run state `guest-panicked`).
+    GuestPanicked,
 }
 
 /// Progress of the checks of a start, in [`VmSummary::start`].
@@ -893,6 +1120,104 @@ pub enum StorageOperation {
     CreateBaseline,
     /// `restore_baseline`.
     RestoreBaseline,
+    /// `take_snapshot` (ADR-0032).
+    TakeSnapshot,
+    /// `revert_snapshot` (ADR-0032).
+    RevertSnapshot,
+    /// `delete_snapshot` (ADR-0032). (`promote_snapshot` shows as
+    /// `create_baseline`.)
+    DeleteSnapshot,
+}
+
+/// Longest description of a user snapshot, in characters.
+pub const MAX_SNAPSHOT_DESCRIPTION_CHARS: usize = 1000;
+
+/// Checks the description of a user snapshot: at most
+/// [`MAX_SNAPSHOT_DESCRIPTION_CHARS`] characters, line breaks and tabs
+/// allowed, no other control characters. Text only, never interpreted.
+pub fn validate_snapshot_description(s: &str) -> Result<(), &'static str> {
+    if s.chars().count() > MAX_SNAPSHOT_DESCRIPTION_CHARS {
+        return Err("description too long (at most 1000 characters)");
+    }
+    if s.chars()
+        .any(|c| c.is_control() && !matches!(c, '\n' | '\t'))
+    {
+        return Err("control characters not allowed in the description");
+    }
+    Ok(())
+}
+
+/// Largest snapshot thumbnail kept, in bytes of PNG (fits one IPC frame).
+pub const MAX_SNAPSHOT_THUMBNAIL_BYTES: usize = 40 * 1024;
+
+/// User snapshot facts of a VM, in [`VmSummary`] (ADR-0032).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct VmSnapshots {
+    /// Number of user snapshots.
+    #[serde(default)]
+    pub count: u32,
+    /// Snapshot the current state descends from ("you are here"), if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<SnapshotId>,
+}
+
+/// User snapshot of a VM (ADR-0032), for the snapshot manager.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SnapshotSummary {
+    /// Snapshot.
+    pub snapshot_id: SnapshotId,
+    /// Owning VM.
+    pub vm_id: VmId,
+    /// Snapshot this one descends from; `None` = a root of the tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<SnapshotId>,
+    /// Name given by the user.
+    pub name: Label,
+    /// Description given by the user (may be empty).
+    #[serde(default)]
+    pub description: String,
+    /// Creation instant.
+    pub created_at: UtcTimestamp,
+    /// Taken while the VM ran: the disk state is like after a power cut at
+    /// that instant (crash-consistent); `false` = taken with the VM off.
+    pub taken_while_running: bool,
+    /// The VM was off after an observed clean guest shutdown (or had never
+    /// run) when the snapshot was taken: it can become a verified baseline.
+    pub clean_shutdown: bool,
+    /// The snapshot carries a copy of the UEFI variables.
+    pub firmware_saved: bool,
+    /// A thumbnail of the screen is available
+    /// ([`Request::GetSnapshotThumbnail`]).
+    pub has_thumbnail: bool,
+    /// Disk size of the VM at that moment (GiB), from the saved
+    /// configuration.
+    pub disk_gib: u64,
+    /// VM configuration revision when the snapshot was taken.
+    pub config_revision: u64,
+    /// Bytes of the snapshot's own files on the host (UEFI variables and
+    /// thumbnail). The disk clusters the snapshot keeps live inside the VM's
+    /// disk and are counted in the VM's disk usage.
+    pub files_bytes: u64,
+}
+
+/// User snapshots of a VM as a tree, in [`ResponseBody::Snapshots`].
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SnapshotTree {
+    /// Snapshots, oldest first; parents always before their children.
+    #[serde(default)]
+    pub snapshots: Vec<SnapshotSummary>,
+    /// Snapshot the current state descends from ("you are here"): the last
+    /// one taken or reverted to; `None` if the current state descends from
+    /// no snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<SnapshotId>,
+    /// Snapshots are available for this VM now (it runs on its own disk);
+    /// otherwise `unavailable_reason` says why.
+    pub available: bool,
+    /// Why snapshots cannot be taken or reverted now (agent session on the
+    /// VM, VM on an overlay of a baseline, TPM guest...), for the UI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
 }
 
 /// Baseline of a VM, for `list_baselines` and `create_baseline` (F3).
@@ -1061,6 +1386,9 @@ pub struct EmergencyStopReport {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ResponseBody {
+    GuestTools {
+        reply: crate::ToolReply,
+    },
     /// Response to `ping`.
     Pong,
     /// Response to `get_capabilities`.
@@ -1132,6 +1460,11 @@ pub enum ResponseBody {
         /// New registry entry.
         media: MediaRecord,
     },
+    /// Response to `delete_media`.
+    MediaDeleted {
+        /// Deleted medium.
+        media_id: crate::MediaId,
+    },
     /// Response to `delete_vm`.
     VmDeleted {
         /// Deleted VM.
@@ -1168,6 +1501,42 @@ pub enum ResponseBody {
         vm_id: VmId,
         /// Deleted baseline.
         baseline_id: BaselineId,
+    },
+    /// Response to `list_snapshots`.
+    Snapshots {
+        /// VM.
+        vm_id: VmId,
+        /// Snapshot tree.
+        tree: SnapshotTree,
+    },
+    /// Response to `take_snapshot` and `update_snapshot`.
+    Snapshot {
+        /// The snapshot.
+        snapshot: SnapshotSummary,
+    },
+    /// Response to `revert_snapshot`: the VM is now at the snapshot.
+    SnapshotReverted {
+        /// VM.
+        vm_id: VmId,
+        /// Snapshot reverted to.
+        snapshot_id: SnapshotId,
+        /// Configuration revision after the revert.
+        config_revision: u64,
+    },
+    /// Response to `delete_snapshot`.
+    SnapshotDeleted {
+        /// VM.
+        vm_id: VmId,
+        /// Deleted snapshot.
+        snapshot_id: SnapshotId,
+    },
+    /// Response to `get_snapshot_thumbnail`.
+    SnapshotThumbnail {
+        /// Snapshot.
+        snapshot_id: SnapshotId,
+        /// PNG, standard base64 with padding; `None` if none was kept.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        png_base64: Option<String>,
     },
     /// Response to `request_session`.
     SessionRequested {
@@ -1360,6 +1729,218 @@ pub enum ResponseBody {
         /// Summary of the session's report.
         report: SessionReportSummary,
     },
+    /// Response to `preview_vmware_import`.
+    VmwareImportPreview {
+        /// What would be imported.
+        preview: Box<VmwareImportPreview>,
+    },
+    /// Response to `import_vmware`: the VM exists with its converted disk.
+    VmwareImported {
+        /// New VM.
+        vm: VmRecord,
+    },
+    /// Response to `cancel_vmware_import`.
+    VmwareImportCancel {
+        /// `true` if an import was in progress and is being cancelled.
+        cancelled: bool,
+    },
+}
+
+/// Longest text taken from a VMware file into a preview (display name,
+/// guest type, file names): control characters removed, then truncated.
+pub const MAX_VMWARE_TEXT_CHARS: usize = 128;
+
+/// Outcome of the examination of a VMware VM (ADR-0030), for the UI. The
+/// texts come from the user's files: they are shown, never interpreted.
+/// No path is included, only file names.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct VmwareImportPreview {
+    /// File name of the `.vmx`.
+    pub vmx_file: String,
+    /// `displayName` of the VMware VM, if present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// VMware guest type as written in the `.vmx` (`guestOS`).
+    pub vmware_guest_os: String,
+    /// Configuration the import would create; the name is a suggestion
+    /// from the VMware display name, the display the standard adapter.
+    pub config: VmConfig,
+    /// Main disk.
+    pub disk: VmwareDiskPreview,
+    /// Bytes needed on the catalog volume for the converted disk
+    /// (estimate: the data of the disk chain, at most its virtual size).
+    pub required_bytes: u64,
+    /// Free bytes on the catalog volume, if measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub free_bytes: Option<u64>,
+    /// What is not imported.
+    #[serde(default)]
+    pub not_imported: Vec<NotImported>,
+    /// Warnings the user should read before importing.
+    #[serde(default)]
+    pub warnings: Vec<ImportWarning>,
+    /// The VMware SVGA display adapter can be chosen (Windows guests).
+    #[serde(default)]
+    pub vmware_svga_offered: bool,
+    /// The `.vmx` says the VMware Tools were installed in the guest (hint).
+    #[serde(default)]
+    pub vmware_tools_hint: bool,
+}
+
+/// Main disk of a VMware VM, in [`VmwareImportPreview`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct VmwareDiskPreview {
+    /// File name of the current VMDK (top of the snapshot chain).
+    pub file_name: String,
+    /// VMware slot of the disk (`scsi0:0`, `sata0:1`, `ide0:0`, `nvme0:0`).
+    pub slot: String,
+    /// Controller of the disk in VMware.
+    pub vmware_controller: VmwareController,
+    /// `createType` of the current VMDK.
+    pub create_type: String,
+    /// Virtual size of the disk.
+    pub virtual_size_bytes: u64,
+    /// Bytes allocated by the files of the chain on the host.
+    pub allocated_bytes: u64,
+    /// Snapshot levels flattened into the converted disk (0 = no snapshot).
+    pub snapshot_levels: u32,
+}
+
+/// Disk controller of a VMware VM.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum VmwareController {
+    /// IDE.
+    Ide,
+    /// SATA (AHCI).
+    Sata,
+    /// NVMe.
+    Nvme,
+    /// SCSI, VMware paravirtual (`pvscsi`).
+    Pvscsi,
+    /// SCSI, LSI Logic parallel (`lsilogic`): not emulated by QEMU.
+    LsiLogic,
+    /// SCSI, LSI Logic SAS (`lsisas1068`).
+    LsiSas1068,
+    /// SCSI, BusLogic (`buslogic`): not emulated by QEMU.
+    BusLogic,
+}
+
+/// Part of a VMware VM that is not imported, in [`VmwareImportPreview`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct NotImported {
+    /// What.
+    pub item: NotImportedItem,
+    /// Detail from the `.vmx` (for example a file name or a count), shown
+    /// as text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// Kind of [`NotImported`].
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum NotImportedItem {
+    /// Network adapters: LightVM VMs are offline (ADR-0004).
+    Network,
+    /// Shared folders: recreated later through LightVM Tools (ADR-0031).
+    SharedFolders,
+    /// USB controllers and devices: recreated later through LightVM Tools.
+    Usb,
+    /// Sound card.
+    Sound,
+    /// 3D acceleration.
+    Accelerated3d,
+    /// Intermediate snapshots (only the current state is converted).
+    Snapshots,
+    /// A hard disk other than the main one.
+    OtherDisk,
+    /// A CD/DVD drive (an ISO can be imported as a data medium).
+    CdRom,
+    /// Floppy drive.
+    Floppy,
+    /// Serial port.
+    SerialPort,
+    /// Parallel port.
+    ParallelPort,
+    /// Virtual printer.
+    Printer,
+    /// VMware Tools features (clipboard, drag and drop, time sync):
+    /// recreated later through LightVM Tools (ADR-0031).
+    VmwareToolsFeatures,
+}
+
+/// Warning of a VMware import, in [`VmwareImportPreview`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ImportWarning {
+    /// What.
+    pub kind: ImportWarningKind,
+    /// Values for the message (for example the VMware value and the one
+    /// LightVM uses), shown as text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// Kind of [`ImportWarning`].
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportWarningKind {
+    /// Windows on a controller LightVM cannot keep (an LSI Logic parallel
+    /// controller, which QEMU does not emulate, or an NVMe boot disk with
+    /// legacy BIOS, which SeaBIOS cannot boot): Windows may not start (stop
+    /// 0x7B) until the storage driver of the new controller is enabled in
+    /// the guest, and the storage helper is not available for the automatic
+    /// preparation (manual preparation, `docs/USER_GUIDE.md`).
+    StorageDriverPreparation,
+    /// As [`Self::StorageDriverPreparation`], but LightVM enables the
+    /// guest's own driver of the new controller in the converted disk with
+    /// the storage helper (offline `SYSTEM` hive edit; the VMware VM is not
+    /// changed).
+    StorageDriverEnabled,
+    /// A controller QEMU does not emulate on a Linux guest: the disk is
+    /// attached to the profile's controller (the initramfs must have its
+    /// driver, as standard distributions do).
+    ControllerReplaced,
+    /// The guest memory was raised to the minimum of the guest system.
+    MemoryRaised,
+    /// The guest memory was lowered to the host limit.
+    MemoryLowered,
+    /// The vCPUs were lowered to the host limit.
+    VcpusLowered,
+    /// The VMware CPU topology could not be kept (one socket per vCPU).
+    TopologyChanged,
+    /// VMware uses the same guest type for Windows 8 and 8.1: LightVM
+    /// supports 8.1 only.
+    Windows8Or81,
+    /// UEFI guest: the firmware starts with a new variable store, so the
+    /// boot entries of VMware are not carried over (the default loader of
+    /// the disk is used).
+    NewUefiVariables,
+    /// A disk of the snapshot chain is marked dirty (not closed cleanly).
+    DirtyDisk,
+}
+
+/// Phase of a VMware import, in [`ServiceEvent::VmwareImportProgress`].
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum VmwareImportPhase {
+    /// Examination of the `.vmx` and of the disk chain.
+    Checking,
+    /// `qemu-img convert` running.
+    Converting,
+    /// The storage driver of the new controller being enabled in the
+    /// converted disk (storage helper, ADR-0030).
+    PreparingDisk,
+    /// Check of the converted disk and creation of the VM.
+    Finishing,
 }
 
 /// State of the service.
@@ -1421,6 +2002,13 @@ pub enum ServiceEvent {
         /// VM.
         vm_id: VmId,
     },
+    /// The user snapshots of a VM changed (taken, reverted, deleted,
+    /// renamed, operation started or ended): re-read `list_snapshots`
+    /// (ADR-0032).
+    SnapshotsChanged {
+        /// VM.
+        vm_id: VmId,
+    },
     /// Events lost because the client was too slow.
     EventsLost {
         /// Number of lost events.
@@ -1465,6 +2053,15 @@ pub enum ServiceEvent {
     SessionReportChanged {
         /// Session.
         session_id: SessionId,
+    },
+    /// Progress of the VMware import in progress (ADR-0030); published at
+    /// most a few times per second. The end is the reply to
+    /// `import_vmware`.
+    VmwareImportProgress {
+        /// Phase.
+        phase: VmwareImportPhase,
+        /// Percentage of the phase (0..=100).
+        percent: u8,
     },
 }
 

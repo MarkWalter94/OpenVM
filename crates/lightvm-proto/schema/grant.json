@@ -20,6 +20,14 @@
       "description": "Identifier.",
       "$ref": "#/$defs/GrantId"
     },
+    "network_endpoints": {
+      "description": "Network endpoints of the VM the session may use (names as in the VM\nsettings, normalized to lower case), with\n[`Capability::NetworkEndpoints`]; empty otherwise (ADR-0033).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
     "policy_revision": {
       "description": "Revision of the policy the grant was issued with.",
       "$ref": "#/$defs/PolicyRevision"
@@ -31,6 +39,9 @@
     "session_id": {
       "description": "Session it is bound to.",
       "$ref": "#/$defs/SessionId"
+    },
+    "tools": {
+      "$ref": "#/$defs/ToolGrant"
     },
     "vm_allowlist": {
       "description": "Allowed VMs (explicit allowlist; empty = no VM).",
@@ -54,6 +65,18 @@
     "Capability": {
       "description": "Authorizable action on a VM. Serialized names follow the MCP catalog\n(ROADMAP 9); `vm.input` covers mouse and keyboard.",
       "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "share.read",
+            "share.write",
+            "clipboard",
+            "files.transfer",
+            "usb",
+            "ui.inspect",
+            "ui.act"
+          ]
+        },
         {
           "description": "List filtered by the grant.",
           "type": "string",
@@ -103,6 +126,11 @@
           "description": "Authorized LightVM events and QEMU logs.",
           "type": "string",
           "const": "vm.logs"
+        },
+        {
+          "description": "Network endpoints of the VM's allowlist (ADR-0033, ADR-0034): the\ngrant lists which ones ([`Grant::network_endpoints`]). Without it\nthe session's VM runs without network.",
+          "type": "string",
+          "const": "network.endpoints"
         }
       ]
     },
@@ -166,6 +194,26 @@
       "type": "string",
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "ToolGrant": {
+      "description": "Named subsets granted by the user. Booleans in `shares` denote write\npermission; feature capabilities remain independently required.",
+      "type": "object",
+      "properties": {
+        "shares": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "boolean"
+          }
+        },
+        "usb_devices": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
     },
     "UtcTimestamp": {
       "description": "RFC 3339 UTC instant with Z suffix, millisecond precision.",

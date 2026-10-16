@@ -223,6 +223,22 @@ pub enum ReportEventBody {
         /// Claimed outcome.
         claimed_outcome: TestOutcome,
     },
+    /// Network event of the session's VM (ADR-0033): a connection through
+    /// the endpoint allowlist ended, an attempt was refused, or the run's
+    /// network was set up (`kind` of the audit: `network_setup`,
+    /// `network_connection`, `network_denied`, `network_policy`).
+    Network {
+        /// Audit action name.
+        action: String,
+        /// Details (addresses and counts, never content).
+        detail: crate::NetworkAudit,
+    },
+    /// Tools metadata, never file contents or clipboard/UI values.
+    Tools {
+        action: String,
+        outcome: crate::AuditOutcome,
+        detail: crate::ToolAudit,
+    },
     /// Service note (plain text).
     Note {
         /// Text.
@@ -234,6 +250,9 @@ pub enum ReportEventBody {
 /// `get_session_report` replies `events` is empty: events are read by page.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionReport {
+    /// Named Tools resources authorized for this session.
+    #[serde(default, skip_serializing_if = "crate::ToolGrant::is_empty")]
+    pub tools: crate::ToolGrant,
     /// [`REPORT_FORMAT`].
     pub report_format: String,
     /// Session.
@@ -279,6 +298,9 @@ pub struct SessionReport {
     pub policy_revision: PolicyRevision,
     /// Granted capabilities.
     pub capabilities: CapabilitySet,
+    /// Granted network endpoints (`network.endpoints`, ADR-0033).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub network_endpoints: Vec<String>,
     /// Granted quotas.
     pub quotas: Quotas,
     /// Grant expiry.

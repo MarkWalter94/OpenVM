@@ -239,6 +239,8 @@ fn registered_files(tx: &Tx<'_>, vm: &VmId) -> Result<Vec<ManagedPath>> {
 /// Deletes every row of the VM, children first. Disks of other VMs backed by
 /// a disk of this VM make the deletion fail (`Referenced`).
 pub(crate) fn delete_vm_rows(tx: &Tx<'_>, vm: &VmId) -> Result<()> {
+    // User snapshots (ADR-0032): their files are under `vms/<vm_id>/`.
+    Catalog::snapshot_rows_cleared(tx, vm)?;
     let id = vm.sql();
     let c = tx.conn();
     let steps = [

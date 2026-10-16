@@ -95,7 +95,8 @@ $Source = $PSScriptRoot
 $Payload = @(
     'lightvm-desktop.exe', 'lightvm-service.exe', 'lightvm-mcp.exe', 'README.md', 'USER_GUIDE.md',
     'LICENSE.txt', 'THIRD-PARTY-LICENSES.txt', 'SBOM.cdx.json', 'BUILDINFO.txt', 'SHA256SUMS.txt',
-    'install.ps1', 'uninstall.ps1'
+    'install.ps1', 'uninstall.ps1',
+    'tools/TOOLS.EXE', 'tools/TOOLS.PY', 'tools/TOOLS.EXE.sha256', 'tools/TOOLS.PY.sha256', 'tools/README.txt', 'tools/LICENSE.txt'
 )
 $ShortcutName = 'LightVM.lnk'
 
@@ -143,6 +144,7 @@ if ($running.Count -gt 0) { throw 'LightVM is running from the prefix: close it 
 
 New-Item -ItemType Directory -Force -Path $Prefix | Out-Null
 foreach ($f in $Payload) {
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent (Join-Path $Prefix $f)) | Out-Null
     Copy-Item -LiteralPath (Join-Path $Source $f) -Destination (Join-Path $Prefix $f) -Force
 }
 Write-Host "Files copied to $Prefix"

@@ -103,6 +103,9 @@ pub fn operation_label(op: StorageOperation) -> &'static str {
     match op {
         StorageOperation::CreateBaseline => "Creating baseline",
         StorageOperation::RestoreBaseline => "Restoring baseline",
+        StorageOperation::TakeSnapshot => "Taking snapshot",
+        StorageOperation::RevertSnapshot => "Reverting snapshot",
+        StorageOperation::DeleteSnapshot => "Deleting snapshot",
     }
 }
 
@@ -456,6 +459,21 @@ fn progress_or_outcome(ui: &mut egui::Ui, env: &BaselinesEnv<'_>) {
             StorageOperation::RestoreBaseline => (
                 "Restoring the baseline…",
                 "LightVM verifies the baseline's integrity, then replaces the VM's current state with a fresh copy of it.",
+            ),
+            // A snapshot operation is shown in detail on the Snapshots page;
+            // here it only occupies the VM (progress card with the generic
+            // text, no outcome, because it is not a baseline operation).
+            StorageOperation::TakeSnapshot => (
+                "Taking a snapshot…",
+                "The disk of the VM is being snapshotted.",
+            ),
+            StorageOperation::RevertSnapshot => (
+                "Reverting the VM to a snapshot…",
+                "The disk of the VM is being reverted to the saved state.",
+            ),
+            StorageOperation::DeleteSnapshot => (
+                "Deleting a snapshot…",
+                "The snapshot is being removed from the disk of the VM.",
             ),
         };
         theme::card(ui, |ui| {

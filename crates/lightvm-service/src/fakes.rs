@@ -4,14 +4,14 @@
 //! fake. They are not part of the product: the binary always uses the real
 //! adapters ([`crate::adapters`]).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 use lightvm_proto::ipc::StopReason;
 use lightvm_proto::{
     AuditEvent, BackendObservation, Caller, DisplayGeometry, GuestOs, HostCapacity, ImageFormat,
-    InputEvent, Label, ManagedRelPath, MediaEntry, MediaId, MediaKind, MediaRecord, NetworkProfile,
+    InputEvent, Label, MediaEntry, MediaId, MediaKind, MediaLocation, MediaRecord, NetworkProfile,
     OperationId, OperationRecord, PublicError, RunEndReason, RunId, RunRecord, Screenshot,
     Sha256Digest, UtcTimestamp, VmConfig, VmId, VmName, VmRecord, VmState,
 };
@@ -97,16 +97,37 @@ pub const FAKE_GEOMETRY: DisplayGeometry = DisplayGeometry {
 /// Test configuration valid for the MVP limits.
 pub fn sample_config(name: &str) -> VmConfig {
     VmConfig {
+        tools: Default::default(),
         name: VmName::parse(name).expect("valid test name"),
         guest_os: GuestOs::UbuntuLtsX86_64,
         vcpus: 2,
         memory_mib: 2048,
         disk_gib: 16,
         network: NetworkProfile::Offline,
+        endpoints: Vec::new(),
         install_media: None,
         data_media: None,
         firmware: lightvm_proto::Firmware::Uefi,
         limits: Default::default(),
+        imported: None,
+    }
+}
+
+/// Test configuration for `guest_os` with `firmware` (ADR-0027) and the
+/// suggested resources of that guest (within the MVP limits).
+pub fn sample_guest_config(
+    name: &str,
+    guest_os: GuestOs,
+    firmware: lightvm_proto::Firmware,
+) -> VmConfig {
+    let (vcpus, memory_mib, disk_gib) = guest_os.suggested_resources();
+    VmConfig {
+        guest_os,
+        firmware,
+        vcpus,
+        memory_mib,
+        disk_gib,
+        ..sample_config(name)
     }
 }
 
@@ -182,6 +203,13 @@ impl CatalogStore for MemoryStore {
     fn list_media(&self) -> Result<Vec<MediaRecord>, PublicError> {
         Ok(self.0.media.values().map(|e| e.record.clone()).collect())
     }
+    fn remove_media(&mut self, id: MediaId) -> Result<(), PublicError> {
+        self.0
+            .media
+            .remove(&id)
+            .map(|_| ())
+            .ok_or_else(|| PublicError::not_found("medium not found"))
+    }
     fn remove_vm(&mut self, id: VmId) -> Result<(), PublicError> {
         self.0.vms.remove(&id);
         self.0.runs.retain(|_, r| r.vm_id != id);
@@ -196,6 +224,9 @@ impl CatalogStore for MemoryStore {
 /// No baselines in memory: listings empty, operations `unsupported` (the
 /// baseline tests use the SQLite catalog with [`FakeImageTool`]).
 impl BaselinePort for MemoryStore {}
+
+/// No VMware imports in memory (the import tests use the SQLite catalog).
+impl crate::engine::VmImportPort for MemoryStore {}
 
 /// Image tool without `qemu-img` for the baseline tests (F3): files with a
 /// minimal QCOW2 v3 header (4 KiB) followed by the "guest data". `convert`
@@ -212,6 +243,194 @@ pub struct FakeImageTool {
     /// F6 disk-full injection: while set, `convert` writes part of the
     /// output and fails as `qemu-img` does on a full volume (ENOSPC).
     pub disk_full: Arc<std::sync::atomic::AtomicBool>,
+    /// VMware import tests (ADR-0030): the real `qemu-img` of the approved
+    /// build and a private directory for its outputs; the VMware operations
+    /// (`info`, `convert -p`) and the `check`/`virtual_size` of their
+    /// results then run on real images. `None` = VMware import unsupported.
+    pub vmdk_tool: Option<Arc<crate::adapters::backend::QemuImageTool>>,
+    /// Delay before each VMware conversion, polled for cancellation every
+    /// 10 ms (cancellation and crash tests).
+    pub vmdk_delay: std::time::Duration,
+    /// Free bytes reported for the catalog volume (budget tests); `None` =
+    /// the real free space when `vmdk_tool` is set.
+    pub free_bytes: Option<u64>,
+    /// User snapshot tests (ADR-0032): while set, `internal_snapshot`
+    /// fails without touching the disk.
+    pub snapshot_fail: Arc<std::sync::atomic::AtomicBool>,
+    /// Delay of `internal_snapshot`, polled for cancellation every 10 ms.
+    pub snapshot_delay: std::time::Duration,
+    /// Scripted storage helper (ADR-0030); `None` = not available.
+    pub storage_helper: Option<Arc<FakeStorageHelper>>,
+}
+
+/// Storage helper of the tests: each run returns the next scripted report
+/// and records its job.
+#[derive(Debug, Default)]
+pub struct FakeStorageHelper {
+    /// Reports returned in order (an exhausted list is an error).
+    pub reports: Mutex<VecDeque<Result<qemu_backend::storage_helper::HelperReport, PublicError>>>,
+    /// Jobs received: `(keys, reg)`.
+    pub jobs: Mutex<Vec<(Vec<String>, Option<String>)>>,
+}
+
+/// Fake disk with internal snapshots for the user snapshot tests
+/// (ADR-0032), without `qemu-img`: a minimal QCOW2 v3 image whose snapshot
+/// table and L1 tables are real (the catalog settles snapshot operations by
+/// reading them), the guest content after [`SNAP_DISK_DATA`] and the content
+/// of each snapshot in a sidecar file `<disk>.<tag>`. A guest write
+/// changes the content and points the active L1 table to a new cluster, as
+/// a copy on write would.
+pub mod snapshot_disk {
+    use std::path::{Path, PathBuf};
+
+    use lightvm_proto::PublicError;
+
+    use crate::engine::DiskSnapshotAction;
+
+    /// Offset of the guest content.
+    pub const SNAP_DISK_DATA: usize = 0x60000;
+    const MAGIC: [u8; 4] = [0x51, 0x46, 0x49, 0xfb];
+    const SIZE: u64 = 32 << 30;
+
+    struct Disk {
+        active: u64,
+        snaps: Vec<(String, u64)>,
+        content: Vec<u8>,
+    }
+
+    fn err(what: &str) -> PublicError {
+        PublicError::infrastructure(format!("fake snapshot disk: {what}"))
+    }
+
+    fn be64(b: &[u8], o: usize) -> u64 {
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[o..o + 8]);
+        u64::from_be_bytes(a)
+    }
+
+    fn load(path: &Path) -> Result<Disk, PublicError> {
+        let raw = std::fs::read(path).map_err(|_| err("read"))?;
+        let info = vm_storage::qcow2_read_info(path).map_err(|_| err("not a fake disk"))?;
+        let l1 = |off: u64| be64(&raw, usize::try_from(off).unwrap_or(0));
+        Ok(Disk {
+            active: l1(info.l1_offset),
+            snaps: info
+                .snapshots
+                .iter()
+                .map(|s| (s.name.clone(), l1(s.l1_offset)))
+                .collect(),
+            content: raw.get(SNAP_DISK_DATA..).unwrap_or_default().to_vec(),
+        })
+    }
+
+    fn save(path: &Path, d: &Disk) -> Result<(), PublicError> {
+        let mut img = vec![0u8; SNAP_DISK_DATA];
+        img[0..4].copy_from_slice(&MAGIC);
+        img[4..8].copy_from_slice(&3u32.to_be_bytes());
+        img[20..24].copy_from_slice(&16u32.to_be_bytes());
+        img[24..32].copy_from_slice(&SIZE.to_be_bytes());
+        img[36..40].copy_from_slice(&1u32.to_be_bytes());
+        img[40..48].copy_from_slice(&0x10000u64.to_be_bytes());
+        img[60..64].copy_from_slice(&u32::try_from(d.snaps.len()).unwrap_or(0).to_be_bytes());
+        img[64..72].copy_from_slice(&0x20000u64.to_be_bytes());
+        img[100..104].copy_from_slice(&104u32.to_be_bytes());
+        img[0x10000..0x10008].copy_from_slice(&d.active.to_be_bytes());
+        let mut pos = 0x20000usize;
+        for (k, (name, l1)) in d.snaps.iter().enumerate() {
+            let l1_off = 0x30000 + k * 8;
+            if l1_off + 8 > 0x40000 || pos + 64 + name.len() > 0x30000 {
+                return Err(err("too many snapshots"));
+            }
+            img[l1_off..l1_off + 8].copy_from_slice(&l1.to_be_bytes());
+            let id = format!("{}", k + 1);
+            img[pos..pos + 8].copy_from_slice(&(l1_off as u64).to_be_bytes());
+            img[pos + 8..pos + 12].copy_from_slice(&1u32.to_be_bytes());
+            img[pos + 12..pos + 14].copy_from_slice(&(id.len() as u16).to_be_bytes());
+            img[pos + 14..pos + 16].copy_from_slice(&(name.len() as u16).to_be_bytes());
+            img[pos + 36..pos + 40].copy_from_slice(&16u32.to_be_bytes());
+            img[pos + 48..pos + 56].copy_from_slice(&SIZE.to_be_bytes());
+            let ids = pos + 56;
+            img[ids..ids + id.len()].copy_from_slice(id.as_bytes());
+            let ns = ids + id.len();
+            img[ns..ns + name.len()].copy_from_slice(name.as_bytes());
+            pos = (ns + name.len()).div_ceil(8) * 8;
+        }
+        img.extend_from_slice(&d.content);
+        std::fs::write(path, img).map_err(|_| err("write"))
+    }
+
+    fn sidecar(path: &Path, tag: &str) -> PathBuf {
+        let mut p = path.as_os_str().to_owned();
+        p.push(format!(".{tag}"));
+        PathBuf::from(p)
+    }
+
+    /// New fake disk with `content`.
+    pub fn create(path: &Path, content: &[u8]) -> Result<(), PublicError> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|_| err("directory"))?;
+        }
+        save(
+            path,
+            &Disk {
+                active: 0x10_0000,
+                snaps: Vec::new(),
+                content: content.to_vec(),
+            },
+        )
+    }
+
+    /// Guest content of the disk.
+    pub fn content(path: &Path) -> Result<Vec<u8>, PublicError> {
+        Ok(load(path)?.content)
+    }
+
+    /// The guest writes `content`.
+    pub fn guest_write(path: &Path, content: &[u8]) -> Result<(), PublicError> {
+        let mut d = load(path)?;
+        d.active += 0x10000;
+        d.content = content.to_vec();
+        save(path, &d)
+    }
+
+    /// Names of the internal snapshots.
+    pub fn tags(path: &Path) -> Result<Vec<String>, PublicError> {
+        Ok(load(path)?.snaps.into_iter().map(|(n, _)| n).collect())
+    }
+
+    /// `qemu-img snapshot -c/-a/-d` (and the QMP equivalents).
+    pub fn apply(path: &Path, action: DiskSnapshotAction, tag: &str) -> Result<(), PublicError> {
+        let mut d = load(path)?;
+        let side = sidecar(path, tag);
+        match action {
+            DiskSnapshotAction::Create => {
+                if d.snaps.iter().any(|(n, _)| n == tag) {
+                    return Err(err("duplicate tag"));
+                }
+                std::fs::write(&side, &d.content).map_err(|_| err("sidecar"))?;
+                d.snaps.push((tag.to_owned(), d.active));
+            }
+            DiskSnapshotAction::Apply => {
+                let l1 = d
+                    .snaps
+                    .iter()
+                    .find(|(n, _)| n == tag)
+                    .map(|(_, l)| *l)
+                    .ok_or_else(|| err("snapshot not found"))?;
+                d.content = std::fs::read(&side).map_err(|_| err("sidecar"))?;
+                d.active = l1;
+            }
+            DiskSnapshotAction::Delete => {
+                let before = d.snaps.len();
+                d.snaps.retain(|(n, _)| n != tag);
+                if d.snaps.len() == before {
+                    return Err(err("snapshot not found"));
+                }
+                let _ = std::fs::remove_file(&side);
+            }
+        }
+        save(path, &d)
+    }
 }
 
 /// Minimal QCOW2 v3 header with an optional backing reference (format
@@ -234,6 +453,16 @@ pub fn fake_qcow2(backing: Option<&str>, payload: &[u8]) -> Vec<u8> {
     }
     h.extend_from_slice(payload);
     h
+}
+
+/// `true` for a QCOW2 file written by the real `qemu-img` (a fake image is
+/// a bare 4 KiB header followed by its payload, without a cluster size).
+fn is_real_qcow2(p: &Path) -> bool {
+    use std::io::Read as _;
+    let mut h = [0u8; 24];
+    std::fs::File::open(p)
+        .and_then(|mut f| f.read_exact(&mut h))
+        .is_ok_and(|()| h[..4] == [0x51, 0x46, 0x49, 0xfb] && h[20..24] != [0, 0, 0, 0])
 }
 
 /// Guest-visible content of a fake image (see [`FakeImageTool`]).
@@ -289,17 +518,122 @@ impl ImageTool for FakeImageTool {
         push(&self.calls, "compare");
         Ok(fake_content(a)? == fake_content(b)?)
     }
-    fn check(&self, _p: &Path, _cancel: &dyn Fn() -> bool) -> Result<(), PublicError> {
+    fn check(&self, p: &Path, cancel: &dyn Fn() -> bool) -> Result<(), PublicError> {
         push(&self.calls, "check");
-        Ok(())
+        match &self.vmdk_tool {
+            Some(t) if is_real_qcow2(p) => t.check(p, cancel),
+            _ => Ok(()),
+        }
     }
-    fn virtual_size(&self, _p: &Path) -> Result<u64, PublicError> {
-        Ok(32 << 30)
+    fn virtual_size(&self, p: &Path) -> Result<u64, PublicError> {
+        match &self.vmdk_tool {
+            Some(t) if is_real_qcow2(p) => t.virtual_size(p),
+            _ => Ok(32 << 30),
+        }
+    }
+    fn vmdk_chain_info(
+        &self,
+        top: &Path,
+        cancel: &dyn Fn() -> bool,
+    ) -> Result<String, PublicError> {
+        push(&self.calls, "vmdk_info");
+        match &self.vmdk_tool {
+            Some(t) => t.vmdk_chain_info(top, cancel),
+            None => Err(PublicError::unsupported("no qemu-img in this test")),
+        }
+    }
+    fn convert_vmdk(
+        &self,
+        src: &Path,
+        dst: &Path,
+        cancel: &dyn Fn() -> bool,
+        progress: &mut dyn FnMut(u8),
+    ) -> Result<(), PublicError> {
+        push(&self.calls, "convert_vmdk");
+        let t0 = std::time::Instant::now();
+        while t0.elapsed() < self.vmdk_delay {
+            if cancel() {
+                return Err(PublicError::state_conflict("operation cancelled"));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        match &self.vmdk_tool {
+            Some(t) => t.convert_vmdk(src, dst, cancel, progress),
+            None => Err(PublicError::unsupported("no qemu-img in this test")),
+        }
+    }
+    fn free_bytes(&self, dir: &Path) -> Option<u64> {
+        self.free_bytes
+            .or_else(|| self.vmdk_tool.as_ref().and_then(|t| t.free_bytes(dir)))
+    }
+    fn storage_helper_available(&self) -> bool {
+        self.storage_helper.is_some()
+    }
+    fn run_storage_helper(
+        &self,
+        _disk: &Path,
+        keys: &[String],
+        reg: Option<&str>,
+        cancel: &dyn Fn() -> bool,
+    ) -> Result<qemu_backend::storage_helper::HelperReport, PublicError> {
+        push(&self.calls, "storage_helper");
+        let Some(h) = &self.storage_helper else {
+            return Err(PublicError::unsupported("storage helper not available"));
+        };
+        if cancel() {
+            return Err(PublicError::state_conflict("operation cancelled"));
+        }
+        if let Ok(mut j) = h.jobs.lock() {
+            j.push((keys.to_vec(), reg.map(str::to_owned)));
+        }
+        h.reports
+            .lock()
+            .ok()
+            .and_then(|mut r| r.pop_front())
+            .unwrap_or_else(|| Err(PublicError::infrastructure("no scripted helper report")))
     }
     fn create_overlay(&self, backing_ref: &str, _size: u64, dst: &Path) -> Result<(), PublicError> {
         push(&self.calls, "create_overlay");
         std::fs::write(dst, fake_qcow2(Some(backing_ref), b""))
             .map_err(|_| PublicError::infrastructure("fake overlay"))
+    }
+    fn internal_snapshot(
+        &self,
+        disk: &Path,
+        action: crate::engine::DiskSnapshotAction,
+        tag: &str,
+        cancel: &dyn Fn() -> bool,
+    ) -> Result<(), PublicError> {
+        push(&self.calls, format!("snapshot_{action:?}").to_lowercase());
+        let t0 = std::time::Instant::now();
+        while t0.elapsed() < self.snapshot_delay {
+            if cancel() {
+                return Err(PublicError::state_conflict("operation cancelled"));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        if cancel() {
+            return Err(PublicError::state_conflict("operation cancelled"));
+        }
+        if self.snapshot_fail.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(PublicError::infrastructure("qemu-img snapshot failed"));
+        }
+        snapshot_disk::apply(disk, action, tag)
+    }
+    fn convert_snapshot(
+        &self,
+        src: &Path,
+        tag: &str,
+        dst: &Path,
+        _cancel: &dyn Fn() -> bool,
+    ) -> Result<(), PublicError> {
+        push(&self.calls, "convert_snapshot");
+        let mut side = src.as_os_str().to_owned();
+        side.push(format!(".{tag}"));
+        let content = std::fs::read(PathBuf::from(side))
+            .map_err(|_| PublicError::infrastructure("fake snapshot content"))?;
+        std::fs::write(dst, fake_qcow2(None, &content))
+            .map_err(|_| PublicError::infrastructure("fake convert"))
     }
 }
 
@@ -359,9 +693,12 @@ fn fake_entry(
             size_bytes: size,
             declared_origin,
             approved_at: UtcTimestamp::now(),
+            detected_guest: None,
+            location: Some(source.to_string_lossy().into_owned()),
+            missing: false,
         },
-        managed_path: ManagedRelPath::parse(format!("media/{id}.iso"))
-            .map_err(|_| PublicError::infrastructure("path"))?,
+        // ADR-0029: the file is used where it is.
+        location: MediaLocation::Referenced(source.to_path_buf()),
         file_identity: None,
     })
 }
@@ -515,7 +852,25 @@ pub struct FakeVmBackend {
     /// Delay of every input forwarding (stop-latency measurements: a slow
     /// backend keeps the supervisor busy).
     pub input_delay: Option<std::time::Duration>,
+    /// Guests stopped on a vCPU error, injected by the test; cleared by a
+    /// reset, as the QEMU backend does.
+    pub vcpu_halts: Arc<Mutex<BTreeMap<VmId, lightvm_proto::ipc::VcpuHalt>>>,
+    /// Automatic resets to report, injected by the test.
+    pub auto_resets: Arc<Mutex<Vec<crate::engine::AutoReset>>>,
+    /// Catalog root for snapshots of running VMs (ADR-0032): the "QMP"
+    /// internal snapshot is applied to the fake disk
+    /// `vms/<vm_id>/primary.qcow2` ([`snapshot_disk`]); `None` = unsupported.
+    pub snapshot_root: Option<PathBuf>,
+    /// ADR-0033: allowed endpoints applied per VM on the endpoint allowlist
+    /// (run, last set; `None` = not applied yet).
+    pub net_allowed: NetAllowed,
+    /// ADR-0033: network records to report, injected by the test.
+    pub net_records: Arc<Mutex<Vec<crate::engine::NetworkRecord>>>,
 }
+
+/// Allowed endpoints applied per VM by [`FakeVmBackend`].
+pub type NetAllowed =
+    Arc<Mutex<BTreeMap<VmId, (RunId, Option<std::collections::BTreeSet<String>>)>>>;
 
 /// Outcomes of background graceful stops injected by a test.
 pub type StopResults = Arc<Mutex<Vec<(VmId, Result<(), PublicError>)>>>;
@@ -527,19 +882,39 @@ impl VmBackend for FakeVmBackend {
         run_id: RunId,
         media: &[VerifiedMedia],
     ) -> Result<(), PublicError> {
-        let overlay = self
+        let disks = self
             .start_disks
             .get(&vm.id)
-            .is_some_and(|(r, _)| *r == run_id);
+            .filter(|(r, _)| *r == run_id)
+            .map(|(_, d)| d);
+        // A current state without UEFI variables (legacy BIOS VM, ADR-0027).
+        let no_vars = disks.is_some_and(|d| d.vars.is_none());
         push(
             &self.calls,
             format!(
-                "vm_start:{}:media={}{}",
+                "vm_start:{}:media={}{}{}",
                 vm.config.name,
                 media.len(),
-                if overlay { ":overlay" } else { "" }
+                if no_vars { ":no_vars" } else { "" },
+                if disks.is_some() { ":overlay" } else { "" }
             ),
         );
+        // Logged only for a run with a network adapter: the call logs of
+        // the other tests stay as they were.
+        if vm.config.network != NetworkProfile::Offline {
+            push(
+                &self.calls,
+                format!("vm_network:{:?}", vm.config.network).to_lowercase(),
+            );
+        }
+        if vm.config.network == NetworkProfile::Endpoints {
+            self.net_allowed
+                .lock()
+                .unwrap()
+                .insert(vm.id, (run_id, None));
+        } else {
+            self.net_allowed.lock().unwrap().remove(&vm.id);
+        }
         Ok(())
     }
     fn shutdown(&mut self, vm_id: VmId, run_id: RunId) -> Result<(), PublicError> {
@@ -558,8 +933,9 @@ impl VmBackend for FakeVmBackend {
         lock(&self.emergency_killed).remove(&vm_id);
         Ok(())
     }
-    fn reset(&mut self, _vm_id: VmId, _run_id: RunId) -> Result<(), PublicError> {
+    fn reset(&mut self, vm_id: VmId, _run_id: RunId) -> Result<(), PublicError> {
         push(&self.calls, "vm_reset");
+        lock(&self.vcpu_halts).remove(&vm_id);
         Ok(())
     }
     fn screenshot(
@@ -614,8 +990,38 @@ impl VmBackend for FakeVmBackend {
 }
 
 impl BackendPort for FakeVmBackend {
+    /// The fake runs every guest, whatever the host (service tests create
+    /// x86 VMs on Apple Silicon too).
+    fn guest_support(&self) -> vm_core::resources::GuestSupport {
+        vm_core::resources::any_guest
+    }
     fn image_tool(&self) -> Option<Arc<dyn ImageTool>> {
         self.image_tool.clone().map(|t| t as Arc<dyn ImageTool>)
+    }
+    fn set_network_allowed(
+        &mut self,
+        vm_id: VmId,
+        run_id: RunId,
+        allowed: &std::collections::BTreeSet<String>,
+    ) -> bool {
+        let mut m = self.net_allowed.lock().unwrap();
+        match m.get_mut(&vm_id) {
+            Some((run, last)) if *run == run_id && last.as_ref() != Some(allowed) => {
+                *last = Some(allowed.clone());
+                push(
+                    &self.calls,
+                    format!(
+                        "net_allowed:{}",
+                        allowed.iter().cloned().collect::<Vec<_>>().join(",")
+                    ),
+                );
+                true
+            }
+            _ => false,
+        }
+    }
+    fn take_network_records(&mut self) -> Vec<crate::engine::NetworkRecord> {
+        std::mem::take(&mut *self.net_records.lock().unwrap())
     }
     fn set_start_disks(&mut self, vm_id: VmId, run_id: RunId, disks: StartDisks) {
         push(&self.calls, "vm_start_disks");
@@ -627,6 +1033,12 @@ impl BackendPort for FakeVmBackend {
     }
     fn take_exits(&mut self) -> Vec<(VmId, RunId, bool)> {
         std::mem::take(&mut self.exits)
+    }
+    fn vcpu_halt(&self, vm_id: VmId, _run_id: RunId) -> Option<lightvm_proto::ipc::VcpuHalt> {
+        lock(&self.vcpu_halts).get(&vm_id).copied()
+    }
+    fn take_auto_resets(&mut self) -> Vec<crate::engine::AutoReset> {
+        std::mem::take(&mut *lock(&self.auto_resets))
     }
     fn drain_observations(&mut self) -> Vec<(VmId, BackendObservation)> {
         if let Some(g) = &self.gate {
@@ -655,6 +1067,39 @@ impl BackendPort for FakeVmBackend {
             "C:\\lightvm\\qemu\\qemu-system-x86_64.exe: fake run {run_id} started\n\
              qemu-system-x86_64.exe: warning: C:\\Users\\someone\\catalog\\vms\\disk.qcow2 opened\n"
         ))
+    }
+    fn snapshot_disk(&mut self, vm_id: VmId, _run_id: RunId, tag: &str) -> Result<(), PublicError> {
+        push(&self.calls, "vm_snapshot_disk");
+        let root = self
+            .snapshot_root
+            .clone()
+            .ok_or_else(|| PublicError::unsupported("no snapshots in this fake"))?;
+        let disk = root
+            .join("vms")
+            .join(vm_id.to_string())
+            .join("primary.qcow2");
+        snapshot_disk::apply(&disk, crate::engine::DiskSnapshotAction::Create, tag)
+    }
+    fn delete_disk_snapshot(
+        &mut self,
+        vm_id: VmId,
+        _run_id: RunId,
+        tag: &str,
+    ) -> Result<(), PublicError> {
+        push(&self.calls, "vm_delete_disk_snapshot");
+        let root = self
+            .snapshot_root
+            .clone()
+            .ok_or_else(|| PublicError::unsupported("no snapshots in this fake"))?;
+        let disk = root
+            .join("vms")
+            .join(vm_id.to_string())
+            .join("primary.qcow2");
+        snapshot_disk::apply(&disk, crate::engine::DiskSnapshotAction::Delete, tag)
+    }
+    fn snapshot_thumbnail(&mut self, _vm_id: VmId, _run_id: RunId) -> Option<Vec<u8>> {
+        push(&self.calls, "vm_snapshot_thumbnail");
+        Some(b"\x89PNG fake thumbnail".to_vec())
     }
     fn take_screenshot(&mut self, vm_id: VmId, run_id: RunId) -> Option<(Screenshot, Vec<u8>)> {
         let (meta, png) = self.last_shots.remove(&vm_id)?;

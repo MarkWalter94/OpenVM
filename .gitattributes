@@ -1,3 +1,10 @@
 *.sh text eol=lf
 # Migration SQL is hashed into existing catalogs: always LF.
 *.sql text eol=lf
+# edk2 sources use CRLF: patches against them must keep it byte for byte.
+packaging/firmware/**/*.patch -text
+# Storage helper init runs in Linux: LF only.
+packaging/storage-helper/init text eol=lf
+packaging/storage-helper/*.py text eol=lf
+# QEMU sources use LF: patches against them must keep it.
+packaging/qemu-win11/*.patch text eol=lf

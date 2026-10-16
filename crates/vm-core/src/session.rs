@@ -89,6 +89,7 @@ impl Session {
 /// Session creation request, approved by the user in the app.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionSpec {
+    pub tools: lightvm_proto::ToolGrant,
     /// Allowed VMs.
     pub vm_allowlist: std::collections::BTreeSet<VmId>,
     /// Granted capabilities.
@@ -99,6 +100,9 @@ pub struct SessionSpec {
     pub expires_at: UtcTimestamp,
     /// Lease duration in ms (1..=10000).
     pub lease_millis: i64,
+    /// Network endpoints granted with `network.endpoints` (names of the
+    /// VM's endpoints; empty without the capability). ADR-0033.
+    pub network_endpoints: std::collections::BTreeSet<String>,
 }
 
 /// Session registry.

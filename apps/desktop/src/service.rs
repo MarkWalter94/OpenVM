@@ -33,19 +33,21 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use lightvm_proto::DisplayAdapter;
 use lightvm_proto::ipc::{
     BaselineSummary, ConsoleTicket, InputOwner, ParentLossPolicy, Request, ResponseBody,
     ServerMessage, ServiceEvent, SessionApproval, SessionInfo, SessionRequestId,
-    SessionRequestInfo, SessionRequestOutcome, VmSummary,
+    SessionRequestInfo, SessionRequestOutcome, SnapshotTree, VmSummary, VmwareImportPhase,
+    VmwareImportPreview,
 };
 use lightvm_proto::report::{
     ReportEvent, ReportFormat, SessionReport, SessionReportSummary, SessionVerifier,
 };
 use lightvm_proto::{
-    BaselineId, ErrorCode, HostCapacity, InputBatch, InputEvent, KeyAction, Label, MediaKind,
-    MediaRecord, MouseButton, OperationId, OperationStatus, PointerButton, ReplyError, RunId,
-    SessionId, SessionState, Sha256Digest, TerminationCause, TestOutcome, UtcTimestamp, VmAction,
-    VmConfig, VmId, VmRequest,
+    BaselineId, ErrorCode, HostCapacity, InputBatch, InputEvent, KeyAction, Label, MediaId,
+    MediaKind, MediaRecord, MouseButton, OperationId, OperationStatus, PointerButton, ReplyError,
+    RunId, SessionId, SessionState, Sha256Digest, SnapshotId, TerminationCause, TestOutcome,
+    UtcTimestamp, VmAction, VmConfig, VmId, VmName, VmRecord, VmRequest,
 };
 use lightvm_service::client::Client;
 use lightvm_service::credential::Credential;
@@ -171,6 +173,15 @@ impl Failure {
         self
     }
 
+    /// The supervisor refused a start because this host lacks the capability
+    /// of starting VMs (`unsupported` with capability `vm.start`): what
+    /// happens when it runs without a QEMU distribution.
+    pub fn start_unavailable(&self) -> bool {
+        self.unsupported
+            && self.details.get("capability").map(String::as_str)
+                == Some(lightvm_proto::Capability::VmStart.as_str())
+    }
+
     /// Value of the `reason` detail, if any.
     pub fn reason(&self) -> Option<&str> {
         self.details.get("reason").map(String::as_str)
@@ -271,6 +282,42 @@ pub struct BaselineRequest {
     pub op: BaselineOp,
     /// Outcome.
     pub status: RequestStatus<BaselineId>,
+}
+
+/// Snapshots of a VM known to the UI (ADR-0032).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SnapshotList {
+    /// The tree was received at least once.
+    pub loaded: bool,
+    /// The tree, as last read.
+    pub tree: Option<SnapshotTree>,
+    /// Last read error, if any.
+    pub error: Option<Failure>,
+}
+
+/// Snapshot operation requested by the UI (ADR-0032).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SnapshotOp {
+    /// New snapshot (name and description in the request).
+    Take,
+    /// Revert to a snapshot (VM off).
+    Revert(SnapshotId),
+    /// Deletion of a snapshot.
+    Delete(SnapshotId),
+    /// New name and description of a snapshot.
+    Rename(SnapshotId),
+}
+
+/// Last snapshot operation requested by the UI and its outcome (on
+/// success, the snapshot concerned).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SnapshotRequest {
+    /// VM.
+    pub vm_id: VmId,
+    /// Operation.
+    pub op: SnapshotOp,
+    /// Outcome.
+    pub status: RequestStatus<SnapshotId>,
 }
 
 /// Control of the agent sessions requested by the UI (F4).
@@ -694,6 +741,8 @@ pub fn termination_text(c: TerminationCause) -> &'static str {
 /// State seen by the UI, updated by the IPC threads.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ServiceState {
+    /// Last explicit guest Tools operation (payload Debug is redacted).
+    pub tools: Option<(VmId, RunId, RequestStatus<lightvm_proto::ToolReply>)>,
     /// Connection state, readable.
     pub connection: String,
     /// Connection established and handshake succeeded.
@@ -708,12 +757,19 @@ pub struct ServiceState {
     pub vms: Vec<VmSummary>,
     /// Outcome of the last requested action, readable.
     pub last_outcome: Option<String>,
+    /// Text put in [`Self::last_outcome`] by the last start refused because
+    /// the host cannot start VMs ([`Failure::start_unavailable`]): while the
+    /// two are equal, the Dashboard can name the cause when the supervisor
+    /// has no QEMU.
+    pub start_unavailable_outcome: Option<String>,
     /// UI loss policy reported by the service.
     pub policy: Option<ParentLossPolicy>,
     /// Approved media of the registry.
     pub media: MediaState,
     /// Last ISO import.
     pub import: RequestStatus<MediaRecord>,
+    /// Last media deletion.
+    pub delete_media: RequestStatus<MediaId>,
     /// Last VM creation.
     pub create: RequestStatus<VmId>,
     /// Last VM deletion.
@@ -726,10 +782,32 @@ pub struct ServiceState {
     pub baselines: BTreeMap<VmId, BaselineList>,
     /// Last baseline operation (creation, restore, deletion).
     pub baseline: Option<BaselineRequest>,
+    /// Snapshots per VM, as last read (ADR-0032).
+    pub snapshots: BTreeMap<VmId, SnapshotList>,
+    /// Last snapshot operation (take, revert, delete, rename).
+    pub snapshot: Option<SnapshotRequest>,
     /// Agent access and sessions (F4).
     pub agents: AgentState,
     /// Session reports (F5).
     pub reports: ReportsState,
+    /// Import of a VMware VM (ADR-0030).
+    pub vmware: VmwareImportState,
+}
+
+/// Import of a VMware VM as seen by the UI (ADR-0030).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct VmwareImportState {
+    /// `.vmx` the last preview was asked for.
+    pub preview_path: Option<PathBuf>,
+    /// Last preview.
+    pub preview: RequestStatus<Box<VmwareImportPreview>>,
+    /// Last import (reply after the conversion).
+    pub import: RequestStatus<VmRecord>,
+    /// Last progress event of the import in progress (cleared at every new
+    /// import and when it ends).
+    pub progress: Option<(VmwareImportPhase, u8)>,
+    /// Last cancellation request: `true` if an import was being cancelled.
+    pub cancel: RequestStatus<bool>,
 }
 
 impl ServiceState {
@@ -747,6 +825,12 @@ impl ServiceState {
 /// Actions requested by the UI from the service.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ServiceCommand {
+    /// A bounded Tools operation for the current VM run.
+    GuestTools {
+        vm_id: VmId,
+        run_id: RunId,
+        call: lightvm_proto::ToolCall,
+    },
     /// Re-reads the VM list and the capabilities.
     Refresh,
     /// Creates a VM in the service's catalog (wizard).
@@ -807,6 +891,8 @@ pub enum ServiceCommand {
         /// Origin declared to the registry (text, never interpreted).
         origin: String,
     },
+    /// Deletes an imported medium no VM uses (asks for confirmation first).
+    DeleteMedia(MediaId),
     /// Requests a per-run console ticket.
     OpenConsole(VmId),
     /// Keyboard and mouse towards the guest.
@@ -837,6 +923,42 @@ pub enum ServiceCommand {
         vm_id: VmId,
         /// Baseline.
         baseline_id: BaselineId,
+    },
+    /// Re-reads the snapshots of a VM (ADR-0032).
+    ListSnapshots(VmId),
+    /// Takes a snapshot of a VM, off or running (long: storage lane).
+    TakeSnapshot {
+        /// VM.
+        vm_id: VmId,
+        /// Name given by the user.
+        name: Label,
+        /// Description given by the user.
+        description: String,
+    },
+    /// Reverts a VM to a snapshot (VM off; long: storage lane).
+    RevertSnapshot {
+        /// VM.
+        vm_id: VmId,
+        /// Snapshot.
+        snapshot_id: SnapshotId,
+    },
+    /// Deletes a snapshot (VM off or running; long: storage lane).
+    DeleteSnapshot {
+        /// VM.
+        vm_id: VmId,
+        /// Snapshot.
+        snapshot_id: SnapshotId,
+    },
+    /// New name and description of a snapshot.
+    RenameSnapshot {
+        /// VM.
+        vm_id: VmId,
+        /// Snapshot.
+        snapshot_id: SnapshotId,
+        /// New name.
+        name: Label,
+        /// New description.
+        description: String,
     },
     /// Re-reads the agent access switch (F4).
     GetAgentAccess,
@@ -924,6 +1046,21 @@ pub enum ServiceCommand {
     },
     /// Deletes the report and the screenshots of a terminated session.
     DeleteSessionReport(SessionId),
+    /// Examines the `.vmx` chosen by the user with the native file picker
+    /// (ADR-0030): what would be imported, what not, warnings.
+    PreviewVmwareImport(PathBuf),
+    /// Imports the VMware VM by conversion (long: the reply arrives when the
+    /// converted disk and the VM exist).
+    ImportVmware {
+        /// `.vmx` chosen in the picker.
+        path: PathBuf,
+        /// Name of the new VM.
+        name: VmName,
+        /// Display adapter.
+        display: DisplayAdapter,
+    },
+    /// Cancels the VMware import in progress.
+    CancelVmwareImport,
 }
 
 impl ServiceCommand {
@@ -975,6 +1112,23 @@ impl ServiceCommand {
             }
             _ => None,
         }
+    }
+
+    /// Snapshot operation of the command, if it is one (list excluded).
+    pub fn snapshot_op(&self) -> Option<(VmId, SnapshotOp)> {
+        Some(match self {
+            Self::TakeSnapshot { vm_id, .. } => (*vm_id, SnapshotOp::Take),
+            Self::RevertSnapshot { vm_id, snapshot_id } => {
+                (*vm_id, SnapshotOp::Revert(*snapshot_id))
+            }
+            Self::DeleteSnapshot { vm_id, snapshot_id } => {
+                (*vm_id, SnapshotOp::Delete(*snapshot_id))
+            }
+            Self::RenameSnapshot {
+                vm_id, snapshot_id, ..
+            } => (*vm_id, SnapshotOp::Rename(*snapshot_id)),
+            _ => return None,
+        })
     }
 }
 
@@ -1324,8 +1478,12 @@ pub fn mark_pending(
     c: &ServiceCommand,
 ) {
     match c {
+        ServiceCommand::GuestTools { vm_id, run_id, .. } => {
+            s.tools = Some((*vm_id, *run_id, RequestStatus::Pending))
+        }
         ServiceCommand::Create(_) => s.create = RequestStatus::Pending,
         ServiceCommand::ImportMedia { .. } => s.import = RequestStatus::Pending,
+        ServiceCommand::DeleteMedia(_) => s.delete_media = RequestStatus::Pending,
         ServiceCommand::Delete { .. } => s.delete = RequestStatus::Pending,
         ServiceCommand::OpenConsole(vm_id) => {
             *lock(ticket) = None;
@@ -1345,6 +1503,16 @@ pub fn mark_pending(
             s.reports
                 .set_shot(*session_id, *shot, RequestStatus::Pending);
         }
+        ServiceCommand::PreviewVmwareImport(path) => {
+            s.vmware.preview_path = Some(path.clone());
+            s.vmware.preview = RequestStatus::Pending;
+        }
+        ServiceCommand::ImportVmware { .. } => {
+            s.vmware.import = RequestStatus::Pending;
+            s.vmware.progress = None;
+            s.vmware.cancel = RequestStatus::Idle;
+        }
+        ServiceCommand::CancelVmwareImport => s.vmware.cancel = RequestStatus::Pending,
         c => {
             if let Some(op) = c.report_op() {
                 s.reports.action = Some(ReportControl {
@@ -1353,6 +1521,12 @@ pub fn mark_pending(
                 });
             } else if let Some((vm_id, op)) = c.baseline_op() {
                 s.baseline = Some(BaselineRequest {
+                    vm_id,
+                    op,
+                    status: RequestStatus::Pending,
+                });
+            } else if let Some((vm_id, op)) = c.snapshot_op() {
+                s.snapshot = Some(SnapshotRequest {
                     vm_id,
                     op,
                     status: RequestStatus::Pending,
@@ -1376,12 +1550,16 @@ fn fail_pending(s: &mut ServiceState, why: &str) {
         }
     }
     fail(&mut s.import, why);
+    fail(&mut s.delete_media, why);
     fail(&mut s.create, why);
     fail(&mut s.delete, why);
     if let Some(r) = &mut s.console {
         fail(&mut r.status, why);
     }
     if let Some(r) = &mut s.baseline {
+        fail(&mut r.status, why);
+    }
+    if let Some(r) = &mut s.snapshot {
         fail(&mut r.status, why);
     }
     if let Some(r) = &mut s.agents.approval {
@@ -1391,6 +1569,10 @@ fn fail_pending(s: &mut ServiceState, why: &str) {
         fail(&mut r.status, why);
     }
     fail(&mut s.agents.pairing, why);
+    fail(&mut s.vmware.preview, why);
+    fail(&mut s.vmware.import, why);
+    fail(&mut s.vmware.cancel, why);
+    s.vmware.progress = None;
     for (_, r) in &mut s.reports.shots {
         fail(r, why);
     }
@@ -1402,8 +1584,12 @@ fn fail_pending(s: &mut ServiceState, why: &str) {
 
 fn mark_failed(s: &mut ServiceState, c: &ServiceCommand, f: Failure) {
     match c {
+        ServiceCommand::GuestTools { vm_id, run_id, .. } => {
+            s.tools = Some((*vm_id, *run_id, RequestStatus::Failed(f)))
+        }
         ServiceCommand::Create(_) => s.create = RequestStatus::Failed(f),
         ServiceCommand::ImportMedia { .. } => s.import = RequestStatus::Failed(f),
+        ServiceCommand::DeleteMedia(_) => s.delete_media = RequestStatus::Failed(f),
         ServiceCommand::Delete { .. } => s.delete = RequestStatus::Failed(f),
         ServiceCommand::OpenConsole(vm_id) => {
             s.console = Some(ConsoleRequest {
@@ -1415,6 +1601,9 @@ fn mark_failed(s: &mut ServiceState, c: &ServiceCommand, f: Failure) {
         ServiceCommand::ListBaselines(vm_id) => {
             s.baselines.entry(*vm_id).or_default().error = Some(f);
         }
+        ServiceCommand::ListSnapshots(vm_id) => {
+            s.snapshots.entry(*vm_id).or_default().error = Some(f);
+        }
         ServiceCommand::GetAgentAccess
         | ServiceCommand::ListSessionRequests
         | ServiceCommand::ListSessions => s.agents.error = Some(f),
@@ -1425,6 +1614,12 @@ fn mark_failed(s: &mut ServiceState, c: &ServiceCommand, f: Failure) {
             });
         }
         ServiceCommand::CreatePairing => s.agents.pairing = RequestStatus::Failed(f),
+        ServiceCommand::PreviewVmwareImport(_) => s.vmware.preview = RequestStatus::Failed(f),
+        ServiceCommand::ImportVmware { .. } => {
+            s.vmware.import = RequestStatus::Failed(f);
+            s.vmware.progress = None;
+        }
+        ServiceCommand::CancelVmwareImport => s.vmware.cancel = RequestStatus::Failed(f),
         ServiceCommand::ListSessionReports => s.reports.error = Some(f),
         ServiceCommand::GetSessionReport(id) => {
             if f.code == Some(ErrorCode::NotFound) {
@@ -1460,6 +1655,15 @@ fn mark_failed(s: &mut ServiceState, c: &ServiceCommand, f: Failure) {
                 });
             }
         }
+        c if c.snapshot_op().is_some() => {
+            if let Some((vm_id, op)) = c.snapshot_op() {
+                s.snapshot = Some(SnapshotRequest {
+                    vm_id,
+                    op,
+                    status: RequestStatus::Failed(f),
+                });
+            }
+        }
         c => match c.baseline_op() {
             Some((vm_id, op)) => {
                 s.baseline = Some(BaselineRequest {
@@ -1468,7 +1672,14 @@ fn mark_failed(s: &mut ServiceState, c: &ServiceCommand, f: Failure) {
                     status: RequestStatus::Failed(f),
                 });
             }
-            None => s.last_outcome = Some(f.message),
+            None => {
+                if matches!(c, ServiceCommand::Start(_) | ServiceCommand::OpenVm { .. })
+                    && f.start_unavailable()
+                {
+                    s.start_unavailable_outcome = Some(f.message.clone());
+                }
+                s.last_outcome = Some(f.message);
+            }
         },
     }
 }
@@ -1667,6 +1878,22 @@ async fn ipc_loop(
                     ev_lanes.queue(ServiceCommand::Refresh);
                     ev_lanes.queue(ServiceCommand::ListBaselines(vm_id));
                 }
+                Ok(Ok(ServiceEvent::SnapshotsChanged { vm_id })) => {
+                    // Snapshot taken, reverted to, renamed or deleted: the
+                    // VM summary (operation, count, "you are here") and the
+                    // tree are re-read.
+                    ev_lanes.queue(ServiceCommand::Refresh);
+                    ev_lanes.queue(ServiceCommand::ListSnapshots(vm_id));
+                }
+                Ok(Ok(ServiceEvent::VmwareImportProgress { phase, percent })) => {
+                    ev_lanes.update(|s| {
+                        // Only while this UI waits for an import: a late
+                        // event after the reply is not shown.
+                        if s.vmware.import.is_pending() {
+                            s.vmware.progress = Some((phase, percent.min(100)));
+                        }
+                    });
+                }
                 Ok(Ok(ev)) => agent_event(&ev_lanes, ev),
                 Ok(Err(m)) => {
                     let d = describe_error(&m);
@@ -1705,13 +1932,27 @@ async fn ipc_loop(
                 | ServiceCommand::ResumeSession(_)
                 | ServiceCommand::RevokeSession(_)
                 | ServiceCommand::SetInputOwner { .. }
-                | ServiceCommand::SetAgentAccess(_) => fast_in.push(c),
-                // Imports and exports copy files (an export can write
-                // hundreds of MiB of screenshots).
-                ServiceCommand::ImportMedia { .. } | ServiceCommand::ExportSessionReport { .. } => {
+                | ServiceCommand::SetAgentAccess(_)
+                // The cancellation of a VMware import never waits behind it.
+                | ServiceCommand::CancelVmwareImport => fast_in.push(c),
+                // Imports read whole ISOs (hash), exports copy files (an export can write
+                // hundreds of MiB of screenshots); a VMware preview reads the
+                // VM's files and runs `qemu-img info`.
+                ServiceCommand::ImportMedia { .. }
+                | ServiceCommand::ExportSessionReport { .. }
+                | ServiceCommand::PreviewVmwareImport(_) => {
                     let _ = slow_tx.send(c);
                 }
-                ServiceCommand::CreateBaseline { .. } | ServiceCommand::RestoreBaseline { .. } => {
+                // A VMware import converts a whole disk: like a baseline,
+                // the reply arrives when it ends, without timeout. A
+                // snapshot operation (take, revert, delete) is the same:
+                // a disk operation the supervisor settles before replying.
+                ServiceCommand::CreateBaseline { .. }
+                | ServiceCommand::RestoreBaseline { .. }
+                | ServiceCommand::TakeSnapshot { .. }
+                | ServiceCommand::RevertSnapshot { .. }
+                | ServiceCommand::DeleteSnapshot { .. }
+                | ServiceCommand::ImportVmware { .. } => {
                     let _ = storage_tx.send(c);
                 }
                 ServiceCommand::Start(_) | ServiceCommand::OpenVm { .. } => {
@@ -1976,6 +2217,32 @@ fn context(what: &str, f: Failure) -> Failure {
 async fn execute(c: &mut Client, lanes: &Lanes, command: ServiceCommand) -> Result<(), Failure> {
     let state = &*lanes.state;
     match command {
+        ServiceCommand::GuestTools {
+            vm_id,
+            run_id,
+            call,
+        } => {
+            match request(
+                c,
+                Request::GuestTools {
+                    vm_id,
+                    run_id,
+                    call,
+                },
+            )
+            .await?
+            {
+                ServerMessage::Response {
+                    result: ResponseBody::GuestTools { reply },
+                    ..
+                } => {
+                    lanes.update(|s| s.tools = Some((vm_id, run_id, RequestStatus::Done(reply))));
+                    Ok(())
+                }
+                m => Err(context("guest Tools", failure(&m))),
+            }
+        }
+
         ServiceCommand::Refresh => {
             let caps = request(c, Request::GetCapabilities).await?;
             if let ServerMessage::Response {
@@ -1994,25 +2261,38 @@ async fn execute(c: &mut Client, lanes: &Lanes, command: ServiceCommand) -> Resu
                     result: ResponseBody::VmList { vms },
                     ..
                 } => {
-                    // Baselines not read yet, or changed since: re-read, so
-                    // the Dashboard can name the baseline a VM is on.
-                    let stale: Vec<VmId> = {
+                    // Baselines and snapshots not read yet, or changed
+                    // since: re-read, so the Dashboard can name the
+                    // baseline a VM is on and the snapshots it has.
+                    let stale = {
                         let mut s = lock(state);
                         s.vms = vms;
-                        s.vms
-                            .iter()
-                            .filter(|v| {
-                                let count = v.baselines.count as usize;
-                                (count > 0 || v.baselines.current.is_some())
-                                    && s.baselines
-                                        .get(&v.vm_id)
-                                        .is_none_or(|l| !l.loaded || l.items.len() != count)
-                            })
-                            .map(|v| v.vm_id)
-                            .collect()
+                        let mut stale = Vec::new();
+                        for v in s.vms.iter() {
+                            let count = v.baselines.count as usize;
+                            if (count > 0 || v.baselines.current.is_some())
+                                && s.baselines
+                                    .get(&v.vm_id)
+                                    .is_none_or(|l| !l.loaded || l.items.len() != count)
+                            {
+                                stale.push(Some(ServiceCommand::ListBaselines(v.vm_id)));
+                            }
+                            let count = v.snapshots.count as usize;
+                            if (count > 0 || v.snapshots.current.is_some())
+                                && s.snapshots.get(&v.vm_id).is_none_or(|l| {
+                                    !l.loaded
+                                        || l.tree
+                                            .as_ref()
+                                            .is_none_or(|t| t.snapshots.len() != count)
+                                })
+                            {
+                                stale.push(Some(ServiceCommand::ListSnapshots(v.vm_id)));
+                            }
+                        }
+                        stale
                     };
-                    for vm_id in stale {
-                        lanes.queue(ServiceCommand::ListBaselines(vm_id));
+                    for c in stale.into_iter().flatten() {
+                        lanes.queue(c);
                     }
                     Ok(())
                 }
@@ -2060,6 +2340,24 @@ async fn execute(c: &mut Client, lanes: &Lanes, command: ServiceCommand) -> Resu
                     Ok(())
                 }
                 m => Err(context("import", failure(&m))),
+            }
+        }
+        ServiceCommand::DeleteMedia(media_id) => {
+            match request(c, Request::DeleteMedia { media_id }).await? {
+                ServerMessage::Response {
+                    result: ResponseBody::MediaDeleted { media_id },
+                    ..
+                } => {
+                    {
+                        let mut s = lock(state);
+                        s.media.records.retain(|m| m.id != media_id);
+                        s.delete_media = RequestStatus::Done(media_id);
+                        s.last_outcome = Some("medium deleted".into());
+                    }
+                    lanes.queue(ServiceCommand::ListMedia);
+                    Ok(())
+                }
+                m => Err(context("media deletion", failure(&m))),
             }
         }
         ServiceCommand::Create(config) => {
@@ -2347,6 +2645,147 @@ async fn execute(c: &mut Client, lanes: &Lanes, command: ServiceCommand) -> Resu
                     Ok(())
                 }
                 m => Err(context("baseline deletion", failure(&m))),
+            }
+        }
+        ServiceCommand::ListSnapshots(vm_id) => {
+            match request(c, Request::ListSnapshots { vm_id }).await? {
+                ServerMessage::Response {
+                    result: ResponseBody::Snapshots { tree, .. },
+                    ..
+                } => {
+                    lock(state).snapshots.insert(
+                        vm_id,
+                        SnapshotList {
+                            loaded: true,
+                            tree: Some(tree),
+                            error: None,
+                        },
+                    );
+                    Ok(())
+                }
+                m => Err(context("snapshots", failure(&m))),
+            }
+        }
+        ServiceCommand::TakeSnapshot {
+            vm_id,
+            name,
+            description,
+        } => {
+            let body = Request::TakeSnapshot {
+                vm_id,
+                name,
+                description,
+            };
+            match request(c, body).await? {
+                ServerMessage::Response {
+                    result: ResponseBody::Snapshot { snapshot },
+                    ..
+                } => {
+                    snapshot_done(
+                        lanes,
+                        vm_id,
+                        SnapshotOp::Take,
+                        snapshot.snapshot_id,
+                        format!("snapshot taken: {}", snapshot.name.as_str()),
+                    );
+                    Ok(())
+                }
+                m => Err(context("snapshot", failure(&m))),
+            }
+        }
+        ServiceCommand::RevertSnapshot { vm_id, snapshot_id } => {
+            let label = snapshot_label(state, vm_id, snapshot_id);
+            match request(c, Request::RevertSnapshot { vm_id, snapshot_id }).await? {
+                ServerMessage::Response {
+                    result: ResponseBody::SnapshotReverted { .. },
+                    ..
+                } => {
+                    snapshot_done(
+                        lanes,
+                        vm_id,
+                        SnapshotOp::Revert(snapshot_id),
+                        snapshot_id,
+                        format!("reverted to: {label}"),
+                    );
+                    Ok(())
+                }
+                m => Err(context("revert", failure(&m))),
+            }
+        }
+        ServiceCommand::DeleteSnapshot { vm_id, snapshot_id } => {
+            let label = snapshot_label(state, vm_id, snapshot_id);
+            match request(c, Request::DeleteSnapshot { vm_id, snapshot_id }).await? {
+                ServerMessage::Response {
+                    result: ResponseBody::SnapshotDeleted { .. },
+                    ..
+                } => {
+                    if let Some(t) = lock(state)
+                        .snapshots
+                        .get_mut(&vm_id)
+                        .and_then(|l| l.tree.as_mut())
+                    {
+                        t.snapshots.retain(|s| s.snapshot_id != snapshot_id);
+                        t.snapshots.iter_mut().for_each(|s| {
+                            if s.parent == Some(snapshot_id) {
+                                s.parent = None;
+                            }
+                        });
+                        if t.current == Some(snapshot_id) {
+                            t.current = None;
+                        }
+                    }
+                    snapshot_done(
+                        lanes,
+                        vm_id,
+                        SnapshotOp::Delete(snapshot_id),
+                        snapshot_id,
+                        format!("snapshot deleted: {label}"),
+                    );
+                    Ok(())
+                }
+                m => Err(context("snapshot deletion", failure(&m))),
+            }
+        }
+        ServiceCommand::RenameSnapshot {
+            vm_id,
+            snapshot_id,
+            name,
+            description,
+        } => {
+            let body = Request::UpdateSnapshot {
+                vm_id,
+                snapshot_id,
+                name,
+                description,
+            };
+            match request(c, body).await? {
+                ServerMessage::Response {
+                    result: ResponseBody::Snapshot { snapshot },
+                    ..
+                } => {
+                    if let Some(s) = lock(state)
+                        .snapshots
+                        .get_mut(&vm_id)
+                        .and_then(|l| l.tree.as_mut())
+                        .and_then(|t| {
+                            t.snapshots
+                                .iter_mut()
+                                .find(|s| s.snapshot_id == snapshot.snapshot_id)
+                        })
+                    {
+                        s.name = snapshot.name.clone();
+                        s.description = snapshot.description.clone();
+                    }
+                    snapshot_done(
+                        lanes,
+                        vm_id,
+                        SnapshotOp::Rename(snapshot_id),
+                        snapshot.snapshot_id,
+                        format!("snapshot renamed: {}", snapshot.name.as_str()),
+                    );
+                    Ok(())
+                }
+                m => Err(context("snapshot rename", failure(&m))),
             }
         }
         ServiceCommand::GetAgentAccess => match request(c, Request::GetAgentAccess).await? {
@@ -2722,6 +3161,64 @@ async fn execute(c: &mut Client, lanes: &Lanes, command: ServiceCommand) -> Resu
                 m => Err(context("deletion", failure(&m))),
             }
         }
+        ServiceCommand::PreviewVmwareImport(path) => {
+            let body = Request::PreviewVmwareImport {
+                vmx_path: path.to_string_lossy().into_owned(),
+            };
+            match request(c, body).await? {
+                ServerMessage::Response {
+                    result: ResponseBody::VmwareImportPreview { preview },
+                    ..
+                } => {
+                    let mut s = lock(state);
+                    // A newer preview (another file) supersedes this one.
+                    if s.vmware.preview_path.as_ref() == Some(&path) {
+                        s.vmware.preview = RequestStatus::Done(preview);
+                    }
+                    Ok(())
+                }
+                m => Err(context("VMware VM", failure(&m))),
+            }
+        }
+        ServiceCommand::ImportVmware {
+            path,
+            name,
+            display,
+        } => {
+            let body = Request::ImportVmware {
+                vmx_path: path.to_string_lossy().into_owned(),
+                name,
+                display,
+            };
+            match request(c, body).await? {
+                ServerMessage::Response {
+                    result: ResponseBody::VmwareImported { vm },
+                    ..
+                } => {
+                    {
+                        let mut s = lock(state);
+                        s.last_outcome = Some(format!("imported: {}", vm.config.name.as_str()));
+                        s.vmware.progress = None;
+                        s.vmware.import = RequestStatus::Done(vm);
+                    }
+                    refresh_after(c, lanes).await;
+                    Ok(())
+                }
+                m => Err(context("VMware import", failure(&m))),
+            }
+        }
+        ServiceCommand::CancelVmwareImport => {
+            match request(c, Request::CancelVmwareImport).await? {
+                ServerMessage::Response {
+                    result: ResponseBody::VmwareImportCancel { cancelled },
+                    ..
+                } => {
+                    lock(state).vmware.cancel = RequestStatus::Done(cancelled);
+                    Ok(())
+                }
+                m => Err(context("cancellation", failure(&m))),
+            }
+        }
         ServiceCommand::EmergencyStop => match request(c, Request::EmergencyStop).await? {
             ServerMessage::Response {
                 result: ResponseBody::EmergencyStop(r),
@@ -2884,6 +3381,31 @@ fn baseline_done(lanes: &Lanes, vm_id: VmId, op: BaselineOp, id: BaselineId, out
     });
     lanes.queue(ServiceCommand::Refresh);
     lanes.queue(ServiceCommand::ListBaselines(vm_id));
+}
+
+/// Name of a known snapshot, for the outcome line.
+fn snapshot_label(state: &Mutex<ServiceState>, vm_id: VmId, id: SnapshotId) -> String {
+    lock(state)
+        .snapshots
+        .get(&vm_id)
+        .and_then(|l| l.tree.as_ref())
+        .and_then(|t| t.snapshots.iter().find(|s| s.snapshot_id == id))
+        .map_or_else(|| "snapshot".into(), |s| s.name.as_str().to_owned())
+}
+
+/// Records a successful snapshot operation and re-reads the VM list and the
+/// snapshots (queued: the storage lane does not wait for them).
+fn snapshot_done(lanes: &Lanes, vm_id: VmId, op: SnapshotOp, id: SnapshotId, outcome: String) {
+    lanes.update(|s| {
+        s.snapshot = Some(SnapshotRequest {
+            vm_id,
+            op,
+            status: RequestStatus::Done(id),
+        });
+        s.last_outcome = Some(outcome);
+    });
+    lanes.queue(ServiceCommand::Refresh);
+    lanes.queue(ServiceCommand::ListSnapshots(vm_id));
 }
 
 /// Re-reads the list after a successful change: a failure is reported in
@@ -3068,6 +3590,35 @@ mod tests {
         assert_eq!(s.delete, RequestStatus::Failed(Failure::new("x")));
     }
 
+    /// A start refused because the host cannot start VMs (no QEMU) is
+    /// recognised, so the Dashboard can name the cause; other refusals are
+    /// not.
+    #[test]
+    fn start_refused_for_missing_capability_is_recognised() {
+        let vm = VmId::new_v7();
+        let refused = Failure::coded(
+            ErrorCode::Unsupported,
+            "start: unsupported: capability not available on this host",
+        )
+        .with_detail("capability", "vm.start");
+        assert!(refused.start_unavailable());
+        let mut s = ServiceState::default();
+        mark_failed(&mut s, &ServiceCommand::Start(vm), refused.clone());
+        assert_eq!(s.last_outcome.as_deref(), Some(refused.message.as_str()));
+        assert_eq!(s.start_unavailable_outcome, s.last_outcome);
+
+        // Other capability, other code, other command: not recognised.
+        let other =
+            Failure::coded(ErrorCode::Unsupported, "x").with_detail("capability", "vm.stop");
+        assert!(!other.start_unavailable());
+        let denied =
+            Failure::coded(ErrorCode::PermissionDenied, "y").with_detail("capability", "vm.start");
+        assert!(!denied.start_unavailable());
+        let mut s = ServiceState::default();
+        mark_failed(&mut s, &ServiceCommand::Stop(vm), refused);
+        assert_eq!(s.start_unavailable_outcome, None);
+    }
+
     /// In-process IPC server speaking the real framing on the real local
     /// transport, with scripted replies: drives `ipc_loop` without a
     /// supervisor process.
@@ -3099,6 +3650,12 @@ mod tests {
                 OperationId::new_v7()
             ));
             std::fs::create_dir_all(&dir).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                // The endpoint accepts only a private directory.
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
             let opts = EndpointOptions {
                 runtime_dir: Some(dir.clone()),
                 catalog_dir: dir,
@@ -3184,8 +3741,10 @@ mod tests {
                             }
                             return;
                         }
-                        let long = matches!(body, Request::CreateBaseline { .. })
-                            || matches!(&body, Request::SubmitVm { request }
+                        let long = matches!(
+                            body,
+                            Request::CreateBaseline { .. } | Request::ImportVmware { .. }
+                        ) || matches!(&body, Request::SubmitVm { request }
                                 if request.action == VmAction::Start);
                         if long {
                             while hold.load(Ordering::SeqCst) {
@@ -3579,6 +4138,95 @@ mod tests {
         assert_eq!(f.reason(), Some("baseline_referenced"));
     }
 
+    /// ADR-0030: the `.vmx` path goes to the service as chosen; the preview
+    /// is kept; the import is a long request whose progress arrives as
+    /// events and whose cancellation is not queued behind it.
+    #[test]
+    fn vmware_import_preview_progress_and_cancel() {
+        use lightvm_proto::ipc::{
+            VmwareController, VmwareDiskPreview, VmwareImportPhase, VmwareImportPreview,
+        };
+        let preview = VmwareImportPreview {
+            vmx_file: "lab.vmx".into(),
+            display_name: None,
+            vmware_guest_os: "ubuntu-64".into(),
+            config: crate::vm_settings::default_config("lab").unwrap(),
+            disk: VmwareDiskPreview {
+                file_name: "lab.vmdk".into(),
+                slot: "sata0:0".into(),
+                vmware_controller: VmwareController::Sata,
+                create_type: "monolithicSparse".into(),
+                virtual_size_bytes: 16 << 30,
+                allocated_bytes: 1 << 30,
+                snapshot_levels: 0,
+            },
+            required_bytes: 1 << 30,
+            free_bytes: None,
+            not_imported: Vec::new(),
+            warnings: Vec::new(),
+            vmware_svga_offered: false,
+            vmware_tools_hint: false,
+        };
+        let record = VmRecord {
+            id: VmId::new_v7(),
+            config: preview.config.clone(),
+            config_revision: 1,
+            persisted_state: lightvm_proto::VmState::Stopped,
+            created_at: UtcTimestamp::now(),
+        };
+        let (p2, r2) = (preview.clone(), record.clone());
+        let server = fake::start(Arc::new(move |r: &Request| match r {
+            Request::PreviewVmwareImport { .. } => Ok(ResponseBody::VmwareImportPreview {
+                preview: Box::new(p2.clone()),
+            }),
+            Request::ImportVmware { .. } => Ok(ResponseBody::VmwareImported { vm: r2.clone() }),
+            Request::CancelVmwareImport => Ok(ResponseBody::VmwareImportCancel { cancelled: true }),
+            r => base_reply(r),
+        }));
+        server.hold_baseline.store(true, Ordering::SeqCst);
+        let l = Loop::start(server.endpoint.clone());
+        let vmx = PathBuf::from(r"D:\VMs\lab\lab.vmx");
+        assert!(l.send(ServiceCommand::PreviewVmwareImport(vmx.clone())));
+        l.wait(
+            "preview",
+            |s| matches!(&s.vmware.preview, RequestStatus::Done(p) if **p == preview),
+        );
+        assert!(requested(&server, |r| matches!(
+            r,
+            Request::PreviewVmwareImport { vmx_path } if vmx_path == r"D:\VMs\lab\lab.vmx"
+        )));
+        let name = VmName::parse("lab").unwrap();
+        assert!(l.send(ServiceCommand::ImportVmware {
+            path: vmx,
+            name: name.clone(),
+            display: DisplayAdapter::Standard,
+        }));
+        l.wait("import received", |_| {
+            requested(
+                &server,
+                |r| matches!(r, Request::ImportVmware { name: n, .. } if *n == name),
+            )
+        });
+        lock(&server.events).push(ServiceEvent::VmwareImportProgress {
+            phase: VmwareImportPhase::Converting,
+            percent: 37,
+        });
+        l.wait("progress", |s| {
+            s.vmware.progress == Some((VmwareImportPhase::Converting, 37))
+        });
+        // Held import: the cancellation is answered meanwhile.
+        assert!(l.send(ServiceCommand::CancelVmwareImport));
+        l.wait("cancel answered", |s| {
+            s.vmware.cancel == RequestStatus::Done(true)
+        });
+        assert!(l.state().vmware.import.is_pending());
+        server.hold_baseline.store(false, Ordering::SeqCst);
+        l.wait("import done", |s| {
+            s.vmware.import == RequestStatus::Done(record.clone())
+        });
+        assert_eq!(l.state().vmware.progress, None);
+    }
+
     /// A start replies only after the verification of media and baseline
     /// and the launch: it has its own lane, the VM list is read meanwhile.
     #[test]
@@ -3715,6 +4363,7 @@ mod tests {
 
     fn session_info(id: SessionId, vm: VmId, state: SessionState, input: bool) -> SessionInfo {
         SessionInfo {
+            tools: Default::default(),
             session_id: id,
             vm_id: vm,
             connection_id: Some(7),
@@ -3723,6 +4372,7 @@ mod tests {
             state,
             termination: None,
             capabilities: [lightvm_proto::Capability::VmInput].into(),
+            network_endpoints: Vec::new(),
             quotas: lightvm_proto::ipc::AGENT_DEFAULT_QUOTAS,
             usage: Default::default(),
             created_at: UtcTimestamp::from_unix_millis(1_791_709_920_000).unwrap(),
@@ -3790,6 +4440,7 @@ mod tests {
             purpose: "Check the editor".into(),
             requested_vms: vec![vm],
             requested_capabilities: Default::default(),
+            requested_endpoints: Vec::new(),
             verification_code: "482-913".into(),
             requested_at: UtcTimestamp::now(),
             expires_at: UtcTimestamp::now(),
@@ -3798,12 +4449,14 @@ mod tests {
         l.wait("request listed", |s| s.agents.requests.len() == 1);
 
         let approval = SessionApproval {
+            tools: Default::default(),
             vm_id: vm,
             capabilities: [lightvm_proto::Capability::VmInput].into(),
             duration_s: 3600,
             quotas: None,
             lease_ms: None,
             give_input: true,
+            network_endpoints: Vec::new(),
         };
         assert!(l.send(ServiceCommand::ApproveSession {
             request_id: 3,
@@ -3889,6 +4542,7 @@ mod tests {
         use lightvm_proto::report::{OutcomeSource, ReportVersions};
         let t = UtcTimestamp::from_unix_millis(1_791_709_920_000).unwrap();
         SessionReport {
+            tools: Default::default(),
             report_format: lightvm_proto::report::REPORT_FORMAT.into(),
             session_id: id,
             vm_id: VmId::new_v7(),
@@ -3913,6 +4567,7 @@ mod tests {
             vm_config_revision: 1,
             policy_revision: lightvm_proto::PolicyRevision(1),
             capabilities: Default::default(),
+            network_endpoints: Vec::new(),
             quotas: lightvm_proto::ipc::AGENT_DEFAULT_QUOTAS,
             expires_at: t,
             versions: ReportVersions::default(),

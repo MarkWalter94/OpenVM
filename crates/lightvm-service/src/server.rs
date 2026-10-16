@@ -308,12 +308,16 @@ impl Shared {
     /// request in progress and its queued requests are abandoned at once
     /// (the pairing credential is kept: a new session needs a new approval).
     fn close_agent_connection(&self, connection_id: u64) {
+        if let Some(vm) = self.agents.connection_vm(connection_id) {
+            self.emergency.suspend_tools(Some(vm));
+        }
         if let Some(e) = lock(&self.conns).get(&connection_id) {
             let _ = e.revoke.send(true);
         }
     }
 
     fn close_all_agent_sessions(&self, reason: &str, cause: TerminationCause, stop: bool) {
+        self.emergency.suspend_tools(None);
         for conn in self.agents.terminate_all(cause, stop) {
             self.close_agent_connection(conn);
         }
@@ -587,6 +591,7 @@ pub async fn start(
         reports: crate::reports::ReportStore::new(Some(
             cfg.catalog_dir.join(crate::reports::SESSIONS_DIR),
         )),
+        vmware: Default::default(),
     };
     // Published before any possible subscription: no client receives it late,
     // after later events (race with `subscribe`).
@@ -1087,8 +1092,14 @@ async fn handle_connection(shared: Arc<Shared>, stream: BoxedStream, peer: PeerI
                     } else if matches!(
                         body,
                         Request::ImportMedia { .. }
+                            | Request::PreviewVmwareImport { .. }
+                            | Request::ImportVmware { .. }
                             | Request::CreateBaseline { .. }
                             | Request::RestoreBaseline { .. }
+                            | Request::TakeSnapshot { .. }
+                            | Request::RevertSnapshot { .. }
+                            | Request::DeleteSnapshot { .. }
+                            | Request::PromoteSnapshot { .. }
                             | Request::AwaitSession { .. }
                             | Request::Agent { call: AgentCall::Snapshot { .. } | AgentCall::Restore { .. }, .. }
                     ) {
@@ -1155,6 +1166,9 @@ async fn handle_connection(shared: Arc<Shared>, stream: BoxedStream, peer: PeerI
     // Agent connection lost: its pending request is withdrawn, its live
     // session ends and its VM is stopped (ROADMAP 7.3, client loss).
     if role == Role::Pairing {
+        if let Some(vm) = shared.agents.connection_vm(connection_id) {
+            shared.emergency.suspend_tools(Some(vm));
+        }
         let (withdrawn, live) = shared.agents.connection_closed(connection_id);
         if let Some(id) = withdrawn {
             shared.report_closed(vec![(id, SessionRequestOutcome::Withdrawn)]);
@@ -1398,6 +1412,15 @@ async fn dispatch(
         Request::GetCapabilities => SupervisorRequest::GetCapabilities,
         Request::ListVms => SupervisorRequest::ListVms,
         Request::VmStatus { vm_id } => SupervisorRequest::VmStatus(vm_id),
+        Request::GuestTools {
+            vm_id,
+            run_id,
+            call,
+        } => SupervisorRequest::GuestTools {
+            vm_id,
+            run_id,
+            call,
+        },
         Request::CreateVm { config } => SupervisorRequest::CreateVm(Box::new(config)),
         Request::UpdateVm {
             vm_id,
@@ -1419,6 +1442,7 @@ async fn dispatch(
             media_kind,
             declared_origin,
         },
+        Request::DeleteMedia { media_id } => SupervisorRequest::DeleteMedia(media_id),
         Request::DeleteVm {
             vm_id,
             expected_revision,
@@ -1443,6 +1467,45 @@ async fn dispatch(
         Request::DeleteBaseline { vm_id, baseline_id } => {
             SupervisorRequest::DeleteBaseline { vm_id, baseline_id }
         }
+        Request::ListSnapshots { vm_id } => SupervisorRequest::ListSnapshots(vm_id),
+        Request::TakeSnapshot {
+            vm_id,
+            name,
+            description,
+        } => SupervisorRequest::TakeSnapshot {
+            vm_id,
+            name,
+            description,
+        },
+        Request::RevertSnapshot { vm_id, snapshot_id } => {
+            SupervisorRequest::RevertSnapshot { vm_id, snapshot_id }
+        }
+        Request::DeleteSnapshot { vm_id, snapshot_id } => {
+            SupervisorRequest::DeleteSnapshot { vm_id, snapshot_id }
+        }
+        Request::UpdateSnapshot {
+            vm_id,
+            snapshot_id,
+            name,
+            description,
+        } => SupervisorRequest::UpdateSnapshot {
+            vm_id,
+            snapshot_id,
+            name,
+            description,
+        },
+        Request::GetSnapshotThumbnail { vm_id, snapshot_id } => {
+            SupervisorRequest::SnapshotThumbnail { vm_id, snapshot_id }
+        }
+        Request::PromoteSnapshot {
+            vm_id,
+            snapshot_id,
+            label,
+        } => SupervisorRequest::PromoteSnapshot {
+            vm_id,
+            snapshot_id,
+            label,
+        },
         Request::Subscribe => {
             if events.is_none() {
                 *events = Some(shared.events.subscribe());
@@ -1511,6 +1574,7 @@ async fn dispatch(
             purpose,
             requested_vms,
             requested_capabilities,
+            requested_endpoints,
         } => {
             return Dispatch::Reply(request_session(
                 shared,
@@ -1520,6 +1584,7 @@ async fn dispatch(
                 &purpose,
                 requested_vms,
                 requested_capabilities,
+                requested_endpoints,
             ));
         }
         Request::AwaitSession { request_id } => {
@@ -1556,6 +1621,9 @@ async fn dispatch(
         }
         Request::ListSessions => SupervisorRequest::ListSessions,
         Request::PauseSession { session_id } => {
+            if let Some(vm) = shared.agents.session_vm(session_id) {
+                shared.emergency.suspend_tools(Some(vm));
+            }
             // Gate first (priority): agent mutations refused from now on;
             // the core follows (sync before its next admission).
             if !shared.agents.pause(session_id) {
@@ -1586,6 +1654,9 @@ async fn dispatch(
             return Dispatch::Reply(r);
         }
         Request::RevokeSession { session_id } => {
+            if let Some(vm) = shared.agents.session_vm(session_id) {
+                shared.emergency.suspend_tools(Some(vm));
+            }
             // Point of revocation: the gate closes and the agent connection
             // closes before the core records the revocation.
             if let Some(conn) = shared.agents.revoke(session_id) {
@@ -1668,6 +1739,19 @@ async fn dispatch(
         Request::DeleteSessionReport { session_id } => {
             SupervisorRequest::Report(Box::new(ReportRequest::Delete(session_id)))
         }
+        // ADR-0030: the `.vmx` chosen with the picker of the UI (UI role
+        // only, checked above); read as untrusted input by the service.
+        Request::PreviewVmwareImport { vmx_path } => SupervisorRequest::PreviewVmware { vmx_path },
+        Request::ImportVmware {
+            vmx_path,
+            name,
+            display,
+        } => SupervisorRequest::ImportVmware {
+            vmx_path,
+            name,
+            display,
+        },
+        Request::CancelVmwareImport => SupervisorRequest::CancelVmwareImport,
     };
     let reply_rx = match enqueue(
         shared,
@@ -1755,6 +1839,7 @@ async fn supervisor_call(
 }
 
 /// `request_session` (agent): new pending request with its verification code.
+#[allow(clippy::too_many_arguments)]
 fn request_session(
     shared: &Arc<Shared>,
     connection_id: u64,
@@ -1763,6 +1848,7 @@ fn request_session(
     purpose: &str,
     requested_vms: Vec<lightvm_proto::VmId>,
     requested_capabilities: lightvm_proto::CapabilitySet,
+    requested_endpoints: Vec<String>,
 ) -> Result<ResponseBody, ReplyError> {
     match shared.agents.open_request(
         connection_id,
@@ -1771,6 +1857,7 @@ fn request_session(
         purpose,
         requested_vms,
         requested_capabilities,
+        requested_endpoints,
     ) {
         Ok((info, closed)) => {
             shared.report_closed(closed);
@@ -1878,9 +1965,17 @@ async fn approve_session(
         shared.agents.abort_approval(request_id);
         return Err(op_error(ErrorCode::InvalidArgument, "expiry out of range"));
     };
+    // ADR-0033: `network.endpoints` without any endpoint grants nothing
+    // (the VM runs without network for the session): the capability is
+    // dropped rather than recorded empty.
+    let mut capabilities = approval.capabilities.clone();
+    if approval.network_endpoints.is_empty() {
+        capabilities.remove(&Capability::NetworkEndpoints);
+    }
     let new = NewSession {
+        tools: approval.tools,
         vm_id: approval.vm_id,
-        capabilities: approval.capabilities.clone(),
+        capabilities,
         quotas,
         expires_at,
         lease_ms,
@@ -1889,6 +1984,11 @@ async fn approve_session(
         connection_id: info.connection_id,
         client_name: info.client_name.clone(),
         purpose: info.purpose.clone(),
+        network_endpoints: approval
+            .network_endpoints
+            .iter()
+            .map(|n| n.trim_end_matches('.').to_ascii_lowercase())
+            .collect(),
     };
     b.fill(0);
     let r = supervisor_call(
@@ -1918,6 +2018,7 @@ async fn approve_session(
         return Err(op_error(ErrorCode::InfrastructureError, "unexpected reply"));
     };
     let session = SessionInfo {
+        tools: grant.tools.clone(),
         session_id,
         vm_id: approval.vm_id,
         connection_id: Some(info.connection_id),
@@ -1926,6 +2027,7 @@ async fn approve_session(
         state: SessionState::Active,
         termination: None,
         capabilities: grant.capabilities.clone(),
+        network_endpoints: grant.network_endpoints.iter().cloned().collect(),
         quotas: grant.quotas,
         usage: SessionUsage::default(),
         created_at: lease.renewed_at,

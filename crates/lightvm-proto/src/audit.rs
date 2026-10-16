@@ -16,6 +16,9 @@ use crate::{
 )]
 #[serde(rename_all = "snake_case")]
 pub enum AuditAction {
+    ToolsCall,
+    ToolsTransfer,
+    ToolsPolicy,
     /// VM creation.
     VmCreate,
     /// VM start (request forwarded or outcome).
@@ -88,6 +91,76 @@ pub enum AuditAction {
     ReportExport,
     /// Deletion of a session report and its screenshots (F5).
     ReportDelete,
+    /// Deletion of an imported medium from the registry (user only): a
+    /// managed copy is removed with it, a file used in place is kept.
+    MediaDelete,
+    /// Automatic reset of a guest whose virtual CPUs stopped on an
+    /// unrecoverable error (QEMU `internal-error`, for example a triple fault
+    /// under WHPX), as hardware would reset: `succeeded` (reset and resumed),
+    /// `failed` (QMP refused), `denied` with `resource_limit` (too many in a
+    /// short time: the guest is left stopped for the user). Actor `system`.
+    VmAutoReset,
+    /// Import of a VMware VM by conversion (user only, ADR-0030): denied
+    /// (checks of the `.vmx` and its disks, limits), failed (conversion,
+    /// cancellation) or succeeded (VM created with its converted disk).
+    /// Never the path of the source files.
+    VmImport,
+    /// User snapshot taken (ADR-0032, user only): with the VM off, or while
+    /// it runs (disk state only, like a power cut at that instant).
+    SnapshotTake,
+    /// Revert of a VM to a user snapshot with the VM off (ADR-0032): disk,
+    /// firmware state and configuration of the snapshot.
+    SnapshotRevert,
+    /// Deletion of a user snapshot (ADR-0032); its children keep their
+    /// state and move to its parent.
+    SnapshotDelete,
+    /// Rename or new description of a user snapshot (ADR-0032; never the
+    /// texts).
+    SnapshotUpdate,
+    /// Network of a run set up (ADR-0033): `network.mode`, and for the
+    /// endpoint allowlist one event per endpoint with the host address it
+    /// was resolved to at the start (`failed` if it could not be resolved:
+    /// that endpoint refuses every connection).
+    NetworkSetup,
+    /// A guest connection through the endpoint allowlist ended (ADR-0033):
+    /// endpoint, addresses and byte counts, never the content.
+    NetworkConnection,
+    /// A guest connection attempt refused by the endpoint allowlist
+    /// (`denied`; the first ones of each run, later ones only counted).
+    NetworkDenied,
+    /// The endpoints allowed on a running VM changed (session started or
+    /// ended, revocation, expiry, Emergency Stop): connections to endpoints
+    /// no longer allowed were reset.
+    NetworkPolicy,
+}
+
+/// Network details of a `network_*` audit event (ADR-0033). Addresses and
+/// counts only: never data carried by the connection.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct NetworkAudit {
+    /// Network mode of the run (`offline`, `nat`, `endpoints`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// Endpoint name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    /// Destination inside the guest network (`10.0.2.101:1433`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<String>,
+    /// Host address the connection was opened to (or the endpoint
+    /// resolved to).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// Bytes from the guest to the endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes_from_guest: Option<u64>,
+    /// Bytes from the endpoint to the guest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes_to_guest: Option<u64>,
+    /// How it ended or why it was refused (`closed`, `revoked`,
+    /// `not_allowed`...), or the allowed endpoints for `network_policy`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Recorded outcome.
@@ -113,6 +186,8 @@ pub enum AuditOutcome {
 /// Audit event. `seq` is the total order assigned by the core, strictly increasing.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AuditEvent {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<ToolAudit>,
     /// Order (from 1, strictly increasing).
     pub seq: u64,
     /// UTC instant.
@@ -144,4 +219,20 @@ pub struct AuditEvent {
     /// Termination cause (for `session_terminate`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub termination: Option<TerminationCause>,
+    /// Network details (`network_*` events).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<NetworkAudit>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ToolAudit {
+    pub feature: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }

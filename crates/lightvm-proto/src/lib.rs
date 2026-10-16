@@ -31,20 +31,33 @@ mod session;
 mod state;
 mod text;
 mod time;
+mod tools;
+mod tools_wire;
 
-pub use audit::{AuditAction, AuditEvent, AuditOutcome};
+pub use tools::{
+    ToolCall, ToolGrant, ToolReply, ToolShare, ToolUiAction, ToolUiNode, ToolsConfig,
+    valid_tool_name,
+};
+pub use tools_wire::{ToolFileEntry, ToolFileReply, ToolFileRequest, ToolRelativePath};
+
+pub use audit::{AuditAction, AuditEvent, AuditOutcome, NetworkAudit, ToolAudit};
 pub use error::{ErrorCode, ProtocolError, ProtocolErrorCode, PublicError, ReplyError};
-pub use ids::{BaselineId, GrantId, IdParseError, MediaId, OperationId, RunId, SessionId, VmId};
+pub use ids::{
+    BaselineId, GrantId, IdParseError, MediaId, OperationId, RunId, SessionId, SnapshotId, VmId,
+};
 pub use input::{
     ABS_AXIS_MAX, InputBatch, InputEvent, KeyAction, MAX_INPUT_EVENTS_PER_REQUEST, MouseButton,
     PointerButton, PointerMove,
 };
 pub use model::{
-    BaselineOrigin, BaselineRecord, DisplayGeometry, FileIdentity, Firmware, GuestOs, HostCapacity,
-    ImageFormat, MAX_DATA_MEDIA_BYTES, MAX_INSTALL_MEDIA_BYTES, MAX_MEMORY_MARGIN_MIB,
+    BaselineOrigin, BaselineRecord, DetectedGuest, DiskController, DisplayAdapter, DisplayGeometry,
+    FIRST_ENDPOINT_IP, FileIdentity, Firmware, GuestArch, GuestOs, HostCapacity, ImageFormat,
+    ImportSource, ImportedHardware, LAST_ENDPOINT_IP, MAX_CORES_PER_SOCKET, MAX_DATA_MEDIA_BYTES,
+    MAX_ENDPOINT_NAME_CHARS, MAX_INSTALL_MEDIA_BYTES, MAX_MEMORY_MARGIN_MIB, MAX_NETWORK_ENDPOINTS,
     MAX_STORAGE_BUDGET_GIB, MIN_CPU_MAX_PERCENT, MIN_MEMORY_MARGIN_MIB, MediaEntry, MediaKind,
-    MediaRecord, NetworkProfile, OperationKind, OperationRecord, OperationStatus, ResourceLimits,
-    RunEndReason, RunRecord, Screenshot, VmConfig, VmLimits, VmRecord,
+    MediaLocation, MediaRecord, NetworkEndpoint, NetworkProfile, OperationKind, OperationRecord,
+    OperationStatus, ResourceLimits, ResourceTemplate, RunEndReason, RunRecord, Screenshot,
+    VmConfig, VmLimits, VmRecord, next_endpoint_ip, validate_network,
 };
 pub use request::{Actor, Admission, Caller, VmAction, VmRequest};
 pub use session::{

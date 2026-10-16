@@ -102,6 +102,82 @@ fn ui_starts_the_supervisor_and_stops_it() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Settings → Move catalog… with the real executable: refused while a
+/// supervisor holds the catalog and for a destination inside it; then a
+/// catalog written by a real supervisor is moved by `lightvm-service
+/// --move-catalog` and a supervisor starts on the new folder.
+#[test]
+fn catalog_moves_with_the_real_executable() {
+    use lightvm_desktop::catalog_move::{MoveOutcome, MoveRequest, child_runner};
+    use std::sync::atomic::AtomicBool;
+    let Some(exe) = service_executable() else {
+        eprintln!("lightvm-service not built: test skipped (cargo build --workspace)");
+        return;
+    };
+    let dir = temp_catalog("move");
+    let cfg = |catalog: PathBuf| ServiceConfig {
+        executable: exe.clone(),
+        catalog,
+        qemu_dir: None,
+        runtime_dir: Some(dir.join("run")),
+        audit_log: Some(dir.join("audit.jsonl")),
+        policy: ParentLossPolicy::default(),
+        pairing_dir: Some(dir.join("pairing")),
+    };
+    let mut s =
+        Service::start(&cfg(dir.join("catalog")), Arc::new(|| {})).expect("supervisor start");
+    wait_for(&s, "connection", |s| s.state().connected);
+    let run = child_runner();
+    let no_cancel = AtomicBool::new(false);
+
+    let req = MoveRequest {
+        executable: exe.clone(),
+        from: dir.join("catalog"),
+        to: dir.join("moved"),
+        keep_source: false,
+    };
+    match run(&req, &|_| {}, &no_cancel) {
+        MoveOutcome::Failed(m) => assert!(m.contains("in use"), "{m}"),
+        other => panic!("move with the supervisor running: {other:?}"),
+    }
+    let (code, _) = s.stop(Duration::from_secs(15));
+    assert_eq!(code, Some(0));
+    drop(s);
+
+    let inside = MoveRequest {
+        to: dir.join("catalog").join("inside"),
+        ..req.clone()
+    };
+    assert!(matches!(
+        run(&inside, &|_| {}, &no_cancel),
+        MoveOutcome::Failed(_)
+    ));
+    assert!(!dir.join("catalog").join("inside").exists());
+
+    let phases = std::sync::Mutex::new(Vec::new());
+    let outcome = run(&req, &|p| phases.lock().unwrap().push(p.phase), &no_cancel);
+    assert!(
+        matches!(
+            outcome,
+            MoveOutcome::Moved {
+                source_removed: true,
+                ..
+            }
+        ),
+        "{outcome:?}"
+    );
+    assert!(phases.lock().unwrap().iter().any(|p| p == "checking"));
+    assert!(!dir.join("catalog").exists());
+    assert!(dir.join("moved").join("catalog.sqlite3").is_file());
+
+    let mut s = Service::start(&cfg(dir.join("moved")), Arc::new(|| {}))
+        .expect("start on the moved catalog");
+    wait_for(&s, "connection", |s| s.state().connected);
+    let _ = s.stop(Duration::from_secs(15));
+    drop(s);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// VM settings and opening from the command line through a real supervisor
 /// without QEMU: change saved (revision 2), `OpenVm` applies the changes and
 /// tries the start, refused because QEMU is not configured; non-existent VM
@@ -127,16 +203,19 @@ fn vm_settings_and_open_vm_without_qemu() {
     let mut s = Service::start(&cfg, Arc::new(|| {})).expect("supervisor start");
     wait_for(&s, "connection", |s| s.state().connected);
     let vm = VmConfig {
+        tools: Default::default(),
         name: VmName::parse("from-command-line").unwrap(),
         guest_os: GuestOs::UbuntuLtsX86_64,
         vcpus: 2,
         memory_mib: 2048,
         disk_gib: 16,
         network: NetworkProfile::Offline,
+        endpoints: Vec::new(),
         install_media: None,
         data_media: None,
         firmware: Firmware::Uefi,
         limits: Default::default(),
+        imported: None,
     };
     assert!(s.send(ServiceCommand::Create(Box::new(vm))));
     wait_for(&s, "creation", |s| s.state().vms.len() == 1);
@@ -288,16 +367,19 @@ fn ui_role(qemu_dir: PathBuf) -> ! {
     let s = Service::start(&cfg, Arc::new(|| {})).expect("supervisor start");
     wait_for(&s, "connection", |s| s.state().connected);
     let vm = VmConfig {
+        tools: Default::default(),
         name: VmName::parse("p2-crash-ui").unwrap(),
         guest_os: GuestOs::UbuntuLtsX86_64,
         vcpus: 1,
         memory_mib: 1024,
         disk_gib: 8,
         network: NetworkProfile::Offline,
+        endpoints: Vec::new(),
         install_media: None,
         data_media: None,
         firmware: Firmware::Uefi,
         limits: Default::default(),
+        imported: None,
     };
     assert!(s.send(ServiceCommand::Create(Box::new(vm))));
     wait_for(&s, "creation", |s| s.state().vms.len() == 1);

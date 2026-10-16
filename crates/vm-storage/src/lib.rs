@@ -12,7 +12,11 @@
 //!   backup before migrating ([`migrate`]).
 //! - One instance per catalog, guaranteed by a file lock ([`CatalogLock`]).
 //! - Paths always relative to the root and validated ([`ManagedPath`]); links,
-//!   junctions and paths outside the root are rejected.
+//!   junctions and paths outside the root are rejected. One exception: the
+//!   ISO files the user selected are used where they are (ADR-0029,
+//!   [`MediaLocation::Referenced`]), recorded as absolute paths, never
+//!   written or removed, and re-verified (no link on any component, hash)
+//!   through a guard handle before every use ([`MediaGuard`]).
 //! - An SQL transaction does not make a file move atomic: every
 //!   DB + filesystem operation goes through the journal (`begin_intent` →
 //!   `mark_applied` → `commit`/`abort`) and [`Catalog::recover`] reconciles it;
@@ -24,6 +28,9 @@
 //!   ([`Catalog::guard_run`], ADR-0025); the service opens the guard on its
 //!   supervisor thread ([`Catalog::open_current_state`]) and hashes through
 //!   the same handles on a worker ([`RunGuard::verify_baseline`]).
+//! - The whole catalog moves to another folder only with every VM stopped:
+//!   copied, verified (size and SHA-256 of every file) and opened at the
+//!   destination before the source is removed ([`move_catalog`]).
 //! - Storage does not start processes and does not interpret configurations as
 //!   host options: disks are produced by the caller (`qemu-backend`).
 //!
@@ -34,6 +41,7 @@
 mod baseline;
 mod budget;
 mod catalog;
+mod catalog_move;
 mod enums;
 mod error;
 mod fsx;
@@ -45,21 +53,29 @@ mod media;
 pub mod migrate;
 mod ops;
 mod paths;
+mod qcow2;
 mod records;
 mod recover;
+mod snapshot;
 mod time;
 mod vm_delete;
+mod vm_import;
 
 pub use baseline::{
     BaselineInfo, BaselineJob, BaselineJobDone, BaselineOverview, CreateBaseline,
-    CurrentStateFiles, FaultAction, FaultPoint, ProducedImage, RestoreBaseline, RestoreJob,
-    RestoreJobDone, StartFiles, qcow2_backing,
+    CurrentStateFiles, FaultAction, FaultPoint, PROMOTE_RUNNING_SNAPSHOT, ProducedImage,
+    RestoreBaseline, RestoreJob, RestoreJobDone, StartFiles, TPM_BASELINE_UNSUPPORTED,
+    qcow2_backing,
 };
 pub use budget::{
     BUDGET_MANIFEST_FILE, BaselineUsage, BudgetCheck, BudgetConfig, BudgetManifest, Enforcement,
     RunBudgetRequest, RunUsage, StorageUsage, VmBudget,
 };
 pub use catalog::{Catalog, Intent, IntentSpec, OpenReport};
+pub use catalog_move::{
+    MOVE_CANCELLED, MOVE_FREE_MARGIN, MoveFault, MoveMethod, MovePhase, MoveProgress, MoveReport,
+    MoveRequest, is_move_cancelled, move_catalog,
+};
 pub use enums::{
     ArtifactKind, AuditOutcome, DiskRole, DiskStatus, FirmwareScope, IntentKind, IntentState,
     Lifecycle, MediaKind, MediaSlot, MediaStatus, OperationState, RunState, SessionState,
@@ -70,7 +86,7 @@ pub use fsx::HASH_CANCELLED;
 pub use guard::{BaselineGuard, GuardReport, RunGuard, WriterProbe};
 pub use ids::{
     ArtifactId, BaselineId, DiskId, FirmwareId, GrantId, MediaId, OperationId, RunId, SessionId,
-    VmId,
+    SnapshotId, VmId,
 };
 pub use layout::{CatalogLayout, CatalogLock, DB_FILE, LOCK_FILE, TMP_DIR, TmpCleanup};
 pub use manifest::{
@@ -78,19 +94,27 @@ pub use manifest::{
     sha256_file,
 };
 pub use media::{
-    CopiedMedia, MAX_DECLARED_ORIGIN, MediaCheck, MediaGuard, MediaImportJob,
-    MediaImportReservation, MediaLimits, NOT_OPTICAL_IMAGE,
+    HashedMedia, MAX_DECLARED_ORIGIN, MediaCheck, MediaGuard, MediaImportReservation, MediaLimits,
+    NOT_OPTICAL_IMAGE, canonical_source,
 };
 pub use ops::PromoteBaseline;
 pub use paths::ManagedPath;
+pub use qcow2::{
+    Qcow2Info, Qcow2Snapshot, active_matches as qcow2_active_matches, read_info as qcow2_read_info,
+};
 pub use records::{
     ArtifactRecord, AuditEvent, AuditRecord, BaselineRecord, CurrentStateRecord, DiskRecord,
-    FirmwareRecord, GrantRecord, MediaRecord, NewVm, OperationRecord, RunRecord, SessionRecord, Tx,
-    VmRecord,
+    FirmwareRecord, GrantRecord, MediaLocation, MediaRecord, NewVm, OperationRecord, RunRecord,
+    SessionRecord, Tx, VmRecord,
 };
 pub use recover::{IntegrityIssue, IntentRecovery, RecoveryOutcome, RecoveryReport};
+pub use snapshot::{
+    MAX_THUMBNAIL_BYTES, RESTORE_WITH_SNAPSHOTS, RevertSnapshot, SNAPSHOT_NO_DISK,
+    SNAPSHOT_ON_OVERLAY, Settled, SnapshotList, SnapshotOp, SnapshotRecord, TakeSnapshot,
+};
 pub use time::{UtcMillis, now_rfc3339};
 pub use vm_delete::VmDeletionReport;
+pub use vm_import::VmImport;
 
 /// Lowercase hexadecimal.
 pub(crate) fn hex(bytes: &[u8]) -> String {

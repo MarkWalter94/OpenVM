@@ -735,8 +735,13 @@ async fn import_list_create_and_delete_with_the_sqlite_catalog() {
     };
     assert_eq!(media.kind, MediaKind::InstallIso);
     assert_eq!(media.size_bytes, 48 * 1024);
-    let copy = dir.join("media").join(format!("{}.iso", media.id));
-    assert!(std::fs::metadata(&copy).unwrap().permissions().readonly());
+    // ADR-0029: the user's file is used in place, nothing is copied.
+    assert_eq!(
+        std::fs::canonicalize(media.location.as_deref().unwrap()).unwrap(),
+        std::fs::canonicalize(&iso).unwrap()
+    );
+    assert!(!media.missing);
+    assert_eq!(std::fs::read_dir(dir.join("media")).unwrap().count(), 0);
     match req(&mut ui, Request::ListMedia).await {
         ServerMessage::Response {
             result: ResponseBody::MediaList { media: list },
@@ -749,8 +754,26 @@ async fn import_list_create_and_delete_with_the_sqlite_catalog() {
     std::fs::create_dir_all(src.join("folder.iso")).unwrap();
     let no_sig = iso_file(&src, "zip.iso", b"PK\x03\x04\x00");
     let txt = iso_file(&src, "notes.txt", b"CD001");
-    let cases: Vec<(String, ErrorCode)> = vec![
+    #[cfg_attr(not(windows), allow(unused_mut))]
+    let mut cases: Vec<(String, ErrorCode)> = vec![
         ("relative.iso".into(), ErrorCode::InvalidArgument),
+        (txt.display().to_string(), ErrorCode::InvalidArgument),
+        (
+            src.join("folder.iso").display().to_string(),
+            ErrorCode::InvalidArgument,
+        ),
+        (
+            src.join("missing.iso").display().to_string(),
+            ErrorCode::NotFound,
+        ),
+        (no_sig.display().to_string(), ErrorCode::InvalidArgument),
+        (String::new(), ErrorCode::InvalidArgument),
+    ];
+    // UNC and device namespaces, alternate data streams, reserved names and
+    // backslash traversal exist only on Windows: elsewhere these strings are
+    // ordinary (missing) file names.
+    #[cfg(windows)]
+    cases.extend([
         (r"\\server\share\x.iso".into(), ErrorCode::PermissionDenied),
         (r"\\?\C:\x.iso".into(), ErrorCode::PermissionDenied),
         (r"\\.\PhysicalDrive0".into(), ErrorCode::PermissionDenied),
@@ -767,22 +790,8 @@ async fn import_list_create_and_delete_with_the_sqlite_catalog() {
             format!("{}\\..\\{}", src.display(), "Ubuntu.ISO"),
             ErrorCode::InvalidArgument,
         ),
-        (txt.display().to_string(), ErrorCode::InvalidArgument),
-        (
-            src.join("folder.iso").display().to_string(),
-            ErrorCode::InvalidArgument,
-        ),
-        (
-            src.join("missing.iso").display().to_string(),
-            ErrorCode::NotFound,
-        ),
-        (no_sig.display().to_string(), ErrorCode::InvalidArgument),
-        (String::new(), ErrorCode::InvalidArgument),
-    ];
+    ]);
     for (path, want) in cases {
-        if !cfg!(windows) && path.contains('\\') {
-            continue;
-        }
         let m = req(
             &mut ui,
             Request::ImportMedia {
@@ -817,7 +826,7 @@ async fn import_list_create_and_delete_with_the_sqlite_catalog() {
             assert_eq!(code(&m), Some(ErrorCode::PermissionDenied), "{m:?}");
         }
     }
-    assert_eq!(std::fs::read_dir(dir.join("media")).unwrap().count(), 1);
+    assert_eq!(std::fs::read_dir(dir.join("media")).unwrap().count(), 0);
 
     // The imported medium is usable as installation media.
     let mut cfg = sample_config("f2-vm");
@@ -829,7 +838,7 @@ async fn import_list_create_and_delete_with_the_sqlite_catalog() {
         } => vm,
         other => panic!("{other:?}"),
     };
-    // The managed copy is verified at start (real inspector).
+    // The file is verified at start (real inspector).
     let run = start_vm(&mut ui, vm.id).await;
     assert!(
         calls(&svc).iter().any(|c| c == "vm_start:f2-vm:media=1"),
@@ -885,7 +894,7 @@ async fn import_list_create_and_delete_with_the_sqlite_catalog() {
     let m = req(&mut ui, Request::VmStatus { vm_id: vm.id }).await;
     assert_eq!(code(&m), Some(ErrorCode::NotFound));
     // The medium stays in the registry.
-    assert!(copy.exists());
+    assert!(iso.exists());
     svc.handle.shutdown().await;
 
     let events = read_audit(&dir);
@@ -912,6 +921,117 @@ async fn import_list_create_and_delete_with_the_sqlite_catalog() {
             result: ResponseBody::MediaList { media: list },
             ..
         } => assert_eq!(list.len(), 1),
+        other => panic!("{other:?}"),
+    }
+    svc.handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn imported_media_are_deleted_only_when_no_vm_uses_them() {
+    let dir = temp_dir("f2-media-delete");
+    let src = temp_dir("f2-media-delete-sources");
+    let svc = start_sqlite(&dir).await;
+    let (mut ui, _) = connect_ui(&svc).await;
+    let iso = iso_file(&src, "install.iso", b"CD001");
+    let media = match req(
+        &mut ui,
+        Request::ImportMedia {
+            source_path: iso.to_str().unwrap().into(),
+            media_kind: MediaKind::InstallIso,
+            declared_origin: "ubuntu.com".into(),
+        },
+    )
+    .await
+    {
+        ServerMessage::Response {
+            result: ResponseBody::MediaImported { media },
+            ..
+        } => media,
+        other => panic!("{other:?}"),
+    };
+    let original = std::fs::read(&iso).unwrap();
+    let delete = Request::DeleteMedia { media_id: media.id };
+
+    let mut cfg = sample_config("media-user");
+    cfg.install_media = Some(media.id);
+    let vm = match req(&mut ui, Request::CreateVm { config: cfg }).await {
+        ServerMessage::Response {
+            result: ResponseBody::VmCreated { vm },
+            ..
+        } => vm,
+        other => panic!("{other:?}"),
+    };
+    // Running (the file is held by the run) and then stopped: refused, the
+    // VM is named.
+    start_vm(&mut ui, vm.id).await;
+    for running in [true, false] {
+        match req(&mut ui, delete.clone()).await {
+            ServerMessage::Error {
+                error: ReplyError::Operational(e),
+                ..
+            } => {
+                assert_eq!(e.code, ErrorCode::StateConflict);
+                assert!(
+                    e.message
+                        .contains("used by 1 VM: \u{201c}media-user\u{201d}"),
+                    "{}",
+                    e.message
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(std::fs::read(&iso).unwrap(), original);
+        if running {
+            succeeded(&submit(&mut ui, vm.id, None, VmAction::Stop).await);
+        }
+    }
+    match req(
+        &mut ui,
+        Request::DeleteVm {
+            vm_id: vm.id,
+            expected_revision: 1,
+        },
+    )
+    .await
+    {
+        ServerMessage::Response {
+            result: ResponseBody::VmDeleted { .. },
+            ..
+        } => {}
+        other => panic!("{other:?}"),
+    }
+    match req(&mut ui, delete.clone()).await {
+        ServerMessage::Response {
+            result: ResponseBody::MediaDeleted { media_id },
+            ..
+        } => assert_eq!(media_id, media.id),
+        other => panic!("{other:?}"),
+    }
+    // ADR-0029: only the registry row goes, the user's file is kept.
+    assert_eq!(std::fs::read(&iso).unwrap(), original);
+    match req(&mut ui, Request::ListMedia).await {
+        ServerMessage::Response {
+            result: ResponseBody::MediaList { media: list },
+            ..
+        } => assert!(list.is_empty(), "{list:?}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(code(&req(&mut ui, delete).await), Some(ErrorCode::NotFound));
+    svc.handle.shutdown().await;
+
+    let events = read_audit(&dir);
+    let has = |a, o| events.iter().any(|e| e.action == a && e.outcome == o);
+    assert!(has(AuditAction::MediaDelete, AuditOutcome::Denied));
+    assert!(has(AuditAction::MediaDelete, AuditOutcome::Succeeded));
+
+    // After a restart the medium is still gone.
+    let svc = start_sqlite(&dir).await;
+    let (mut ui, _) = connect_ui(&svc).await;
+    match req(&mut ui, Request::ListMedia).await {
+        ServerMessage::Response {
+            result: ResponseBody::MediaList { media: list },
+            ..
+        } => assert!(list.is_empty()),
         other => panic!("{other:?}"),
     }
     svc.handle.shutdown().await;
@@ -1015,8 +1135,8 @@ fn rfb_watch(ticket: &ConsoleTicket) -> Arc<std::sync::Mutex<RfbSeen>> {
     seen
 }
 
-/// Removes a test catalog even if the test fails: the managed copy of the
-/// ISO is large and read-only.
+/// Removes a test catalog even if the test fails: it may hold read-only
+/// files (and, before ADR-0029, a large managed copy of the ISO).
 struct RemoveCatalog(PathBuf);
 
 impl Drop for RemoveCatalog {
@@ -1056,7 +1176,7 @@ fn ms(d: Duration) -> f64 {
 /// stop, deletion. Requires `LIGHTVM_E2E_QEMU_DIR`; optional
 /// `LIGHTVM_E2E_ISO` (default `lab/media/ubuntu-26.04.1-desktop-amd64.iso`)
 /// and `LIGHTVM_E2E_BOOT_S` (wait for the live system, default 150). The
-/// catalog (with the 6 GiB managed copy) is removed at the end. Run in
+/// catalog is removed at the end (the ISO is used in place, ADR-0029). Run in
 /// release: `cargo test --release -p lightvm-service --test f2 --
 /// --ignored --nocapture`.
 #[test]
@@ -1083,7 +1203,7 @@ fn e2e_real_qemu_import_console_input_stop_delete() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(150);
-    // Catalogs left by an interrupted run (QEMU kept the copy open).
+    // Catalogs left by an interrupted run (QEMU kept a file open).
     if let Ok(rd) = std::fs::read_dir(std::env::temp_dir().join("lightvm-service-tests")) {
         for e in rd.flatten() {
             if e.file_name().to_string_lossy().starts_with("f2-e2e-") {
@@ -1105,7 +1225,7 @@ fn e2e_real_qemu_import_console_input_stop_delete() {
     assert!(capacity.accelerator_available, "accelerator not available");
     assert!(capacity.input_available && capacity.screenshot_available);
     // The lab host may have less free space than the 16 GiB reserve plus the
-    // VM disk after the 6 GiB managed copy: the qcow2 disk is sparse and the
+    // VM disk: the qcow2 disk is sparse and the
     // live session does not write to it, so the test lowers the reserve
     // (declared in F2-01) instead of failing on host capacity.
     if capacity.free_storage_gib < capacity.reserved_storage_gib + 25 {
@@ -1148,7 +1268,7 @@ fn e2e_real_qemu_import_console_input_stop_delete() {
             other => panic!("{other:?}"),
         }
 
-        // 1. Import: the supervisor keeps answering during the copy.
+        // 1. Import: the supervisor keeps answering during the hash.
         let size = std::fs::metadata(&iso).unwrap().len();
         let (mut other, _) = connect_ui(&svc).await;
         let t0 = Instant::now();

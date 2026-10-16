@@ -40,10 +40,15 @@ pub struct StorageUsage {
     pub artifacts: u64,
     /// Logs.
     pub logs: u64,
-    /// Media registry (catalog total only).
+    /// Managed media copies (catalog total only; files used in place,
+    /// ADR-0029, are outside the catalog and not counted).
     pub media: u64,
     /// Database and auxiliary files (catalog total only).
     pub metadata: u64,
+    /// Files of the user snapshots (UEFI variables and thumbnails,
+    /// ADR-0032); their disk clusters live inside the VM's disk.
+    #[serde(default)]
+    pub snapshots: u64,
 }
 
 impl StorageUsage {
@@ -58,6 +63,7 @@ impl StorageUsage {
             self.logs,
             self.media,
             self.metadata,
+            self.snapshots,
         ]
         .iter()
         .fold(0u64, |a, b| a.saturating_add(*b))
@@ -200,13 +206,19 @@ impl Catalog {
             )?,
             media: 0,
             metadata: 0,
+            snapshots: sum(
+                "SELECT coalesce(sum(vars_bytes + thumbnail_bytes),0) FROM snapshots
+                 WHERE (?1 IS NULL OR vm_id = ?1)",
+            )?,
         };
         if vm.is_none() {
             let media: i64 = self
                 .conn
-                .query_row("SELECT coalesce(sum(size_bytes),0) FROM media", [], |r| {
-                    r.get(0)
-                })
+                .query_row(
+                    "SELECT coalesce(sum(size_bytes),0) FROM media WHERE storage = 'managed'",
+                    [],
+                    |r| r.get(0),
+                )
                 .db()?;
             usage.media = u(media);
             let db = self.layout.db_path();

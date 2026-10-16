@@ -31,9 +31,10 @@
 //! file cannot be deleted or renamed (the name cannot be re-pointed to
 //! another file), and its parent directories cannot be renamed either (NTFS
 //! refuses to rename a directory that contains an open file not shared for
-//! delete: tested in `adapters::catalog`). QEMU opens the managed path (the
-//! service-chosen catalog path, never a client path) read-only, which is
-//! compatible with the guard; so the bytes hashed are the bytes QEMU reads.
+//! delete: tested in `adapters::catalog`). QEMU opens the guarded path (the
+//! catalog path of a managed copy, or the recorded path of a file used in
+//! place that the guard has just opened and checked, ADR-0029) read-only,
+//! which is compatible with the guard; so the bytes hashed are the bytes QEMU reads.
 //! Limits, unchanged from ADR-0025: an administrator, raw volume access or a
 //! memory mapping created before the guard; on non-Windows hosts there are
 //! no share modes (declared limit, R2a).
@@ -74,7 +75,8 @@ pub trait StartGuard: Send {
     }
 }
 
-/// Managed copy of an approved medium, opened in a protected way for a start
+/// File of an approved medium (managed copy or the user's file used in
+/// place, ADR-0029), opened in a protected way for a start
 /// by [`MediaGuardPort::open_for_start`]. Dropping it closes the handle.
 pub trait GuardedMedia: Send + std::fmt::Debug {
     /// Size read on the handle (progress).
@@ -90,7 +92,7 @@ pub trait GuardedMedia: Send + std::fmt::Debug {
 
 /// Opening of the approved media for a start (supervisor thread: no hash).
 pub trait MediaGuardPort {
-    /// Opens the managed copy of `entry` with the guard share mode.
+    /// Opens the file of `entry` with the guard share mode.
     fn open_for_start(&mut self, entry: &MediaEntry) -> Result<Box<dyn GuardedMedia>, PublicError>;
 }
 

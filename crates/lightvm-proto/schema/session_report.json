@@ -98,6 +98,13 @@
       "description": "Declared guest OS.",
       "$ref": "#/$defs/GuestOs"
     },
+    "network_endpoints": {
+      "description": "Granted network endpoints (`network.endpoints`, ADR-0033).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
     "objective": {
       "description": "Objective (purpose declared by the agent and approved by the user).",
       "type": "string"
@@ -174,6 +181,10 @@
           "type": "null"
         }
       ]
+    },
+    "tools": {
+      "description": "Named Tools resources authorized for this session.",
+      "$ref": "#/$defs/ToolGrant"
     },
     "verdicts": {
       "description": "Verdicts in order (the last one is the current outcome).",
@@ -255,6 +266,41 @@
         "at"
       ]
     },
+    "AuditOutcome": {
+      "description": "Recorded outcome.",
+      "oneOf": [
+        {
+          "description": "Accepted (queued).",
+          "type": "string",
+          "const": "accepted"
+        },
+        {
+          "description": "Forwarded to the backend.",
+          "type": "string",
+          "const": "forwarded"
+        },
+        {
+          "description": "Completed.",
+          "type": "string",
+          "const": "succeeded"
+        },
+        {
+          "description": "Failed.",
+          "type": "string",
+          "const": "failed"
+        },
+        {
+          "description": "Denied: no effect.",
+          "type": "string",
+          "const": "denied"
+        },
+        {
+          "description": "Discarded before forwarding: no effect.",
+          "type": "string",
+          "const": "discarded"
+        }
+      ]
+    },
     "BaselineId": {
       "description": "BaselineId: version 7 UUID, lowercase with hyphens.",
       "type": "string",
@@ -264,6 +310,18 @@
     "Capability": {
       "description": "Authorizable action on a VM. Serialized names follow the MCP catalog\n(ROADMAP 9); `vm.input` covers mouse and keyboard.",
       "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "share.read",
+            "share.write",
+            "clipboard",
+            "files.transfer",
+            "usb",
+            "ui.inspect",
+            "ui.act"
+          ]
+        },
         {
           "description": "List filtered by the grant.",
           "type": "string",
@@ -313,6 +371,11 @@
           "description": "Authorized LightVM events and QEMU logs.",
           "type": "string",
           "const": "vm.logs"
+        },
+        {
+          "description": "Network endpoints of the VM's allowlist (ADR-0033, ADR-0034): the\ngrant lists which ones ([`Grant::network_endpoints`]). Without it\nthe session's VM runs without network.",
+          "type": "string",
+          "const": "network.endpoints"
         }
       ]
     },
@@ -372,7 +435,7 @@
       ]
     },
     "GuestOs": {
-      "description": "Declared guest operating system. In the MVP the reference is Ubuntu LTS\nx86_64 with the version and checksum pinned in F0 (ROADMAP 4).",
+      "description": "Declared guest operating system. In the MVP the reference is Ubuntu LTS\nx86_64 with the version and checksum pinned in F0 (ROADMAP 4). The\nWindows variants (ADR-0027, ROADMAP R2c) select a hardware profile with\ndevices the guest has inbox drivers for; they are manual, offline guests\nand their compatibility cells stay \"not verified\" until real evidence.",
       "oneOf": [
         {
           "description": "Ubuntu LTS x86_64 (MVP reference guest).",
@@ -383,8 +446,97 @@
           "description": "Other Linux x86_64: manageable manually, without compatibility guarantees.",
           "type": "string",
           "const": "other_linux_x86_64"
+        },
+        {
+          "description": "Windows XP (NT 5.1, and XP x64 / NT 5.2): legacy BIOS, i440fx, PIIX IDE.",
+          "type": "string",
+          "const": "windows_xp"
+        },
+        {
+          "description": "Windows Vista (NT 6.0): legacy BIOS, q35, AHCI.",
+          "type": "string",
+          "const": "windows_vista"
+        },
+        {
+          "description": "Windows 7 (NT 6.1): legacy BIOS, q35, AHCI.",
+          "type": "string",
+          "const": "windows7"
+        },
+        {
+          "description": "Windows 8.1 (NT 6.3): UEFI (x64) or legacy BIOS (32-bit), q35, AHCI.",
+          "type": "string",
+          "const": "windows81"
+        },
+        {
+          "description": "Windows 10 (NT 10.0, build < 22000): UEFI (x64) or legacy BIOS\n(32-bit), q35, AHCI.",
+          "type": "string",
+          "const": "windows10"
+        },
+        {
+          "description": "Windows 11 on ARM64 (build 22000 and later): macOS/HVF hosts only,\n`virt`, UEFI with Secure Boot, TPM 2.0 (ADR-0028).",
+          "type": "string",
+          "const": "windows11_arm64"
         }
       ]
+    },
+    "NetworkAudit": {
+      "description": "Network details of a `network_*` audit event (ADR-0033). Addresses and\ncounts only: never data carried by the connection.",
+      "type": "object",
+      "properties": {
+        "bytes_from_guest": {
+          "description": "Bytes from the guest to the endpoint.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "bytes_to_guest": {
+          "description": "Bytes from the endpoint to the guest.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "destination": {
+          "description": "Destination inside the guest network (`10.0.2.101:1433`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "endpoint": {
+          "description": "Endpoint name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "description": "Network mode of the run (`offline`, `nat`, `endpoints`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "description": "How it ended or why it was refused (`closed`, `revoked`,\n`not_allowed`...), or the allowed endpoints for `network_policy`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "target": {
+          "description": "Host address the connection was opened to (or the endpoint\nresolved to).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
     },
     "OperationId": {
       "description": "OperationId: version 7 UUID, lowercase with hyphens.",
@@ -783,6 +935,54 @@
           ]
         },
         {
+          "description": "Network event of the session's VM (ADR-0033): a connection through\nthe endpoint allowlist ended, an attempt was refused, or the run's\nnetwork was set up (`kind` of the audit: `network_setup`,\n`network_connection`, `network_denied`, `network_policy`).",
+          "type": "object",
+          "properties": {
+            "action": {
+              "description": "Audit action name.",
+              "type": "string"
+            },
+            "detail": {
+              "description": "Details (addresses and counts, never content).",
+              "$ref": "#/$defs/NetworkAudit"
+            },
+            "kind": {
+              "type": "string",
+              "const": "network"
+            }
+          },
+          "required": [
+            "kind",
+            "action",
+            "detail"
+          ]
+        },
+        {
+          "description": "Tools metadata, never file contents or clipboard/UI values.",
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string"
+            },
+            "detail": {
+              "$ref": "#/$defs/ToolAudit"
+            },
+            "kind": {
+              "type": "string",
+              "const": "tools"
+            },
+            "outcome": {
+              "$ref": "#/$defs/AuditOutcome"
+            }
+          },
+          "required": [
+            "kind",
+            "action",
+            "outcome",
+            "detail"
+          ]
+        },
+        {
           "description": "Service note (plain text).",
           "type": "object",
           "properties": {
@@ -978,6 +1178,63 @@
           "const": "infrastructure_error"
         }
       ]
+    },
+    "ToolAudit": {
+      "type": "object",
+      "properties": {
+        "bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "feature": {
+          "type": "string"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "share": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "feature"
+      ]
+    },
+    "ToolGrant": {
+      "description": "Named subsets granted by the user. Booleans in `shares` denote write\npermission; feature capabilities remain independently required.",
+      "type": "object",
+      "properties": {
+        "shares": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "boolean"
+          }
+        },
+        "usb_devices": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
     },
     "UtcTimestamp": {
       "description": "RFC 3339 UTC instant with Z suffix, millisecond precision.",

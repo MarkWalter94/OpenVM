@@ -166,6 +166,49 @@ pub fn encode_png(img: &RgbImage) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// Box-filtered copy of `img` fitting in `max_w` × `max_h` with the same
+/// aspect ratio (never enlarged; at least 1 × 1). Snapshot thumbnails.
+#[must_use]
+pub fn downscale(img: &RgbImage, max_w: u32, max_h: u32) -> RgbImage {
+    let (w, h) = (img.width.max(1), img.height.max(1));
+    let scale = f64::min(
+        f64::from(max_w.max(1)) / f64::from(w),
+        f64::from(max_h.max(1)) / f64::from(h),
+    )
+    .min(1.0);
+    let nw = ((f64::from(w) * scale).floor() as u32).max(1);
+    let nh = ((f64::from(h) * scale).floor() as u32).max(1);
+    let mut data = Vec::with_capacity((nw * nh * 3) as usize);
+    for y in 0..nh {
+        let y0 = (u64::from(y) * u64::from(h) / u64::from(nh)) as u32;
+        let y1 = ((u64::from(y + 1) * u64::from(h)).div_ceil(u64::from(nh)) as u32).max(y0 + 1);
+        for x in 0..nw {
+            let x0 = (u64::from(x) * u64::from(w) / u64::from(nw)) as u32;
+            let x1 = ((u64::from(x + 1) * u64::from(w)).div_ceil(u64::from(nw)) as u32).max(x0 + 1);
+            let mut acc = [0u64; 3];
+            let mut n = 0u64;
+            for sy in y0..y1.min(img.height) {
+                for sx in x0..x1.min(img.width) {
+                    let o = ((sy * img.width + sx) * 3) as usize;
+                    if let Some(px) = img.data.get(o..o + 3) {
+                        for c in 0..3 {
+                            acc[c] += u64::from(px[c]);
+                        }
+                        n += 1;
+                    }
+                }
+            }
+            let n = n.max(1);
+            data.extend(acc.iter().map(|v| (v / n) as u8));
+        }
+    }
+    RgbImage {
+        width: nw,
+        height: nh,
+        data,
+    }
+}
+
 /// Removes the temporary file when leaving the scope, even on error.
 struct TempFile<'a>(&'a ManagedPath);
 
@@ -323,5 +366,39 @@ mod tests {
         assert!(parse_ppm(b"P6\n1 1\n255\n\x00\x00\x00\x00", MAX_SIDE).is_err());
         assert!(parse_ppm(b"P6", MAX_SIDE).is_err());
         assert!(parse_ppm(b"", MAX_SIDE).is_err());
+    }
+
+    #[test]
+    fn downscale_keeps_the_aspect_and_averages() {
+        let (w, h) = (1280u32, 800u32);
+        let mut data = vec![0u8; (w * h * 3) as usize];
+        // Left half white.
+        for y in 0..h {
+            for x in 0..w / 2 {
+                let o = ((y * w + x) * 3) as usize;
+                data[o..o + 3].copy_from_slice(&[255, 255, 255]);
+            }
+        }
+        let img = RgbImage {
+            width: w,
+            height: h,
+            data,
+        };
+        let t = downscale(&img, 160, 120);
+        assert_eq!((t.width, t.height), (160, 100));
+        assert_eq!(t.data.len(), 160 * 100 * 3);
+        assert_eq!(&t.data[0..3], &[255, 255, 255]);
+        assert_eq!(&t.data[t.data.len() - 3..], &[0, 0, 0]);
+        let png = encode_png(&t).unwrap();
+        assert!(png.len() < 40 * 1024);
+        // Never enlarged; degenerate sizes do not panic.
+        let one = RgbImage {
+            width: 1,
+            height: 1,
+            data: vec![9, 9, 9],
+        };
+        let t = downscale(&one, 160, 120);
+        assert_eq!((t.width, t.height, t.data.clone()), (1, 1, vec![9, 9, 9]));
+        let _ = downscale(&img, 0, 0);
     }
 }

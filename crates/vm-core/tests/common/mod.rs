@@ -53,7 +53,8 @@ pub struct MemStoreInner {
     pub runs: BTreeMap<RunId, RunRecord>,
     /// Sequence of persisted states, to check the transitions.
     pub state_log: Vec<(VmId, VmState)>,
-    /// Makes `remove_vm` and `import_media` fail (catalog error).
+    /// Makes `remove_vm`, `remove_media` and `import_media` fail (catalog
+    /// error).
     pub fail_files: bool,
 }
 
@@ -152,16 +153,27 @@ impl CatalogStore for MemStore {
                 size_bytes: 1024,
                 declared_origin: declared_origin.clone(),
                 approved_at: UtcTimestamp::from_unix_millis(T0).unwrap(),
+                detected_guest: None,
+                location: Some(source.to_string_lossy().into_owned()),
+                missing: false,
             },
-            managed_path: ManagedRelPath::parse(format!(
-                "media/{}",
-                source.file_name().and_then(|n| n.to_str()).unwrap_or("x")
-            ))
-            .unwrap(),
+            // ADR-0029: the file chosen by the user is used in place.
+            location: MediaLocation::Referenced(source.to_path_buf()),
             file_identity: None,
         };
         self.insert_media(&entry)?;
         Ok(entry)
+    }
+    fn remove_media(&mut self, id: MediaId) -> Result<(), PublicError> {
+        let mut inner = self.0.borrow_mut();
+        if inner.fail_files {
+            return Err(PublicError::infrastructure("catalog error"));
+        }
+        inner
+            .media
+            .remove(&id)
+            .map(|_| ())
+            .ok_or_else(|| PublicError::not_found("medium not found"))
     }
     fn remove_vm(&mut self, id: VmId) -> Result<(), PublicError> {
         let mut inner = self.0.borrow_mut();
@@ -205,6 +217,8 @@ pub struct FakeBackend {
     pub calls: Vec<Call>,
     pub fail_next: Option<PublicError>,
     pub geometry: Option<DisplayGeometry>,
+    /// Network mode of each start (ADR-0033).
+    pub networks: Vec<NetworkProfile>,
 }
 
 impl FakeBackend {
@@ -226,6 +240,7 @@ impl VmBackend for FakeBackend {
         run_id: RunId,
         media: &[VerifiedMedia],
     ) -> Result<(), PublicError> {
+        self.networks.push(vm.config.network);
         self.calls.push(Call::Start(
             vm.id,
             run_id,
@@ -365,7 +380,7 @@ impl Harness {
         let cell = Rc::new(Cell::new(T0));
         let clock = FakeClock(cell.clone());
         let audit = MemAudit::default();
-        let core = Core::new(
+        let mut core = Core::new(
             store.clone(),
             clock.clone(),
             SeqIds {
@@ -375,6 +390,9 @@ impl Harness {
             audit.clone(),
             cfg,
         );
+        // The fake backend runs every guest whatever the build host; the
+        // host rule itself is tested in `windows_guests.rs`.
+        core.set_guest_support(vm_core::resources::any_guest);
         Self {
             core,
             clock,
@@ -404,7 +422,9 @@ impl Harness {
                 sha256: Sha256Digest::from_bytes([1; 32]),
                 size_bytes: 6 * 1024 * 1024 * 1024,
                 declared_origin: Label::parse("downloaded by the user").unwrap(),
-                managed_path: ManagedRelPath::parse(format!("media/{name}")).unwrap(),
+                location: MediaLocation::Managed(
+                    ManagedRelPath::parse(format!("media/{name}")).unwrap(),
+                ),
                 file_identity: Some(FileIdentity {
                     volume: 1,
                     file_id: [9; 16],
@@ -416,16 +436,19 @@ impl Harness {
 
     pub fn vm_config(&self, name: &str, media: Option<MediaId>) -> VmConfig {
         VmConfig {
+            tools: Default::default(),
             name: VmName::parse(name).unwrap(),
             guest_os: GuestOs::UbuntuLtsX86_64,
             vcpus: 2,
             memory_mib: 4096,
             disk_gib: 40,
             network: NetworkProfile::Offline,
+            endpoints: Vec::new(),
             install_media: media,
             data_media: None,
             firmware: Firmware::Uefi,
             limits: Default::default(),
+            imported: None,
         }
     }
 
@@ -478,11 +501,13 @@ impl Harness {
 
     pub fn session(&mut self, vms: &[VmId], caps: &[Capability], token: u8) -> (SessionId, Caller) {
         let spec = SessionSpec {
+            tools: Default::default(),
             vm_allowlist: vms.iter().copied().collect(),
             capabilities: caps.iter().copied().collect(),
             quotas: Quotas::UNBOUNDED,
             expires_at: UtcTimestamp::from_unix_millis(self.clock.0.get() + 3_600_000).unwrap(),
             lease_millis: 10_000,
+            network_endpoints: Default::default(),
         };
         let (grant, _lease) = self
             .core
@@ -542,4 +567,4 @@ impl Harness {
     }
 }
 
-pub const ALL_CAPS: [Capability; 10] = Capability::ALL;
+pub const ALL_CAPS: [Capability; 11] = Capability::VM_CONTROLS;

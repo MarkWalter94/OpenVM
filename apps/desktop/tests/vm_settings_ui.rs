@@ -20,16 +20,19 @@ struct Fixture {
 
 fn config() -> VmConfig {
     VmConfig {
+        tools: Default::default(),
         name: VmName::parse("ubuntu-test").unwrap(),
         guest_os: GuestOs::UbuntuLtsX86_64,
         vcpus: 2,
         memory_mib: 2048,
         disk_gib: 16,
         network: NetworkProfile::Offline,
+        endpoints: Vec::new(),
         install_media: None,
         data_media: None,
         firmware: Firmware::Uefi,
         limits: VmLimits::default(),
+        imported: None,
     }
 }
 
@@ -85,7 +88,7 @@ fn save_only_with_changes_and_budget_from_menu() {
     let mut h = harness(true);
     h.run();
     assert!(!enabled(&h, "Save settings"));
-    assert_eq!(h.query_all_by_role(Role::ComboBox).count(), 4);
+    assert_eq!(h.query_all_by_role(Role::ComboBox).count(), 5);
     h.get_by_role_and_label(Role::ComboBox, "Storage budget")
         .click();
     h.run();
@@ -169,4 +172,77 @@ fn media_not_editable_while_running() {
     let mut h = harness_for(c, false);
     h.run();
     assert!(!enabled(&h, "Remove the installation media"));
+}
+
+/// Focuses the text field `label` and types `text` into it.
+fn type_into(h: &mut Harness<'_, Fixture>, label: &str, text: &str) {
+    h.get_by_label(label).click();
+    h.run_steps(2);
+    h.get_by_label(label).type_text(text);
+    h.run_steps(2);
+}
+
+/// ADR-0033: the network mode from the menu; the endpoint allowlist needs
+/// at least one valid endpoint before "Save settings" is enabled; the
+/// virtual address is assigned by the panel. The endpoint fields are the
+/// only text fields of the panel.
+#[test]
+fn network_mode_and_endpoints() {
+    let mut h = harness(true);
+    h.run();
+    h.get_by_role_and_label(Role::ComboBox, "Network mode")
+        .click();
+    h.run();
+    h.get_by_label("Endpoint allowlist").click();
+    h.run();
+    assert_eq!(h.state().m.config.network, NetworkProfile::Endpoints);
+    h.get_by_label("the endpoint allowlist mode needs at least one endpoint");
+    assert!(!enabled(&h, "Save settings"));
+    h.get_by_role_and_label(Role::Button, "Add endpoint")
+        .click();
+    h.run();
+    assert_eq!(h.query_all_by_role(Role::TextInput).count(), 3);
+    assert!(!enabled(&h, "Save settings"), "empty endpoint");
+    type_into(&mut h, "Name of endpoint 1", "sql.lan");
+    h.run();
+    type_into(&mut h, "Host of endpoint 1", "127.0.0.1");
+    h.run();
+    type_into(&mut h, "Port of endpoint 1", "1433");
+    h.run();
+    h.run();
+    let e = &h.state().m.config.endpoints[0];
+    assert_eq!(
+        (e.name.as_str(), e.host.as_str(), e.port, e.virtual_ip),
+        (
+            "sql.lan",
+            "127.0.0.1",
+            1433,
+            std::net::Ipv4Addr::new(10, 0, 2, 100)
+        )
+    );
+    h.get_by_label("guest 10.0.2.100");
+    assert!(enabled(&h, "Save settings"));
+    // A wildcard name is refused.
+    type_into(&mut h, "Name of endpoint 1", "*");
+    h.run();
+    h.run();
+    assert!(!enabled(&h, "Save settings"));
+    h.get_by_role_and_label(Role::Button, "Remove endpoint 1")
+        .click();
+    h.run();
+    assert!(h.state().m.config.endpoints.is_empty());
+}
+
+/// Windows on ARM has no network adapter: any mode other than offline is
+/// refused before saving.
+#[test]
+fn arm64_guests_stay_offline() {
+    let mut c = config();
+    c.guest_os = GuestOs::Windows11Arm64;
+    c.network = NetworkProfile::Nat;
+    let mut h = harness_for(c, true);
+    h.state_mut().m.original.network = NetworkProfile::Offline;
+    h.run();
+    h.get_by_label("Windows 11 ARM64 guests can only be offline.");
+    assert!(!enabled(&h, "Save settings"));
 }

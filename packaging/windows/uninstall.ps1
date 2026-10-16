@@ -103,11 +103,19 @@ if ((Get-Location).Path.StartsWith($Prefix, [StringComparison]::OrdinalIgnoreCas
 # Only plain file names directly in the prefix: no separators, no "." or
 # "..", and only files (never a folder).
 foreach ($f in @($manifest.files)) {
-    if ($f -isnot [string] -or $f -notmatch '^[A-Za-z0-9._-]+$' -or $f -match '^\.+$') {
+    $knownTools = @('tools/TOOLS.EXE', 'tools/TOOLS.PY', 'tools/TOOLS.EXE.sha256', 'tools/TOOLS.PY.sha256', 'tools/README.txt', 'tools/LICENSE.txt')
+    $toolEntry = $f -is [string] -and $knownTools -contains $f
+    $toolsDir = Join-Path $Prefix 'tools'
+    if ($toolEntry -and (Test-Path -LiteralPath $toolsDir) -and ((Get-Item -LiteralPath $toolsDir -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) { Write-Warning 'Skipping reparse-point Tools directory'; continue }
+    if ($f -isnot [string] -or (-not $toolEntry -and ($f -notmatch '^[A-Za-z0-9._-]+$' -or $f -match '^\.+$'))) {
         Write-Warning "Skipping unexpected manifest entry: $f"; continue
     }
     $p = Join-Path $Prefix $f
     if ((Test-Path -LiteralPath $p -PathType Leaf) -and $PSCmdlet.ShouldProcess($p, 'Remove file')) { Remove-Item -LiteralPath $p -Force }
+}
+$toolsDir = Join-Path $Prefix 'tools'
+if ((Test-Path -LiteralPath $toolsDir -PathType Container) -and -not ((Get-Item -LiteralPath $toolsDir -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -and @(Get-ChildItem -LiteralPath $toolsDir -Force).Count -eq 0) {
+    if ($PSCmdlet.ShouldProcess($toolsDir, 'Remove empty Tools directory')) { Remove-Item -LiteralPath $toolsDir -Force }
 }
 # The shortcut only if it is a .lnk file in the user's Start Menu "Programs"
 # folder (a manifest cannot make the script delete files elsewhere).
