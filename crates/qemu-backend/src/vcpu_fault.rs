@@ -4,16 +4,20 @@
 //! Under KVM, or on real hardware, a guest triple fault resets the machine.
 //! Under WHPX QEMU 11.1 reports it as `WHPX: Unexpected VP exit code 4`
 //! (`WHvRunVpExitReasonUnrecoverableException`), stops the virtual CPUs and
-//! leaves the guest in run state `internal-error` with the process alive
-//! (QMP `STOP` event): nothing runs any more and every `input-send-event` is
-//! refused with `VM not running`. Windows Vista Setup does this at its first
+//! leaves the guest stopped with the process alive (QMP `STOP` event):
+//! nothing runs any more and every `input-send-event` is refused with
+//! `VM not running`. The 11.1.0 source stops it in run state `paused`
+//! (`vm_stop(RUN_STATE_PAUSED)` in `target/i386/whpx/whpx-all.c`); other
+//! accelerators and builds use `internal-error`. LightVM never pauses a run
+//! itself (no QMP `stop`) and disk errors use `io-error`, so a `paused` run
+//! was stopped by the accelerator. Windows Vista Setup does this at its first
 //! reboot (`docs/verification/R2c-01`).
 //!
 //! [`watch_vcpu_faults`] follows the QMP events of a run: on `STOP` (and on
-//! `GUEST_PANICKED`) it reads `query-status` and, for `internal-error`, does
-//! what hardware would: `system_reset`, then `cont` ([`reset_and_resume`]:
-//! after a reset from `internal-error` QEMU goes to `prelaunch` and needs
-//! `cont`). At most [`VcpuFaultPolicy::max_resets`] automatic resets within
+//! `GUEST_PANICKED`) it reads `query-status` and, for `internal-error` or
+//! `paused`, does what hardware would: `system_reset`, then `cont`
+//! ([`reset_and_resume`]: after a reset from `internal-error` QEMU goes to
+//! `prelaunch`, a paused guest stays paused; both need `cont`). At most [`VcpuFaultPolicy::max_resets`] automatic resets within
 //! [`VcpuFaultPolicy::window`]: past that the guest is left stopped and the
 //! halt is published ([`VcpuFaults::halt`]) so the user sees it and decides
 //! (reset, or force stop and start again). `guest-panicked` is reset only if
@@ -219,12 +223,13 @@ const RESET_SETTLE: Duration = Duration::from_secs(5);
 
 /// `system_reset`, then `cont` if the virtual CPUs were stopped on an error
 /// or before start (`internal-error`, `guest-panicked`, `shutdown`,
-/// `prelaunch`): QEMU moves such a guest to `prelaunch` after the reset and
-/// refuses `cont` until the reset happened, so the state is polled first. A
+/// `paused`, `prelaunch`): QEMU moves such a guest to `prelaunch` (a paused
+/// one stays `paused`) after the reset and refuses `cont` until the reset
+/// happened, so the state is polled first. A
 /// running guest is only reset. Returns `true` if `cont` was sent.
 pub async fn reset_and_resume(qmp: &QmpClient) -> Result<bool, QmpError> {
     let before = qmp.query_status().await?.status;
-    let resume = needs_reset(&before) || before == RunState::Prelaunch;
+    let resume = needs_reset(&before) || matches!(before, RunState::Prelaunch | RunState::Paused);
     qmp.system_reset().await?;
     if !resume {
         return Ok(false);
@@ -293,7 +298,7 @@ async fn handle_fault(qmp: &QmpClient, faults: &VcpuFaults) {
         return;
     };
     let reason = match status.status {
-        RunState::InternalError => VcpuHaltReason::InternalError,
+        RunState::InternalError | RunState::Paused => VcpuHaltReason::InternalError,
         RunState::GuestPanicked => VcpuHaltReason::GuestPanicked,
         _ => return,
     };

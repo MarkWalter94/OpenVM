@@ -56,6 +56,8 @@ Source: "{#StagingDir}\USER_GUIDE.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StagingDir}\LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StagingDir}\THIRD-PARTY-LICENSES.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StagingDir}\SBOM.cdx.json"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#StagingDir}\BUNDLED-ASSETS.json"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#StagingDir}\licenses\fonts\*.txt"; DestDir: "{app}\licenses\fonts"; Flags: ignoreversion
 Source: "{#StagingDir}\BUILDINFO.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StagingDir}\SHA256SUMS.txt"; DestDir: "{app}"; Flags: ignoreversion
 

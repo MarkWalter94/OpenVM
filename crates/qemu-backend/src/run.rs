@@ -64,6 +64,10 @@ pub use crate::process::EMERGENCY_EXIT_CODE;
 pub enum ExitCause {
     /// The guest shut down (`SHUTDOWN` event with `guest: true`).
     GuestShutdown,
+    /// A reset ended the process (`-action reboot=shutdown`, `SHUTDOWN`
+    /// event with a reset cause: the guest's reboot or QMP `system_reset`).
+    /// The run is to be started again from cold (Windows 11 x64 profile).
+    Reboot,
     /// Exit after `quit` requested by the backend.
     QmpQuit,
     /// Container termination requested by the backend.
@@ -558,13 +562,16 @@ fn spawn_waiter(
                 std::thread::sleep(Duration::from_millis(5));
             }
             let mut guest_shutdown = false;
+            let mut reboot = false;
             loop {
                 match events.try_recv() {
-                    Ok(e) => {
-                        if let EventKind::Shutdown { guest: true, .. } = e.kind() {
-                            guest_shutdown = true;
+                    Ok(e) => match e.kind() {
+                        EventKind::Shutdown { reason, .. } if is_reset_cause(&reason) => {
+                            reboot = true;
                         }
-                    }
+                        EventKind::Shutdown { guest: true, .. } => guest_shutdown = true,
+                        _ => {}
+                    },
                     Err(broadcast::error::TryRecvError::Lagged(_)) => {}
                     Err(_) => break,
                 }
@@ -572,6 +579,8 @@ fn spawn_waiter(
             let starting = matches!(*state_tx.borrow(), ProcessState::Starting);
             let cause = if flags.emergency.load(Ordering::SeqCst) {
                 ExitCause::EmergencyStop
+            } else if reboot && !flags.quit_requested.load(Ordering::SeqCst) {
+                ExitCause::Reboot
             } else if guest_shutdown {
                 ExitCause::GuestShutdown
             } else if flags.quit_requested.load(Ordering::SeqCst) {
@@ -586,6 +595,12 @@ fn spawn_waiter(
         })
         .map_err(BackendError::Io)?;
     Ok(())
+}
+
+/// QAPI `ShutdownCause` values of a reset turned into a shutdown by
+/// `-action reboot=shutdown`.
+fn is_reset_cause(reason: &str) -> bool {
+    matches!(reason, "guest-reset" | "host-qmp-system-reset")
 }
 
 /// Emergency stop: direct path to the OS primitives, usable
@@ -638,7 +653,10 @@ impl EmergencyStop {
 /// reported by QMP. Failed startup and unexpected exit are not.
 pub fn exit_cause_expected(cause: ExitCause) -> bool {
     match cause {
-        ExitCause::EmergencyStop | ExitCause::QmpQuit | ExitCause::GuestShutdown => true,
+        ExitCause::EmergencyStop
+        | ExitCause::QmpQuit
+        | ExitCause::GuestShutdown
+        | ExitCause::Reboot => true,
         ExitCause::StartupFailed | ExitCause::Unexpected => false,
     }
 }
@@ -1542,6 +1560,24 @@ impl Drop for QemuRun {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_reset_causes_are_cold_reboots() {
+        for r in ["guest-reset", "host-qmp-system-reset"] {
+            assert!(is_reset_cause(r), "{r}");
+        }
+        for r in [
+            "guest-shutdown",
+            "host-qmp-quit",
+            "host-signal",
+            "guest-panic",
+            "subsystem-reset",
+            "",
+        ] {
+            assert!(!is_reset_cause(r), "{r}");
+        }
+        assert!(exit_cause_expected(ExitCause::Reboot));
+    }
 
     #[test]
     fn nic_check() {

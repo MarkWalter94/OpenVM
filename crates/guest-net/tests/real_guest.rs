@@ -127,7 +127,16 @@ impl Guest {
     fn boot(tag: &str, net_args: &[String]) -> Guest {
         let lab = lab();
         let q = lab.join(r"qemu\qemu-11.1.0\qemu-system-x86_64.exe");
-        let casper = lab.join(r"integration-spike\ubuntu-boot\casper");
+        // The kernel and initrd extracted by the network spike, or by the
+        // Tools real tests (`lab/tools-real`).
+        let casper = [
+            r"integration-spike\ubuntu-boot\casper",
+            r"tools-real\ubuntu-boot\casper",
+        ]
+        .iter()
+        .map(|p| lab.join(p))
+        .find(|p| p.join("vmlinuz").is_file())
+        .unwrap_or_else(|| lab.join(r"integration-spike\ubuntu-boot\casper"));
         let iso = lab.join(r"media\ubuntu-26.04.1-desktop-amd64.iso");
         for p in [&q, &casper.join("vmlinuz"), &casper.join("initrd"), &iso] {
             assert!(p.is_file(), "missing lab file {}", p.display());
@@ -400,6 +409,53 @@ elif mode == "revoked":
         ("dns sql.lan", lambda: dnsq("10.0.2.3", "sql.lan")),
         ("tcp by vip 10.0.2.101:1433", lambda: tcp("10.0.2.101", 1433, send=b"HELLO late\n")),
     ]
+elif mode == "filtered":
+    import ssl
+    def https(name, path="/"):
+        ctx = ssl.create_default_context()
+        try:
+            with socket.create_connection((name, 443), timeout=10) as raw:
+                with ctx.wrap_socket(raw, server_hostname=name) as s:
+                    s.sendall(b"GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n" % (path.encode(), name.encode()))
+                    s.settimeout(10); d = s.recv(64)
+                    return "TLS " + s.version() + " " + d.split(b"\r\n")[0].decode(errors="replace")
+        except socket.timeout: return "TIMEOUT"
+        except ConnectionRefusedError: return "REFUSED"
+        except Exception as e: return "FAIL " + type(e).__name__
+    web, host_ip, decoy = args[0], args[1], int(args[2])
+    checks = [
+        ("dns web", lambda: dnsq("10.0.2.3", web)),
+        ("dns other name", lambda: dnsq("10.0.2.3", "www.iana.org")),
+        ("https web", lambda: https(web)),
+        ("http web", lambda: tcp(web, 80, send=b"HEAD / HTTP/1.0\r\nHost: " + web.encode() + b"\r\n\r\n")),
+        ("tcp web:22 (other port)", lambda: tcp(web, 22)),
+        ("dns rebind", lambda: dnsq("10.0.2.3", "rebind.example.net")),
+        ("tcp rebind:443 (pinned to loopback)", lambda: tcp("rebind.example.net", 443, send=b"HELLO rebind\n")),
+        ("tcp gateway 10.0.2.2:decoy", lambda: tcp("10.0.2.2", decoy)),
+        ("tcp host LAN ip:decoy", lambda: tcp(host_ip, decoy)),
+        ("tcp Internet 1.1.1.1:443", lambda: tcp("1.1.1.1", 443)),
+        ("dns udp 8.8.8.8", lambda: dnsq("8.8.8.8", "example.com")),
+        ("tcp IPv6 [2606:4700:4700::1111]:443", lambda: tcp("2606:4700:4700::1111", 443, socket.AF_INET6)),
+        ("icmp 1.1.1.1", lambda: ping("1.1.1.1")),
+    ]
+elif mode == "persist":
+    # One TLS connection kept open across a revocation: the first request
+    # must work, the second (after /tmp/go appears) must not.
+    import os, ssl
+    name = args[0]
+    ctx = ssl.create_default_context()
+    s = ctx.wrap_socket(socket.create_connection((name, 443), timeout=10), server_hostname=name)
+    s.settimeout(10)
+    def req():
+        try:
+            s.sendall(b"HEAD / HTTP/1.1\r\nHost: %s\r\n\r\n" % name.encode())
+            d = s.recv(4096)
+            return d.split(b"\r\n")[0].decode(errors="replace") if d else "EOF"
+        except Exception as e: return "FAIL " + type(e).__name__
+    print("@@ persist first\t" + req(), flush=True)
+    t = time.time()
+    while not os.path.exists("/tmp/go") and time.time() - t < 120: time.sleep(0.2)
+    print("@@ persist after revoke\t" + req(), flush=True)
 elif mode == "nat":
     host_port, decoy = int(args[0]), int(args[1])
     checks = [
@@ -656,4 +712,174 @@ fn nat_with_a_real_linux_guest() {
     assert!(get(&r, "bulk 16MiB").starts_with("OK"));
     assert!(decoy_hits.load(Ordering::SeqCst) >= 1);
     // The Internet row depends on the host's connectivity: recorded only.
+}
+
+#[test]
+#[ignore = "needs the lab (QEMU, WHPX, Ubuntu live) and host Internet access"]
+fn filtered_internet_with_a_real_linux_guest() {
+    use std::net::ToSocketAddrs;
+    const WEB: &str = "example.com";
+    // As the supervisor does at run start (ADR-0037): every IPv4 answer
+    // must pass the policy, the first one is pinned for the run.
+    let answers: Vec<SocketAddr> = (WEB, 443)
+        .to_socket_addrs()
+        .unwrap()
+        .filter(SocketAddr::is_ipv4)
+        .collect();
+    assert!(!answers.is_empty(), "no IPv4 answer for {WEB}");
+    for a in &answers {
+        guest_net::egress::validate_target(*a).unwrap();
+    }
+    let (loopback, rebind_hits) = line_server("127.0.0.1:0");
+    let (decoy_port, decoy_hits) = decoy();
+    let host_ip = host_lan_ip().map_or("192.168.101.134".to_owned(), |ip| ip.to_string());
+    let sock_dir = lab().join("net").join("s");
+    std::fs::create_dir_all(&sock_dir).unwrap();
+    let sock = sock_dir.join("filtered.sock");
+    let _ = std::fs::remove_file(&sock);
+    let mut g = Guest::boot(
+        "filtered",
+        &[
+            "-netdev".into(),
+            format!(
+                "stream,id=n0,server=on,addr.type=unix,addr.path={}",
+                sock.display()
+            ),
+            "-device".into(),
+            "e1000,netdev=n0,mac=52:54:00:12:34:56".into(),
+        ],
+    );
+    let link = guest_net::transport::attach(connect_unix(&sock)).unwrap();
+    let eps = vec![
+        EndpointSpec {
+            name: WEB.into(),
+            virtual_ip: Ipv4Addr::new(10, 0, 2, 101),
+            port: 443,
+            target: answers[0],
+        },
+        // A name whose (rebound) answer points at this host: the
+        // public-only check must refuse it although it is allowed.
+        EndpointSpec {
+            name: "rebind.example.net".into(),
+            virtual_ip: Ipv4Addr::new(10, 0, 2, 102),
+            port: 443,
+            target: loopback,
+        },
+    ];
+    let mut cfg = NetConfig::new(eps);
+    cfg.public_endpoints = [WEB, "rebind.example.net"]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+    let allowed = [WEB.to_owned(), "rebind.example.net".to_owned()];
+    let mut stack = NetStack::start(cfg, link, allowed).unwrap();
+    g.login();
+    let lease = wait_dhcp(&mut g);
+    let mut ev = format!("== pinned {WEB} -> {}\n== guest\n{lease}\n", answers[0]);
+    g.push(PROBE, "/tmp/probe.py");
+    g.cmd(
+        "sudo ip route add default via 10.0.2.2 2>&1",
+        Duration::from_secs(20),
+    );
+    let out = g.cmd(
+        &format!("python3 /tmp/probe.py filtered {WEB} {host_ip} {decoy_port}"),
+        Duration::from_secs(300),
+    );
+    let r = results(&out);
+    for (n, v) in &r {
+        ev.push_str(&format!("{n:<42} {v}\n"));
+    }
+    // A persistent TLS connection, then revocation of every endpoint.
+    g.cmd(
+        &format!("rm -f /tmp/go; (python3 /tmp/probe.py persist {WEB} >/tmp/p.out 2>&1 &)"),
+        Duration::from_secs(10),
+    );
+    let t = Instant::now();
+    while !g
+        .cmd("cat /tmp/p.out", Duration::from_secs(10))
+        .contains("persist first")
+    {
+        assert!(
+            t.elapsed() < Duration::from_secs(60),
+            "persistent connection"
+        );
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    stack.set_allowed(Vec::<String>::new());
+    std::thread::sleep(Duration::from_millis(300));
+    g.cmd("touch /tmp/go", Duration::from_secs(10));
+    let t = Instant::now();
+    let persist = loop {
+        let o = g.cmd("cat /tmp/p.out", Duration::from_secs(10));
+        if o.contains("persist after revoke") {
+            break results(&o);
+        }
+        assert!(t.elapsed() < Duration::from_secs(60), "revoked connection");
+        std::thread::sleep(Duration::from_secs(1));
+    };
+    for (n, v) in &persist {
+        ev.push_str(&format!("{n:<42} {v}\n"));
+    }
+    let stats = stack.stats();
+    stack.stop();
+    ev.push_str(&format!(
+        "== stack\n{stats:?}\nloopback (rebind) connections: {}\ndecoy connections: {}\n",
+        rebind_hits.load(Ordering::SeqCst),
+        decoy_hits.load(Ordering::SeqCst)
+    ));
+    for rec in stack.take_records() {
+        if let NetRecord::Connection(c) = rec {
+            ev.push_str(&format!(
+                "conn {} -> {} up={} down={} {}\n",
+                c.endpoint,
+                c.target,
+                c.bytes_from_guest,
+                c.bytes_to_guest,
+                c.outcome.as_str()
+            ));
+        }
+    }
+    evidence("filtered-real.txt", &ev);
+    println!("{ev}");
+    drop(g);
+
+    assert!(!lease.contains("default"), "no default route from DHCP");
+    assert_eq!(get(&r, "dns web"), "ANSWER rcode=0 an=1 ip=10.0.2.101");
+    assert_eq!(get(&r, "dns other name"), "ANSWER rcode=3 an=0 ip=-");
+    assert!(get(&r, "https web").starts_with("TLS "), "{r:?}");
+    assert!(get(&r, "https web").contains(" HTTP/1.1 "), "{r:?}");
+    for n in [
+        "http web",
+        "tcp web:22 (other port)",
+        "tcp gateway 10.0.2.2:decoy",
+    ] {
+        assert_eq!(get(&r, n), "REFUSED", "{n}");
+    }
+    assert_eq!(get(&r, "dns rebind"), "ANSWER rcode=0 an=1 ip=10.0.2.102");
+    // The stack may accept the guest's handshake before its host connect
+    // fails; what matters is that no byte of the loopback service comes back
+    // (and, below, that it never accepted a connection).
+    assert!(
+        !get(&r, "tcp rebind:443 (pinned to loopback)").contains("ECHO"),
+        "{r:?}"
+    );
+    for n in [
+        "tcp host LAN ip:decoy",
+        "tcp Internet 1.1.1.1:443",
+        "tcp IPv6 [2606:4700:4700::1111]:443",
+    ] {
+        assert!(!get(&r, n).starts_with("CONNECTED"), "{n}");
+    }
+    assert_eq!(get(&r, "dns udp 8.8.8.8"), "TIMEOUT");
+    assert_eq!(get(&r, "icmp 1.1.1.1"), "NOREPLY");
+    assert!(
+        get(&persist, "persist first").starts_with("HTTP/1.1"),
+        "{persist:?}"
+    );
+    assert!(
+        !get(&persist, "persist after revoke").starts_with("HTTP/"),
+        "{persist:?}"
+    );
+    assert_eq!(rebind_hits.load(Ordering::SeqCst), 0, "loopback reached");
+    assert_eq!(decoy_hits.load(Ordering::SeqCst), 0, "decoy reached");
 }

@@ -147,7 +147,10 @@ foreach ($b in 'lightvm-desktop.exe', 'lightvm-service.exe', 'lightvm-mcp.exe') 
 
 # --- Staging ----------------------------------------------------------------
 $Staging = Join-Path $OutDir "staging\$Name"
-if (Test-Path (Join-Path $OutDir 'staging')) { Remove-Item -Recurse -Force (Join-Path $OutDir 'staging') }
+if (Test-Path -LiteralPath $Staging) {
+    # Preserve previous artifacts and other agents' staging directories.
+    $Staging = Join-Path $OutDir ("staging\$Name-" + [guid]::NewGuid().ToString('N'))
+}
 New-Item -ItemType Directory -Force $Staging | Out-Null
 
 Copy-Item (Join-Path $Release 'lightvm-desktop.exe') $Staging
@@ -203,6 +206,7 @@ $sb = New-Object System.Text.StringBuilder
 [void]$sb.AppendLine('C/assembly code from BoringSSL in ring (see the ring licence below),')
 [void]$sb.AppendLine('egui default fonts (OFL-1.1 and Ubuntu Font Licence, epaint_default_fonts).')
 [void]$sb.AppendLine('QEMU, its firmware and guest images are NOT distributed with LightVM.')
+[void]$sb.AppendLine('Additional embedded font assets and notices are inventoried in BUNDLED-ASSETS.json.')
 [void]$sb.AppendLine('')
 $missing = @()
 $standard = [ordered]@{
@@ -263,6 +267,17 @@ foreach ($k in @($standard.Keys)) {
     [void]$sb.AppendLine('')
 }
 $utf8 = New-Object System.Text.UTF8Encoding($false)
+. (Join-Path $PSScriptRoot 'embedded-fonts.ps1')
+$embeddedFonts = @(Copy-EmbeddedFontNotices -Repo $Repo -Staging $Staging)
+foreach ($font in $embeddedFonts) {
+    [void]$sb.AppendLine('=' * 78)
+    [void]$sb.AppendLine("Embedded font: $($font.name) $($font.version) - $($font.licence)")
+    [void]$sb.AppendLine("SHA-256: $($font.sha256)")
+    [void]$sb.AppendLine("Source: $($font.source)")
+    [void]$sb.AppendLine('')
+    [void]$sb.AppendLine((Get-Content -LiteralPath (Join-Path $Staging $font.notice) -Raw -Encoding UTF8).TrimEnd())
+    [void]$sb.AppendLine('')
+}
 [System.IO.File]::WriteAllText((Join-Path $Staging 'THIRD-PARTY-LICENSES.txt'), ($sb.ToString() -replace "`r?`n", "`r`n"), $utf8)
 Write-Host "    crates: $(@($sorted).Count); without licence file: $($missing.Count)"
 if ($missing.Count -gt 0) { Write-Host "    without licence file: $($missing -join ', ')" }

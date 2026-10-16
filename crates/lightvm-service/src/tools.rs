@@ -325,6 +325,19 @@ impl ToolsRun {
         }
         self.applied = Some(policy);
     }
+    /// The guest started again within the run (cold reboot): the connections
+    /// of its previous instance are closed, and the same policy is applied
+    /// again for the next one (same run credentials).
+    pub fn guest_restarted(&mut self) {
+        self.control.close_handle().disconnect();
+        match self.applied.take() {
+            Some(policy) => {
+                self.gate.revoke();
+                self.apply(policy);
+            }
+            None => self.files.stop_handle().suspend(),
+        }
+    }
     pub fn records(&self) -> Vec<FileRecord> {
         self.files.take_records()
     }

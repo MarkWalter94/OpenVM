@@ -366,9 +366,12 @@ in the configured QEMU directory, or selected using the supervisor's
 package refuses start; other guests use the ordinary QEMU installation.
 
 Windows PE has reported TPM 2.0 and Secure Boot enabled, and a test TPM value
-survived a cold restart. **A complete Windows 11 installation does not work
-yet**: in the project's test, Setup stopped at its first restart with a
-virtual CPU error under the Windows hypervisor. Baselines and snapshots of a
+survived a cold restart. A complete Windows 11 installation has been tested
+up to the desktop (in the project's test it stops before the first-run
+account setup). When Windows restarts, LightVM restarts the virtual machine
+completely, as if it were switched off and on again; the console window
+loses its connection for a moment, open it again if it does not come back.
+The Reset button does the same. Baselines and snapshots of a
 Windows 11 VM save and restore the TPM state together with disk and firmware
 settings; take them with the VM shut down (a snapshot of a running Windows 11
 VM is refused).

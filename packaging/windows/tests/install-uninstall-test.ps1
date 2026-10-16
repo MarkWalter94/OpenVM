@@ -58,8 +58,11 @@ try {
     $pkg = Join-Path $work 'package'
     New-Item -ItemType Directory -Force -Path $pkg | Out-Null
     $payload = @('lightvm-desktop.exe', 'lightvm-service.exe', 'lightvm-mcp.exe', 'README.md', 'USER_GUIDE.md',
-        'LICENSE.txt', 'THIRD-PARTY-LICENSES.txt', 'SBOM.cdx.json', 'BUILDINFO.txt', 'tools/TOOLS.EXE', 'tools/TOOLS.PY', 'tools/TOOLS.EXE.sha256', 'tools/TOOLS.PY.sha256', 'tools/README.txt', 'tools/LICENSE.txt')
+        'LICENSE.txt', 'THIRD-PARTY-LICENSES.txt', 'SBOM.cdx.json', 'BUNDLED-ASSETS.json', 'BUILDINFO.txt',
+        'licenses/fonts/DepartureMono-OFL.txt', 'licenses/fonts/JetBrainsMono-OFL.txt',
+        'tools/TOOLS.EXE', 'tools/TOOLS.PY', 'tools/TOOLS.EXE.sha256', 'tools/TOOLS.PY.sha256', 'tools/README.txt', 'tools/LICENSE.txt')
     New-Item -ItemType Directory -Force -Path (Join-Path $pkg 'tools') | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $pkg 'licenses/fonts') | Out-Null
     foreach ($f in $payload) { Set-Content -LiteralPath (Join-Path $pkg $f) -Value "dummy $f" -Encoding ascii }
     Copy-Item -LiteralPath (Join-Path $scripts 'install.ps1') -Destination $pkg
     Copy-Item -LiteralPath (Join-Path $scripts 'uninstall.ps1') -Destination $pkg
@@ -120,7 +123,33 @@ try {
     Check (Test-Path -LiteralPath $outsideLnk) 'shortcut outside the Start Menu Programs folder kept'
     Check ((Read-RawPath $scratchKey).Value -eq $original) 'PATH untouched when path_added is false'
 
-    # 4. A package without the MCP adapter is incomplete: install refuses
+    # 4. Neither nested font ancestor may redirect deletion through a
+    # junction. Both junctions point only to this test's own scratch tree.
+    foreach ($junctionParent in @('licenses', 'licenses/fonts')) {
+        $case = $junctionParent.Replace('/', '-')
+        $prefix4 = Join-Path $work "prefix-junction-$case"
+        $protected = Join-Path $work "protected-$case"
+        $protectedFont = if ($junctionParent -eq 'licenses') { Join-Path $protected 'fonts/DepartureMono-OFL.txt' } else { Join-Path $protected 'DepartureMono-OFL.txt' }
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $protectedFont) | Out-Null
+        Set-Content -LiteralPath $protectedFont -Value 'must survive' -Encoding ascii
+        $junction = Join-Path $prefix4 $junctionParent
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $junction) | Out-Null
+        New-Item -ItemType Junction -Path $junction -Target $protected | Out-Null
+        Copy-Item -LiteralPath (Join-Path $scripts 'uninstall.ps1') -Destination $prefix4
+        $hostileFontManifest = [ordered]@{
+            product = 'LightVM'; prefix = $prefix4
+            files = @('licenses/fonts/DepartureMono-OFL.txt', 'uninstall.ps1', 'install-manifest.json')
+            shortcut = $null; path_added = $false
+        }
+        [System.IO.File]::WriteAllText((Join-Path $prefix4 'install-manifest.json'), ($hostileFontManifest | ConvertTo-Json))
+        $code = Invoke-Script (Join-Path $prefix4 'uninstall.ps1') @('-Prefix', $prefix4, '-EnvironmentKey', $scratchKey)
+        Check ($code -eq 0) "uninstaller skips $junctionParent junction"
+        Check ((Get-Content -LiteralPath $protectedFont -Raw).Trim() -eq 'must survive') "font behind $junctionParent junction preserved"
+        # Remove the link itself before the ordinary scratch-tree cleanup.
+        [System.IO.Directory]::Delete($junction)
+    }
+
+    # 5. A package without the MCP adapter is incomplete: install refuses
     #    and creates nothing.
     $pkg3 = Join-Path $work 'package-no-mcp'
     Copy-Item -LiteralPath $pkg -Destination $pkg3 -Recurse

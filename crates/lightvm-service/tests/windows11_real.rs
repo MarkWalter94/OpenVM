@@ -78,16 +78,22 @@ impl ManagedPaths for Paths {
 #[test]
 #[ignore = "requires an explicitly approved development Windows 11 bundle and test ISO on E:"]
 fn windows_pe_reports_tpm2_and_secure_boot_on_production_run() {
-    qualify_pe(false);
+    qualify_pe(false, false);
 }
 
 #[test]
 #[ignore = "real TPM checkpoint qualification requires the explicit lab bundle and ISO on E:"]
 fn windows_pe_tpm_state_follows_snapshot_and_baseline_restore() {
-    qualify_pe(true);
+    qualify_pe(true, false);
 }
 
-fn qualify_pe(checkpoints: bool) {
+#[test]
+#[ignore = "requires an explicitly approved development Windows 11 bundle and test ISO on E:"]
+fn windows_pe_boots_again_after_a_warm_reset_with_the_tpm() {
+    qualify_pe(false, true);
+}
+
+fn qualify_pe(checkpoints: bool, warm_reset: bool) {
     let env = |name: &str| PathBuf::from(std::env::var_os(name).expect(name));
     let lab = env("LIGHTVM_LAB");
     let bundle = env("LIGHTVM_WIN11_BUNDLE");
@@ -232,23 +238,28 @@ fn qualify_pe(checkpoints: bool) {
             network: GuestNetwork::Supervisor,
         };
         rt.block_on(async {
-            let guest = qemu_backend::QemuRun::start(&caps, &spec, &paths, Default::default())
-                .await
+            let launch = || async {
+                let guest = qemu_backend::QemuRun::start(&caps, &spec, &paths, Default::default())
+                    .await
+                    .unwrap();
+                let socket =
+                    socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)
+                        .unwrap();
+                socket
+                    .connect(&socket2::SockAddr::unix(guest.net_socket().unwrap()).unwrap())
+                    .unwrap();
+                let mut net = NetConfig::new(tools.endpoints().into());
+                net.advertise_dns = false;
+                let stack = NetStack::start(
+                    net,
+                    guest_net::transport::attach(socket).unwrap(),
+                    ToolsRun::allowed_endpoints(),
+                )
                 .unwrap();
-            let boot = tokio::spawn(guest.boot_prompt_keys());
-            let socket =
-                socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None).unwrap();
-            socket
-                .connect(&socket2::SockAddr::unix(guest.net_socket().unwrap()).unwrap())
-                .unwrap();
-            let mut net = NetConfig::new(tools.endpoints().into());
-            net.advertise_dns = false;
-            let mut stack = NetStack::start(
-                net,
-                guest_net::transport::attach(socket).unwrap(),
-                ToolsRun::allowed_endpoints(),
-            )
-            .unwrap();
+                (guest, stack)
+            };
+            let (mut guest, mut stack) = launch().await;
+            let mut boot = tokio::spawn(guest.boot_prompt_keys());
             let start = Instant::now();
             while !tools.control.connected() {
                 assert!(
@@ -261,27 +272,77 @@ fn qualify_pe(checkpoints: bool) {
                 }
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
-            let reply = tools
-                .control
-                .call(lightvm_tools::control::Command::File {
-                    request: lightvm_tools::protocol::FileRequest::Read {
-                        share: "outbox".into(),
-                        path: lightvm_tools::protocol::RelativePath::new(vec!["tpm.log".into()])
+            let read_tpm_log = || {
+                let reply = tools
+                    .control
+                    .call(lightvm_tools::control::Command::File {
+                        request: lightvm_tools::protocol::FileRequest::Read {
+                            share: "outbox".into(),
+                            path: lightvm_tools::protocol::RelativePath::new(vec![
+                                "tpm.log".into(),
+                            ])
                             .unwrap(),
-                        offset: 0,
-                        length: 16384,
-                    },
-                })
-                .unwrap();
-            let text = match reply {
-                lightvm_proto::ToolReply::File {
-                    reply: lightvm_tools::protocol::FileReply::Data { data, .. },
-                } => String::from_utf8(lightvm_tools::protocol::decode(&data, 16384).unwrap())
-                    .unwrap(),
-                other => panic!("{other:?}"),
+                            offset: 0,
+                            length: 16384,
+                        },
+                    })
+                    .unwrap();
+                match reply {
+                    lightvm_proto::ToolReply::File {
+                        reply: lightvm_tools::protocol::FileReply::Data { data, .. },
+                    } => String::from_utf8(lightvm_tools::protocol::decode(&data, 16384).unwrap())
+                        .unwrap(),
+                    other => panic!("{other:?}"),
+                }
             };
+            let text = read_tpm_log();
             std::fs::write(base.join(format!("tpm-{cycle}.log")), &text).unwrap();
             println!("{}\n{text}", base.display());
+            if warm_reset && cycle == 0 {
+                // A reset of this profile ends QEMU (`-action
+                // reboot=shutdown`); like the service, the test starts the
+                // same run again from cold, and the same probe from the same
+                // medium must see the TPM again.
+                guest.reset().await.unwrap();
+                let exit = guest.wait_exit(Duration::from_secs(20)).await;
+                assert!(
+                    matches!(exit, Some((_, qemu_backend::ExitCause::Reboot))),
+                    "{exit:?}"
+                );
+                stack.stop();
+                boot.abort();
+                let closed = guest.close().await.unwrap();
+                assert_eq!(closed.active_at_close, 0);
+                tools.control.close_handle().disconnect();
+                (guest, stack) = launch().await;
+                boot = tokio::spawn(guest.boot_prompt_keys());
+                let start = Instant::now();
+                let mut disconnected = false;
+                loop {
+                    assert!(
+                        start.elapsed() < Duration::from_secs(240),
+                        "no reconnect after warm reset: {}",
+                        base.display()
+                    );
+                    for event in guest.take_vcpu_fault_events() {
+                        println!("vCPU event: {event:?}");
+                    }
+                    if let Ok(shot) = guest.screenshot().await {
+                        std::fs::write(base.join("reset.png"), shot.png).unwrap();
+                    }
+                    disconnected |= !tools.control.connected();
+                    if disconnected && tools.control.connected() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+                let after = read_tpm_log();
+                std::fs::write(base.join("tpm-after-reset.log"), &after).unwrap();
+                println!("after warm reset:\n{after}");
+                assert!(after.contains("tpm_version=2"), "{after}");
+                assert!(after.contains("tbs_status=0"), "{after}");
+                assert!(after.contains("secure_boot=1"), "{after}");
+            }
             let helper = guest.tpm_identity().unwrap();
             if cycle == 0 || checkpoints {
                 let stopped = guest
@@ -486,10 +547,25 @@ fn service_backend_starts_windows11_twice_and_keeps_other_profiles_working() {
         persisted_state: lightvm_proto::VmState::Stopped,
         created_at: lightvm_proto::UtcTimestamp::now(),
     };
-    for _ in 0..2 {
+    for cycle in 0..2 {
         let run = RunId::new_v7();
         backend.start(&vm, run, &[]).unwrap();
         std::thread::sleep(Duration::from_millis(500));
+        if cycle == 0 {
+            // R6-05 §15: a reset ends QEMU and the same run starts again from
+            // cold; the core never sees an exit and the run keeps working.
+            std::thread::sleep(Duration::from_secs(3));
+            backend.reset(vm.id, run).unwrap();
+            let t0 = Instant::now();
+            while t0.elapsed() < Duration::from_secs(15) {
+                let obs = lightvm_service::engine::BackendPort::drain_observations(&mut backend);
+                assert!(obs.is_empty(), "the reset was reported as an exit: {obs:?}");
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            backend
+                .screenshot(vm.id, run, 16 << 20)
+                .expect("the same run answers after the cold reboot");
+        }
         backend.force_stop(vm.id, run).unwrap();
     }
     assert!(
@@ -506,7 +582,7 @@ fn service_backend_starts_windows11_twice_and_keeps_other_profiles_working() {
     let run = RunId::new_v7();
     backend.start(&linux, run, &[]).unwrap();
     backend.force_stop(linux.id, run).unwrap();
-    std::fs::write(base.join("results.txt"),"windows11_backend_start_restart=passed\nper_vm_tpm_state=passed\nother_profiles=passed\nbundle_still_immutable=passed\n").unwrap();
+    std::fs::write(base.join("results.txt"),"windows11_backend_start_restart=passed\nreset_is_a_cold_reboot_in_the_same_run=passed\nper_vm_tpm_state=passed\nother_profiles=passed\nbundle_still_immutable=passed\n").unwrap();
     println!("backend evidence: {}", base.display());
 }
 
@@ -654,27 +730,44 @@ fn windows11_installs_and_reboots_with_tpm_and_secure_boot() {
             network: GuestNetwork::Supervisor,
         };
         rt.block_on(async {
-            let guest = qemu_backend::QemuRun::start(&caps, &spec, &paths, Default::default())
-                .await
+            // What the service does (`cold_reboot`): QEMU ends on every
+            // reset of this profile and the same run starts again from cold.
+            let launch = || async {
+                let guest = qemu_backend::QemuRun::start(&caps, &spec, &paths, Default::default())
+                    .await
+                    .unwrap();
+                let socket =
+                    socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)
+                        .unwrap();
+                socket
+                    .connect(&socket2::SockAddr::unix(guest.net_socket().unwrap()).unwrap())
+                    .unwrap();
+                let mut net = NetConfig::new(tools.endpoints().into());
+                net.advertise_dns = false;
+                let stack = NetStack::start(
+                    net,
+                    guest_net::transport::attach(socket).unwrap(),
+                    ToolsRun::allowed_endpoints(),
+                )
                 .unwrap();
+                (guest, stack)
+            };
+            let rebooted = |g: &qemu_backend::QemuRun| {
+                matches!(
+                    g.state(),
+                    qemu_backend::ProcessState::Exited {
+                        cause: qemu_backend::ExitCause::Reboot,
+                        ..
+                    }
+                )
+            };
+            let mut cold_reboots = 0u32;
+            let (mut guest, mut stack) = launch().await;
             let boot = if resume.is_none() {
                 Some(tokio::spawn(guest.boot_prompt_keys()))
             } else {
                 None
             };
-            let socket =
-                socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None).unwrap();
-            socket
-                .connect(&socket2::SockAddr::unix(guest.net_socket().unwrap()).unwrap())
-                .unwrap();
-            let mut net = NetConfig::new(tools.endpoints().into());
-            net.advertise_dns = false;
-            let mut stack = NetStack::start(
-                net,
-                guest_net::transport::attach(socket).unwrap(),
-                ToolsRun::allowed_endpoints(),
-            )
-            .unwrap();
             let start = Instant::now();
             while !tools.control.connected() {
                 assert!(
@@ -682,6 +775,16 @@ fn windows11_installs_and_reboots_with_tpm_and_secure_boot() {
                     "guest Tools timeout: {}",
                     base.display()
                 );
+                if rebooted(&guest) {
+                    stack.stop();
+                    let closed = guest.close().await.unwrap();
+                    assert_eq!(closed.active_at_close, 0);
+                    tools.control.close_handle().disconnect();
+                    (guest, stack) = launch().await;
+                    cold_reboots += 1;
+                    println!("cold reboot {cold_reboots} at {:?}", start.elapsed());
+                    continue;
+                }
                 for event in guest.take_vcpu_fault_events() {
                     println!("vCPU event: {event:?}");
                 }
@@ -728,7 +831,7 @@ fn windows11_installs_and_reboots_with_tpm_and_secure_boot() {
                         ])
                         .unwrap(),
                         offset: 0,
-                        length: 32768,
+                        length: 16384,
                     },
                 })
                 .unwrap()
@@ -736,7 +839,7 @@ fn windows11_installs_and_reboots_with_tpm_and_secure_boot() {
                 lightvm_proto::ToolReply::File {
                     reply: lightvm_tools::protocol::FileReply::Data { data, .. },
                 } => {
-                    String::from_utf8_lossy(&lightvm_tools::protocol::decode(&data, 32768).unwrap())
+                    String::from_utf8_lossy(&lightvm_tools::protocol::decode(&data, 16384).unwrap())
                         .into_owned()
                 }
                 other => panic!("{other:?}"),
@@ -751,6 +854,16 @@ fn windows11_installs_and_reboots_with_tpm_and_secure_boot() {
                     wait.elapsed() < Duration::from_secs(600),
                     "warm reboot timeout"
                 );
+                if rebooted(&guest) {
+                    stack.stop();
+                    let closed = guest.close().await.unwrap();
+                    assert_eq!(closed.active_at_close, 0);
+                    tools.control.close_handle().disconnect();
+                    (guest, stack) = launch().await;
+                    cold_reboots += 1;
+                    println!("guest reboot: cold reboot {cold_reboots}");
+                    continue;
+                }
                 for event in guest.take_vcpu_fault_events() {
                     println!("vCPU event: {event:?}");
                 }
@@ -775,6 +888,12 @@ fn windows11_installs_and_reboots_with_tpm_and_secure_boot() {
                 "boot timestamp must change after guest shutdown /r"
             );
             assert!(second.contains("Windows 11"), "{second}");
+            assert!(cold_reboots >= 1, "the guest's own reboot was not seen");
+            std::fs::write(
+                base.join("cold-reboots.txt"),
+                format!("cold_reboots={cold_reboots}\n"),
+            )
+            .unwrap();
             let stopped = guest
                 .shutdown(qemu_backend::run::ShutdownPolicy {
                     powerdown_timeout: Duration::from_secs(60),

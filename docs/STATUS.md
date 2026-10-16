@@ -234,12 +234,18 @@ with disk and UEFI variables under the operation journal; running TPM
 snapshots are refused. In real Windows PE, snapshot revert and baseline
 restore both brought back the original TPM NV value (`R6-05` §14).
 
-**Installed Windows 11 is blocked**: the first installation attempt stopped
-at Setup's first guest-initiated reboot with `failed to get xsave state`
-and `WHPX: Unexpected VP exit code 4` (`R6-05` §14). Warm reboot,
-BitLocker/Hello and TPM-aware restore of an installed system remain
-unqualified. Release packaging/signing and the full external-runtime
-licence/source closure remain open.
+**Installed Windows 11 qualified in audit mode** (2026-10-17, `R6-05`
+§15): a fresh installation from the owner's ISO, with Setup's requirement
+checks and no bypass, reached Windows 11 Pro 10.0.26300 with TPM 2.0 and
+Secure Boot, and its own `shutdown /r` worked. Three fixes were needed:
+QEMU patch `0003` (no write-back of a stale xsave image), the vCPU fault
+watcher also handling WHPX's `paused` stop, and **cold reboots**: for this
+profile every reset ends QEMU (`-action reboot=shutdown`) and the service
+starts the same run again with new QEMU and swtpm processes, because a
+reset inside the running processes left Windows Boot Manager in a reset
+loop. OOBE with a user account, BitLocker/Hello, TPM-aware restore of an
+installed system, console reconnection after a reboot, and the release
+bundle (recipe build, licences, signing) remain open.
 
 ## R1 work: filtered Internet, first increment (ADR-0037)
 
@@ -258,7 +264,8 @@ only. Agent sessions get it only through the `network.endpoints` grant.
 | Destination policy: special ranges, IPv6, ports, routes | `guest-net` `egress` unit tests | verified in simulation/test |
 | Configuration: exact names, 80/443, no IP literals | `lightvm-proto` `tests/roundtrip.rs` | verified in simulation/test |
 | A public-only endpoint pinned to loopback never reaches the host | `guest-net` `tests/stack.rs` | verified in simulation/test |
-| Real guest browsing, redirects, DNS rebinding, VPN, system proxy, revocation of persistent connections, gateway crash | — | not verified |
+| Real Linux guest: HTTPS to the allowed name (TLS 1.3, 200), other names/ports, host, LAN, Internet IPs, UDP DNS, IPv6, ICMP refused; name pinned to loopback never reaches the host; persistent TLS connection reset on revocation | `guest-net` `tests/real_guest.rs` (`--ignored`), R1-01 §3 | verified on hardware (Windows, WHPX), stack level |
+| Product end to end, real resolver rebinding, VPN, system proxy, route change, gateway crash, Windows guests | — | not verified |
 
 R1 is not complete: the release conditions of ROADMAP 12 (R1) need the
 real-guest evidence above. Evidence file: `docs/verification/R1-01-filtered-internet.md`.

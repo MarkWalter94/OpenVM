@@ -3,8 +3,9 @@
 Upstream QEMU for Windows cannot have a TPM: `meson.build` refuses `CONFIG_TPM`
 on Windows, and the `emulator` backend passes its data channel to `swtpm` as a
 descriptor (`CMD_SET_DATAFD`, `SCM_RIGHTS`). This directory builds QEMU 11.1.0
-for Windows x86_64 with two small patches so that `tpm-crb` works under WHPX
-with a Windows build of `swtpm` connected over two loopback TCP sockets.
+for Windows x86_64 with three small patches: `tpm-crb` under WHPX
+with a Windows build of `swtpm` connected over two loopback TCP sockets, and
+a WHPX xsave fix needed by installed Windows 11.
 Every other profile keeps the upstream build of ADR-0010.
 
 ## Inputs
@@ -37,6 +38,25 @@ Every other profile keeps the upstream build of ADR-0010.
     The `tpm-crb` command buffer (`0xFED40080`) and the TPM PPI RAM are such
     sections. They are never mapped, so the call is skipped; guest accesses
     exit to QEMU and are emulated.
+- `0003-whpx-do-not-write-back-a-stale-xsave-image.patch`
+  - `target/i386/whpx/whpx-all.c`: installed Windows 11 made
+    `WHvGetVirtualProcessorState(XsaveState)` fail; QEMU ignored the error
+    (logging `failed to get xsave state: No error`) and later wrote its old
+    xsave image back over the live vector registers, and the guest stopped
+    with `WHPX: Unexpected VP exit code 4` (`R6-05` §14, §15). The read now
+    retries once with the size the hypervisor reports, logs the HRESULT,
+    frees the buffer on error, and a per-vCPU `xsave_valid` flag skips the
+    write-back of an image that was not read (the live FP/vector state is
+    then left untouched). Same direction as the upstream proposal
+    "target/i386/whpx: whpx_get_xsave_state error handling" (Doug Cook,
+    2026-08), written independently for 11.1.0. The legacy x87/SSE
+    registers are not written in addition to the xsave image.
+
+Resets of this profile do not run inside QEMU: the product passes
+`-action reboot=shutdown` and starts the run again with new QEMU and swtpm
+processes (R6-05 §15). Two WHPX reset patches tried during that
+investigation (parking the application processors, recreating the virtual
+processors) are therefore not part of the recipe.
 
 ## Use
 

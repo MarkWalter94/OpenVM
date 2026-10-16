@@ -44,6 +44,12 @@ Later the same day, baselines and user snapshots taken with the VM stopped
 started to carry the TPM permanent state together with disk and UEFI
 variables, under the existing operation journal; a running snapshot of a TPM
 guest is refused. In real Windows PE, both a snapshot revert and a baseline
-restore brought back the original TPM NV value (`R6-05` §14). Installed
-Windows 11 is still unqualified: a Setup installation stopped at its first
-guest-initiated reboot with a WHPX vCPU fault (`R6-05` §14).
+restore brought back the original TPM NV value (`R6-05` §14).
+
+On 2026-10-17 installed Windows 11 was qualified in audit mode (`R6-05`
+§15). A reset inside the running QEMU and swtpm left Windows Boot Manager
+in a reset loop, so **a reset of this profile is a cold reboot**: QEMU runs
+with `-action reboot=shutdown` and the supervisor starts the same run again
+with new QEMU and swtpm processes on the same disk, UEFI variables and TPM
+state (at most 10 in 5 minutes). The project QEMU gained patch `0003`
+(WHPX xsave read errors).

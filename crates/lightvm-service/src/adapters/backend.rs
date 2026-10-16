@@ -93,7 +93,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use lightvm_proto::ipc::{StopReason, VcpuHalt};
 use lightvm_proto::{
@@ -301,7 +301,7 @@ pub struct QemuSetup {
     /// refused (ADR-0011). Hosts whose CPU lacks the model's features are not
     /// verified (single reference host).
     pub cpu_model: String,
-    /// Ordinary stop policy (`system_powerdown` â†’ `quit` â†’ kill).
+    /// Ordinary stop policy (`system_powerdown` Ã¢â€ â€™ `quit` Ã¢â€ â€™ kill).
     pub stop_policy: ShutdownPolicy,
     /// Maximum wait for the Emergency Stop and the forced stop.
     pub emergency_timeout: Duration,
@@ -364,7 +364,7 @@ fn logical_cpus() -> u32 {
 /// Job Object limits from the VM limits (ADR-0017):
 /// - CPU cap: `cpu_max_percent` of the capacity of the assigned vCPUs,
 ///   expressed as a share of the whole machine in hundredths of a percentage
-///   point (`vcpus Ã— percent Ã— 100 / logical processors`); 100 % = no cap;
+///   point (`vcpus Ãƒâ€” percent Ãƒâ€” 100 / logical processors`); 100 % = no cap;
 /// - job memory: guest RAM plus `memory_margin_mib`.
 pub fn job_limits(config: &lightvm_proto::VmConfig, logical: u32) -> JobLimits {
     let l = config.limits;
@@ -674,6 +674,7 @@ pub fn probe(setup: QemuSetup) -> Result<(QemuHost, QemuVmBackend, HostCapacity)
         net_records: Vec::new(),
         tools: BTreeMap::new(),
         tools_records: Vec::new(),
+        relaunch: BTreeMap::new(),
     };
     Ok((host, backend, capacity))
 }
@@ -1062,7 +1063,26 @@ pub struct QemuVmBackend {
     net_records: Vec<crate::engine::NetworkRecord>,
     tools: BTreeMap<VmId, crate::tools::ToolsRun>,
     tools_records: Vec<crate::engine::ToolsRecord>,
+    /// What a cold reboot of a running VM needs (Windows 11 x64: QEMU ends on
+    /// every reset and the run starts again with new processes).
+    relaunch: BTreeMap<VmId, Relaunch>,
 }
+
+/// Launch inputs kept for a cold reboot within the same run (R6-05 Â§15).
+#[derive(Debug)]
+struct Relaunch {
+    vm: VmRecord,
+    caps: HostCapabilities,
+    spec: VmLaunchSpec,
+    paths: RunPaths,
+    /// Cold reboots in the last [`COLD_REBOOT_WINDOW`].
+    recent: Vec<Instant>,
+}
+
+/// At most [`COLD_REBOOTS`] cold reboots within this window; the next reset
+/// ends the run (a guest rebooting in a loop is stopped, as a halt).
+const COLD_REBOOT_WINDOW: Duration = Duration::from_secs(300);
+const COLD_REBOOTS: usize = 10;
 
 /// Route of a graceful stop task that ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1285,6 +1305,7 @@ impl QemuVmBackend {
     /// Releases a terminated run: QMP, sockets, protected files, Job Object,
     /// private directory.
     fn release(&mut self, vm_id: VmId) {
+        self.relaunch.remove(&vm_id);
         if let Some(mut t) = self.tools.remove(&vm_id) {
             t.stop_handle().close();
             t.files.stop();
@@ -1361,6 +1382,90 @@ impl QemuVmBackend {
             .take(12)
             .collect();
         self.setup.private_root.join(short)
+    }
+
+    /// Reset of a Windows 11 x64 guest: its QEMU ended (`-action
+    /// reboot=shutdown`). The same run starts again with new QEMU and swtpm
+    /// processes on the same disk, UEFI variables and TPM state, as a power
+    /// cycle would; the network is attached again with the endpoints last
+    /// applied and the Tools of the run stay. The core sees no exit: the VM
+    /// stays running in the same run. At most [`COLD_REBOOTS`] in
+    /// [`COLD_REBOOT_WINDOW`].
+    fn cold_reboot(&mut self, vm_id: VmId) -> Result<(), String> {
+        let mut r = self
+            .relaunch
+            .remove(&vm_id)
+            .ok_or("not a cold-reboot profile")?;
+        let now = Instant::now();
+        r.recent
+            .retain(|t| now.duration_since(*t) < COLD_REBOOT_WINDOW);
+        if r.recent.len() >= COLD_REBOOTS {
+            return Err(format!(
+                "{} reboots within {:?}",
+                r.recent.len(),
+                COLD_REBOOT_WINDOW
+            ));
+        }
+        r.recent.push(now);
+        let applied = self.nets.remove(&vm_id).and_then(|mut n| {
+            let records = n.stop(vm_id);
+            self.net_records.extend(records);
+            n.applied.clone()
+        });
+        if let Some(task) = self.boot_keys.remove(&vm_id) {
+            task.abort();
+        }
+        self.last_shots.remove(&vm_id);
+        let old = self.runs.remove(&vm_id).ok_or("no run")?;
+        let old = Arc::try_unwrap(old).map_err(|_| "run still referenced".to_owned())?;
+        match self.rt.block_on(old.close()) {
+            Ok(c) if c.active_at_close > 0 => {
+                return Err(format!(
+                    "{} processes still active after the reset",
+                    c.active_at_close
+                ));
+            }
+            Ok(_) => {}
+            Err(e) => return Err(format!("closing the run: {e}")),
+        }
+        let run = self
+            .rt
+            .block_on(QemuRun::start(
+                &r.caps,
+                &r.spec,
+                &r.paths,
+                self.setup.run_config.clone(),
+            ))
+            .map_err(|e| format!("starting again: {e}"))?;
+        if let Some(t) = self.tools.get_mut(&vm_id) {
+            t.guest_restarted();
+        }
+        let tools = self.tools.get(&vm_id);
+        let (net, records) = super::network::setup(&r.vm, r.spec.run_id, run.net_socket(), tools);
+        self.net_records.extend(records);
+        if let Some(mut n) = net {
+            if let Some(a) = &applied {
+                n.set_allowed(a);
+            }
+            self.nets.insert(vm_id, n);
+        }
+        lock(&self.registry).insert(
+            vm_id,
+            (
+                r.spec.run_id,
+                run.emergency_stop_handle(),
+                tools.map(crate::tools::ToolsRun::stop_handle),
+            ),
+        );
+        self.runs.insert(vm_id, Arc::new(run));
+        crate::diag!(
+            "lightvm-service: guest reset: run {} started again from cold ({} in {:?})",
+            r.spec.run_id,
+            r.recent.len(),
+            COLD_REBOOT_WINDOW
+        );
+        self.relaunch.insert(vm_id, r);
+        Ok(())
     }
 
     /// Run already exited (also through the final termination of the stop
@@ -1772,6 +1877,18 @@ impl VmBackend for QemuVmBackend {
                 self.setup.run_config.clone(),
             ))
             .map_err(|e| public(&e))?;
+        if vm.config.guest_os == lightvm_proto::GuestOs::Windows11X64 {
+            self.relaunch.insert(
+                vm.id,
+                Relaunch {
+                    vm: vm.clone(),
+                    caps: caps.clone(),
+                    spec: spec.clone(),
+                    paths,
+                    recent: Vec::new(),
+                },
+            );
+        }
         if boot_key {
             crate::diag!(
                 "lightvm-service: Windows UEFI setup on a blank disk: pressing `{}` at the CD boot prompt every {:?} for {:?}",
@@ -2295,6 +2412,21 @@ impl BackendPort for QemuVmBackend {
             .collect();
         let mut out = Vec::new();
         for vm_id in exited {
+            let reboot = self.runs.get(&vm_id).is_some_and(|r| {
+                matches!(
+                    r.state(),
+                    ProcessState::Exited {
+                        cause: ExitCause::Reboot,
+                        ..
+                    }
+                )
+            });
+            if reboot {
+                match self.cold_reboot(vm_id) {
+                    Ok(()) => continue,
+                    Err(e) => crate::diag!("lightvm-service: cold reboot not done, run ends: {e}"),
+                }
+            }
             if let Some(run) = self.runs.get(&vm_id) {
                 if let Ok(r) = run.limit_report()
                     && r.memory_limit_reached()
@@ -2388,7 +2520,7 @@ impl Backend for QemuHost {
         // already revoked by the service; the core sessions arrive with F4.
     }
     fn prepare_shutdown(&mut self) {
-        // ACPI 15 s â†’ `quit` 5 s â†’ termination 5 s per VM: within the 30 s per
+        // ACPI 15 s Ã¢â€ â€™ `quit` 5 s Ã¢â€ â€™ termination 5 s per VM: within the 30 s per
         // VM of the service shutdown budget. A guest that powers off earlier
         // ends earlier; a `shutdown_vms` policy already set stays.
         let mut o = lock(&self.stop_override);

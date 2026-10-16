@@ -94,7 +94,8 @@ public static extern System.IntPtr SendMessageTimeout(System.IntPtr hWnd, uint M
 $Source = $PSScriptRoot
 $Payload = @(
     'lightvm-desktop.exe', 'lightvm-service.exe', 'lightvm-mcp.exe', 'README.md', 'USER_GUIDE.md',
-    'LICENSE.txt', 'THIRD-PARTY-LICENSES.txt', 'SBOM.cdx.json', 'BUILDINFO.txt', 'SHA256SUMS.txt',
+    'LICENSE.txt', 'THIRD-PARTY-LICENSES.txt', 'SBOM.cdx.json', 'BUNDLED-ASSETS.json', 'BUILDINFO.txt', 'SHA256SUMS.txt',
+    'licenses/fonts/DepartureMono-OFL.txt', 'licenses/fonts/JetBrainsMono-OFL.txt',
     'install.ps1', 'uninstall.ps1',
     'tools/TOOLS.EXE', 'tools/TOOLS.PY', 'tools/TOOLS.EXE.sha256', 'tools/TOOLS.PY.sha256', 'tools/README.txt', 'tools/LICENSE.txt'
 )

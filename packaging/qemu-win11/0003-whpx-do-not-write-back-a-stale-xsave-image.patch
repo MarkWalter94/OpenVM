@@ -1,0 +1,170 @@
+--- a/include/system/whpx-common.h
++++ b/include/system/whpx-common.h
+@@ -9,6 +9,14 @@
+     bool ready_for_pic_interrupt;
+     uint64_t tpr;
+     bool interruption_pending;
++    /*
++     * env holds the xsave image last read from the hypervisor. False until
++     * a read succeeds and after a failed read: a stale image must not be
++     * written back over the live vector state of the guest.
++     */
++    bool xsave_valid;
++    /* Size of the hypervisor's compacted xsave image, 0 = CPUID size. */
++    uint32_t xsave_len;
+     /* Must be the last field as it may have a tail */
+     WHV_RUN_VP_EXIT_CONTEXT exit_ctx;
+ };
+--- a/include/system/whpx-internal.h
++++ b/include/system/whpx-internal.h
+@@ -57,6 +57,7 @@
+ void whpx_apic_get(APICCommonState *s);
+ 
+ #define WHV_E_UNKNOWN_CAPABILITY 0x80370300L
++#define WHV_E_INSUFFICIENT_BUFFER 0x80370301L
+ 
+ /* This should eventually come from the Windows SDK */
+ #define WHV_E_UNKNOWN_PROPERTY 0x80370302
+--- a/target/i386/whpx/whpx-all.c
++++ b/target/i386/whpx/whpx-all.c
+@@ -11,6 +11,7 @@
+ #include "qemu/osdep.h"
+ #include "cpu.h"
+ #include "qemu/typedefs.h"
++#include "qemu/units.h"
+ #include "system/address-spaces.h"
+ #include "system/ioport.h"
+ #include "gdbstub/helpers.h"
+@@ -407,6 +408,14 @@
+     return whpx_get_supported_cpuid(0xd, 0, R_ECX);
+ }
+ 
++static size_t whpx_xsave_buf_len(const CPUState *cpu)
++{
++    size_t page = qemu_real_host_page_size();
++    size_t len = MAX(whpx_get_xsave_max_len(), cpu->accel->xsave_len);
++
++    return ROUND_UP(len, page);
++}
++
+ static int whpx_set_xsave_state(const CPUState *cpu)
+ {
+     struct whpx_state *whpx = &whpx_global;
+@@ -417,9 +426,19 @@
+     size_t page = qemu_real_host_page_size();
+     size_t xsavec_buf_len;
+ 
++    /*
++     * env was not refreshed from the hypervisor: writing it would replace
++     * the guest's live FP/vector registers with an old image. Leave them
++     * as they are (QEMU does not change them between a read and a write).
++     */
++    if (!cpu->accel->xsave_valid) {
++        return 0;
++    }
++
+     /* allocate and populate compacted buffer */
+-    xsavec_buf_len = whpx_get_xsave_max_len();
++    xsavec_buf_len = whpx_xsave_buf_len(cpu);
+     xsavec_buf = qemu_memalign(page, xsavec_buf_len);
++    memset(xsavec_buf, 0, xsavec_buf_len);
+ 
+     /* save registers to standard format buffer */
+     x86_cpu_xsave_all_areas(x86cpu, env->xsave_buf, env->xsave_buf_len);
+@@ -442,8 +461,7 @@
+ 
+     qemu_vfree(xsavec_buf);
+     if (FAILED(hr)) {
+-        error_report("WHPX: Failed to get virtual processor context, hr=%08lx",
+-                     hr);
++        error_report_once("WHPX: failed to set xsave state, hr=%08lx", hr);
+     }
+ 
+     return 0;
+@@ -810,45 +828,69 @@
+     idx += 1;
+ }
+ 
+-static int whpx_get_xsave_state(CPUState *cpu)
++static HRESULT whpx_read_xsave(CPUState *cpu, void *buf, UINT32 len,
++                               UINT32 *written)
+ {
+     struct whpx_state *whpx = &whpx_global;
++
++    *written = 0;
++    if (!whpx_is_legacy_os()) {
++        return whp_dispatch.WHvGetVirtualProcessorState(
++            whpx->partition, cpu->cpu_index,
++            WHvVirtualProcessorStateTypeXsaveState, buf, len, written);
++    }
++    return whp_dispatch.WHvGetVirtualProcessorXsaveState(
++        whpx->partition, cpu->cpu_index, buf, len, written);
++}
++
++/*
++ * The hypervisor's compacted image can be larger than CPUID[0xd,0].ECX
++ * (WHV_E_INSUFFICIENT_BUFFER, with the size needed in *written): retry
++ * once with that size and remember it. On failure env keeps an old image
++ * and xsave_valid stops whpx_set_xsave_state() from writing it back.
++ */
++static int whpx_get_xsave_state(CPUState *cpu)
++{
+     X86CPU *x86cpu = X86_CPU(cpu);
+     CPUX86State *env = &x86cpu->env;
+     int ret;
+     HRESULT hr;
+     void *xsavec_buf;
+     const size_t page = qemu_real_host_page_size();
+-    size_t xsavec_buf_len = whpx_get_xsave_max_len();
++    size_t xsavec_buf_len = whpx_xsave_buf_len(cpu);
+     UINT32 bytes_written;
+ 
++    cpu->accel->xsave_valid = false;
+     xsavec_buf = qemu_memalign(page, xsavec_buf_len);
+     memset(xsavec_buf, 0, xsavec_buf_len);
+-
+-    if (!whpx_is_legacy_os()) {
+-        hr = whp_dispatch.WHvGetVirtualProcessorState(
+-            whpx->partition, cpu->cpu_index,
+-            WHvVirtualProcessorStateTypeXsaveState,
+-            xsavec_buf,
+-            xsavec_buf_len, &bytes_written);
+-    } else {
+-        hr = whp_dispatch.WHvGetVirtualProcessorXsaveState(
+-            whpx->partition, cpu->cpu_index,
+-            xsavec_buf,
+-            xsavec_buf_len, &bytes_written);
++    hr = whpx_read_xsave(cpu, xsavec_buf, xsavec_buf_len, &bytes_written);
++    if (FAILED(hr) && bytes_written > xsavec_buf_len &&
++        bytes_written <= 1 * MiB) {
++        warn_report_once("WHPX: xsave image needs %u bytes, not %zu",
++                         bytes_written, xsavec_buf_len);
++        cpu->accel->xsave_len = bytes_written;
++        qemu_vfree(xsavec_buf);
++        xsavec_buf_len = whpx_xsave_buf_len(cpu);
++        xsavec_buf = qemu_memalign(page, xsavec_buf_len);
++        memset(xsavec_buf, 0, xsavec_buf_len);
++        hr = whpx_read_xsave(cpu, xsavec_buf, xsavec_buf_len, &bytes_written);
+     }
+     if (FAILED(hr) || bytes_written == 0) {
+-        error_report("failed to get xsave state: %s", strerror(errno));
+-        return -errno;
++        error_report_once("WHPX: failed to get xsave state, hr=%08lx, "
++                          "written=%u, buffer=%zu", hr, bytes_written,
++                          xsavec_buf_len);
++        qemu_vfree(xsavec_buf);
++        return -EIO;
+     }
+ 
+     ret = decompact_xsave_area(xsavec_buf, xsavec_buf_len, env);
+     qemu_vfree(xsavec_buf);
+     if (ret < 0) {
+-        error_report("failed to decompact xsave area");
++        error_report_once("WHPX: failed to decompact xsave area");
+         return ret;
+     }
+     x86_cpu_xrstor_all_areas(x86cpu, env->xsave_buf, env->xsave_buf_len);
++    cpu->accel->xsave_valid = true;
+ 
+     return 0;
+ }

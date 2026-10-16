@@ -191,14 +191,24 @@ fn invalid_greeting_rejected() {
 }
 
 /// Simulated QEMU run state for the vCPU fault tests, following the QEMU
-/// 11.1 rules: `vm_stop(internal-error)` emits `STOP`; `cont` is refused
+/// 11.1 rules: `vm_stop(<fault_state>)` emits `STOP`; `cont` is refused
 /// while a reset is needed; a reset from a stopped state moves to
-/// `prelaunch`. `faults` faults are injected, the first one right after the
+/// `prelaunch`, except from `paused`, which stays paused. The WHPX source of
+/// 11.1.0 faults to `paused`, other accelerators to `internal-error`. `faults` faults are injected, the first one right after the
 /// handshake and each further one when `cont` resumes the guest. Every
 /// command name is recorded in `log`.
 fn qemu_with_faults(
     path: &ManagedPath,
     faults: u32,
+    log: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) -> std::thread::JoinHandle<()> {
+    qemu_faulting_to(path, faults, "internal-error", log)
+}
+
+fn qemu_faulting_to(
+    path: &ManagedPath,
+    faults: u32,
+    fault_state: &'static str,
     log: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 ) -> std::thread::JoinHandle<()> {
     serve(path, move |mut c| {
@@ -207,7 +217,7 @@ fn qemu_with_faults(
         let fault = |c: &mut Conn, status: &mut &str, left: &mut u32| {
             if *left > 0 {
                 *left -= 1;
-                *status = "internal-error";
+                *status = fault_state;
                 c.send(json!({"event": "STOP", "timestamp": {"seconds": 1, "microseconds": 0}}));
             }
         };
@@ -222,7 +232,7 @@ fn qemu_with_faults(
                     "id": v["id"]
                 })),
                 "system_reset" => {
-                    if status != "running" {
+                    if !matches!(status, "running" | "paused") {
                         status = "prelaunch";
                     }
                     c.send(json!({"return": {}, "id": v["id"]}));
@@ -309,6 +319,53 @@ fn internal_error_is_reset_and_resumed() {
         assert!(first_reset < first_cont, "{l:?}");
         drop(l);
         // The watcher ends with the process.
+        tx.send_replace(ProcessState::Exited {
+            code: Some(0),
+            cause: qemu_backend::ExitCause::QmpQuit,
+        });
+        tokio::time::timeout(Duration::from_secs(3), w)
+            .await
+            .unwrap()
+            .unwrap();
+        c.close(Duration::from_secs(2)).await;
+    });
+    server.join().unwrap();
+}
+
+#[test]
+fn whpx_pause_after_an_unrecoverable_exit_is_reset_and_resumed() {
+    use qemu_backend::ProcessState;
+    use qemu_backend::vcpu_fault::{
+        VcpuFaultEvent, VcpuFaultPolicy, VcpuFaults, watch_vcpu_faults,
+    };
+    let path = socket_path("vcpu-paused");
+    let log = std::sync::Arc::default();
+    let server = qemu_faulting_to(&path, 1, "paused", std::sync::Arc::clone(&log));
+    rt().block_on(async {
+        let c = std::sync::Arc::new(
+            QmpClient::connect(&path, QmpConfig::default())
+                .await
+                .unwrap(),
+        );
+        let (tx, rx) = tokio::sync::watch::channel(ProcessState::Running);
+        let faults = std::sync::Arc::new(VcpuFaults::new(VcpuFaultPolicy::default()));
+        let w = tokio::spawn(watch_vcpu_faults(c.clone(), rx, faults.clone()));
+        let mut events = Vec::new();
+        until(|| {
+            events.extend(faults.take_events());
+            !events.is_empty()
+        })
+        .await;
+        assert_eq!(
+            events,
+            vec![VcpuFaultEvent::AutoReset {
+                reason: lightvm_proto::ipc::VcpuHaltReason::InternalError,
+                resets_in_window: 1
+            }]
+        );
+        assert_eq!(count(&log, "system_reset"), 1);
+        assert_eq!(count(&log, "cont"), 1);
+        assert_eq!(c.query_status().await.unwrap().status, RunState::Running);
         tx.send_replace(ProcessState::Exited {
             code: Some(0),
             cause: qemu_backend::ExitCause::QmpQuit,

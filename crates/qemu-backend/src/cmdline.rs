@@ -1309,6 +1309,12 @@ impl VmLaunchSpec {
                 "emulator,id=tpm0,chardev=chrtpm,data-chardev=chrtpmdata",
             );
             a.opt("-device", "tpm-crb,tpmdev=tpm0");
+            // A reset inside the running QEMU and swtpm is not a power
+            // cycle: after one, Windows Boot Manager reset again at once and
+            // looped (R6-05 §15). Every reset (the guest's or QMP's) ends
+            // the process instead, and the supervisor starts the same run
+            // again with new QEMU and swtpm processes: a cold boot.
+            a.opt("-action", "reboot=shutdown");
             let args = [
                 "socket".into(),
                 "--tpm2".into(),
@@ -1710,6 +1716,7 @@ pub(crate) mod tests {
         );
         t.insert("-chardev", Some(&["id", "path", "host", "port"]));
         t.insert("-tpmdev", Some(&["id", "chardev", "data-chardev"]));
+        t.insert("-action", Some(&["reboot"]));
         // ADR-0033: user (NAT) or stream to the private directory only.
         t.insert("-netdev", Some(&["id", "server", "addr.type", "addr.path"]));
         // Path value, checked separately.
@@ -1932,6 +1939,25 @@ pub(crate) mod tests {
             .iter()
             .map(|a| a.to_str().unwrap().to_owned())
             .collect()
+    }
+
+    /// R6-05 §15: only the Windows 11 x64 profile ends QEMU on a reset (the
+    /// supervisor starts the run again from cold); the others reset in place.
+    #[test]
+    fn only_windows11_x64_turns_resets_into_shutdowns() {
+        for profile in DeviceProfile::ALL {
+            let Ok(cmd) = spec_for(profile).build(&FakePaths::for_profile(&profile)) else {
+                assert!(profile == DeviceProfile::WINDOWS11_X64 && !cfg!(windows));
+                continue;
+            };
+            audit_args(&cmd.args).unwrap();
+            let joined = strs(&cmd).join(" ");
+            assert_eq!(
+                joined.contains("-action reboot=shutdown"),
+                profile == DeviceProfile::WINDOWS11_X64,
+                "{profile:?}: {joined}"
+            );
+        }
     }
 
     /// ADR-0033: the three network modes on every profile.

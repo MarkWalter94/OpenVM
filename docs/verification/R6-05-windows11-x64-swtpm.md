@@ -469,6 +469,88 @@ Artifacts: `E:\OpenVM-tests\lab\win11-real\installed-01a1450c-537e-717b-832a-650
 (`run\qemu.stderr.log`, `setup.png`), log
 `E:\OpenVM-tests\win11\install-resume.log`.
 
-Installed Windows 11, warm reboot, BitLocker/Hello and TPM-aware restore of
-an installed system remain **unqualified**; the WHPX reset failure must be
-resolved first.
+§15 records the causes and the qualification that followed.
+
+## 15. Installed Windows 11 qualified: xsave fix and cold reboots (2026-10-16/17)
+
+### Findings
+
+1. **Stale xsave write-back.** With the 11.1.0 WHPX code QEMU logged
+   `failed to get xsave state: No error` (12 times in the earlier Windows PE
+   runs, 10 at the installation's first reboot), ignored the error and could
+   later write its old xsave image back over the live vector registers.
+   Patch `0003` (packaging/qemu-win11) checks the HRESULT, retries once with
+   the size the hypervisor reports, frees the buffer and never writes back an
+   image that was not read. In every run after it, no read failure and no
+   retry was logged; why the original reads failed is not established.
+2. **The vCPU fault watcher never fired under WHPX.** QEMU 11.1.0 stops a
+   guest after `Unexpected VP exit code` in run state `paused`, not
+   `internal-error`. Fixed in `qemu_backend::vcpu_fault` (R2c-01,
+   correction of 2026-10-16); the automatic resets then appeared in the logs.
+3. **A reset inside the running QEMU does not work for this profile.** A
+   lab-only diagnostic build printed the state at the fault: RIP
+   `0xfffcc704` in the firmware's SEC phase, empty IDT, CR3 `0x800000`, and
+   two vCPUs (0 and 2) at the same RIP and stack, so the application
+   processors ran the reset vector together with the BSP. Putting them back
+   in wait-for-SIPI removed the triple fault, and recreating every virtual
+   processor on reset gave them a cold-start state, but Windows Boot
+   Manager still reset the machine immediately after loading, in a loop,
+   while a cold start of the same disk worked. Windows PE reproduced it in
+   4 minutes (`windows_pe_boots_again_after_a_warm_reset_with_the_tpm`). The
+   persistent swtpm process is the main state a cold start renews; the
+   same symptom is reported for Windows 11 with swtpm on other hypervisors
+   ([UTM #7648](https://github.com/utmapp/UTM/issues/7648)). The exact
+   cause inside Boot Manager was not determined.
+
+### Product change: a reset is a cold reboot
+
+- The Windows 11 x64 command line carries `-action reboot=shutdown`: every
+  reset request (the guest's reboot, QMP `system_reset` from the Reset
+  action or from the vCPU fault watcher) ends QEMU with a `SHUTDOWN` event
+  whose reason is `guest-reset` or `host-qmp-system-reset`
+  (`ExitCause::Reboot`).
+- The service backend (`cold_reboot`) then closes the run's processes and
+  starts **the same run** again with new QEMU and swtpm processes on the
+  same disk, UEFI variables and TPM state. The network is attached again
+  with the endpoints last applied; the Tools of the run stay and their old
+  connections are closed (`ToolsRun::guest_restarted`). The core sees no
+  exit: the VM stays running in the same run. At most 10 cold reboots in
+  5 minutes; the next reset ends the run as an ordinary exit.
+- The console connection of the previous process is lost on a reboot and
+  must be opened again (not yet automated in the UI).
+- Other profiles keep resetting inside QEMU (upstream build).
+
+### Evidence
+
+All on Windows 11 Pro host build 26300, WHPX, the development bundle with
+patches 0001-0003 (lab bundle `E:\OpenVM-tests\win11\bundle-xsave`), the
+owner's Windows 11 ISO, disposable disks on E:.
+
+| Test (ignored, lab) | Result |
+| --- | --- |
+| `windows_pe_boots_again_after_a_warm_reset_with_the_tpm` | passed (50 s): QMP reset → `ExitCause::Reboot` → cold start; Windows PE back, `tpm_version=2`, `tbs_status=0`, Secure Boot on, test NV value `matched` |
+| `windows11_installs_and_reboots_with_tpm_and_secure_boot` | passed (584 s): fresh 64 GiB disk, Setup with its requirement checks (no bypass), 2 Setup reboots and 1 reboot requested by the installed system, all as cold reboots; Windows 11 Pro 10.0.26300 in audit mode; TPM 2.0 present/ready/owned, `Confirm-SecureBootUEFI` true; Tools reconnected and `LastBootUpTime` changed after `shutdown /r` |
+| `service_backend_starts_windows11_twice_and_keeps_other_profiles_working` | passed (26 s): the service backend turns the Reset action into a cold reboot of the same run (no exit reported for 15 s, screenshot of the same run afterwards), then the earlier checks |
+
+```text
+cold reboot 1 at 254.9s
+cold reboot 2 at 380.6s
+Caption        : Microsoft Windows 11 Pro
+Version        : 10.0.26300
+guest reboot: cold reboot 3
+test result: ok. 1 passed; finished in 584.15s
+```
+
+Artifacts: `E:\OpenVM-tests\lab\win11-real\installed-01a14712-2883-74da-b732-386ad3399350\`
+(`results.txt`, `cold-reboots.txt`, `installed-before.log`,
+`installed-after.log`, `tpm-0.log`, screenshots) and
+`E:\OpenVM-tests\lab\win11-real\backend-01a1471c-1dd4-73a1-b124-4ad28f2dbcd4\`.
+
+### Still open
+
+OOBE with a user account (the qualification stops in audit mode),
+BitLocker and Windows Hello, TPM-aware baseline/snapshot restore of an
+installed system, console reconnection after a cold reboot, the release
+bundle from the recipe (licences, signing), and whether the SEC-phase AP
+fault of finding 3 also affects other WHPX profiles with more than one vCPU
+(Vista Setup's first-reboot triple fault in R2c-01 has the same exit code).
