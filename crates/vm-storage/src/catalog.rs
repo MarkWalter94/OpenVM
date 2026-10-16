@@ -834,6 +834,7 @@ impl Catalog {
                 manifest::read_checked(&layout, &rel, Some(&b.manifest_sha256), &mut out)?;
             let disk = tx.disk(&b.base_disk_id)?;
             let vars = b.vars_fw_id.as_ref().map(|f| tx.firmware(f)).transpose()?;
+            let tpm = tx.baseline_tpm(id)?;
             if let Some(file) = &file {
                 if file.format_version > MANIFEST_FORMAT_VERSION {
                     out.push(Divergence::UnsupportedFormat(file.format_version));
@@ -853,6 +854,16 @@ impl Catalog {
                 if file.disk.path != disk.managed_path.as_str() || file.disk.sha256 != disk.sha256 {
                     out.push(Divergence::FieldMismatch("disk"));
                 }
+                let tpm_db = tpm
+                    .as_ref()
+                    .map(|v| (v.managed_path.as_str().to_owned(), v.sha256.clone()));
+                let tpm_file = file
+                    .tpm
+                    .as_ref()
+                    .map(|v| (v.path.clone(), v.sha256.clone()));
+                if tpm_db != tpm_file {
+                    out.push(Divergence::FieldMismatch("tpm"));
+                }
                 let vars_db = vars
                     .as_ref()
                     .map(|v| (v.managed_path.as_str().to_owned(), v.sha256.clone()));
@@ -867,6 +878,9 @@ impl Catalog {
             let mut files = vec![(disk.managed_path.clone(), disk.sha256.clone())];
             if let Some(v) = &vars {
                 files.push((v.managed_path.clone(), v.sha256.clone()));
+            }
+            if let Some(tpm) = tpm {
+                files.push((tpm.managed_path, tpm.sha256));
             }
             for (rel, sha) in files {
                 let p = layout.resolve(&rel)?;

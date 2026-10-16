@@ -215,9 +215,117 @@ class GuestFiles:
             os.close(parent)
 
 
+class ClipboardImages:
+    """Immutable image captures and verified uploads, cleared on disconnect."""
+    MAX_PIXELS = 4 * 1024 * 1024
+    MAX_BYTES = MAX_PIXELS * 4 + 12
+
+    def __init__(self, desktop):
+        self.desktop, self.capture, self.upload = desktop, None, None
+
+    def clear(self):
+        self.capture, self.upload = None, None
+
+    @classmethod
+    def dimensions(cls, data):
+        if len(data) < 12 or data[:4] != b"LIMG":
+            raise ValueError("invalid image header")
+        width, height = struct.unpack("<II", data[4:12])
+        if not 0 < width <= 8192 or not 0 < height <= 8192 or width * height > cls.MAX_PIXELS:
+            raise ValueError("image dimension limit")
+        return width, height
+
+    def call(self, request):
+        op = request["op"]
+        if op == "begin":
+            if request["path"] != ["image"] or request.get("replace", False):
+                raise ValueError("image scope")
+            token = os.urandom(32).hex()
+            if request["share"] == "clipboard-read":
+                if self.capture or request["size"] != 0:
+                    raise ValueError("capture active")
+                data = self.desktop.image()
+                width, height = self.dimensions(data)
+                if len(data) != 12 + width * height * 4:
+                    raise ValueError("image length")
+                self.capture = (token, data)
+            elif request["share"] == "clipboard-write":
+                size = request["size"]
+                if self.upload or not 12 <= size <= self.MAX_BYTES or len(bytes.fromhex(request["sha256"])) != 32:
+                    raise ValueError("image upload limit")
+                self.upload = (token, size, request["sha256"], bytearray())
+            else:
+                raise ValueError("image scope")
+            return dict(result="transfer", transfer=token)
+        if op == "read":
+            if not self.capture or self.capture[0] != request["share"] or request["path"] != ["image"]:
+                raise ValueError("unknown capture")
+            data = self.capture[1]
+            offset, length = request["offset"], request["length"]
+            if not 0 <= offset < len(data) or not 0 < length <= 16384:
+                raise ValueError("image read limit")
+            chunk = data[offset:offset + length]
+            return dict(result="data", offset=offset, data=chunk.hex(), eof=offset + len(chunk) == len(data))
+        token = request["transfer"]
+        if op == "cancel":
+            if self.capture and self.capture[0] == token:
+                self.capture = None
+            if self.upload and self.upload[0] == token:
+                self.upload = None
+            return dict(result="ok")
+        if not self.upload or self.upload[0] != token:
+            raise ValueError("unknown upload")
+        _, size, digest, data = self.upload
+        if op == "write":
+            chunk = bytes.fromhex(request["data"])
+            if request["offset"] != len(data) or not 0 < len(chunk) <= 16384 or len(chunk) > size - len(data):
+                self.upload = None
+                raise ValueError("image write bounds")
+            data.extend(chunk)
+        elif op == "commit":
+            self.upload = None
+            width, height = self.dimensions(data)
+            if len(data) != size or size != 12 + width * height * 4 or hashlib.sha256(data).hexdigest() != digest:
+                raise ValueError("image checksum or length mismatch")
+            self.desktop.image(bytes(data))
+        else:
+            raise ValueError("image operation")
+        return dict(result="ok")
+
+
 class Desktop:
     def __init__(self):
         self.tree, self.nodes = None, {}
+
+    def image(self, data=None):
+        # Pillow is optional inside Linux guests; missing support fails closed.
+        import io
+        import tempfile
+        from PIL import Image
+        Image.MAX_IMAGE_PIXELS = ClipboardImages.MAX_PIXELS
+        if os.environ.get("WAYLAND_DISPLAY"):
+            command = ["wl-copy", "--type", "image/png"] if data is not None else ["wl-paste", "--type", "image/png"]
+        else:
+            command = ["xclip", "-selection", "clipboard", "-t", "image/png"] + (["-in"] if data is not None else ["-out"])
+        if data is not None:
+            width, height = ClipboardImages.dimensions(data)
+            if len(data) != 12 + width * height * 4:
+                raise ValueError("image length")
+            png = io.BytesIO()
+            Image.frombytes("RGBA", (width, height), data[12:]).save(png, format="PNG")
+            data = png.getvalue()
+        with tempfile.TemporaryFile() as output:
+            subprocess.run(command, input=data, stdout=output, stderr=subprocess.DEVNULL, timeout=3, check=True)
+            if data is None:
+                output.seek(0)
+                png = output.read(20 * 1024 * 1024 + 1)
+                if len(png) > 20 * 1024 * 1024:
+                    raise ValueError("image encoded limit")
+                with Image.open(io.BytesIO(png), formats=["PNG"]) as image:
+                    width, height = image.size
+                    header = struct.pack("<4sII", b"LIMG", width, height)
+                    ClipboardImages.dimensions(header)
+                    return header + image.convert("RGBA").tobytes()
 
     def clipboard(self, text=None):
         # Helpers run only in the guest, with fixed executables/arguments.
@@ -312,6 +420,7 @@ class Desktop:
 
 def control_loop(bootstrap):
     channel, desktop = Channel(bootstrap, True), Desktop()
+    images = ClipboardImages(desktop)
     files = GuestFiles(pathlib.Path.home() / "Documents" / "LightVM Tools")
     while True:
         try:
@@ -327,6 +436,8 @@ def control_loop(bootstrap):
                     elif op == "clipboard_write":
                         desktop.clipboard(command["text"])
                         reply = dict(result="ok")
+                    elif op == "clipboard_image":
+                        reply = dict(result="clipboard_image", reply=images.call(command["request"]))
                     elif op == "ui_tree":
                         reply = desktop.inspect(ident, command["max_depth"], command["max_nodes"])
                     elif op == "ui_invoke":
@@ -335,6 +446,8 @@ def control_loop(bootstrap):
                     elif op == "file":
                         reply = dict(result="file", reply=files.call(command["request"]))
                     elif op == "flush":
+                        if files.transfers:
+                            raise ValueError("file transfer active")
                         os.sync()
                         reply = dict(result="ok")
                     else:
@@ -345,6 +458,7 @@ def control_loop(bootstrap):
         except (OSError, EOFError, ValueError, KeyError):
             channel.close()
             files.clear()
+            images.clear()
             desktop.tree, desktop.nodes = None, {}
             time.sleep(1)
 
@@ -425,6 +539,7 @@ def webdav_handler(channel, shares):
             self.finish_response(207, "".join(data).encode(), "application/xml; charset=utf-8")
 
         def do_GET(self):
+            headers_started = False
             try:
                 share, path = self.parts()
                 entries = channel.call(dict(op="list", share=share, path=path[:-1]))
@@ -436,6 +551,7 @@ def webdav_handler(channel, shares):
                 self.send_header("Content-Type", "application/octet-stream")
                 self.send_header("Connection", "close")
                 self.end_headers()
+                headers_started = True
                 self.close_connection = True
                 if self.command == "HEAD":
                     return
@@ -443,11 +559,14 @@ def webdav_handler(channel, shares):
                 while offset < entry["size"]:
                     reply = self.request_file("read", offset=offset, length=CHUNK)
                     data = bytes.fromhex(reply["data"])
-                    if not data or len(data) > CHUNK:
+                    if (reply.get("offset") != offset or not data or len(data) > CHUNK
+                            or len(data) > entry["size"] - offset):
                         raise ValueError("invalid chunk")
                     self.wfile.write(data)
                     offset += len(data)
             except (OSError, ValueError, KeyError, EOFError):
+                if not headers_started:
+                    self.finish_response(403)
                 self.close_connection = True
 
         do_HEAD = do_GET

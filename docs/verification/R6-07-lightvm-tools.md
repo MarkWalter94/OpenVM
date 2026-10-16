@@ -201,3 +201,216 @@ with warnings denied passed for `lightvm-tools`, `lightvm-service`,
 `lightvm-desktop`. The product Tools integration test passed again after the
 final journal wiring; `git diff --check` passed. The Windows packaging
 PowerShell scripts and new focused clipboard UI were not runtime tested.
+
+## 2026-10-16 desktop file-transfer follow-up (Windows)
+
+The desktop now connects the existing per-run file RPC to the console.
+`apps/desktop/src/transfers.rs` streams files on a worker using bounded
+16 KiB chunks; file handles, hashing and host writes stay off the UI thread.
+Only file names and chunks reach the supervisor/guest, never the selected
+host paths. The shared Tools reply slot is reserved for one operation at a
+time, so clipboard replies cannot be consumed as file data. The app polls
+the worker even while another page is open.
+
+- Send a file using a native picker (Windows/macOS), or drop up to 16 local
+  files on the console. Uploads go to the guest Inbox and carry a SHA-256
+  checked by the existing guest component before commit.
+- Refresh the root of the guest Outbox, choose a regular file and receive
+  it using a native save dialog. Downloads check chunk bounds, offsets,
+  EOF and the listed length. The protocol has no checksum manifest or
+  stable read handle for downloads; same-size guest edits are not detected.
+- A 4 GiB per-file limit, progress and cancellation apply. Upload failure
+  attempts guest cancellation. Downloads use a create-only sibling staging
+  file, flush it and publish with a create-only hard link. Existing targets
+  are preserved and local staging files are removed on handled failures.
+  Filesystems without hard-link support fail publication without replacing
+  a target. Sudden host/app death can leave a local staging file; startup
+  recovery for user-selected download directories is not implemented.
+- Run changes, disabled permissions, supervisor disconnection and agent
+  input ownership cancel work. Queued non-cleanup requests are discarded
+  after cancellation; every dispatched RPC retains the original VM/run.
+  A completion interrupted after publication can leave a completed file;
+  the UI tells the user to check before retrying.
+
+Verification uses real host files and a simulated supervisor/guest, not a
+real guest installation. Eight worker tests cover bounded streaming and
+hashing, source mutation, cancellation, malformed/short data, zero-byte
+files, name/size limits, cleanup and preservation of existing destinations.
+Six headless UI tests cover disabled controls, picker upload, background
+navigation, Outbox receive, host-to-guest drop, cancellation and run changes;
+a seventh test renders the new `console_files` visual snapshot.
+
+Verified on Windows with the MSVC build environment loaded:
+
+```text
+cargo fmt --all --check
+cargo clippy -p lightvm-desktop --all-targets --locked -- -D warnings
+cargo test -p lightvm-desktop --locked --lib --test transfers_ui --test console_ui --test agents_ui --test vm_settings_ui
+git diff --check
+```
+
+All passed: 110 library tests, 7 transfer UI/snapshot tests, 13 console UI
+tests, 10 agent UI tests and 8 VM-settings UI tests (148 total). The new
+snapshot was rendered and visually inspected. This is a focused desktop
+regression run, not a complete workspace or real-guest qualification.
+
+Remaining priority: qualify the transfer on real Windows/Linux guests and
+with a 750 MB build/log return; implement guest-to-host drag-out, USB with
+UsbDk/usbredir, clipboard images/sync, mapping compatibility and snapshot
+quiescence. Windows 11 x64 and filtered Internet follow completed Tools,
+in that order. Runtime/package tests and the other outstanding evidence in
+the 2026-10-15 handoff remain open.
+
+## 2026-10-16 real guests, images, synchronization and snapshot flush
+
+### Storage and reproducibility
+
+At the owner's request, all generated build/test output uses
+`E:\OpenVM-tests`: `target` and `lab/tools-real` in the checkout are junctions
+to that drive; test `TEMP`/`TMP` point to its `tmp` folder. The completed Windows
+ISO download was moved from Downloads to
+`E:\OpenVM-tests\media\Windows11_Client_x64_it-it_26300_9457.iso`.
+Existing QEMU and Ubuntu media were used read-only. No installed VM or host
+USB device was modified. Tools real tests are explicit ignored tests in
+`crates/lightvm-service/tests/tools_real.rs`, gated by `supervisor`.
+
+### Real Ubuntu live/WHPX
+
+`linux_tools_large_transfer_and_revocation` passed in 498.83 seconds with the
+production ToolsRun, authenticated channels, production Python guest and
+isolated guest network. No external network or port forwarding was enabled.
+The test boots the approved Ubuntu live ISO with its extracted kernel/initrd;
+the generated Tools ISO is mounted read-only. The payload is deterministic,
+synthetic data, **not an actual application build**.
+
+```text
+bytes=750000000
+upload_seconds=216.116
+download_seconds=221.186
+sha256=34f7d1a05e3630ed40ee76a9467877059d68eef0180487a1214341b5b58658e5
+log_return=passed
+revocation=passed
+partial_upload_cleanup=passed
+scope_reconnect=passed
+flush=passed
+webdav=passed
+```
+
+Artifacts: `E:\OpenVM-tests\lab\tools-real\01a1440b-a54c-758f-ba8d-eeee349629dd\`
+contains `results.txt` and WebDAV probe output. The probe exercises directories,
+file read/write/replace/rename/delete and rejects writes to a read-only share,
+unknown shares and traversal. This tests the HTTP compatibility layer, not
+every desktop redirector or drive mapping implementation.
+
+The real test exposed Windows teardown problems in the host channel: closing a
+cloned TCP socket did not reliably interrupt a blocked read, and the idle
+control loop did not release the old connection after scope revocation. Both
+channels now use nonblocking, deadline-bound cancellable I/O with a connection
+epoch. The file channel keeps the original generation permit for its entire
+connection, preventing an old connection from adopting new permissions.
+Idle reconnect, partial handshake, partial frame and revoke regressions pass.
+
+### Disposable Windows PE x64/WHPX
+
+`windows_pe_tools_native_clipboard_and_file_channel` passed in 10.26 seconds
+after extension to image streaming and hashed upload. It boots the user's
+Windows 11 x64 setup ISO with a generated 64 MiB answer medium; there is no
+installation disk, partitioning, product key or requirement bypass. Its
+unattend file only starts the probe in the Windows PE phase. QEMU is killed
+and waited on at test exit. Artifacts are in
+`E:\OpenVM-tests\lab\tools-real\winpe-01a1442e-d05c-7344-abc5-772cf4ce12c0\`.
+
+```text
+lab_only_x64_tools=true
+installed_windows=false
+native_clipboard_text_and_rgba=passed
+clipboard_image_stream_round_trip=passed
+file_upload_sha256_commit=passed
+file_channel_log_return=passed
+```
+
+The x64 Tools build is a **lab-only build of the production C source**, because
+x64 WinPE cannot execute the shipped i686 binary. The native test uses a
+create-only, noninteractive, current-user-private window station; it does not
+access the host's interactive clipboard. It tests native text, RGBA/alpha and
+invalid dimensions. The protocol test then streams a 128×64 RGBA image to
+the guest, commits with SHA-256, captures it through an immutable token and
+checks every returned byte. A 256 KiB file is uploaded through SHA-256 commit,
+and the native test log is returned through the file channel.
+
+The tests found and fixed native clipboard ownership: SetClipboardData needs
+an owner window; Tools now opens the clipboard with a private message-only
+window. The shipped i686/subsystem-5.1 build and allowed DLL import checks
+pass, but **installed Windows and the i686 guest runtime remain unqualified**.
+
+### Desktop and protocol behavior
+
+- Explicit image copies use the `clipboard` capability independently of
+  `files.transfer`. The protocol streams raw `LIMG`/RGBA in 16 KiB chunks,
+  bounded to 4,194,304 pixels, 8192 per side and 16 MiB + 12 bytes. Uploads
+  require exact length and SHA-256. Capture/upload tokens are per connection;
+  disconnect clears them. Linux PNG conversion requires Pillow plus a working
+  graphical-session wl-clipboard/xclip backend; real Linux image clipboard
+  interoperability is not yet qualified.
+- Text synchronization is off by default, requires a fresh opt-in per run,
+  and runs only with console capture, viewport focus, user input ownership
+  and permission. It shares the Tools reply slot with transfers. Focus loss
+  discards pending guest text; a newer host copy wins over a delayed reply.
+  Tests inject a fake clipboard, so they do not read the host clipboard.
+- Windows native drag-out uses **Prepare drag…** on one Outbox entry. The
+  worker downloads it to a private cache and exposes only that file through
+  a Windows shell data object and OLE DoDragDrop in COPY mode. The cache is
+  removed on explicit clear or app exit; keep LightVM open until the target
+  finishes copying. This is an Outbox UI workflow, not interception of a drag
+  inside guest Explorer. The prepared-row/cache/cleanup flow passes a headless
+  UI test; an actual drop into host Explorer is still unverified. Other host
+  platforms retain Receive.
+- The initial third-party `drag` dependency pulled an unmaintained transitive
+  package (`RUSTSEC-2024-0370`). It was removed before completion. The final
+  implementation uses the existing Windows bindings 0.62.2, with no advisory
+  exception. `cargo deny --locked check` passes advisories, bans, licences and
+  sources (duplicate versions remain warnings).
+
+### Snapshot flush
+
+Before a running disk snapshot, configured Tools must acknowledge an internal
+flush RPC. Active guest transfers, missing/disconnected Tools, failed flush or
+an unrelated reply refuse the snapshot. The internal maintenance permit
+requires a live generation but grants no file or clipboard access. Python
+uses `os.sync`; native Windows flushes fixed volumes and requires elevation
+inside the guest. Ubuntu live verifies both a successful flush and refusal
+during an active transfer. This is **not filesystem freeze, VSS or application
+quiescence**; writes can resume after the acknowledgement. Installed-guest
+snapshot/restart/rollback qualification remains open.
+
+### Focused automated checks
+
+Windows/MSVC: 119 desktop library tests, 8 transfer UI/snapshot tests, 13 console
+UI tests, 10 agent UI tests and 8 VM-settings UI tests passed (158 total).
+The updated console snapshot was visually inspected. Tools: 8 boundary,
+5 file-channel (including 52 MiB round trip), 8 control and 2 journal tests
+passed. Core Tools scope tests (3), service bootstrap/scope test (1), protocol
+tests (44 including schema checks and image boundary negatives), MCP library
+and stdio tests (15 + 6), and Python guest tests (8) passed. All-targets clippy with warnings denied passes for
+desktop, Tools and supervisor. The guest bundle build/import checks pass.
+These checks do not establish complete workspace or installed-guest release
+qualification.
+
+### Remaining work
+
+1. USB capture/redirection, explicit UsbDk installation UX and verified detach,
+   including rejection of session approval when detach fails. No driver was
+   installed and no host device was captured. A physical test needs an
+   explicitly selected disposable device; E: is excluded from capture.
+2. Installed Windows/Linux drive mapping, restart/rollback and a representative
+   application build/log workflow; the existing tests use Ubuntu live and
+   disposable Windows PE. Installer/package execution, external native drag,
+   Linux image clipboard and WPF UI Automation remain to be qualified.
+3. Windows 11 x64 TPM/Secure Boot integration and filtered Internet remain
+   subsequent work, in the owner's stated order.
+
+Owner steering afterwards (2026-10-16): physical USB testing is deferred;
+Windows 11 TPM took priority. Product integration and Windows PE evidence
+(TPM 2.0, Secure Boot, NV persistence and helper-failure shutdown) are now
+recorded in `R6-05` §13. Installed Windows, warm reboot and TPM-aware
+baseline/snapshot restore remain open; filtered Internet has not started.

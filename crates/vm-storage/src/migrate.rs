@@ -82,6 +82,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "0010_user_snapshots.sql",
         sql: include_str!("../migrations/0010_user_snapshots.sql"),
     },
+    Migration {
+        version: 11,
+        name: "0011_tpm_checkpoints.sql",
+        sql: include_str!("../migrations/0011_tpm_checkpoints.sql"),
+    },
 ];
 
 /// Latest schema version known to this binary.

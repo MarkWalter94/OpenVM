@@ -90,6 +90,9 @@ pub struct BaselineManifest {
     pub disk: ManifestFile,
     /// Firmware state of the baseline.
     pub vars: Option<ManifestFile>,
+    /// TPM permanent state (offline checkpoints only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tpm: Option<ManifestFile>,
     /// Created with the VM powered off (always `true`).
     pub created_powered_off: bool,
     /// Clean shutdown observed.

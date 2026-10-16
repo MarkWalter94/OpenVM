@@ -24,6 +24,7 @@ JOBS=${JOBS:-4}
 HERE=$(cd "$(dirname "$0")" && pwd)
 WORK=$(mkdir -p "$1" && cd "$1" && pwd)
 OUT=$(mkdir -p "$2" && cd "$2" && pwd)
+[[ -z $(find "$OUT" -mindepth 1 -maxdepth 1 -print -quit) ]] || { echo 'output must be empty' >&2; exit 1; }
 TARBALL=$WORK/qemu-$QEMU_VERSION.tar.xz
 
 echo "$QEMU_SHA256 *$TARBALL" | sha256sum -c -
@@ -35,7 +36,7 @@ gpg --batch --status-fd 1 --verify "$TARBALL.sig" "$TARBALL" 2>/dev/null |
   grep -q "VALIDSIG $QEMU_KEY " || { echo "bad QEMU signature" >&2; exit 1; }
 
 SRC=$WORK/qemu-$QEMU_VERSION
-rm -rf "$SRC"
+[[ ! -e "$SRC" ]] || { echo 'source directory already exists; use a fresh work directory' >&2; exit 1; }
 # MSYS2 tar emulates a symlink by copying its target, which fails while the
 # target is not extracted yet: extract twice, the second pass must succeed.
 # roms/ (firmware sources) and tests/lcitool/ hold dangling links and are not
@@ -58,7 +59,6 @@ grep -E "^ +(TPM support|WHPX support) +: YES" meson-logs/meson-log.txt >/dev/nu
 # Only the emulator: the unit tests are not part of the distribution.
 ninja -j"$JOBS" qemu-system-x86_64.exe
 
-rm -rf "$OUT"/*
 mkdir -p "$OUT/share"
 cp qemu-system-x86_64.exe "$OUT/"
 strip "$OUT/qemu-system-x86_64.exe"
@@ -71,4 +71,6 @@ for f in bios-256k.bin kvmvapic.bin linuxboot_dma.bin multiboot_dma.bin pvh.bin 
   cp "$SRC/pc-bios/$f" "$OUT/share/"
 done
 cp "$SRC/COPYING" "$SRC/COPYING.LIB" "$SRC/LICENSE" "$OUT/share/"
-(cd "$OUT" && sha256sum -b *.exe *.dll share/* > SHA256SUMS && cat SHA256SUMS)
+# The VNC server loads these even with a non-interactive -display none.
+cp -R "$SRC/pc-bios/keymaps" "$OUT/share/"
+(cd "$OUT" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum -b > SHA256SUMS && cat SHA256SUMS)

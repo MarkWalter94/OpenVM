@@ -5,6 +5,9 @@ import importlib.util
 import pathlib
 import tempfile
 import unittest
+import threading
+import urllib.error
+import urllib.request
 
 loader = importlib.machinery.SourceFileLoader('guest_tools', str(pathlib.Path(__file__).with_name('TOOLS.PY')))
 spec = importlib.util.spec_from_loader(loader.name, loader)
@@ -55,5 +58,65 @@ class Files(unittest.TestCase):
             r = self.files.call(dict(op='read', share='outbox', path=['output'], offset=len(result), length=16384))
             result.extend(bytes.fromhex(r['data']))
         self.assertEqual(bytes(result), data)
+
+class Images(unittest.TestCase):
+    def setUp(self):
+        class Desktop:
+            data = guest.struct.pack('<4sII', b'LIMG', 101, 99) + b'\x42' * (101 * 99 * 4)
+            writes = 0
+            def image(self, data=None):
+                if data is None: return self.data
+                self.data = data
+                self.writes += 1
+        self.desktop = Desktop()
+        self.images = guest.ClipboardImages(self.desktop)
+    def test_verified_image_upload_and_stable_capture(self):
+        data = self.desktop.data
+        token = self.images.call(dict(op='begin', share='clipboard-write', path=['image'], size=len(data), sha256=hashlib.sha256(data).hexdigest()))['transfer']
+        for offset in range(0, len(data), 16384):
+            self.images.call(dict(op='write', transfer=token, offset=offset, data=data[offset:offset+16384].hex()))
+        self.images.call(dict(op='commit', transfer=token))
+        self.assertEqual(self.desktop.writes, 1)
+        token = self.images.call(dict(op='begin', share='clipboard-read', path=['image'], size=0))['transfer']
+        self.desktop.data = b'changed clipboard'
+        got = bytearray()
+        while True:
+            reply = self.images.call(dict(op='read', share=token, path=['image'], offset=len(got), length=16384))
+            got.extend(bytes.fromhex(reply['data']))
+            if reply['eof']: break
+        self.assertEqual(bytes(got), data)
+        self.images.call(dict(op='cancel', transfer=token))
+        self.assertIsNone(self.images.capture)
+    def test_bad_digest_and_disconnect_do_not_replace_clipboard(self):
+        data = self.desktop.data
+        token = self.images.call(dict(op='begin', share='clipboard-write', path=['image'], size=len(data), sha256='0'*64))['transfer']
+        for offset in range(0, len(data), 16384):
+            self.images.call(dict(op='write', transfer=token, offset=offset, data=data[offset:offset+16384].hex()))
+        with self.assertRaises(ValueError): self.images.call(dict(op='commit', transfer=token))
+        self.assertEqual(self.desktop.writes, 0)
+        self.images.clear()
+        self.assertIsNone(self.images.upload)
+    def test_image_dimensions_are_limited(self):
+        for width, height in ((0, 1), (8193, 1), (4096, 4096)):
+            with self.assertRaises(ValueError): self.images.dimensions(guest.struct.pack('<4sII', b'LIMG', width, height))
+
+class WebDAV(unittest.TestCase):
+    def test_invalid_paths_are_refused_before_any_host_request(self):
+        class Channel:
+            def call(self, request):
+                raise AssertionError("invalid paths must not reach the host")
+        server = guest.http.server.HTTPServer(('127.0.0.1', 0), guest.webdav_handler(Channel(), {'Builds'}))
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            for path in ('/Builds/%2e%2e/escape', '/Builds/a%5cb', '/Unapproved/secret'):
+                with self.assertRaises(urllib.error.HTTPError) as error:
+                    urllib.request.urlopen('http://127.0.0.1:%d%s' % (server.server_port, path), timeout=2)
+                self.assertEqual(error.exception.code, 403)
+                error.exception.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+            worker.join()
 
 if __name__ == '__main__': unittest.main()

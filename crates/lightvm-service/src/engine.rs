@@ -682,6 +682,8 @@ pub struct StartDisks {
     pub base: PathBuf,
     /// UEFI variables of the baseline (protected read-only during the run).
     pub base_vars: Option<PathBuf>,
+    /// Writable TPM directory belonging to the same restored state.
+    pub tpm_dir: Option<PathBuf>,
     /// Catalog guard (baseline read-only, overlay not deletable), opened
     /// before the baseline's hash is verified through it
     /// ([`StartGuard::verify`], on the start worker): kept by the backend
@@ -3313,7 +3315,11 @@ where
                     expires,
                 },
             );
-            if self.core.run_network(vm_id) != Some(lightvm_proto::NetworkProfile::Endpoints) {
+            if !self
+                .core
+                .run_network(vm_id)
+                .is_some_and(lightvm_proto::NetworkProfile::is_restricted)
+            {
                 continue;
             }
             let allowed = self.core.allowed_endpoints(vm_id, tainted);

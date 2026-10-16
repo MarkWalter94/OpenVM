@@ -144,3 +144,11 @@ required-features = ["supervisor"]
 [[test]]
 name = "network"
 required-features = ["supervisor"]
+
+[[test]]
+name = "tools_real"
+required-features = ["supervisor"]
+
+[[test]]
+name = "windows11_real"
+required-features = ["supervisor"]

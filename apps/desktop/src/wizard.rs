@@ -216,7 +216,9 @@ impl Bounds {
     /// The host can hold a VM of this guest system (memory and disk above
     /// its minimums).
     pub fn sufficient_for(&self, os: GuestOs) -> bool {
-        self.max_memory_mib >= os.min_memory_mib() && self.max_disk_gib >= os.min_disk_gib()
+        self.max_memory_mib >= os.min_memory_mib()
+            && self.max_disk_gib >= os.min_disk_gib()
+            && (os != GuestOs::Windows11X64 || self.max_vcpus >= 2)
     }
 }
 
@@ -251,6 +253,9 @@ pub fn hardware_summary(os: GuestOs) -> &'static str {
         }
         GuestOs::Windows11Arm64 => {
             "NVMe disk, ramfb display, USB keyboard and tablet, TPM 2.0, UEFI with Secure Boot"
+        }
+        GuestOs::Windows11X64 => {
+            "AHCI disk, standard VGA, USB tablet, TPM 2.0, UEFI with Secure Boot"
         }
     }
 }
@@ -435,7 +440,11 @@ impl Wizard {
         let max_mem = self.max_memory(b).max(os.min_memory_mib());
         let max_disk = b.max_disk_gib.max(os.min_disk_gib());
         Some((
-            t.vcpus.clamp(1, b.max_vcpus.max(1)),
+            t.vcpus.clamp(
+                if os == GuestOs::Windows11X64 { 2 } else { 1 },
+                b.max_vcpus
+                    .max(if os == GuestOs::Windows11X64 { 2 } else { 1 }),
+            ),
             t.memory_mib.clamp(os.min_memory_mib(), max_mem),
             t.disk_gib.clamp(os.min_disk_gib(), max_disk),
         ))
@@ -808,6 +817,10 @@ fn system_step(ui: &mut egui::Ui, w: &mut Wizard, b: Bounds) {
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
                     ui.set_min_width(380.0);
+                    // Keep the growing OS list and navigation visible in a
+                    // normal-height desktop window, with full-width rows.
+                    ui.spacing_mut().interact_size.y = 24.0;
+                    ui.spacing_mut().item_spacing.y = 4.0;
                     group_caption(ui, caption);
                     for &os in list {
                         if ui.radio(w.os == Some(os), os_choice_label(os)).clicked() {
@@ -877,7 +890,7 @@ fn system_step(ui: &mut egui::Ui, w: &mut Wizard, b: Bounds) {
 }
 
 /// Note under the systems on x86 hosts.
-pub const X86_HOST_NOTE: &str = "Windows guests run offline, without a network adapter. Windows 8 and Windows 11 are not supported.";
+pub const X86_HOST_NOTE: &str = "Windows guests run offline by default. Windows 11 x64 is experimental and needs the Windows 11 support package (TPM 2.0 and Secure Boot). Windows 8 is not supported.";
 /// Note under the systems on Apple Silicon hosts (ADR-0028).
 pub const ARM_HOST_NOTE: &str = "Windows guests run offline, without a network adapter. On this Mac only Windows 11 ARM64 runs: bring your own installation ISO and licence.";
 
@@ -891,6 +904,7 @@ fn os_choice_label(os: GuestOs) -> &'static str {
         GuestOs::Windows81 => "Windows 8.1",
         GuestOs::Windows10 => "Windows 10",
         GuestOs::Windows11Arm64 => "Windows 11 (ARM64)",
+        GuestOs::Windows11X64 => "Windows 11 (64-bit)",
     }
 }
 
@@ -936,10 +950,15 @@ pub fn template_label(os: GuestOs, arch: Option<GuestArch>) -> String {
 
 fn insufficient_text(os: GuestOs) -> String {
     format!(
-        "Not enough free memory or disk space on this host for a {} VM: it needs at least {} of memory and {} GiB of disk.",
+        "Not enough free resources on this host for a {} VM: it needs at least {} of memory and {} GiB of disk.{}",
         os_label(os),
         format_mib(os.min_memory_mib()),
-        os.min_disk_gib()
+        os.min_disk_gib(),
+        if os == GuestOs::Windows11X64 {
+            " Windows 11 also needs at least 2 vCPU."
+        } else {
+            ""
+        }
     )
 }
 
@@ -1151,14 +1170,15 @@ fn resources_step(ui: &mut egui::Ui, w: &mut Wizard, b: Bounds) {
         return;
     }
     let max_mem = w.max_memory(b).max(min_mem);
-    w.vcpus = w.vcpus.clamp(1, b.max_vcpus);
+    let min_cpu = if os == GuestOs::Windows11X64 { 2 } else { 1 };
+    w.vcpus = w.vcpus.clamp(min_cpu, b.max_vcpus);
     w.memory_mib = w.memory_mib.clamp(min_mem, max_mem);
     w.disk_gib = w.disk_gib.clamp(min_disk, b.max_disk_gib);
     let mut edited = slider_row(
         ui,
         "Virtual processors",
         &mut w.vcpus,
-        1..=b.max_vcpus,
+        min_cpu..=b.max_vcpus,
         |s| s,
         |v| format!("{v} vCPU"),
     );

@@ -66,6 +66,32 @@ fn setup(root: &Temp) -> (FileServer, Hello, Gate) {
 }
 
 #[test]
+fn idle_scope_change_releases_the_old_connection_and_accepts_a_new_one() {
+    let root = Temp::new();
+    let (mut server, hello, gate) = setup(&root);
+    let mut old = FileClient::connect(server.address(), &hello).unwrap();
+    let start = Instant::now();
+    server.stop_handle().suspend();
+    gate.replace(Grant {
+        features: [Feature::ShareRead].into(),
+        shares: [("builds".into(), false)].into(),
+        ..Default::default()
+    });
+    let mut new = FileClient::connect(server.address(), &hello).unwrap();
+    assert!(start.elapsed() < Duration::from_secs(1));
+    let list = || FileRequest::List {
+        share: "builds".into(),
+        path: RelativePath::new(vec![]).unwrap(),
+    };
+    assert!(old.call(&list()).is_err());
+    assert!(matches!(
+        new.call(&list()).unwrap(),
+        FileReply::Entries { .. }
+    ));
+    server.stop();
+}
+
+#[test]
 fn real_tcp_upload_download_over_fifty_mb_and_cancel_cleanup() {
     let root = Temp::new();
     let guest = Temp::new();

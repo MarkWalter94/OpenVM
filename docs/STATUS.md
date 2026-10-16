@@ -1,6 +1,6 @@
 # Project status
 
-Last updated: 2026-10-15
+Last updated: 2026-10-16
 
 Operational document required by section 17 of `docs/ROADMAP.md`: current phase, impediments and progress. **This file does not change the Definition of Done (section 11), the scope or the exit criteria.** A status reported here does not count as verification: the evidence is in `docs/verification/`.
 
@@ -172,12 +172,12 @@ Started on 2026-10-14 at the owner's request (ROADMAP 12, R6, in parallel; not a
 | UI: page, tree, take dialog, running-VM revert flow (orderly shutdown first, offered snapshot of the current state), refusals, progress, one operation at a time | `lightvm-desktop` `tests/snapshots_ui.rs`, snapshots | verified in simulation/test |
 | Disk operations on real QEMU 11.1.0: off (the exact `qemu-img` command) and running (QMP, WHPX), the data restored byte by byte after every apply | `qemu-backend` `tests/real_snapshots.rs` (`--ignored`, lab), `docs/verification/R6-03-user-snapshots.md` items 8–9 | verified on hardware (Windows, WHPX) |
 | Real guests (Windows and Linux) reverted to an earlier snapshot boot normally | — | not verified (no guest installed for this feature) |
-| A running take with the guest file systems flushed first (LightVM Tools, ADR-0031) | — | not implemented |
+| A running take with the guest file systems flushed first (LightVM Tools, ADR-0031) | `R6-07`, Tools control tests and Ubuntu live | implemented: waits for guest flush acknowledgement, refuses disconnected/failed/busy Tools; no freeze, VSS or application-consistency guarantee; actual snapshot/restore with installed guests remains unverified |
 
 ## R6 work: LightVM Tools (ADR-0031, ADR-0034, ADR-0036)
 
-Implementation in progress on macOS Apple Silicon (2026-10-15), paused at
-owner request for commit/push. Tools now have product wiring: private per-run
+Implementation resumed on Windows (2026-10-16), following the macOS Apple
+Silicon handoff of 2026-10-15. Tools now have product wiring: private per-run
 ISO and authenticated channels through the supervisor stack, VM settings and
 named session grants, shared-folder operations, bounded clipboard/UI/file RPC,
 MCP UI tools, explicit focused console clipboard buttons, direct-Win32 and
@@ -185,14 +185,83 @@ Python guest components, transfer audit/report metadata and a private staging
 recovery journal. Guest bundle build recipe and Windows package integration
 are present. Features remain disabled by default.
 
-**Tools are not complete or guest-qualified.** USB redirection, desktop file
-transfer progress/cancellation and drag/drop, clipboard images/automatic sync,
-full filesystem mapping compatibility and guest filesystem quiescence remain
-open. Windows native runtime, installer/package execution, real Windows/Linux
-guests and WPF UI Automation need verification. Only this Mac is available.
-Windows 11 x64 and filtered Internet remain next, in that order after Tools.
+The console now sends files to the guest Inbox (native picker or up to 16
+files dropped onto the console), lists the Outbox and receives a selected
+file to a user-chosen host destination. Transfers stream on a worker with
+progress, cancellation, a 4 GiB per-file limit and create-only publication.
+Unit tests, headless UI tests and a visual snapshot verify the desktop flow
+on Windows. Windows hosts also offer a prepared Outbox row for native copy
+drag-out; copying into Explorer remains unverified. Clipboard image streaming
+and opt-in, focus-bound text synchronization are implemented.
+
+Real Ubuntu live/WHPX passed a synthetic 750,000,000-byte upload/download,
+SHA-256 verification, log return, WebDAV create/replace/rename/delete and
+read-only refusals, revocation, partial cleanup, reconnect and filesystem flush.
+Windows PE x64/WHPX passed native text/RGBA clipboard tests, streamed image
+round trip, hashed file upload and log return using a lab-only x64 Tools build.
+The shipped i686/XP-targeted build passed static import/subsystem checks;
+WinPE evidence does not qualify installed Windows or the i686 binary.
+
+**Tools remain incomplete.** USB capture/redirection and verified detach,
+installed Windows/Linux mapping compatibility, installed-guest restart/rollback,
+an actual application build/log workflow, installer/package execution and WPF
+UI Automation remain open. Snapshot flush is implemented, but filesystem
+freeze/application quiescence is not. Lab outputs, build cache and temporary
+VM media use `E:\OpenVM-tests` at the owner's request; no Windows installation
+or requirements bypass was performed.
+On 2026-10-16 the owner deferred USB tests and requested the Windows 11 TPM
+work below. Filtered Internet remains subsequent work.
 Evidence, commands and the handoff are in
-`docs/verification/R6-07-lightvm-tools.md` (2026-10-15 follow-up).
+`docs/verification/R6-07-lightvm-tools.md` (2026-10-16 follow-up).
+
+## R6 work: Windows 11 x64 TPM (ADR-0035)
+
+Implemented on 2026-10-16 after the owner deferred USB tests. Windows 11 x64
+is a distinct experimental guest with UEFI, TPM CRB, at least 2 vCPUs, 4 GiB
+RAM and 64 GiB disk. A separately approved project QEMU/swtpm/Secure Boot
+bundle is verified and held read-only per run; other profiles keep the
+upstream runtime. swtpm shares the VM Job Object, connections are checked by
+PID and helper death stops the run. State is private per VM.
+
+Real Windows PE x64/WHPX reports TPM 2.0, Secure Boot=1 and SetupMode=0.
+A test NV value survives cold restart; forced helper death stops QEMU and
+close releases all owned processes/handles. The service backend starts the
+new profile repeatedly and still starts the ordinary Linux profile. Builds
+and scratch remain on E:. Evidence: `R6-05` §13.
+
+Baselines and snapshots taken with the VM stopped now carry the TPM state
+with disk and UEFI variables under the operation journal; running TPM
+snapshots are refused. In real Windows PE, snapshot revert and baseline
+restore both brought back the original TPM NV value (`R6-05` §14).
+
+**Installed Windows 11 is blocked**: the first installation attempt stopped
+at Setup's first guest-initiated reboot with `failed to get xsave state`
+and `WHPX: Unexpected VP exit code 4` (`R6-05` §14). Warm reboot,
+BitLocker/Hello and TPM-aware restore of an installed system remain
+unqualified. Release packaging/signing and the full external-runtime
+licence/source closure remain open.
+
+## R1 work: filtered Internet, first increment (ADR-0037)
+
+Started on 2026-10-16 (owner: "vai con tutto"). A fourth network mode,
+**Filtered Internet (experimental)**, reuses the supervisor's isolated stack
+of ADR-0033: the guest reaches only the exact DNS names listed for the VM,
+on TCP 80/443, with names resolved by the supervisor at start and pinned for
+the run. Every address must be public IPv4 and reached through the host's
+default route; host, LAN, special-use ranges, non-default (VPN/LAN) routes,
+IPv6 and UDP are refused, and every connection is rechecked against the host
+routing table at connect time and every second while open. Windows hosts
+only. Agent sessions get it only through the `network.endpoints` grant.
+
+| Item | Evidence | Declared outcome |
+| --- | --- | --- |
+| Destination policy: special ranges, IPv6, ports, routes | `guest-net` `egress` unit tests | verified in simulation/test |
+| Configuration: exact names, 80/443, no IP literals | `lightvm-proto` `tests/roundtrip.rs` | verified in simulation/test |
+| A public-only endpoint pinned to loopback never reaches the host | `guest-net` `tests/stack.rs` | verified in simulation/test |
+| Real guest browsing, redirects, DNS rebinding, VPN, system proxy, revocation of persistent connections, gateway crash | — | not verified |
+
+R1 is not complete: the release conditions of ROADMAP 12 (R1) need the
+real-guest evidence above. Evidence file: `docs/verification/R1-01-filtered-internet.md`.
 
 ## R6 work: guest network (ADR-0033)
 

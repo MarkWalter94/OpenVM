@@ -79,6 +79,8 @@ pub enum FaultPoint {
     /// Snapshot revert: the VM's UEFI variables removed, the snapshot's
     /// copy not yet in place.
     SnapshotRevertVarsRemoved,
+    /// Snapshot revert: old TPM state removed, before the checkpoint copy is installed.
+    SnapshotRevertTpmRemoved,
 }
 
 /// What happens at a [`FaultPoint`].
@@ -149,6 +151,8 @@ pub struct ProducedImage {
     pub disk_bytes: u64,
     /// SHA-256 and bytes of the copied UEFI variables.
     pub vars: Option<(String, u64)>,
+    /// TPM permanent state, hashed through its guarded handle.
+    pub tpm: Option<(String, u64)>,
 }
 
 /// Baseline creation started by [`Catalog::begin_create_baseline`]: intents
@@ -166,6 +170,9 @@ pub struct BaselineJob {
     vars_intent: Option<Intent>,
     source_disk: PathBuf,
     source_vars: Option<(PathBuf, File)>,
+    source_tpm: Option<(PathBuf, File)>,
+    tpm_intent: Option<Intent>,
+    tpm_fw_id: FirmwareId,
     derived_from: Option<BaselineId>,
     config_revision: u64,
     config: serde_json::Value,
@@ -225,7 +232,12 @@ impl BaselineJob {
             .as_ref()
             .and_then(|(p, _)| std::fs::metadata(p).ok())
             .map_or(0, |m| m.len());
-        disk.saturating_add(vars)
+        let tpm = self
+            .source_tpm
+            .as_ref()
+            .and_then(|(_, f)| f.metadata().ok())
+            .map_or(0, |m| m.len());
+        disk.saturating_add(vars).saturating_add(tpm)
     }
 
     /// File work, on any thread: `produce(source, temp)` writes the
@@ -261,6 +273,12 @@ impl BaselineJob {
                 disk_sha256,
                 disk_bytes: meta.len(),
                 vars,
+                tpm: match (&self.source_tpm, &self.tpm_intent) {
+                    (Some((src, handle)), Some(i)) => {
+                        Some(copy_from_handle(handle, src, &i.temp_path)?)
+                    }
+                    _ => None,
+                },
             })
         })();
         BaselineJobDone { job: self, outcome }
@@ -337,6 +355,10 @@ pub struct RestoreJob {
     discards: Vec<Intent>,
     old: OldState,
     guard: BaselineGuard,
+    base_tpm: Option<FirmwareRecord>,
+    tpm_intent: Option<Intent>,
+    tpm_fw_id: FirmwareId,
+    old_tpm_fw_id: Option<FirmwareId>,
 }
 
 /// Outcome of [`RestoreJob::run`].
@@ -401,6 +423,13 @@ impl RestoreJob {
                 }
                 _ => None,
             };
+            if let (Some(tpm), Some(i)) = (&self.base_tpm, &self.tpm_intent) {
+                let h = self
+                    .guard
+                    .handle(&tpm.managed_path)
+                    .ok_or_else(|| StorageError::StateConflict("TPM state not guarded".into()))?;
+                copy_from_handle(h, &self.base_disk_abs, &i.temp_path)?;
+            }
             Ok((len, vars))
         })();
         RestoreJobDone { job: self, outcome }
@@ -422,6 +451,8 @@ pub struct StartFiles {
     pub base: PathBuf,
     /// UEFI variables of the baseline (absolute), protected read-only.
     pub base_vars: Option<PathBuf>,
+    /// TPM directory of the restored state (private, writable).
+    pub tpm_dir: Option<PathBuf>,
     /// Guard to keep alive until the process ends.
     pub guard: RunGuard,
 }
@@ -435,6 +466,8 @@ pub struct BaselineInfo {
     pub disk: DiskRecord,
     /// UEFI variables.
     pub vars: Option<FirmwareRecord>,
+    /// TPM permanent state, if this is a TPM-bearing baseline.
+    pub tpm: Option<FirmwareRecord>,
     /// Parent baseline, if the source was an overlay.
     pub derived_from: Option<BaselineId>,
     /// VM configuration revision at creation.
@@ -506,7 +539,7 @@ impl Catalog {
         snapshot: Option<&crate::SnapshotId>,
     ) -> Result<BaselineJob> {
         let mut vm = self.stopped_without_runs(&req.vm_id, "baseline")?;
-        refuse_tpm_guest(&vm)?;
+        let tpm_guest = crate::tpm::needs_tpm(&vm.guest_os);
         let mut snapshot_tag = None;
         if let Some(sid) = snapshot {
             let s = self.read(|tx| tx.snapshot(sid))?;
@@ -576,6 +609,29 @@ impl Catalog {
             }
             None => None,
         };
+        let source_tpm = if tpm_guest {
+            Some(if let Some(sid) = snapshot {
+                let expected = self.read(|tx| tx.snapshot_tpm(sid))?.ok_or_else(|| {
+                    StorageError::StateConflict("snapshot has no TPM state".into())
+                })?;
+                let rel = CatalogLayout::snapshot_tpm(&req.vm_id, sid);
+                let abs = self.layout.resolve(&rel)?;
+                let handle = fsx::open_regular(&abs, Share::ReadOnly, rel.as_str())?;
+                let actual = fsx::sha256_handle(&handle, &abs)?;
+                if actual != expected {
+                    return Err(StorageError::IntegrityMismatch {
+                        path: rel.to_string(),
+                        detail: "snapshot TPM state changed".into(),
+                    });
+                }
+                (abs, handle)
+            } else {
+                let dir = self.current_tpm_dir(&req.vm_id)?;
+                self.open_tpm_state(&dir)?
+            })
+        } else {
+            None
+        };
         let op = OperationId::new_v7();
         let baseline_id = BaselineId::new_v7();
         let disk_id = DiskId::new_v7();
@@ -607,7 +663,35 @@ impl Catalog {
             },
             None => None,
         };
+        let tpm_fw_id = FirmwareId::new_v7();
+        let tpm_intent = if source_tpm.is_some() {
+            match self.begin_intent(IntentSpec {
+                kind: IntentKind::CopyVars,
+                vm_id: Some(req.vm_id),
+                operation_id: Some(op),
+                target_kind: TargetKind::Firmware,
+                target_id: Some(tpm_fw_id.to_string()),
+                final_path: Some(CatalogLayout::baseline_tpm(&req.vm_id, &baseline_id)),
+                read_only: true,
+            }) {
+                Ok(i) => Some(i),
+                Err(e) => {
+                    self.abort_intents(
+                        &[Some(disk_intent.clone()), vars_intent.clone()]
+                            .into_iter()
+                            .flatten()
+                            .collect::<Vec<_>>(),
+                    );
+                    return Err(e);
+                }
+            }
+        } else {
+            None
+        };
         Ok(BaselineJob {
+            source_tpm,
+            tpm_intent,
+            tpm_fw_id,
             req,
             op,
             baseline_id,
@@ -633,6 +717,7 @@ impl Catalog {
         let BaselineJobDone { job, outcome } = done;
         let mut intents = vec![job.disk_intent.clone()];
         intents.extend(job.vars_intent.clone());
+        intents.extend(job.tpm_intent.clone());
         let result = (|| -> Result<BaselineRecord> {
             let produced = outcome?;
             self.fault_at(FaultPoint::CreateBeforePublish)?;
@@ -655,6 +740,13 @@ impl Catalog {
             if let Some(vi) = &job.vars_intent {
                 self.mark_applied(vi)?;
             }
+            if let Some(ti) = &job.tpm_intent {
+                self.mark_applied(ti)?;
+            }
+            let tpm_rel = job
+                .tpm_intent
+                .as_ref()
+                .map(|_| CatalogLayout::baseline_tpm(&job.req.vm_id, &job.baseline_id));
             let vars_rel = job
                 .vars_intent
                 .as_ref()
@@ -676,6 +768,14 @@ impl Catalog {
                 vars: match (&vars_rel, &produced.vars) {
                     (Some(rel), Some((sha, _))) => Some(ManifestFile {
                         role: "vars".into(),
+                        path: rel.to_string(),
+                        sha256: Some(sha.clone()),
+                    }),
+                    _ => None,
+                },
+                tpm: match (&tpm_rel, &produced.tpm) {
+                    (Some(rel), Some((sha, _))) => Some(ManifestFile {
+                        role: "tpm".into(),
                         path: rel.to_string(),
                         sha256: Some(sha.clone()),
                     }),
@@ -730,6 +830,19 @@ impl Catalog {
                     })?;
                 }
                 tx.insert_baseline(&record)?;
+                if let (Some(rel), Some((sha, len))) = (&tpm_rel, &produced.tpm) {
+                    tx.insert_firmware(&FirmwareRecord {
+                        fw_id: job.tpm_fw_id,
+                        vm_id: job.req.vm_id,
+                        scope: FirmwareScope::Baseline,
+                        source_fw_id: None,
+                        managed_path: rel.clone(),
+                        sha256: Some(sha.clone()),
+                        size_bytes: *len,
+                        created_at: created_at.clone(),
+                    })?;
+                    tx.set_baseline_tpm(&record.baseline_id, &job.tpm_fw_id)?;
+                }
                 if let Some(p) = &derived {
                     tx.set_baseline_derived_from(&record.baseline_id, p)?;
                 }
@@ -757,6 +870,7 @@ impl Catalog {
     pub fn abort_baseline_job(&mut self, done: BaselineJobDone) -> Result<()> {
         let mut intents = vec![done.job.disk_intent.clone()];
         intents.extend(done.job.vars_intent.clone());
+        intents.extend(done.job.tpm_intent.clone());
         self.abort_intents(&intents);
         Ok(())
     }
@@ -768,7 +882,7 @@ impl Catalog {
     /// the files of the previous current state (`discard_file`).
     pub fn begin_restore(&mut self, req: RestoreBaseline) -> Result<RestoreJob> {
         let vm = self.stopped_without_runs(&req.vm_id, "restore")?;
-        refuse_tpm_guest(&vm)?;
+        let tpm_guest = crate::tpm::needs_tpm(&vm.guest_os);
         // ADR-0032: the user snapshots live inside the VM's own disk, which
         // a restore discards. The user deletes them (or keeps the VM) first.
         if self.read(|tx| tx.snapshot_count(&req.vm_id))? > 0 {
@@ -801,6 +915,21 @@ impl Catalog {
                 "baseline disk not usable".into(),
             ));
         }
+        let base_tpm = self.read(|tx| tx.baseline_tpm(&req.baseline_id))?;
+        if tpm_guest != base_tpm.is_some() {
+            return Err(StorageError::StateConflict(
+                "baseline TPM state does not match this VM".into(),
+            ));
+        }
+        let old_tpm_fw_id = self.read(|tx| tx.current_tpm(&req.vm_id))?.map(|f| f.fw_id);
+        let old_tpm = if tpm_guest {
+            let dir = self.current_tpm_dir(&req.vm_id)?;
+            // Refuse an unsupported state layout before discarding anything.
+            drop(self.open_tpm_state(&dir)?);
+            Some(crate::tpm::state_file(&dir))
+        } else {
+            None
+        };
         let guard = self.baseline_guard(&req.baseline_id, false)?;
         let base_disk_abs = self.layout.resolve(&base.managed_path)?;
         let base_vars = match &base_vars {
@@ -842,11 +971,24 @@ impl Catalog {
                 OldState::Standalone
             }
         };
+        if let Some(rel) = old_tpm {
+            old_files.push((
+                rel,
+                if old_tpm_fw_id.is_some() {
+                    TargetKind::Firmware
+                } else {
+                    TargetKind::None
+                },
+                old_tpm_fw_id.map(|id| id.to_string()),
+            ));
+        }
         let op = OperationId::new_v7();
         let overlay_id = DiskId::new_v7();
+        let tpm_fw_id = FirmwareId::new_v7();
         let fw_id = FirmwareId::new_v7();
         let mut intents: Vec<Intent> = Vec::new();
-        let begun = (|| -> Result<(Intent, Option<Intent>, Vec<Intent>)> {
+        type RestoreIntents = (Intent, Option<Intent>, Option<Intent>, Vec<Intent>);
+        let begun = (|| -> Result<RestoreIntents> {
             let oi = self.begin_intent(IntentSpec {
                 kind: IntentKind::CreateOverlay,
                 vm_id: Some(req.vm_id),
@@ -873,6 +1015,24 @@ impl Catalog {
                 }
                 None => None,
             };
+            let ti = if base_tpm.is_some() {
+                let ti = self.begin_intent(IntentSpec {
+                    kind: IntentKind::CopyVars,
+                    vm_id: Some(req.vm_id),
+                    operation_id: Some(op),
+                    target_kind: TargetKind::Firmware,
+                    target_id: Some(tpm_fw_id.to_string()),
+                    final_path: Some(crate::tpm::state_file(&CatalogLayout::state_tpm_dir(
+                        &req.vm_id,
+                        &overlay_id,
+                    ))),
+                    read_only: false,
+                })?;
+                intents.push(ti.clone());
+                Some(ti)
+            } else {
+                None
+            };
             let mut discards = Vec::new();
             for (rel, tk, tid) in &old_files {
                 let d = self.begin_intent(IntentSpec {
@@ -887,9 +1047,9 @@ impl Catalog {
                 intents.push(d.clone());
                 discards.push(d);
             }
-            Ok((oi, vi, discards))
+            Ok((oi, vi, ti, discards))
         })();
-        let (overlay_intent, vars_intent, discards) = match begun {
+        let (overlay_intent, vars_intent, tpm_intent, discards) = match begun {
             Ok(t) => t,
             Err(e) => {
                 self.abort_intents(&intents);
@@ -897,6 +1057,10 @@ impl Catalog {
             }
         };
         Ok(RestoreJob {
+            base_tpm,
+            tpm_intent,
+            tpm_fw_id,
+            old_tpm_fw_id,
             vm_id: req.vm_id,
             baseline_id: req.baseline_id,
             overlay_id,
@@ -923,6 +1087,7 @@ impl Catalog {
         let RestoreJobDone { job, outcome } = done;
         let mut intents = vec![job.overlay_intent.clone()];
         intents.extend(job.vars_intent.clone());
+        intents.extend(job.tpm_intent.clone());
         intents.extend(job.discards.iter().cloned());
         let result = (|| -> Result<CurrentStateRecord> {
             let (overlay_len, vars) = outcome?;
@@ -930,6 +1095,9 @@ impl Catalog {
             self.mark_applied(&job.overlay_intent)?;
             if let Some(vi) = &job.vars_intent {
                 self.mark_applied(vi)?;
+            }
+            if let Some(ti) = &job.tpm_intent {
+                self.mark_applied(ti)?;
             }
             self.fault_at(FaultPoint::RestoreAfterPublish)?;
             for (k, d) in job.discards.iter().enumerate() {
@@ -981,6 +1149,23 @@ impl Catalog {
                         created_at: now.clone(),
                     })?;
                 }
+                if let (Some(tpm), Some(ti)) = (&job.base_tpm, &job.tpm_intent) {
+                    tx.insert_firmware(&FirmwareRecord {
+                        fw_id: job.tpm_fw_id,
+                        vm_id,
+                        scope: FirmwareScope::Vm,
+                        source_fw_id: Some(tpm.fw_id),
+                        managed_path: ti.final_rel.clone().expect("TPM final path"),
+                        // Mutable state: hash describes the baseline, not its subsequent writes.
+                        sha256: None,
+                        size_bytes: tpm.size_bytes,
+                        created_at: now.clone(),
+                    })?;
+                    tx.set_current_tpm(&vm_id, &job.tpm_fw_id)?;
+                    if let Some(old_tpm) = job.old_tpm_fw_id {
+                        tx.delete_firmware(&old_tpm)?;
+                    }
+                }
                 tx.set_current_state(&state)?;
                 if let OldState::Overlay { disk, vars } = old {
                     tx.clear_ended_run_refs(Some(&disk), vars.as_ref())?;
@@ -1012,6 +1197,7 @@ impl Catalog {
     pub fn abort_restore_job(&mut self, done: RestoreJobDone) -> Result<()> {
         let mut intents = vec![done.job.overlay_intent.clone()];
         intents.extend(done.job.vars_intent.clone());
+        intents.extend(done.job.tpm_intent.clone());
         intents.extend(done.job.discards.iter().cloned());
         self.abort_intents(&intents);
         Ok(())
@@ -1030,6 +1216,9 @@ impl Catalog {
             let mut files = vec![tx.disk(&b.base_disk_id)?.managed_path];
             if let Some(f) = &b.vars_fw_id {
                 files.push(tx.firmware(f)?.managed_path);
+            }
+            if let Some(tpm) = tx.baseline_tpm(id)? {
+                files.push(tpm.managed_path);
             }
             Ok((b, files))
         })?;
@@ -1178,6 +1367,13 @@ impl Catalog {
             });
         }
         Ok(Some(StartFiles {
+            tpm_dir: if crate::tpm::needs_tpm(&self.read(|tx| tx.vm(vm))?.guest_os) {
+                let dir = CatalogLayout::state_tpm_dir(vm, &cs.overlay_disk_id);
+                drop(self.open_tpm_state(&dir)?);
+                Some(self.layout.resolve(&dir)?)
+            } else {
+                None
+            },
             baseline_id: cs.baseline_id,
             overlay: overlay_abs,
             vars: vars
@@ -1217,6 +1413,7 @@ impl Catalog {
                 let in_use = tx.baseline_referenced(&b.baseline_id)?;
                 let current = cs.as_ref().is_some_and(|c| c.baseline_id == b.baseline_id);
                 out.push(BaselineInfo {
+                    tpm: tx.baseline_tpm(&b.baseline_id)?,
                     record: b,
                     disk,
                     vars,
@@ -1240,6 +1437,9 @@ impl Catalog {
                 o.bytes = o
                     .bytes
                     .saturating_add(tx.disk(&b.base_disk_id)?.allocated_bytes);
+                if let Some(tpm) = tx.baseline_tpm(&b.baseline_id)? {
+                    o.bytes = o.bytes.saturating_add(tpm.size_bytes);
+                }
                 if let Some(f) = &b.vars_fw_id {
                     o.bytes = o.bytes.saturating_add(tx.firmware(f)?.size_bytes);
                 }
@@ -1253,6 +1453,9 @@ impl Catalog {
                     .and_then(|p| std::fs::metadata(p).ok())
                     .map_or(d.allocated_bytes, |m| m.len());
                 o.overlay_bytes = len;
+                if let Some(tpm) = tx.current_tpm(vm)? {
+                    o.overlay_bytes = o.overlay_bytes.saturating_add(tpm.size_bytes);
+                }
                 if let Some(f) = &cs.vars_fw_id {
                     o.overlay_bytes = o.overlay_bytes.saturating_add(tx.firmware(f)?.size_bytes);
                 }
@@ -1299,25 +1502,6 @@ fn be64(b: &[u8], o: usize) -> Option<u64> {
 /// Refusal of the promotion of a snapshot taken while the VM ran (ADR-0005:
 /// an unclean state never becomes a verified baseline).
 pub const PROMOTE_RUNNING_SNAPSHOT: &str = "a snapshot taken while the VM was running cannot become a baseline: only snapshots taken with the VM off";
-
-/// Message of [`refuse_tpm_guest`].
-pub const TPM_BASELINE_UNSUPPORTED: &str =
-    "baselines of VMs with a TPM are not supported yet: the TPM state is not part of the baseline";
-
-/// ADR-0028 (required evidence 3): a baseline of a TPM guest must contain
-/// its swtpm state, and a restore must return it. Until it does, baseline
-/// creation and restore are refused for these guests instead of producing a
-/// baseline whose TPM state silently diverges from disk and variables.
-fn refuse_tpm_guest(vm: &crate::records::VmRecord) -> Result<()> {
-    let tpm = serde_json::from_value::<lightvm_proto::GuestOs>(serde_json::Value::String(
-        vm.guest_os.clone(),
-    ))
-    .is_ok_and(lightvm_proto::GuestOs::needs_tpm);
-    if tpm {
-        return Err(StorageError::Unsupported(TPM_BASELINE_UNSUPPORTED));
-    }
-    Ok(())
-}
 
 /// Backing reference of a QCOW2 image read from its header, without
 /// `qemu-img`: `None` if the image has no backing file, otherwise the

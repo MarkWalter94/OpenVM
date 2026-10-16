@@ -34,6 +34,8 @@ pub enum GuestOs {
     /// Windows 10 (NT 10.0, build < 22000): UEFI (x64) or legacy BIOS
     /// (32-bit), q35, AHCI.
     Windows10,
+    /// Windows 11 x64: project QEMU, Secure Boot and TPM 2.0 (ADR-0035).
+    Windows11X64,
     /// Windows 11 on ARM64 (build 22000 and later): macOS/HVF hosts only,
     /// `virt`, UEFI with Secure Boot, TPM 2.0 (ADR-0028).
     Windows11Arm64,
@@ -41,7 +43,7 @@ pub enum GuestOs {
 
 impl GuestOs {
     /// Every variant, in display order.
-    pub const ALL: [GuestOs; 8] = [
+    pub const ALL: [GuestOs; 9] = [
         GuestOs::UbuntuLtsX86_64,
         GuestOs::OtherLinuxX86_64,
         GuestOs::WindowsXp,
@@ -49,6 +51,7 @@ impl GuestOs {
         GuestOs::Windows7,
         GuestOs::Windows81,
         GuestOs::Windows10,
+        GuestOs::Windows11X64,
         GuestOs::Windows11Arm64,
     ];
 
@@ -63,7 +66,7 @@ impl GuestOs {
     /// (Windows 11, ADR-0028).
     #[must_use]
     pub const fn needs_tpm(self) -> bool {
-        self.is_aarch64()
+        matches!(self, Self::Windows11X64 | Self::Windows11Arm64)
     }
 
     /// Whether this build's host can run the guest with hardware
@@ -71,6 +74,9 @@ impl GuestOs {
     /// AArch64 guests, every other host only x86 guests.
     #[must_use]
     pub const fn runs_on_this_host(self) -> bool {
+        if matches!(self, Self::Windows11X64) {
+            return cfg!(windows);
+        }
         if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
             self.is_aarch64()
         } else {
@@ -107,7 +113,7 @@ impl GuestOs {
             GuestOs::UbuntuLtsX86_64 | GuestOs::OtherLinuxX86_64 => &[Firmware::Uefi],
             GuestOs::WindowsXp | GuestOs::WindowsVista | GuestOs::Windows7 => &[Firmware::Bios],
             GuestOs::Windows81 | GuestOs::Windows10 => &[Firmware::Uefi, Firmware::Bios],
-            GuestOs::Windows11Arm64 => &[Firmware::Uefi],
+            GuestOs::Windows11X64 | GuestOs::Windows11Arm64 => &[Firmware::Uefi],
         }
     }
 
@@ -137,7 +143,7 @@ impl GuestOs {
                 Some(GuestArch::X86) => Firmware::Bios,
                 Some(GuestArch::X86_64 | GuestArch::Aarch64) | None => Firmware::Uefi,
             },
-            GuestOs::Windows11Arm64 => Firmware::Uefi,
+            GuestOs::Windows11X64 | GuestOs::Windows11Arm64 => Firmware::Uefi,
         }
     }
 
@@ -149,7 +155,7 @@ impl GuestOs {
             GuestOs::WindowsXp => 256,
             GuestOs::WindowsVista | GuestOs::Windows7 => 1024,
             GuestOs::Windows81 | GuestOs::Windows10 => 2048,
-            GuestOs::Windows11Arm64 => 4096,
+            GuestOs::Windows11X64 | GuestOs::Windows11Arm64 => 4096,
         }
     }
 
@@ -165,6 +171,7 @@ impl GuestOs {
             // media passes its requirements check with 32 GB (R2b-01), and
             // the qcow2 disk only grows with use.
             GuestOs::Windows11Arm64 => 32,
+            GuestOs::Windows11X64 => 64,
         }
     }
 
@@ -191,7 +198,7 @@ impl GuestOs {
             (GuestOs::Windows81, false) => (2, 4096, 50),
             (GuestOs::Windows10, true) => (2, 2048, 40),
             (GuestOs::Windows10, false) => (2, 4096, 64),
-            (GuestOs::Windows11Arm64, _) => (4, 6144, 64),
+            (GuestOs::Windows11X64 | GuestOs::Windows11Arm64, _) => (4, 6144, 64),
         };
         ResourceTemplate {
             vcpus,
@@ -202,11 +209,11 @@ impl GuestOs {
 
     /// Largest guest memory that makes sense for the guest, in MiB: 32-bit
     /// x86 Windows clients address at most 4 GiB (an x86 architecture paired
-    /// with Windows 11 ARM64 is meaningless and not capped). `None` = no
+    /// with Windows 11 is meaningless and not capped). `None` = no
     /// OS-specific cap (host and catalog limits still apply).
     #[must_use]
     pub const fn max_memory_mib(self, arch: Option<GuestArch>) -> Option<u64> {
-        match (self.is_windows() && !self.is_aarch64(), arch) {
+        match (self.is_windows() && !self.needs_tpm(), arch) {
             (true, Some(GuestArch::X86)) => Some(4096),
             _ => None,
         }
@@ -299,6 +306,10 @@ pub enum NetworkProfile {
     /// `host:port`). In manual use every endpoint of the VM is allowed; in
     /// an agent session only those of the grant.
     Endpoints,
+    /// Closed destination/port Internet policy through the supervisor's
+    /// isolated stack. Only public IPv4 TCP 80/443 for the named endpoints;
+    /// host/LAN, IPv6, UDP and every other destination stay unreachable.
+    FilteredInternet,
 }
 
 impl NetworkProfile {
@@ -306,6 +317,11 @@ impl NetworkProfile {
     #[must_use]
     pub const fn has_nic(self) -> bool {
         !matches!(self, NetworkProfile::Offline)
+    }
+    /// Supervisor-owned network with explicit, revocable endpoint grants.
+    #[must_use]
+    pub const fn is_restricted(self) -> bool {
+        matches!(self, Self::Endpoints | Self::FilteredInternet)
     }
 }
 
@@ -437,6 +453,17 @@ pub fn validate_network(
     let mut addrs = std::collections::BTreeSet::new();
     for e in endpoints {
         e.validate()?;
+        if mode == NetworkProfile::FilteredInternet
+            && (!matches!(e.port, 80 | 443)
+                || e.host.parse::<std::net::IpAddr>().is_ok()
+                || !e.host.contains('.')
+                || e.key() != e.host.trim_end_matches('.').to_ascii_lowercase())
+        {
+            return Err(invalid(
+                "filtered Internet needs exact DNS names (name = host) and TCP port 80 or 443"
+                    .into(),
+            ));
+        }
         if !names.insert(e.key()) {
             return Err(invalid(format!("endpoint name `{}` repeated", e.name)));
         }
@@ -447,7 +474,7 @@ pub fn validate_network(
             )));
         }
     }
-    if mode == NetworkProfile::Endpoints && endpoints.is_empty() {
+    if mode.is_restricted() && endpoints.is_empty() {
         return Err(crate::PublicError::invalid_argument(
             "the endpoint allowlist mode needs at least one endpoint",
         ));
@@ -667,7 +694,7 @@ impl ImportedHardware {
     /// Structural checks against the guest and the vCPU count.
     pub fn validate(&self, os: GuestOs, vcpus: u32) -> Result<(), crate::PublicError> {
         let invalid = crate::PublicError::invalid_argument;
-        if os.is_aarch64() || self.arch == GuestArch::Aarch64 {
+        if os.needs_tpm() || self.arch == GuestArch::Aarch64 {
             return Err(invalid("imported VMs are x86 guests only"));
         }
         if !self.disk_controller.usable_by(os) {

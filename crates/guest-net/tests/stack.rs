@@ -578,6 +578,29 @@ fn connection_limit_and_unreachable_target() {
 }
 
 #[test]
+fn public_only_endpoint_never_reaches_a_host_target() {
+    let (sql, accepted) = line_server();
+    let mut cfg = NetConfig::new(endpoints(sql, sql));
+    // Filtered Internet: a pinned answer that points at loopback (DNS
+    // rebinding, a host route) is refused before any host connection.
+    cfg.public_endpoints = BTreeSet::from(["wcfhost".to_owned()]);
+    cfg.connect_timeout = Duration::from_secs(3);
+    let (stack, mut g) = start(cfg, &["sql.lan", "wcfhost"]);
+    g.configure();
+    let refused = g.connect(VIP_WCF, 8733);
+    g.refused(refused);
+    let recs = wait_records(&stack, 1);
+    let conns = connections(&recs);
+    assert_eq!(conns.len(), 1, "{recs:?}");
+    assert_eq!(conns[0].outcome, ConnOutcome::TargetUnreachable);
+    assert_eq!(accepted.load(Ordering::SeqCst), 0);
+    // An ordinary endpoint of the same stack keeps working.
+    let ok = g.connect(VIP_SQL, 1433);
+    g.established(ok);
+    assert_eq!(accepted.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn stop_resets_connections_and_ends_the_stack() {
     let (sql, _) = line_server();
     let (mut stack, mut g) = start(NetConfig::new(endpoints(sql, sql)), &["sql.lan"]);

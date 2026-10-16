@@ -327,6 +327,26 @@ fn network_endpoint_validation() {
         .map(|i| ep(&format!("e{i}"), "h", 1, [10, 0, 2, 100 + i]))
         .collect();
     assert!(validate_network(NetworkProfile::Endpoints, &many).is_err());
+    // Filtered Internet: exact DNS names only (name = host), TCP 80/443.
+    let filtered = NetworkProfile::FilteredInternet;
+    let web = vec![
+        ep("www.example.com", "www.example.com", 443, [10, 0, 2, 100]),
+        ep("Example.org", "example.org.", 80, [10, 0, 2, 101]),
+    ];
+    validate_network(filtered, &web).unwrap();
+    assert!(validate_network(filtered, &[]).is_err());
+    for b in [
+        ep("www.example.com", "www.example.com", 22, [10, 0, 2, 100]),
+        ep("www.example.com", "other.example.com", 443, [10, 0, 2, 100]),
+        ep("web", "93.184.215.14", 443, [10, 0, 2, 100]),
+        ep("localhost", "localhost", 80, [10, 0, 2, 100]),
+        ep("sql.lan", "sqlserver.corp.example", 1433, [10, 0, 2, 100]),
+    ] {
+        assert!(
+            validate_network(filtered, std::slice::from_ref(&b)).is_err(),
+            "{b:?}"
+        );
+    }
 }
 
 #[test]

@@ -29,6 +29,25 @@ fn detail(e: &PublicError, k: &str) -> Option<String> {
 }
 
 #[test]
+fn windows_11_x64_minimums_are_enforced() {
+    let mut h = Harness::new();
+    let mut c = windows(&mut h, "win11", GuestOs::Windows11X64, Firmware::Uefi);
+    c.vcpus = 1;
+    invalid(h.core.create_vm(&Caller::User, c.clone()));
+    c.vcpus = 2;
+    c.memory_mib = 4095;
+    invalid(h.core.create_vm(&Caller::User, c.clone()));
+    c.memory_mib = 4096;
+    c.disk_gib = 63;
+    invalid(h.core.create_vm(&Caller::User, c.clone()));
+    c.disk_gib = 64;
+    c.firmware = Firmware::Bios;
+    invalid(h.core.create_vm(&Caller::User, c.clone()));
+    c.firmware = Firmware::Uefi;
+    h.core.create_vm(&Caller::User, c).unwrap();
+}
+
+#[test]
 fn every_allowed_guest_and_firmware_is_created() {
     let mut h = Harness::new();
     for (i, os) in GuestOs::ALL.into_iter().enumerate() {

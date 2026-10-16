@@ -4,13 +4,15 @@
 - Executed by: development agent on the project host
 - Roadmap step: section 12, R6; R2c
 - Related ADRs: ADR-0035 (Windows 11 x64 with emulated TPM), ADR-0028 (swtpm and Secure Boot on macOS), ADR-0027 (Windows guest profiles), ADR-0010 (QEMU build), ADR-0011 (firmware)
-- Status: PARTIAL — patched QEMU and swtpm verified with a Linux guest (TPM 2.0, persistence); Secure Boot OVMF not built on this host (antivirus), Windows 11 Setup not run (§12)
+- Status: PARTIAL — product integration and Windows PE x64 TPM/Secure Boot/NV persistence verified on 2026-10-16 (§13); installed Windows, warm reboot and TPM-aware baselines/snapshots remain unqualified
 
 ## Purpose
 
 ADR-0035 leaves to a feasibility spike: where `swtpm` for Windows comes from (existing build or project build), the transport between the Windows build of QEMU and `swtpm`, the Secure Boot firmware for x86_64, and the proof of a Windows 11 x64 installation with TPM 2.0 and Secure Boot under WHPX. This file records what was executed on the project host, what was established only from sources and documentation, and what remains unverified.
 
-What this file does NOT demonstrate: any product code (none is written); any host driver installation or elevated action (none is performed).
+Sections 1–12 record the original 2026-10-15 spike. Section 13 records the
+subsequent product implementation and new host evidence. No host TPM changes
+or driver installation were performed.
 
 ## Environment
 
@@ -256,3 +258,217 @@ A Unix socket is not an alternative here: Cygwin's `AF_UNIX` is its own emulatio
 | Project OVMF with Secure Boot, without SMM | recipe written, build blocked by the host antivirus (§8); key enrolment verified |
 | Windows 11 x64 Setup passes the requirement check and installs, Secure Boot on | not verified (no Windows 11 ISO in `lab/media`; firmware not built) |
 | Warm reset under WHPX | fails with the upstream build too (§7), to be investigated |
+
+## 13. Product integration and real Windows PE verification (2026-10-16)
+
+The owner deferred physical USB testing and asked to proceed with Windows TPM.
+All build trees, downloads, outputs and VM scratch are on E: under
+`E:\OpenVM-tests\win11` and `E:\OpenVM-tests\lab\win11-real`.
+No installed Windows VM, host TPM, host driver or requirement bypass was used.
+
+### Product changes
+
+- `windows11_x64` is a distinct guest in the protocol, ISO detector, core and
+  desktop wizard. It uses q35/AHCI/VGA, xHCI tablet, UEFI Secure Boot and TPM
+  CRB, requires at least two vCPUs, 4096 MiB and 64 GiB, and is currently
+  Windows-host-only. Firmware/hardware stay fixed after creation. TPM-bearing
+  VMware imports remain refused instead of losing the source TPM identity.
+- The supervisor selects the separate project bundle only for this guest.
+  `--win11-dir` selects it explicitly; default: `<ordinary-qemu-dir>/win11`.
+  Development approvals accept `<manifest-sha256> win11-bundle`. The complete
+  top-level `SHA256SUMS` must be approved; all listed files are hashed, links,
+  missing/changed/unlisted files are refused, and write/delete-excluding file
+  handles are held for the run. The ordinary QEMU, firmware and capability
+  cache remain in use for other profiles. There are no release bundle hashes
+  approved by default yet.
+- The TPM process starts in the same kill-on-close Job Object as QEMU,
+  with a minimal environment and PATH limited to its own DLL directory.
+  Cygwin paths are constructed from validated native drive paths. Both
+  loopback listeners are checked by owning PID without opening probe
+  connections. After QEMU starts, the kernel TCP table must show exactly one
+  connection per endpoint with the expected server and QEMU PIDs. Missing
+  peers time out; foreign/additional peers refuse start before vCPUs run.
+  This remains an unauthenticated loopback protocol, with the initial
+  listen/connect window described in §10; PID inspection is not a credential.
+- Before guest execution, QMP must report exactly one `tpm-crb` backed by
+  `emulator` (`tpm-tis` on the existing ARM profile). A helper lifeline stops
+  the entire run if swtpm dies. Normal exit, forced stop and close release
+  the helper, QEMU, process handles and Job Object. Persistent state is under
+  the existing per-VM catalog `tpm/` directory; it is reused on cold restart.
+- Windows DLLs were found creating relative Known Folder caches in the
+  binary directory with a minimal environment. Managed process cwd now uses
+  its run-output directory; help/version probes use the configured temp
+  directory. This prevents cache writes from invalidating the approved
+  bundle. Lab temp/run directories are on E:.
+- At this checkpoint, baselines and user snapshots of TPM guests were
+  refused: copying only the disk/UEFI variables would roll them back
+  without the TPM. §14 adds the TPM state to both. The no-SMM firmware
+  limitation of §3 remains.
+
+### Builds and provenance
+
+The QEMU 11.1.0 archive hash and Michael Roth signature were verified by the
+existing recipe; the two existing patches applied and the WHPX/TPM build
+completed with MSYS2 UCRT64 on E:. Its VNC smoke test exposed a missing runtime
+asset: the recipe now includes `pc-bios/keymaps` and covers it in the manifest.
+The recipe requires fresh source/empty output and no longer recursively
+deletes existing source/output directories.
+
+The Secure Boot firmware built successfully on this host with MSVC, pinned
+edk2-stable202408 and the existing IntrinsicLib patch. The script now handles
+MSYS2 Python's `bin/python.exe` venv layout and checks pip/key-generation
+failures. Microsoft KEK 2011/2023 and Windows signing certificates were
+enrolled; the platform private key was discarded by the existing generator.
+`swtpm-windows/build.sh` verifies the pinned libtpms/swtpm 0.10.2 archives and
+Stefan Berger signature, builds in user-local Cygwin and copies the DLL
+closure. Upstream swtpm tests are disabled in this build recipe; product and
+native guest tests provide the evidence below.
+
+Development artifacts, not release approvals:
+
+| File | SHA-256 |
+| --- | --- |
+| Project QEMU executable | `54fe68ee9d07f2a0c2709e65469202a1133b0db4421996d17dea6747b7009301` |
+| swtpm executable | `350e2698d00d3261ca1de550cbb51a75c44c8c0c903fea1cf7e1072a81318572` |
+| Secure Boot code | `939bc01ba166b849f5296457b2658fff78fb622c8dc34cfa8204ba3ce2d88d2c` |
+| Enrolled variables template | `a1003e1c5fa5e776b35392745f878f4a4bb38b611699e03ec3fce4a682e62a4f` |
+| Assembled `bundle-vnc/SHA256SUMS` | `bf10ebb1bee2c27b2b53d3fbd5b168c621f213239d4043cb18d31c6760d499bf` |
+
+The Cygwin installer was Authenticode-valid (Jon Turney), with the same
+SHA-256 as §4. The complete licence texts, runtime source inventory and
+signing are still required before distribution; the assembled bundle is
+marked DEVELOPMENT and has no automatic global approval.
+
+### Real guest evidence
+
+`windows11_real` uses the production bundle verifier, command builder,
+QemuRun/Job Object lifecycle, authenticated Tools and isolated guest network.
+The guest is disposable **Windows PE x64 from the owner's Windows 11 ISO**,
+not an installed Windows system. A lab-only x64 Tools binary returns the
+native probe log; no host clipboard, host TPM, installation licence prompt,
+disk partitioning or Windows installation is automated.
+
+The native guest probe reads SecureBoot/SetupMode firmware variables and
+uses the Windows TBS API to identify TPM 2.0. It writes `LightVM2` into a
+test-only NV index (`0x01500020`) in the disposable emulator, shuts the VM
+down via QMP quit, then reads the same value on a cold start with a new run
+identity. The second cycle kills only the identified, run-owned swtpm and
+requires QEMU to stop within five seconds. Close must report zero active
+processes, released process handles and a closed Job Object.
+
+```text
+secure_boot=1
+setup_mode=0
+tbs_status=0
+tpm_version=2
+persistent_nv=created  # first boot
+persistent_nv=matched  # cold restart
+```
+
+The extended test passed in 63.42 s; its initial artifact directory is
+`E:\OpenVM-tests\lab\win11-real\01a144dd-fae8-74b1-a7f4-6bd5a5bab6ec`.
+A second ignored test starts the real service backend with Windows 11 twice,
+checks per-VM TPM state, revalidates the unchanged bundle and starts/stops an
+ordinary Linux profile afterwards. The final repeated artifacts, using the
+fresh `build-winpe-test.ps1` outputs, are recorded in
+`01a144eb-4a3a-75a7-8b02-dd760b797d92` (native guest) and
+`backend-01a144eb-22e3-70b2-813d-bd80bfe418b4` (service backend) under
+`E:\OpenVM-tests\lab\win11-real`. Both passed together in 76.68 s; the output
+is in `E:\OpenVM-tests\win11\real-test-final.log`. After adding an explicit
+startup-failure Job Object guard, the backend test passed again (9.95 s), in
+`backend-01a144ef-c32a-743a-a475-12d5ec0550de`.
+
+Additional checks cover real kernel-table listener/peer ownership (including
+wrong PID and an extra connection), manifest/DLL tampering and unlisted files,
+traversal, minimum CPU/memory/disk and firmware refusals, actual Windows 11 ISO
+detection, schemas, core/service regression, desktop wizard and visual
+snapshots. Installed Windows 11 Setup/OOBE, guest-initiated warm reboot,
+BitLocker/Hello and TPM-consistent baseline/snapshot restore remain open.
+
+Reproduction on the Windows lab host (MSVC environment loaded; all scratch
+on E:), after building/assembling the explicit development bundle:
+
+```powershell
+packaging/tools/build-winpe-test.ps1 -Cc <native-x64-gcc.exe> -Out E:\OpenVM-tests\win11\new-winpe-fixture
+$env:TEMP = 'E:\OpenVM-tests\tmp'
+$env:TMP = $env:TEMP
+$env:CARGO_TARGET_DIR = 'E:\OpenVM-tests\target'
+$env:LIGHTVM_LAB = 'E:\OpenVM-tests\lab'
+$env:LIGHTVM_WIN11_BUNDLE = 'E:\OpenVM-tests\win11\bundle-vnc'
+$env:LIGHTVM_WINPE_FIXTURE = 'E:\OpenVM-tests\win11\new-winpe-fixture'
+$env:LIGHTVM_WINPE_ISO = 'E:\OpenVM-tests\media\Windows11_Client_x64_it-it_26300_9457.iso'
+cargo test -p lightvm-service --features supervisor --test windows11_real --locked -- --ignored --nocapture --test-threads=1
+```
+
+Run the test probes only in the disposable guest. The test writes its final
+`results.txt`, two native guest logs and diagnostic PNGs into the new lab
+directory. The PNG is a progress diagnostic, not proof of installed Windows;
+the native API log is the TPM/Secure Boot evidence. Product/default tests do
+not auto-approve or run the lab bundle.
+
+Final focused checks passed: protocol/detector/core/fixture test suites,
+99 QEMU backend library tests, 74 supervisor library tests plus Tools,
+Windows-guest and snapshot integrations, 119 desktop library tests plus
+wizard/transfer/settings UI tests, and three wizard visual tests (four
+updated system-step PNGs, visually inspected). The OS choices were compacted
+to keep navigation visible at normal window heights. All-targets clippy with
+warnings denied, formatting, dependency advisories/licences/sources and
+`git diff --check` pass. This is not a complete release qualification.
+
+## 14. TPM-consistent baselines and snapshots; installation attempt (2026-10-16)
+
+### Product changes
+
+- A baseline or user snapshot of a TPM guest, taken with the VM stopped,
+  now copies the swtpm permanent state together with the disk and UEFI
+  variables. The copy is hashed through a guarded handle and recorded as a
+  `tpm` firmware record of the baseline/snapshot; restore and revert verify
+  the hash and install disk, variables and TPM state through the existing
+  operation journal (`SnapshotRevertTpmRemoved` is the new intermediate
+  step). An interrupted operation rolls forward or back as a whole, so disk
+  and TPM never come from different points in time.
+- Changed, missing or extra TPM state, and a baseline whose TPM presence does
+  not match the VM, are refused. **A running snapshot of a TPM guest is
+  refused**: QEMU's disk snapshot does not include the swtpm state.
+- Storage tests cover capture, restore, revert, deletion and simulated
+  interruptions at every journal step.
+
+### Real Windows PE evidence
+
+`windows_pe_tpm_state_follows_snapshot_and_baseline_restore` (ignored lab
+test, same setup and reproduction as §13) uses the production catalog
+operations and the real swtpm. In the disposable Windows PE guest the probe
+writes a test NV value, the VM is stopped and a snapshot and a baseline are
+taken; the probe then changes the value, and after each revert/restore the
+next cold boot must read the original value:
+
+```text
+persistent_nv=created
+persistent_nv=mutated
+persistent_nv=matched   # after snapshot revert
+persistent_nv=mutated
+persistent_nv=matched   # after baseline restore
+test result: ok. 1 passed; finished in 158.95s
+```
+
+Artifacts: `E:\OpenVM-tests\lab\w11\b31c5cf10a37\` (`checkpoint-results.txt`).
+This is Windows PE with a test NV index, not BitLocker or Windows Hello in an
+installed system.
+
+### Installed Windows 11: first attempt (not passed)
+
+`windows11_installs_and_reboots_with_tpm_and_secure_boot` (ignored lab test)
+boots the owner's Windows 11 ISO with an answer file that only selects the
+disposable 64 GiB disk on E:, with no requirement bypass. Setup passed its
+requirement checks (TPM 2.0, Secure Boot) and copied files. **At its first
+guest-initiated reboot QEMU logged `failed to get xsave state` ten times,
+then `WHPX: Unexpected VP exit code 4`**, and the screen stayed black. A
+resumed boot of the same disk failed the same way; the test hit its 40
+minute Tools timeout without any vCPU fault event being reported to it.
+Artifacts: `E:\OpenVM-tests\lab\win11-real\installed-01a1450c-537e-717b-832a-650f7377c392\`
+(`run\qemu.stderr.log`, `setup.png`), log
+`E:\OpenVM-tests\win11\install-resume.log`.
+
+Installed Windows 11, warm reboot, BitLocker/Hello and TPM-aware restore of
+an installed system remain **unqualified**; the WHPX reset failure must be
+resolved first.

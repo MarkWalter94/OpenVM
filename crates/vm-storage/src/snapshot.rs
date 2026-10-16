@@ -67,6 +67,8 @@ pub const SNAPSHOT_NO_DISK: &str = "the VM has no disk yet: start it once before
 pub const MAX_THUMBNAIL_BYTES: usize = 40 * 1024;
 
 const VARS_FILE: &str = "vars.fd";
+const TPM_FILE: &str = "tpm.permall";
+const NEW_TPM: &str = "new.tpm";
 const THUMB_FILE: &str = "thumb.png";
 const NEW_VARS: &str = "new.vars";
 const MOVED_DIR: &str = "files";
@@ -100,6 +102,8 @@ pub struct SnapshotRecord {
     pub vars_bytes: u64,
     /// Bytes of the thumbnail (0 without).
     pub thumbnail_bytes: u64,
+    /// Bytes of the offline TPM permanent-state copy.
+    pub tpm_bytes: u64,
     /// Creation instant (RFC 3339).
     pub created_at: String,
 }
@@ -207,6 +211,8 @@ struct TakePayload {
     disk: String,
     tag: String,
     has_vars: bool,
+    #[serde(default)]
+    has_tpm: bool,
     created_at: String,
 }
 
@@ -219,6 +225,12 @@ struct RevertPayload {
     vars: Option<String>,
     snapshot_vars: Option<String>,
     snapshot_vars_sha256: Option<String>,
+    #[serde(default)]
+    tpm: Option<String>,
+    #[serde(default)]
+    snapshot_tpm: Option<String>,
+    #[serde(default)]
+    snapshot_tpm_sha256: Option<String>,
     config: serde_json::Value,
     config_version: u32,
     expected_revision: u64,
@@ -260,12 +272,15 @@ fn row_to_record(r: &rusqlite::Row<'_>) -> rusqlite::Result<SnapshotRecord> {
         vars_bytes: u64::try_from(r.get::<_, i64>(11)?).unwrap_or(0),
         thumbnail_bytes: u64::try_from(r.get::<_, i64>(12)?).unwrap_or(0),
         created_at: r.get(13)?,
+        tpm_bytes: u64::try_from(r.get::<_, i64>(14)?).unwrap_or(0),
     })
 }
 
 const COLUMNS: &str = "snapshot_id, vm_id, parent_id, name, description, disk_tag,
      taken_while_running, clean_shutdown, config_json, config_revision, vars_sha256,
      vars_bytes, thumbnail_bytes, created_at";
+const TPM_BYTES_COLUMN: &str =
+    "coalesce((SELECT size_bytes FROM snapshot_tpm t WHERE t.snapshot_id=snapshots.snapshot_id),0)";
 
 fn i64_of(v: u64) -> Result<i64> {
     i64::try_from(v).map_err(|_| StorageError::Constraint("value out of range".into()))
@@ -276,7 +291,9 @@ impl Tx<'_> {
     pub fn snapshot(&self, id: &SnapshotId) -> Result<SnapshotRecord> {
         self.conn()
             .query_row(
-                &format!("SELECT {COLUMNS} FROM snapshots WHERE snapshot_id = ?1"),
+                &format!(
+                    "SELECT {COLUMNS}, {TPM_BYTES_COLUMN} FROM snapshots WHERE snapshot_id = ?1"
+                ),
                 params![id.sql()],
                 row_to_record,
             )
@@ -293,7 +310,7 @@ impl Tx<'_> {
         let mut st = self
             .conn()
             .prepare(&format!(
-                "SELECT {COLUMNS} FROM snapshots WHERE vm_id = ?1 ORDER BY created_at, snapshot_id"
+                "SELECT {COLUMNS}, {TPM_BYTES_COLUMN} FROM snapshots WHERE vm_id = ?1 ORDER BY created_at, snapshot_id"
             ))
             .db()?;
         let rows = st.query_map(params![vm.sql()], row_to_record).db()?;
@@ -546,6 +563,19 @@ impl Catalog {
         {
             return Err(StorageError::ResourceLimit("thumbnail too large".into()));
         }
+        let vm = self.read(|tx| tx.vm(&req.vm_id))?;
+        let tpm_src = if crate::tpm::needs_tpm(&vm.guest_os) {
+            let open = self.read(|tx| tx.open_runs(&req.vm_id))?;
+            if req.running || vm.lifecycle != crate::Lifecycle::Stopped || !open.is_empty() {
+                return Err(StorageError::StateConflict(
+                    crate::tpm::TPM_SNAPSHOT_RUNNING.into(),
+                ));
+            }
+            let dir = self.current_tpm_dir(&req.vm_id)?;
+            Some(self.open_tpm_state(&dir)?)
+        } else {
+            None
+        };
         let disk = self.snapshot_target(&req.vm_id, &req.disk)?;
         let vars_src = match &req.vars {
             Some(rel) => {
@@ -570,6 +600,7 @@ impl Catalog {
             disk: req.disk.to_string(),
             tag: tag.clone(),
             has_vars: vars_src.is_some(),
+            has_tpm: tpm_src.is_some(),
             created_at: now_rfc3339(),
         };
         let intent = self.begin_snapshot_intent(
@@ -582,6 +613,9 @@ impl Catalog {
         let files = (|| -> Result<()> {
             if let Some((abs, rel)) = &vars_src {
                 copy_complete(abs, rel.as_str(), &intent.temp_path.join(VARS_FILE))?;
+            }
+            if let Some((src, handle)) = &tpm_src {
+                crate::baseline::copy_from_handle(handle, src, &intent.temp_path.join(TPM_FILE))?;
             }
             if let Some(png) = &req.thumbnail {
                 let p = intent.temp_path.join(THUMB_FILE);
@@ -635,7 +669,26 @@ impl Catalog {
             .vars_sha256
             .as_ref()
             .map(|_| CatalogLayout::snapshot_vars(&req.vm_id, &req.snapshot_id));
+        let tpm_info = self.read(|tx| tx.snapshot_tpm(&req.snapshot_id))?;
+        if crate::tpm::needs_tpm(&rec.guest_os) != tpm_info.is_some() {
+            return Err(StorageError::StateConflict(
+                "snapshot TPM state does not match this VM".into(),
+            ));
+        }
+        let tpm_dest = if tpm_info.is_some() {
+            let dir = self.current_tpm_dir(&req.vm_id)?;
+            drop(self.open_tpm_state(&dir)?);
+            Some(crate::tpm::state_file(&dir))
+        } else {
+            None
+        };
+        let snapshot_tpm = tpm_info
+            .as_ref()
+            .map(|_| CatalogLayout::snapshot_tpm(&req.vm_id, &req.snapshot_id));
         let payload = RevertPayload {
+            tpm: tpm_dest.as_ref().map(ToString::to_string),
+            snapshot_tpm: snapshot_tpm.as_ref().map(ToString::to_string),
+            snapshot_tpm_sha256: tpm_info.as_ref().map(|(h, _)| h.clone()),
             snapshot_id: req.snapshot_id,
             vm_id: req.vm_id,
             disk: req.disk.to_string(),
@@ -670,6 +723,25 @@ impl Catalog {
                 let _ = remove_temp(&self.layout, &intent.temp_rel);
                 let _ =
                     self.set_intent_state(intent.id, IntentState::Aborted, Some("vars_not_copied"));
+                return Err(e);
+            }
+        }
+        if let (Some(rel), Some((expected, _))) = (&snapshot_tpm, &tpm_info) {
+            let staged = (|| -> Result<()> {
+                let src = self.layout.resolve(rel)?;
+                let (sha, _) = copy_complete(&src, rel.as_str(), &intent.temp_path.join(NEW_TPM))?;
+                if &sha != expected {
+                    return Err(StorageError::IntegrityMismatch {
+                        path: rel.to_string(),
+                        detail: "snapshot TPM state changed".into(),
+                    });
+                }
+                Ok(())
+            })();
+            if let Err(e) = staged {
+                let _ = remove_temp(&self.layout, &intent.temp_rel);
+                let _ =
+                    self.set_intent_state(intent.id, IntentState::Aborted, Some("tpm_not_copied"));
                 return Err(e);
             }
         }
@@ -813,6 +885,15 @@ impl Catalog {
         } else {
             None
         };
+        let tpm_info = if p.has_tpm {
+            let path = final_dir.join(TPM_FILE);
+            let f = fsx::open_regular(&path, fsx::Share::ReadOnly, TPM_FILE)?;
+            let info = fsx::sha256_handle(&f, &path)?;
+            fsx::ensure_readonly(&path)?;
+            Some(info)
+        } else {
+            None
+        };
         let thumb_bytes = if exists_no_follow(&thumb)? {
             fsx::ensure_readonly(&thumb)?;
             std::fs::metadata(&thumb).map_or(0, |m| m.len())
@@ -833,6 +914,7 @@ impl Catalog {
             vars_sha256: vars_info.as_ref().map(|(s, _)| s.clone()),
             vars_bytes: vars_info.as_ref().map_or(0, |(_, n)| *n),
             thumbnail_bytes: thumb_bytes,
+            tpm_bytes: tpm_info.as_ref().map_or(0, |(_, n)| *n),
             created_at: p.created_at.clone(),
         };
         let id = i.id;
@@ -853,6 +935,9 @@ impl Catalog {
                     parent_id: parent,
                     ..rec.clone()
                 })?;
+                if let Some((sha, bytes)) = &tpm_info {
+                    tx.set_snapshot_tpm(&rec.snapshot_id, sha, *bytes)?;
+                }
                 tx.set_snapshot_head(&rec.vm_id, Some(&rec.snapshot_id))?;
             }
             set_state_tx(tx, id, IntentState::Committed, Some("taken"))
@@ -908,6 +993,34 @@ impl Catalog {
                 // variables (the next start creates them from the template).
                 crate::catalog::remove_managed_file(&self.layout, &rel)?;
             }
+        }
+        if let (Some(dest_rel), Some(src_rel), Some(expected)) =
+            (&p.tpm, &p.snapshot_tpm, &p.snapshot_tpm_sha256)
+        {
+            let rel = ManagedPath::parse(dest_rel)?;
+            let dest = self.layout.resolve(&rel)?;
+            let src_rel = ManagedPath::parse(src_rel)?;
+            let src = self.layout.resolve(&src_rel)?;
+            if !exists_no_follow(&i.temp_path)? {
+                std::fs::create_dir(&i.temp_path).map_err(|e| StorageError::io(&i.temp_path, e))?;
+            }
+            let new = i.temp_path.join(NEW_TPM);
+            if !exists_no_follow(&new)? {
+                copy_complete(&src, src_rel.as_str(), &new)?;
+            }
+            // Verify both on normal completion and crash recovery, including
+            // an already staged file. Do not boot with a mismatched identity.
+            if crate::manifest::sha256_file(&new)? != *expected {
+                return Err(StorageError::IntegrityMismatch {
+                    path: src_rel.to_string(),
+                    detail: "snapshot TPM state changed".into(),
+                });
+            }
+            if exists_no_follow(&dest)? {
+                crate::catalog::remove_managed_file(&self.layout, &rel)?;
+            }
+            self.fault_at(crate::FaultPoint::SnapshotRevertTpmRemoved)?;
+            std::fs::rename(&new, &dest).map_err(|e| StorageError::io(&dest, e))?;
         }
         self.fault_at(crate::FaultPoint::SnapshotAfterPublish)?;
         let id = i.id;

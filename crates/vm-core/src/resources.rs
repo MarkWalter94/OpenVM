@@ -50,6 +50,7 @@ fn guest_name(os: GuestOs) -> &'static str {
         GuestOs::Windows81 => "Windows 8.1",
         GuestOs::Windows10 => "Windows 10",
         GuestOs::Windows11Arm64 => "Windows 11 ARM64",
+        GuestOs::Windows11X64 => "Windows 11 x64",
     }
 }
 
@@ -211,6 +212,11 @@ pub fn validate_config(config: &VmConfig, limits: &ResourceLimits) -> Result<(),
     config.tools.validate()?;
     if config.vcpus == 0 {
         return Err(PublicError::invalid_argument("vcpus must be at least 1"));
+    }
+    if config.guest_os == GuestOs::Windows11X64 && config.vcpus < 2 {
+        return Err(PublicError::invalid_argument(
+            "Windows 11 needs at least 2 vCPUs",
+        ));
     }
     check_firmware(config)?;
     let min_memory = min_memory_mib(config.guest_os);

@@ -42,10 +42,13 @@ pub mod agents;
 pub mod baselines;
 pub mod catalog_move;
 pub mod clipboard;
+pub mod clipboard_images;
+pub mod clipboard_sync;
 pub mod console;
 pub mod dashboard;
 pub mod diag;
 pub mod dialogs;
+pub mod file_drag;
 pub mod keymap;
 pub mod libraries;
 pub mod media_library;
@@ -56,6 +59,7 @@ pub mod service;
 pub mod settings;
 pub mod snapshots;
 pub mod theme;
+pub mod transfers;
 pub mod vm_settings;
 pub mod vmware_import;
 pub mod wizard;
@@ -510,6 +514,8 @@ pub struct LightVmApp {
     fb_updates: u64,
     frames: u64,
     tools_clipboard_pending: Option<(VmId, RunId)>,
+    clipboard_sync: clipboard_sync::ClipboardSync,
+    transfers: transfers::Transfers,
     live: Option<LiveConsole>,
     /// VM whose console the Console page shows.
     console_vm: Option<VmId>,
@@ -617,6 +623,8 @@ impl LightVmApp {
             fb_updates: 0,
             frames: 0,
             tools_clipboard_pending: None,
+            clipboard_sync: clipboard_sync::ClipboardSync::default(),
+            transfers: transfers::Transfers::default(),
             live: None,
             console_vm: None,
             ticket_request: None,
@@ -1254,6 +1262,26 @@ impl LightVmApp {
         self.service.as_ref().map(|s| s.state())
     }
 
+    /// Supplies file-transfer dialogs, for integrations and headless tests.
+    pub fn set_transfer_pickers(&mut self, pick: Option<FilePicker>, save: Option<SavePicker>) {
+        self.transfers.set_pickers(pick, save);
+    }
+
+    /// Whether a console file operation is still running, on any page.
+    pub fn file_transfer_active(&self) -> bool {
+        self.transfers.busy()
+    }
+
+    /// The native shell consumes only the prepared, run-checked file selected
+    /// by dragging its console row. The guest never supplies a host path.
+    pub fn take_file_drag(&mut self) -> Option<std::path::PathBuf> {
+        self.transfers.take_drag()
+    }
+
+    pub fn file_drag_failed(&mut self, error: String) {
+        self.screenshot_status = Some((error, theme::Tone::Warning));
+    }
+
     fn send(&self, c: ServiceCommand) {
         if let Some(s) = &self.service {
             s.send(c);
@@ -1282,6 +1310,60 @@ impl LightVmApp {
         self.poll_starting(&ctx);
         self.sync_fullscreen(&ctx);
         self.handle_close_request(&ctx);
+        let image_active = if self.section == Section::Console
+            && ctx.input(|i| i.viewport().focused.unwrap_or(false))
+            && !self.dialog_open()
+            && self.closing.is_none()
+        {
+            self.live
+                .as_ref()
+                .map(|live| (live.target().vm_id, live.target().run_id))
+        } else {
+            None
+        };
+        if let Some(command) = self
+            .transfers
+            .poll(self.state().as_ref(), &ctx, image_active)
+        {
+            self.send(command);
+        }
+        let state = self.state();
+        let target = self
+            .live
+            .as_ref()
+            .map(|live| (live.target().vm_id, live.target().run_id));
+        let active = self.section == Section::Console
+            && ctx.input(|i| i.viewport().focused.unwrap_or(false))
+            && self.live.as_ref().is_some_and(LiveConsole::has_focus)
+            && !self.dialog_open()
+            && self.closing.is_none()
+            && target.is_some_and(|(vm, run)| {
+                state.as_ref().is_some_and(|s| {
+                    s.connected
+                        && !s.agents.agent_has_input(vm)
+                        && s.vm(vm).is_some_and(|v| {
+                            v.run_id == Some(run)
+                                && v.state == VmState::Running
+                                && v.config.tools.enabled
+                                && v.config.tools.clipboard
+                        })
+                })
+            });
+        let blocked = self.tools_clipboard_pending.is_some()
+            || self.transfers.busy()
+            || state
+                .as_ref()
+                .and_then(|s| s.tools.as_ref())
+                .is_some_and(|(_, _, status)| status.is_pending());
+        if let Some(command) =
+            self.clipboard_sync
+                .poll(state.as_ref(), target, active, blocked, Instant::now())
+        {
+            self.send(command);
+        }
+        if self.clipboard_sync.busy() || (self.clipboard_sync.enabled && active) {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
 
         // Console chords, removed from the input before any widget sees them.
         let chords = if self.section == Section::Console {
@@ -3606,6 +3688,22 @@ impl LightVmApp {
                 ui.add_space(4.0);
             }
             self.tools_clipboard_ui(ui, ctx, vm_id, state.as_ref(), agent.is_none());
+            let tools_busy = self.tools_clipboard_pending.is_some()
+                || self.clipboard_sync.busy()
+                || state
+                    .as_ref()
+                    .and_then(|s| s.tools.as_ref())
+                    .is_some_and(|(_, _, s)| s.is_pending());
+            self.transfers.ui(ui, state.as_ref(), vm_id, tools_busy);
+            if !self.dialog_open() && self.closing.is_none() {
+                self.transfers.drops(
+                    ctx,
+                    ui.available_rect_before_wrap(),
+                    state.as_ref(),
+                    vm_id,
+                    tools_busy,
+                );
+            }
             let (layout, fullscreen) = (self.settings.keyboard_layout, self.fullscreen);
             let modal_open = self.dialog_open() || self.closing.is_some();
             let action = self.live.as_mut().and_then(|live| {
@@ -3703,43 +3801,71 @@ impl LightVmApp {
             }
         }
         let pending = state.tools.as_ref().is_some_and(|(_, _, s)| s.is_pending());
-        ui.add_enabled_ui(focused && input_owned && !pending, |ui| {
-            ui.horizontal(|ui| {
-                if ui
-                    .button("Host text → Guest clipboard")
-                    .on_hover_text("Read the host clipboard once and send text to this guest")
-                    .clicked()
-                {
-                    match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
-                        Ok(text) if text.len() <= 64 * 1024 && !text.contains('\0') => {
-                            self.send(ServiceCommand::GuestTools {
-                                vm_id,
-                                run_id,
-                                call: ToolCall::ClipboardWrite { text },
-                            });
-                        }
-                        _ => {
-                            self.screenshot_status = Some((
-                                "Host clipboard text is unavailable or exceeds 64 KiB".into(),
-                                theme::Tone::Warning,
-                            ));
+        ui.add_enabled_ui(
+            focused
+                && input_owned
+                && !pending
+                && !self.transfers.busy()
+                && !self.clipboard_sync.enabled
+                && !self.clipboard_sync.busy(),
+            |ui| {
+                ui.horizontal(|ui| {
+                    if ui
+                        .button("Host text → Guest clipboard")
+                        .on_hover_text("Read the host clipboard once and send text to this guest")
+                        .clicked()
+                    {
+                        match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
+                            Ok(text) if text.len() <= 64 * 1024 && !text.contains('\0') => {
+                                self.send(ServiceCommand::GuestTools {
+                                    vm_id,
+                                    run_id,
+                                    call: ToolCall::ClipboardWrite { text },
+                                });
+                            }
+                            _ => {
+                                self.screenshot_status = Some((
+                                    "Host clipboard text is unavailable or exceeds 64 KiB".into(),
+                                    theme::Tone::Warning,
+                                ));
+                            }
                         }
                     }
-                }
-                if ui
-                    .button("Guest text → Host clipboard")
-                    .on_hover_text("Read guest clipboard text once and replace the host clipboard")
-                    .clicked()
-                {
-                    self.tools_clipboard_pending = Some((vm_id, run_id));
-                    self.send(ServiceCommand::GuestTools {
-                        vm_id,
-                        run_id,
-                        call: ToolCall::ClipboardRead,
-                    });
-                }
-            });
-        });
+                    if ui
+                        .button("Guest text → Host clipboard")
+                        .on_hover_text(
+                            "Read guest clipboard text once and replace the host clipboard",
+                        )
+                        .clicked()
+                    {
+                        self.tools_clipboard_pending = Some((vm_id, run_id));
+                        self.send(ServiceCommand::GuestTools {
+                            vm_id,
+                            run_id,
+                            call: ToolCall::ClipboardRead,
+                        });
+                    }
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Host image → Guest clipboard").clicked() {
+                        self.transfers
+                            .clipboard_image((vm_id, run_id), false, ctx.clone());
+                    }
+                    if ui.button("Guest image → Host clipboard").clicked() {
+                        self.transfers
+                            .clipboard_image((vm_id, run_id), true, ctx.clone());
+                    }
+                });
+            },
+        );
+        if ui.checkbox(&mut self.clipboard_sync.enabled, "Synchronize clipboard text while the guest screen has focus")
+            .on_hover_text("Opt in for this console. Text is exchanged automatically only while it captures input, with no file transfer active.")
+            .changed() {
+                self.clipboard_sync.error = None;
+            }
+        if let Some(error) = &self.clipboard_sync.error {
+            ui.label(error);
+        }
     }
 
     /// Console page without an open display: why, and what to do.

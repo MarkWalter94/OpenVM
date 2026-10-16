@@ -109,6 +109,7 @@ pub struct QmpClient {
 /// QMP commands used by the backend. The type is private: no external caller
 /// can compose a command.
 enum Cmd {
+    QueryTpm,
     QueryStatus,
     QueryAccelerators,
     QueryVersion,
@@ -130,6 +131,7 @@ enum Cmd {
 impl Cmd {
     fn name(&self) -> &'static str {
         match self {
+            Self::QueryTpm => "query-tpm",
             Self::QueryStatus => "query-status",
             Self::QueryAccelerators => "query-accelerators",
             Self::QueryVersion => "query-version",
@@ -192,6 +194,32 @@ fn read_json_line<R: BufRead>(r: &mut R, max: usize) -> Result<Option<Value>, Qm
 }
 
 impl QmpClient {
+    /// Require the expected single emulated TPM before any guest vCPU runs.
+    pub(crate) async fn verify_tpm(&self, model: &'static str) -> Result<(), QmpError> {
+        #[derive(serde::Deserialize)]
+        struct Backend {
+            #[serde(rename = "type")]
+            kind: String,
+        }
+        #[derive(serde::Deserialize)]
+        struct Info {
+            id: String,
+            model: String,
+            options: Backend,
+        }
+        let value = self.execute(Cmd::QueryTpm, None).await?;
+        let entries: Vec<Info> = serde_json::from_value(value)
+            .map_err(|_| QmpError::Protocol("invalid TPM reply".into()))?;
+        if entries.len() == 1
+            && entries[0].id == "tpm0"
+            && entries[0].model == model
+            && entries[0].options.kind == "emulator"
+        {
+            Ok(())
+        } else {
+            Err(QmpError::Protocol("unexpected TPM configuration".into()))
+        }
+    }
     /// Connects to the QMP socket, reads the greeting and negotiates the capabilities.
     pub async fn connect(socket: &ManagedPath, cfg: QmpConfig) -> Result<Self, QmpError> {
         let path = socket.as_path().to_owned();

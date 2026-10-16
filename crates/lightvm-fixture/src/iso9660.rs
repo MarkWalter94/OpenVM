@@ -80,6 +80,17 @@ fn sectors(len: usize) -> usize {
 /// On names or a label outside the level-1 rules, or a root directory larger
 /// than one sector: the inputs are constants of the fixture.
 pub fn write_iso(label: &str, files: &[(&str, &[u8])]) -> Vec<u8> {
+    write_iso_names(label, files, false)
+}
+
+/// Root-only ISO with ECMA-119 level-2 file identifiers (up to 31 characters,
+/// including the version suffix). Allows Windows' AUTOUNATTEND.XML in lab
+/// media. Short names produce exactly the same bytes as [`write_iso`].
+pub fn write_iso_level2(label: &str, files: &[(&str, &[u8])]) -> Vec<u8> {
+    write_iso_names(label, files, true)
+}
+
+fn write_iso_names(label: &str, files: &[(&str, &[u8])], level2: bool) -> Vec<u8> {
     assert!(
         label.len() <= 32
             && label
@@ -92,13 +103,18 @@ pub fn write_iso(label: &str, files: &[(&str, &[u8])]) -> Vec<u8> {
     for (name, data) in files {
         let (stem, ext) = name.split_once('.').unwrap_or((name, ""));
         assert!(
-            (1..=8).contains(&stem.len())
-                && ext.len() <= 3
+            (1..=if level2 { 29 } else { 8 }).contains(&stem.len())
+                && if level2 {
+                    name.len() <= 29
+                } else {
+                    ext.len() <= 3
+                }
+                && !ext.contains('.')
                 && name.bytes().all(|c| c.is_ascii_uppercase()
                     || c.is_ascii_digit()
                     || c == b'_'
                     || c == b'.'),
-            "invalid level-1 name {name}"
+            "invalid ISO name {name}"
         );
         let id = format!("{name};1");
         let len = u32::try_from(data.len()).expect("file too large");
@@ -212,4 +228,22 @@ pub fn read_root(img: &[u8]) -> Option<Vec<(String, Vec<u8>)>> {
         pos += len;
     }
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn level2_preserves_short_images_and_windows_answer_file_name() {
+        let files = [("TOOLS.EXE", b"fixture".as_slice())];
+        assert_eq!(
+            write_iso("TOOLS", &files),
+            write_iso_level2("TOOLS", &files)
+        );
+        let image = write_iso_level2("TOOLS", &[("AUTOUNATTEND.XML", b"answer")]);
+        assert_eq!(
+            read_root(&image).unwrap(),
+            vec![("AUTOUNATTEND.XML".into(), b"answer".to_vec())]
+        );
+    }
 }

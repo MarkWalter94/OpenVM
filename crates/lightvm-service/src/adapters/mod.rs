@@ -14,6 +14,7 @@ pub mod audit;
 pub mod backend;
 pub mod catalog;
 pub mod network;
+mod win11;
 
 use lightvm_proto::UtcTimestamp;
 use vm_core::ports::{Clock, IdGenerator};

@@ -66,7 +66,7 @@ JOBS=4 ./build-qemu.sh <workdir> <out>
 The output contains the stripped `qemu-system-x86_64.exe`, its MSYS2 DLL
 closure (25 DLLs: GLib, GnuTLS and its dependencies, pixman, zlib, zstd,
 ncurses, brotli, …), `share/` with the pc-bios blobs of the same tarball and
-the QEMU licence files, and `SHA256SUMS`. The build is not bit-reproducible
+the QEMU licence files, VNC keymaps and `SHA256SUMS`. The build is not bit-reproducible
 (it embeds paths and timestamps): the released binaries are approved by
 SHA-256 like the upstream build of ADR-0010.
 
@@ -77,3 +77,24 @@ plus these patches, and the MSYS2 source packages at the versions in
 `msys2-packages.txt`).
 
 Evidence: `docs/verification/R6-05-windows11-x64-swtpm.md`.
+
+## Development product bundle (2026-10-16)
+
+`assemble.ps1 -Qemu <qemu-output> -Swtpm <swtpm-output> -Firmware <firmware-output> -Out <new-directory>`
+assembles `qemu/`, `swtpm/`, `firmware/` and an exact top-level manifest. It
+prints the development approval line (`<hash> win11-bundle`), used by the
+existing supervisor `--approved-hashes` option. The product verifies the
+approved manifest, every listed file, no unlisted files or links, and holds
+the files open against write/delete for the entire run.
+
+The supervisor accepts `--win11-dir <bundle>`; otherwise it looks for `win11/`
+below its ordinary QEMU directory. This bundle is selected only for the
+`windows11_x64` guest. Other profiles keep their existing binary and firmware.
+The desktop wizard recognizes Windows 11 x64 media and uses UEFI, 2 or more
+vCPUs, at least 4096 MiB and 64 GiB. Missing/unapproved components refuse start.
+
+Build tools, source trees, binaries and lab disks currently live on E: under
+`E:\OpenVM-tests\win11`. The source/output build directories must be new or
+empty; the build recipe does not recursively delete an existing directory.
+The product bundle is experimental, not release-qualified. Its complete
+runtime licence/source inventory and code signing remain release work.

@@ -18,6 +18,96 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 use std::path::Path;
 use std::ptr::{null, null_mut};
 
+/// An IPv4 TCP row with Windows' owning PID, used only to verify TPM peers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TcpRow {
+    pub local: std::net::SocketAddrV4,
+    pub remote: std::net::SocketAddrV4,
+    pub pid: u32,
+    pub listening: bool,
+    pub established: bool,
+}
+
+pub(crate) fn tcp_rows() -> io::Result<Vec<TcpRow>> {
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        GetExtendedTcpTable, MIB_TCPROW_OWNER_PID, TCP_TABLE_OWNER_PID_ALL,
+    };
+    use windows_sys::Win32::Networking::WinSock::AF_INET;
+    let mut size = 0u32;
+    // SAFETY: documented sizing query, valid output pointer and no input buffer.
+    let first = unsafe {
+        GetExtendedTcpTable(
+            null_mut(),
+            &mut size,
+            0,
+            AF_INET as u32,
+            TCP_TABLE_OWNER_PID_ALL,
+            0,
+        )
+    };
+    if first != 0 && first != 122 {
+        return Err(io::Error::from_raw_os_error(first as i32));
+    }
+    for _ in 0..3 {
+        if !(4..=4 * 1024 * 1024).contains(&size) {
+            return Err(io::Error::other("invalid TCP table size"));
+        }
+        let mut buffer = vec![0u64; (size as usize).div_ceil(8)];
+        let capacity = buffer.len() * 8;
+        // SAFETY: the aligned allocation has at least `size` writable bytes;
+        // Windows writes only that capacity and updates size on a race.
+        let status = unsafe {
+            GetExtendedTcpTable(
+                buffer.as_mut_ptr().cast(),
+                &mut size,
+                0,
+                AF_INET as u32,
+                TCP_TABLE_OWNER_PID_ALL,
+                0,
+            )
+        };
+        if status == 122 {
+            continue;
+        }
+        if status != 0 {
+            return Err(io::Error::from_raw_os_error(status as i32));
+        }
+        let count = buffer[0] as u32 as usize;
+        let stride = size_of::<MIB_TCPROW_OWNER_PID>();
+        if count > capacity.saturating_sub(4) / stride {
+            return Err(io::Error::other("truncated TCP table"));
+        }
+        let mut rows = Vec::with_capacity(count);
+        for index in 0..count {
+            // SAFETY: count/stride validated against initialized allocation;
+            // the table header is 4 bytes, so unaligned reads are intentional.
+            let row = unsafe {
+                (buffer
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(4 + index * stride)
+                    .cast::<MIB_TCPROW_OWNER_PID>())
+                .read_unaligned()
+            };
+            let address = |ip: u32, port: u32| {
+                std::net::SocketAddrV4::new(
+                    std::net::Ipv4Addr::from(ip.to_ne_bytes()),
+                    u16::from_be(port as u16),
+                )
+            };
+            rows.push(TcpRow {
+                local: address(row.dwLocalAddr, row.dwLocalPort),
+                remote: address(row.dwRemoteAddr, row.dwRemotePort),
+                pid: row.dwOwningPid,
+                listening: row.dwState == 2,
+                established: row.dwState == 5,
+            });
+        }
+        return Ok(rows);
+    }
+    Err(io::Error::other("TCP table changed repeatedly"))
+}
+
 use windows_sys::Win32::Foundation::{
     CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, FILETIME, HANDLE, INVALID_HANDLE_VALUE,
     WAIT_OBJECT_0, WAIT_TIMEOUT,

@@ -211,12 +211,21 @@ impl CatalogLayout {
         mp(format!("vms/{vm}/firmware/{run}.vars.fd"))
     }
     /// `vms/<vm_id>/tpm`: swtpm state directory of a guest with a TPM 2.0
-    /// (Windows 11 ARM64, ADR-0028), created with mode 0700 by
-    /// [`Self::ensure_private_dir`]. Not yet part of baselines: baseline
-    /// create and restore are refused for these guests
-    /// ([`crate::Catalog::begin_create_baseline`]).
+    /// created with mode 0700 by [`Self::ensure_private_dir`].
     pub fn tpm_state_dir(vm: &VmId) -> ManagedPath {
         mp(format!("vms/{vm}/tpm"))
+    }
+    /// Private emulator directory of the current overlay.
+    pub fn state_tpm_dir(vm: &VmId, disk: &DiskId) -> ManagedPath {
+        mp(format!("vms/{vm}/tpm/{disk}"))
+    }
+    /// Immutable permanent TPM state of a baseline.
+    pub fn baseline_tpm(vm: &VmId, baseline: &BaselineId) -> ManagedPath {
+        mp(format!("vms/{vm}/base/{baseline}/tpm.permall"))
+    }
+    /// Immutable permanent TPM state of an offline snapshot.
+    pub fn snapshot_tpm(vm: &VmId, snapshot: &SnapshotId) -> ManagedPath {
+        mp(format!("vms/{vm}/snapshots/{snapshot}/tpm.permall"))
     }
     /// `vms/<vm_id>/firmware/primary.vars.fd`.
     pub fn primary_vars(vm: &VmId) -> ManagedPath {

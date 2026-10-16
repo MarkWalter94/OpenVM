@@ -70,11 +70,19 @@ Copy-Item "$fv\OVMF_VARS.fd" "$Out\lightvm-x64-vars-blank.fd" -Force
 # enrolled with --enroll-cert.
 $venv = Join-Path $Work 'venv'
 & $Python -m venv --system-site-packages $venv
+$venvPython = Join-Path $venv 'Scripts\python.exe'
+if (-not (Test-Path -LiteralPath $venvPython)) {
+  # MSYS2's native Python uses a POSIX-style venv layout on Windows.
+  $venvPython = Join-Path $venv 'bin\python.exe'
+}
+if (-not (Test-Path -LiteralPath $venvPython)) { throw 'venv interpreter missing' }
 $req = Join-Path $Work 'virtfw-req.txt'; $VIRT_FIRMWARE | Set-Content -Encoding ascii $req
-& "$venv\Scripts\python.exe" -m pip install -q --require-hashes --no-deps --only-binary :all: -r $req
+& $venvPython -m pip install -q --require-hashes --no-deps --only-binary :all: -r $req
+if ($LASTEXITCODE -ne 0) { throw 'virt-firmware installation failed' }
 $pk = Join-Path $Work 'pk.der'
-& "$venv\Scripts\python.exe" -I (Join-Path $Here 'gen-pk.py') $pk 'LightVM Platform Key'
-& "$venv\Scripts\python.exe" -I -m virt.firmware.vars --input "$Out\lightvm-x64-vars-blank.fd" `
+& $venvPython -I (Join-Path $Here 'gen-pk.py') $pk 'LightVM Platform Key'
+if ($LASTEXITCODE -ne 0) { throw 'platform key generation failed' }
+& $venvPython -I -m virt.firmware.vars --input "$Out\lightvm-x64-vars-blank.fd" `
   --output "$Out\lightvm-x64-vars-win.fd" `
   --enroll-cert $pk --microsoft-kek all --microsoft-db win11 --secure-boot | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'key enrolment failed' }

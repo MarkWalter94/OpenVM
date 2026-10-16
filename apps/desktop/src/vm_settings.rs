@@ -236,6 +236,7 @@ pub fn network_mode_text(m: NetworkProfile) -> &'static str {
         NetworkProfile::Offline => "Offline (no network adapter)",
         NetworkProfile::Nat => "NAT (manual use only)",
         NetworkProfile::Endpoints => "Endpoint allowlist",
+        NetworkProfile::FilteredInternet => "Filtered Internet (experimental)",
     }
 }
 
@@ -271,6 +272,7 @@ fn network_ui(ui: &mut egui::Ui, c: &mut VmConfig, ports: &mut Vec<String>) {
                         NetworkProfile::Offline,
                         NetworkProfile::Nat,
                         NetworkProfile::Endpoints,
+                        NetworkProfile::FilteredInternet,
                     ] {
                         ui.selectable_value(&mut c.network, m, network_mode_text(m));
                     }
@@ -287,6 +289,13 @@ fn network_ui(ui: &mut egui::Ui, c: &mut VmConfig, ports: &mut Vec<String>) {
                 Tone::Warning,
             );
         }
+        NetworkProfile::FilteredInternet => {
+            theme::notice(
+                ui,
+                "Filtered Internet: only the exact DNS destinations below on TCP 80 or 443. Public IPv4 only; this computer, LAN, non-default host routes, IPv6 and UDP are blocked. Requires Windows. Each new connection and persistent connection is checked against host routes; an allowed destination can receive guest data. Experimental: full VPN and browser qualification is pending.",
+                Tone::Warning,
+            );
+        }
         NetworkProfile::Endpoints => {
             theme::notice(
                 ui,
@@ -298,12 +307,17 @@ fn network_ui(ui: &mut egui::Ui, c: &mut VmConfig, ports: &mut Vec<String>) {
     if c.network == NetworkProfile::Offline {
         return;
     }
+    let filtered = c.network == NetworkProfile::FilteredInternet;
     let mut remove = None;
     for (i, e) in c.endpoints.iter_mut().enumerate() {
         ui.horizontal_wrapped(|ui| {
             let name = ui.add(
                 egui::TextEdit::singleline(&mut e.name)
-                    .hint_text("name, e.g. sql.lan")
+                    .hint_text(if filtered {
+                        "www.example.com"
+                    } else {
+                        "name, e.g. sql.lan"
+                    })
                     .desired_width(130.0),
             );
             theme::accessible_name(
@@ -311,17 +325,21 @@ fn network_ui(ui: &mut egui::Ui, c: &mut VmConfig, ports: &mut Vec<String>) {
                 WidgetType::TextEdit,
                 &format!("Name of endpoint {}", i + 1),
             );
-            ui.label("\u{2192}");
-            let host = ui.add(
-                egui::TextEdit::singleline(&mut e.host)
-                    .hint_text("host, e.g. 127.0.0.1")
-                    .desired_width(150.0),
-            );
-            theme::accessible_name(
-                &host,
-                WidgetType::TextEdit,
-                &format!("Host of endpoint {}", i + 1),
-            );
+            if filtered {
+                e.host = e.name.clone();
+            } else {
+                ui.label("\u{2192}");
+                let host = ui.add(
+                    egui::TextEdit::singleline(&mut e.host)
+                        .hint_text("host, e.g. 127.0.0.1")
+                        .desired_width(150.0),
+                );
+                theme::accessible_name(
+                    &host,
+                    WidgetType::TextEdit,
+                    &format!("Host of endpoint {}", i + 1),
+                );
+            }
             ui.label(":");
             let port = ui.add(
                 egui::TextEdit::singleline(&mut ports[i])
@@ -589,7 +607,7 @@ fn tools_ui(ui: &mut egui::Ui, tools: &mut lightvm_proto::ToolsConfig) {
     ui.checkbox(&mut tools.enabled, "Enable LightVM Tools for this VM");
     ui.label("Install the guest component from the LIGHTVM_TOOLS CD. Agent access requires a separate session approval.");
     ui.add_enabled_ui(tools.enabled, |ui| {
-        ui.checkbox(&mut tools.clipboard, "Allow clipboard text");
+        ui.checkbox(&mut tools.clipboard, "Allow clipboard text and images");
         ui.checkbox(
             &mut tools.files_transfer,
             "Allow transfers to guest inbox and from guest outbox",

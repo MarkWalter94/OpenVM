@@ -907,7 +907,7 @@ impl VmBackend for FakeVmBackend {
                 format!("vm_network:{:?}", vm.config.network).to_lowercase(),
             );
         }
-        if vm.config.network == NetworkProfile::Endpoints {
+        if vm.config.network.is_restricted() {
             self.net_allowed
                 .lock()
                 .unwrap()

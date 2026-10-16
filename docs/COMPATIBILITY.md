@@ -50,7 +50,7 @@ Notes:
 
 ## Windows guest profiles (ADR-0027)
 
-Host for every row: Windows 11 x86_64 with WHPX, QEMU 11.1.0, CPU `Skylake-Client-v4`, no NIC. Keyboard: built-in PS/2 (i8042); pointer: `usb-tablet`. Windows 8 (6.2) and Windows 11 x86/x64 are not supported (ADR-0027); Windows 11 ARM64 has its own profile on macOS Apple Silicon (below, ADR-0028). The Ubuntu/KVM host named by R2c is not addressed here and stays "not verified".
+Host for every row: Windows 11 x86_64 with WHPX, QEMU 11.1.0, CPU `Skylake-Client-v4`, no NIC. Keyboard: built-in PS/2 (i8042); pointer: `usb-tablet`. Windows 8 (6.2) and Windows 11 x86 are not supported (ADR-0027). Windows 11 x64 has the experimental ADR-0035 profile below; ARM64 has its own profile on macOS Apple Silicon (ADR-0028). The Ubuntu/KVM host named by R2c is not addressed here and stays "not verified".
 
 | Guest system | Machine type | Firmware | Disk / CDs | Display / USB | Status | Last test passed | Evidence |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -62,6 +62,19 @@ Host for every row: Windows 11 x86_64 with WHPX, QEMU 11.1.0, CPU `Skylake-Clien
 | Windows 10 (x86, x64; build below 22000) | `pc-q35-11.1` | OVMF (UEFI, Secure Boot off) or SeaBIOS | `ide-hd` `ide.2` (AHCI) / `ide.0`, `ide.1` | `VGA` / `qemu-xhci` | not verified (Setup reached: x64 UEFI, x86 BIOS; not installed) | none | `R2c-01` |
 
 The modes of these systems (manual, baseline, AI offline) are all "not verified"; filtered Internet and guest agent stay "not verified" as for every combination (R1, R4), and the Windows guests are offline only.
+
+## Windows 11 x64 on Windows (ADR-0035)
+
+The experimental product profile uses `pc-q35-11.1`, AHCI, standard VGA,
+xHCI tablet, project Secure Boot OVMF without SMM and TPM CRB/swtpm 2.0.
+Its separately approved runtime bundle is required. Real Windows PE x64
+reports Secure Boot enabled and TPM 2.0, preserves a test NV value across
+cold restart, and the run stops if its TPM helper dies (`R6-05` §13).
+The real service backend starts this profile repeatedly and still starts the
+ordinary Linux profile. This does **not** qualify an installed Windows 11:
+the guest/mode matrix remains **not verified**. Installation, warm reboot,
+BitLocker/Hello and TPM-aware baselines/snapshots remain open; TPM baselines
+and user snapshots are currently refused.
 
 ## Windows 11 ARM64 on macOS Apple Silicon (ADR-0028)
 

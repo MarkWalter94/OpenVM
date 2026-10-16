@@ -873,7 +873,6 @@ fn approve_form_ui(
     );
     theme::divider(ui);
     network_grant_ui(ui, env, f, editable);
-    theme::divider(ui);
     tools_grant_ui(ui, env, f, editable);
     theme::divider(ui);
     let input = f.caps.contains(&Capability::VmInput);
@@ -1616,6 +1615,7 @@ fn tools_grant_ui(ui: &mut egui::Ui, env: &AgentsEnv<'_>, f: &mut ApproveForm, e
         f.caps.retain(|c| !c.is_integration());
         return;
     };
+    theme::divider(ui);
     small(
         ui,
         "Guest Tools: every permission starts off. Shared folders expose the selected host files to this guest.",
@@ -1624,7 +1624,7 @@ fn tools_grant_ui(ui: &mut egui::Ui, env: &AgentsEnv<'_>, f: &mut ApproveForm, e
         (
             Clipboard,
             config.clipboard,
-            "Read and write guest clipboard text",
+            "Read and write guest clipboard text and images",
         ),
         (
             FilesTransfer,

@@ -37,7 +37,9 @@ impl ProcessContainer for JobContainer {
             stderr: req.stderr.as_path(),
             job: &self.job,
             console: self.console,
-            cwd: exe.parent(),
+            // Keep library caches in the run's output directory, never in
+            // the hash-approved runtime bundle.
+            cwd: req.stdout.as_path().parent(),
         })
         .map_err(BackendError::Spawn)?;
         let creation_time = match sys::creation_time(&spawned.process) {

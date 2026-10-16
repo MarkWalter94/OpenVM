@@ -79,6 +79,7 @@ pub(crate) fn mode_name(m: NetworkProfile) -> &'static str {
         NetworkProfile::Offline => "offline",
         NetworkProfile::Nat => "nat",
         NetworkProfile::Endpoints => "endpoints",
+        NetworkProfile::FilteredInternet => "filtered_internet",
     }
 }
 
@@ -107,6 +108,37 @@ pub(crate) fn resolve(host: &str, port: u16) -> Result<SocketAddr, String> {
         .map_err(|e| e.to_string())?;
     rx.recv_timeout(RESOLVE_TIMEOUT)
         .unwrap_or_else(|_| Err("timed out".into()))
+}
+
+/// Pin the DNS answer for the run. Every returned IPv4 address must pass
+/// the public-route policy; AAAA answers are never used for this mode.
+fn public_address(addresses: &[SocketAddr]) -> Result<SocketAddr, String> {
+    if addresses.len() > 64 {
+        return Err("DNS answer exceeds limit".into());
+    }
+    let mut selected = None;
+    for &address in addresses.iter().filter(|a| a.is_ipv4()) {
+        guest_net::egress::validate_target(address).map_err(str::to_owned)?;
+        selected.get_or_insert(address);
+    }
+    selected.ok_or_else(|| "no approved public IPv4 address".into())
+}
+
+fn resolve_public(host: &str, port: u16) -> Result<SocketAddr, String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let host = host.to_owned();
+    std::thread::Builder::new()
+        .name("lightvm-public-dns".into())
+        .spawn(move || {
+            let result = (host.as_str(), port)
+                .to_socket_addrs()
+                .map_err(|e| e.to_string())
+                .and_then(|a| public_address(&a.take(65).collect::<Vec<_>>()));
+            let _ = tx.send(result);
+        })
+        .map_err(|e| e.to_string())?;
+    rx.recv_timeout(RESOLVE_TIMEOUT)
+        .unwrap_or_else(|_| Err("DNS timed out".into()))
 }
 
 fn setup_record(
@@ -144,17 +176,16 @@ pub(crate) fn setup(
             ..NetworkAudit::default()
         },
     )];
-    if mode != NetworkProfile::Endpoints && tools.is_none() {
+    if !mode.is_restricted() && tools.is_none() {
         return (None, recs);
     }
     let mut specs = Vec::new();
-    for e in vm
-        .config
-        .endpoints
-        .iter()
-        .filter(|_| mode == NetworkProfile::Endpoints)
-    {
-        let r = resolve(&e.host, e.port);
+    for e in vm.config.endpoints.iter().filter(|_| mode.is_restricted()) {
+        let r = if mode == NetworkProfile::FilteredInternet {
+            resolve_public(&e.host, e.port)
+        } else {
+            resolve(&e.host, e.port)
+        };
         recs.push(endpoint_record(vm.id, run_id, e, &r));
         if let Ok(target) = r {
             specs.push(EndpointSpec {
@@ -177,7 +208,16 @@ pub(crate) fn setup(
         .and_then(|s| guest_net::transport::attach(s).map_err(|e| e.to_string()))
         .and_then(|link| {
             let mut cfg = NetConfig::new(specs);
-            cfg.advertise_dns = mode == NetworkProfile::Endpoints;
+            cfg.advertise_dns = mode.is_restricted();
+            if mode == NetworkProfile::FilteredInternet {
+                cfg.public_endpoints = vm
+                    .config
+                    .endpoints
+                    .iter()
+                    .filter(|e| cfg.endpoints.iter().any(|s| s.name == e.name))
+                    .map(NetworkEndpoint::key)
+                    .collect();
+            }
             cfg.max_connections = MAX_CONNECTIONS;
             NetStack::start(cfg, link, internal.clone()).map_err(|e| e.to_string())
         });

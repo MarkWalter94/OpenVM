@@ -227,6 +227,7 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 /// Started process with QMP connected (internal use: probe and runs).
 pub(crate) struct Launched {
+    pub(crate) tpm_identity: Option<ProcessIdentity>,
     pub(crate) container: Arc<dyn ProcessContainer>,
     pub(crate) child: Arc<ChildProcess>,
     pub(crate) qmp: QmpClient,
@@ -302,12 +303,21 @@ async fn start_swtpm(
     container: &Arc<dyn ProcessContainer>,
     run_id: RunId,
     tpm: &TpmCommand,
-) -> Result<()> {
+) -> Result<Arc<ChildProcess>> {
     let req = SpawnRequest {
         run_id,
         program: tpm.program.clone(),
         args: tpm.args.clone(),
-        env: minimal_environment(),
+        env: {
+            let mut env = minimal_environment();
+            if tpm.tcp_ports.is_some()
+                && let Some(dir) = tpm.program.as_path().parent()
+            {
+                env.retain(|(key, _)| !key.eq_ignore_ascii_case("PATH"));
+                env.push(("PATH".into(), dir.as_os_str().into()));
+            }
+            env
+        },
         stdout: tpm.stdout.clone(),
         stderr: tpm.stderr.clone(),
     };
@@ -334,7 +344,10 @@ async fn start_swtpm(
                 stderr_tail: format!("swtpm exited before QEMU started: {tail}"),
             });
         }
-        if tpm.socket.as_path().exists() {
+        if match tpm.tcp_ports {
+            Some(ports) => crate::tpm_transport::ready(ports, child.identity().pid)?,
+            None => tpm.socket.as_path().exists(),
+        } {
             break;
         }
         if Instant::now() >= deadline {
@@ -348,13 +361,14 @@ async fn start_swtpm(
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    let reaper = child.clone();
     std::thread::Builder::new()
         .name("swtpm-reaper".into())
         .spawn(move || {
-            let _ = child.wait(None);
+            let _ = reaper.wait(None);
         })
         .map_err(BackendError::Io)?;
-    Ok(())
+    Ok(child)
 }
 
 fn read_stderr_tail(p: &ManagedPath) -> String {
@@ -363,8 +377,17 @@ fn read_stderr_tail(p: &ManagedPath) -> String {
     stderr_excerpt(&String::from_utf8_lossy(&bytes[start..]))
 }
 
-/// Starts QEMU in the container and connects QMP. The process is terminated if the
-/// connection does not succeed within `timeout`.
+/// A failed launch always terminates the whole container, including helpers.
+struct StartupGuard(Option<Arc<dyn ProcessContainer>>);
+impl Drop for StartupGuard {
+    fn drop(&mut self) {
+        if let Some(container) = &self.0 {
+            let _ = container.kill_all(EMERGENCY_EXIT_CODE);
+        }
+    }
+}
+
+/// Starts QEMU in the container and connects QMP within `timeout`.
 pub(crate) async fn launch(
     cmd: &QemuCommand,
     qmp_cfg: &QmpConfig,
@@ -378,12 +401,21 @@ pub(crate) async fn launch(
     }
     remove_sockets(cmd);
     let container = new_container(&cmd.limits)?;
-    if let Some(tpm) = &cmd.tpm
-        && let Err(e) = start_swtpm(&container, cmd.run_id, tpm).await
-    {
-        remove_sockets(cmd);
-        return Err(e);
-    }
+    // A TPM lifeline also owns the job. Merely dropping this function's Arc
+    // cannot kill it on an early QEMU failure; every error must kill the job.
+    let mut startup_guard = StartupGuard(Some(container.clone()));
+    let tpm_child = if let Some(tpm) = &cmd.tpm {
+        match start_swtpm(&container, cmd.run_id, tpm).await {
+            Ok(child) => Some(child),
+            Err(e) => {
+                let _ = container.kill_all(EMERGENCY_EXIT_CODE);
+                remove_sockets(cmd);
+                return Err(e);
+            }
+        }
+    } else {
+        None
+    };
     let req = SpawnRequest {
         run_id: cmd.run_id,
         program: cmd.program.clone(),
@@ -403,6 +435,45 @@ pub(crate) async fn launch(
         return Err(e);
     }
     let child = Arc::new(child);
+    let tpm_identity = tpm_child.as_ref().map(|p| p.identity());
+    if let Some(tpm) = tpm_child {
+        let monitor_tpm = tpm.clone();
+        let monitor_qemu = child.clone();
+        let monitor_container = container.clone();
+        std::thread::Builder::new()
+            .name("tpm-lifeline".into())
+            .spawn(move || {
+                let _ = monitor_tpm.wait(None);
+                std::thread::sleep(Duration::from_millis(100));
+                if !matches!(monitor_qemu.try_exit_code(), Ok(Some(_))) {
+                    let _ = monitor_container.kill_all(EMERGENCY_EXIT_CODE);
+                }
+            })
+            .map_err(BackendError::Io)?;
+        if let Some(ports) = cmd.tpm.as_ref().and_then(|t| t.tcp_ports) {
+            let deadline = Instant::now() + timeout;
+            loop {
+                match crate::tpm_transport::peers(ports, tpm.identity().pid, child.identity().pid) {
+                    Ok(true) => break,
+                    Ok(false) => (),
+                    Err(e) => {
+                        let _ = container.kill_all(EMERGENCY_EXIT_CODE);
+                        return Err(e);
+                    }
+                }
+                if Instant::now() >= deadline
+                    || child.try_exit_code()?.is_some()
+                    || tpm.try_exit_code()?.is_some()
+                {
+                    let _ = container.kill_all(EMERGENCY_EXIT_CODE);
+                    return Err(BackendError::StateConflict(
+                        "TPM peer ownership could not be verified; VM stopped".into(),
+                    ));
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+    }
     let state_tx = Arc::new(watch::channel(ProcessState::Starting).0);
     let flags = Arc::new(RunFlags::default());
     let deadline = Instant::now() + timeout;
@@ -450,7 +521,9 @@ pub(crate) async fn launch(
         qmp.subscribe_state(),
         cmd.clone(),
     )?;
+    startup_guard.0 = None;
     Ok(Launched {
+        tpm_identity,
         container,
         child,
         qmp,
@@ -626,6 +699,7 @@ pub fn check_network(
 /// A VM run.
 #[derive(Debug)]
 pub struct QemuRun {
+    tpm_identity: Option<ProcessIdentity>,
     run_id: RunId,
     identity: ProcessIdentity,
     /// Shared with the boot prompt presses ([`Self::boot_prompt_keys`]), which
@@ -770,6 +844,7 @@ impl QemuRun {
             flags: launched.flags.clone(),
         };
         let run = Self {
+            tpm_identity: launched.tpm_identity,
             run_id: spec.run_id,
             identity,
             qmp: Arc::new(launched.qmp),
@@ -844,6 +919,15 @@ impl QemuRun {
         let info = self.qmp.network_diagnostics().await?;
         let pci = self.qmp.pci_network_devices().await?;
         check_network(spec.network, &info, &pci)?;
+        if spec.profile.needs_tpm() {
+            self.qmp
+                .verify_tpm(if spec.profile.is_aarch64() {
+                    "tpm-tis"
+                } else {
+                    "tpm-crb"
+                })
+                .await?;
+        }
         Ok(acc)
     }
 
@@ -868,6 +952,11 @@ impl QemuRun {
     /// Identity of the QEMU process (PID, creation time, `run_id`).
     pub fn identity(&self) -> ProcessIdentity {
         self.identity
+    }
+
+    /// Identity of the supervised TPM helper, if this run has one.
+    pub fn tpm_identity(&self) -> Option<ProcessIdentity> {
+        self.tpm_identity
     }
 
     /// Limits applied to the run's Job Object and memory peak.
@@ -1405,6 +1494,15 @@ impl QemuRun {
         }
         let active_at_close = self.emergency.container.active_count()?;
         self.qmp.close(Duration::from_millis(500)).await;
+        if self.tpm_identity.is_some() {
+            let deadline = Instant::now() + Duration::from_millis(500);
+            while (Arc::strong_count(&self.emergency.child) > 1
+                || Arc::strong_count(&self.emergency.container) > 1)
+                && Instant::now() < deadline
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }
         let identity = self.identity;
         let qmp_socket = self.command.qmp_socket.clone();
         remove_sockets(&self.command);

@@ -415,6 +415,11 @@ pub struct DeviceProfile {
 }
 
 impl DeviceProfile {
+    /// Windows 11 x64 (ADR-0035): project Secure Boot OVMF and TPM CRB.
+    pub const WINDOWS11_X64: Self = Self {
+        tpm: true,
+        ..Self::WINDOWS_UEFI
+    };
     /// Ubuntu / other Linux: q35, UEFI, virtio disk, display and input.
     pub const LINUX: Self = Self {
         machine_family: MachineFamily::Q35,
@@ -494,12 +499,13 @@ impl DeviceProfile {
     };
 
     /// Every profile, in the order of the contract table.
-    pub const ALL: [DeviceProfile; 6] = [
+    pub const ALL: [DeviceProfile; 7] = [
         Self::LINUX,
         Self::WINDOWS_UEFI,
         Self::WINDOWS_BIOS,
         Self::WINDOWS_VISTA_7,
         Self::WINDOWS_XP,
+        Self::WINDOWS11_X64,
         Self::WINDOWS11_ARM64,
     ];
 
@@ -530,6 +536,7 @@ impl DeviceProfile {
             (GuestOs::WindowsVista | GuestOs::Windows7, _) => Self::WINDOWS_VISTA_7,
             (GuestOs::WindowsXp, _) => Self::WINDOWS_XP,
             (GuestOs::Windows11Arm64, _) => Self::WINDOWS11_ARM64,
+            (GuestOs::Windows11X64, _) => Self::WINDOWS11_X64,
         })
     }
 
@@ -546,7 +553,7 @@ impl DeviceProfile {
             what,
             hint: "imported VMs keep the hardware allowed by ADR-0030".into(),
         };
-        if os.is_aarch64() {
+        if os.needs_tpm() {
             return Err(unsupported(format!("imported guest {os:?}")));
         }
         if !os.import_firmware().contains(&firmware) {
@@ -611,6 +618,9 @@ impl DeviceProfile {
     /// ADR-0028): Apple Silicon macOS only the AArch64 profiles, every other
     /// host only the x86 ones.
     pub fn runs_on_this_host(&self) -> bool {
+        if self.needs_tpm() && !self.is_aarch64() {
+            return cfg!(windows);
+        }
         self.is_aarch64() == cfg!(all(target_os = "macos", target_arch = "aarch64"))
     }
 
@@ -693,7 +703,11 @@ impl DeviceProfile {
             CdromBus::UsbBot => v.extend(["usb-bot", "scsi-cd"]),
         }
         if self.tpm {
-            v.push("tpm-tis-device");
+            v.push(if self.is_aarch64() {
+                "tpm-tis-device"
+            } else {
+                "tpm-crb"
+            });
         }
         v
     }
@@ -945,6 +959,9 @@ pub struct QemuCommand {
 /// when QEMU closes the connection.
 #[derive(Clone, Debug)]
 pub struct TpmCommand {
+    /// Windows Cygwin transport: control/data loopback ports. Native Unix
+    /// socket mode is retained on macOS. Peers are verified by PID at launch.
+    pub tcp_ports: Option<[u16; 2]>,
     /// Approved swtpm executable.
     pub program: ManagedPath,
     /// Structured arguments.
@@ -960,6 +977,24 @@ pub struct TpmCommand {
 }
 
 struct Args(Vec<OsString>);
+
+/// Cygwin paths for a native absolute drive path, including spaces/Unicode.
+/// ManagedPath already excludes option delimiters, device and UNC paths.
+fn cygwin_path(path: &ManagedPath) -> Result<String> {
+    let value = path.qemu_value();
+    let bytes = value.as_bytes();
+    if bytes.len() < 3 || !bytes[0].is_ascii_alphabetic() || &bytes[1..3] != b":/" {
+        return Err(BackendError::invalid(
+            "swtpm_path",
+            "expected an absolute Windows drive path",
+        ));
+    }
+    Ok(format!(
+        "/cygdrive/{}/{}",
+        (bytes[0] as char).to_ascii_lowercase(),
+        &value[3..]
+    ))
+}
 
 impl Args {
     fn opt(&mut self, name: &'static str, value: impl Into<String>) {
@@ -1244,7 +1279,61 @@ impl VmLaunchSpec {
         if !usb_first {
             push_input(&mut a, profile);
         }
-        let tpm = if profile.needs_tpm() {
+        let tpm = if profile.needs_tpm() && !profile.is_aarch64() {
+            if !cfg!(windows) {
+                return Err(BackendError::Unsupported {
+                    what: "Windows 11 x64 TPM transport".into(),
+                    hint: "this profile currently requires a Windows host".into(),
+                });
+            }
+            let program = paths.swtpm()?;
+            let state = paths
+                .tpm_state_dir(run)?
+                .ok_or_else(|| BackendError::invalid("tpm_state", "missing per-VM TPM state"))?;
+            // Hold both bind probes until both ports are chosen; the runtime
+            // verifies listener ownership without opening probe connections.
+            let first = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+            let second = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+            let ports = [first.local_addr()?.port(), second.local_addr()?.port()];
+            let log = run_dir.join_file(names::SWTPM_LOG)?;
+            a.opt(
+                "-chardev",
+                format!("socket,id=chrtpm,host=127.0.0.1,port={}", ports[0]),
+            );
+            a.opt(
+                "-chardev",
+                format!("socket,id=chrtpmdata,host=127.0.0.1,port={}", ports[1]),
+            );
+            a.opt(
+                "-tpmdev",
+                "emulator,id=tpm0,chardev=chrtpm,data-chardev=chrtpmdata",
+            );
+            a.opt("-device", "tpm-crb,tpmdev=tpm0");
+            let args = [
+                "socket".into(),
+                "--tpm2".into(),
+                "--tpmstate".into(),
+                format!("dir={},lock", cygwin_path(&state)?),
+                "--ctrl".into(),
+                format!("type=tcp,port={},bindaddr=127.0.0.1,terminate", ports[0]),
+                "--server".into(),
+                format!("type=tcp,port={},bindaddr=127.0.0.1", ports[1]),
+                "--log".into(),
+                format!("file={},level=1", cygwin_path(&log)?),
+            ]
+            .into_iter()
+            .map(OsString::from)
+            .collect();
+            Some(TpmCommand {
+                tcp_ports: Some(ports),
+                program,
+                args,
+                socket: private_dir.join_file(names::TPM_SOCKET)?,
+                log,
+                stdout: run_dir.join_file(names::SWTPM_STDOUT)?,
+                stderr: run_dir.join_file(names::SWTPM_STDERR)?,
+            })
+        } else if profile.needs_tpm() {
             let program = paths.swtpm()?;
             let state = paths.tpm_state_dir(run)?.ok_or_else(|| {
                 BackendError::invalid("tpm_state", "the TPM profile needs the VM's TPM state")
@@ -1273,6 +1362,7 @@ impl VmLaunchSpec {
             .map(OsString::from)
             .collect();
             Some(TpmCommand {
+                tcp_ports: None,
                 program,
                 args,
                 socket,
@@ -1618,8 +1708,8 @@ pub(crate) mod tests {
                 "mac",
             ]),
         );
-        t.insert("-chardev", Some(&["id", "path"]));
-        t.insert("-tpmdev", Some(&["id", "chardev"]));
+        t.insert("-chardev", Some(&["id", "path", "host", "port"]));
+        t.insert("-tpmdev", Some(&["id", "chardev", "data-chardev"]));
         // ADR-0033: user (NAT) or stream to the private directory only.
         t.insert("-netdev", Some(&["id", "server", "addr.type", "addr.path"]));
         // Path value, checked separately.
@@ -1649,6 +1739,7 @@ pub(crate) mod tests {
         "usb-bot",
         "scsi-cd",
         "tpm-tis-device",
+        "tpm-crb",
         "pvscsi",
         "mptsas1068",
         "scsi-hd",
@@ -1765,6 +1856,15 @@ pub(crate) mod tests {
                         if !allowed.contains(&k) {
                             return Err(format!("{opt}: key not allowed {k:?}"));
                         }
+                        if opt == "-chardev" && k == "host" && v != "127.0.0.1" {
+                            return Err("TPM transport must use loopback".into());
+                        }
+                        if opt == "-chardev"
+                            && k == "port"
+                            && v.parse::<u16>().ok().is_none_or(|p| p == 0)
+                        {
+                            return Err("invalid TPM port".into());
+                        }
                         if opt == "-netdev" && k == "server" && v != "on" {
                             return Err(format!("-netdev server={v}"));
                         }
@@ -1846,6 +1946,10 @@ pub(crate) mod tests {
                 let mut s = spec_for(profile);
                 s.network = net;
                 let r = s.build(&FakePaths::for_profile(&profile));
+                if profile == DeviceProfile::WINDOWS11_X64 && !cfg!(windows) {
+                    assert!(r.is_err(), "Windows-only TPM transport");
+                    continue;
+                }
                 let Some(nic) = profile.nic() else {
                     if net == GuestNetwork::None {
                         audit_args(&r.unwrap().args).unwrap();
@@ -2172,7 +2276,7 @@ pub(crate) mod tests {
     /// installation ISO, data medium and disk (no backing file).
     #[test]
     fn profile_rows_exact_argv() {
-        for profile in DeviceProfile::ALL.into_iter().filter(|p| !p.is_aarch64()) {
+        for profile in DeviceProfile::ALL.into_iter().filter(|p| !p.needs_tpm()) {
             let mut s = spec_for(profile);
             s.data_media = Some(media_data());
             let p = FakePaths::for_profile(&profile);
@@ -2519,6 +2623,7 @@ pub(crate) mod tests {
             (GuestOs::Windows7, Firmware::Bios, P::WINDOWS_VISTA_7),
             (GuestOs::WindowsXp, Firmware::Bios, P::WINDOWS_XP),
             (GuestOs::Windows11Arm64, Firmware::Uefi, P::WINDOWS11_ARM64),
+            (GuestOs::Windows11X64, Firmware::Uefi, P::WINDOWS11_X64),
         ];
         for (os, fw, want) in table {
             assert_eq!(
@@ -2910,7 +3015,12 @@ mod proptests {
     use proptest::prelude::*;
 
     fn profile() -> impl Strategy<Value = DeviceProfile> {
-        prop::sample::select(DeviceProfile::ALL.to_vec())
+        prop::sample::select(
+            DeviceProfile::ALL
+                .into_iter()
+                .filter(|p| cfg!(windows) || *p != DeviceProfile::WINDOWS11_X64)
+                .collect::<Vec<_>>(),
+        )
     }
 
     /// Hostile strings: QEMU separators, option and protocol prefixes,

@@ -246,6 +246,7 @@ pub(crate) fn delete_vm_rows(tx: &Tx<'_>, vm: &VmId) -> Result<()> {
     let steps = [
         "DELETE FROM operations WHERE vm_id = ?1",
         "DELETE FROM artifacts WHERE run_id IN (SELECT run_id FROM runs WHERE vm_id = ?1)",
+        "DELETE FROM current_tpm WHERE vm_id = ?1",
         "DELETE FROM vm_current_state WHERE vm_id = ?1",
         "DELETE FROM runs WHERE vm_id = ?1",
         "DELETE FROM disks WHERE vm_id = ?1 AND role = 'overlay'",

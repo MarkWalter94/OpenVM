@@ -371,6 +371,9 @@ impl Catalog {
                 let fw = tx.firmware(f)?;
                 out.push((fw.managed_path, fw.sha256));
             }
+            if let Some(tpm) = tx.baseline_tpm(id)? {
+                out.push((tpm.managed_path, tpm.sha256));
+            }
             Ok(out)
         })
     }

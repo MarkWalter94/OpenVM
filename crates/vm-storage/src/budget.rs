@@ -464,9 +464,11 @@ impl Catalog {
         let mut st = self
             .conn
             .prepare(
-                "SELECT b.baseline_id, d.allocated_bytes, coalesce(f.size_bytes, 0)
+                "SELECT b.baseline_id, d.allocated_bytes, coalesce(f.size_bytes, 0) + coalesce(t.size_bytes,0)
                  FROM baselines b JOIN disks d ON d.disk_id = b.base_disk_id
                  LEFT JOIN firmware_state f ON f.fw_id = b.vars_fw_id
+                 LEFT JOIN baseline_tpm bt ON bt.baseline_id=b.baseline_id
+                 LEFT JOIN firmware_state t ON t.fw_id=bt.fw_id
                  WHERE b.vm_id = ?1 ORDER BY b.baseline_id",
             )
             .db()?;

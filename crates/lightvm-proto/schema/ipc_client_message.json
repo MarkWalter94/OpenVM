@@ -688,6 +688,11 @@
           "const": "windows10"
         },
         {
+          "description": "Windows 11 x64: project QEMU, Secure Boot and TPM 2.0 (ADR-0035).",
+          "type": "string",
+          "const": "windows11_x64"
+        },
+        {
           "description": "Windows 11 on ARM64 (build 22000 and later): macOS/HVF hosts only,\n`virt`, UEFI with Secure Boot, TPM 2.0 (ADR-0028).",
           "type": "string",
           "const": "windows11_arm64"
@@ -985,6 +990,11 @@
           "description": "Endpoint allowlist: the guest NIC is attached to the supervisor's\nown network, where only the endpoints of [`VmConfig::endpoints`]\nanswer (each a virtual address and port mapped to one approved\n`host:port`). In manual use every endpoint of the VM is allowed; in\nan agent session only those of the grant.",
           "type": "string",
           "const": "endpoints"
+        },
+        {
+          "description": "Closed destination/port Internet policy through the supervisor's\nisolated stack. Only public IPv4 TCP 80/443 for the named endpoints;\nhost/LAN, IPv6, UDP and every other destination stay unreachable.",
+          "type": "string",
+          "const": "filtered_internet"
         }
       ]
     },
@@ -2502,6 +2512,24 @@
           "required": [
             "op",
             "text"
+          ]
+        },
+        {
+          "description": "Bounded RGBA image stream, independent of the file-transfer grant.",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "clipboard_image"
+            },
+            "request": {
+              "$ref": "#/$defs/ToolFileRequest"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "request"
           ]
         },
         {

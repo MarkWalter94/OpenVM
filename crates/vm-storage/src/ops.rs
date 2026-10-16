@@ -48,6 +48,11 @@ impl Catalog {
         write_vars: Option<Producer<'_>>,
     ) -> Result<BaselineId> {
         let vm = self.read(|tx| tx.vm(&req.vm_id))?;
+        if crate::tpm::needs_tpm(&vm.guest_os) {
+            return Err(StorageError::Unsupported(
+                "TPM guests require begin_create_baseline with complete machine state",
+            ));
+        }
         if vm.lifecycle != Lifecycle::Stopped {
             return Err(StorageError::StateConflict(format!(
                 "baseline requested with VM in state {}",
@@ -126,6 +131,7 @@ impl Catalog {
                     path: rel.to_string(),
                     sha256: Some(sha.clone()),
                 }),
+                tpm: None,
                 created_powered_off: true,
                 clean_shutdown: req.clean_shutdown,
                 created_at: created_at.clone(),
@@ -208,6 +214,11 @@ impl Catalog {
             let f = b.vars_fw_id.as_ref().map(|f| tx.firmware(f)).transpose()?;
             Ok((vm, b, d, f))
         })?;
+        if crate::tpm::needs_tpm(&vm.guest_os) {
+            return Err(StorageError::Unsupported(
+                "TPM guests require begin_restore before starting their current state",
+            ));
+        }
         if vm.lifecycle != Lifecycle::Stopped {
             return Err(StorageError::StateConflict(format!(
                 "run requested with VM in state {}",

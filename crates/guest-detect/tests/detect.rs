@@ -70,12 +70,17 @@ fn windows_versions_through_udf() {
         GuestArch::X86_64,
         Some(19045),
     );
-    assert!(run(&windows_udf(10, 0, 22631, 9, o)).unwrap().is_none());
+    expect(
+        &windows_udf(10, 0, 22631, 9, o),
+        GuestOs::Windows11X64,
+        GuestArch::X86_64,
+        Some(22631),
+    );
     assert!(run(&windows_udf(6, 2, 9200, 9, o)).unwrap().is_none());
 }
 
 #[test]
-fn windows_11_only_on_arm64() {
+fn windows_11_requires_a_known_64_bit_architecture() {
     let o = UdfOpts::default();
     // ARM64 Windows 11 (25H2) is a guest (ADR-0028).
     let g = expect(
@@ -91,8 +96,12 @@ fn windows_11_only_on_arm64() {
         GuestArch::Aarch64,
         Some(22000),
     );
-    // Windows 11 x86 / x64 stays excluded (ADR-0027).
-    assert!(run(&windows_udf(10, 0, 26200, 9, o)).unwrap().is_none());
+    expect(
+        &windows_udf(10, 0, 26200, 9, o),
+        GuestOs::Windows11X64,
+        GuestArch::X86_64,
+        Some(26200),
+    );
     assert!(run(&windows_udf(10, 0, 22000, 0, o)).unwrap().is_none());
     // Windows 10 on ARM is not a guest.
     assert!(run(&windows_udf(10, 0, 19045, 12, o)).unwrap().is_none());

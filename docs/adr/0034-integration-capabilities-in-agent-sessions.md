@@ -30,7 +30,14 @@ ADR-0031's "manual use only" rule is replaced by this ADR.
 ## Implementation
 
 - `network.endpoints` (ADR-0033): implemented. The grant carries the endpoint names (`Grant::network_endpoints`); the agent asks for them with `session_request` (`network_endpoints` hint), the approval form offers the endpoints of the chosen VM unticked, the core refuses names that are not endpoints of the VM and drops the capability without endpoints; the supervisor applies the granted endpoints to the VM's network, resets their connections on revocation, expiry, end of the session and Emergency Stop, and never widens the network of a run once a session targeted it; the session page, the report (`network_endpoints`, `network` events) and the audit show what was granted and used. Evidence: `docs/verification/R6-06-guest-network.md`.
-- `share.read` / `share.write`, `clipboard`, `files.transfer`, `usb`: not implemented.
+- `share.read` / `share.write`, `clipboard`, `files.transfer`: product settings,
+  named grants, per-run channels, revocation and audit/report wiring are
+  implemented. The desktop has file transfer, bounded image copies and opt-in
+  focused text sync. Evidence and remaining installed-guest qualification:
+  `docs/verification/R6-07-lightvm-tools.md` (2026-10-16).
+- `usb`: grant/configuration types exist; host device capture/redirection and
+  verified detach are not implemented. This capability has no working USB
+  transport yet and must not be represented as qualified or complete.
 
 ## Required evidence
 

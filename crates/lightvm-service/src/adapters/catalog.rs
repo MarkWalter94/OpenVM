@@ -642,21 +642,9 @@ impl CatalogStore for SqliteStore {
 /// reserve for manifests and the minimal outcome, ROADMAP 8).
 const BASELINE_FREE_MARGIN: u64 = 1 << 30;
 
-/// Baselines of a TPM guest (ADR-0028, required evidence 3): refused until
-/// the swtpm state is part of the baseline.
-fn tpm_baseline_unsupported() -> PublicError {
-    PublicError::unsupported(
-        "baselines of VMs with a TPM (Windows 11) are not supported yet: the TPM state is not part of the baseline",
-    )
-    .with_detail("reason", "tpm_state")
-}
-
 /// Public error of a baseline operation, without paths.
 fn baseline_error(e: &st::StorageError) -> PublicError {
     match e {
-        st::StorageError::Unsupported(m) if *m == st::TPM_BASELINE_UNSUPPORTED => {
-            tpm_baseline_unsupported()
-        }
         st::StorageError::Referenced(r @ ("baseline_referenced" | "baseline_protected")) => {
             PublicError::state_conflict(if *r == "baseline_referenced" {
                 "the baseline is in use by the VM's current state"
@@ -784,7 +772,8 @@ impl SqliteStore {
             size_bytes: i
                 .disk
                 .allocated_bytes
-                .saturating_add(i.vars.as_ref().map_or(0, |v| v.size_bytes)),
+                .saturating_add(i.vars.as_ref().map_or(0, |v| v.size_bytes))
+                .saturating_add(i.tpm.as_ref().map_or(0, |t| t.size_bytes)),
             disk_sha256: parse_sha(i.disk.sha256.as_deref().unwrap_or_default())?,
             firmware_sha256: i
                 .vars
@@ -872,9 +861,6 @@ impl BaselinePort for SqliteStore {
         tool: Arc<dyn ImageTool>,
         cancel: CancelCheck,
     ) -> Result<StorageWork, PublicError> {
-        if vm.config.guest_os.needs_tpm() {
-            return Err(tpm_baseline_unsupported());
-        }
         let sid = self.sid(vm.id)?;
         let clean = self
             .cat
@@ -975,9 +961,6 @@ impl BaselinePort for SqliteStore {
         tool: Arc<dyn ImageTool>,
         cancel: CancelCheck,
     ) -> Result<StorageWork, PublicError> {
-        if vm.config.guest_os.needs_tpm() {
-            return Err(tpm_baseline_unsupported());
-        }
         let sid = self.sid(vm.id)?;
         let job = self
             .cat
@@ -1096,6 +1079,7 @@ impl BaselinePort for SqliteStore {
             .open_current_state(&sid, &run)
             .map_err(|e| baseline_error(&e))?;
         Ok(files.map(|f| StartDisks {
+            tpm_dir: f.tpm_dir,
             overlay: f.overlay,
             vars: f.vars,
             base: f.base,
@@ -1301,9 +1285,6 @@ impl BaselinePort for SqliteStore {
         tool: Arc<dyn ImageTool>,
         cancel: CancelCheck,
     ) -> Result<StorageWork, PublicError> {
-        if vm.config.guest_os.needs_tpm() {
-            return Err(tpm_baseline_unsupported());
-        }
         let sid = self.sid(vm.id)?;
         let s = self.snapshot_of(vm.id, snapshot)?;
         let job = self
@@ -1380,11 +1361,6 @@ impl SqliteStore {
     /// Why snapshots of this VM cannot be taken or reverted now, from the
     /// catalog: TPM guest, VM on an overlay of a baseline, no disk yet.
     fn snapshot_unavailable(&self, vm: &VmRecord) -> Option<&'static str> {
-        if vm.config.guest_os.needs_tpm() {
-            return Some(
-                "snapshots of VMs with a TPM (Windows 11) are not supported yet: the TPM state is not part of the snapshot",
-            );
-        }
         let sid = self.sid(vm.id).ok()?;
         let overlay = self
             .cat
@@ -1446,7 +1422,10 @@ impl SqliteStore {
             has_thumbnail: s.thumbnail_bytes > 0,
             disk_gib,
             config_revision: s.config_revision,
-            files_bytes: s.vars_bytes.saturating_add(s.thumbnail_bytes),
+            files_bytes: s
+                .vars_bytes
+                .saturating_add(s.thumbnail_bytes)
+                .saturating_add(s.tpm_bytes),
         })
     }
 
@@ -1522,7 +1501,16 @@ impl SqliteStore {
         let disk_bytes = std::fs::metadata(&disk).map_or(0, |m| m.len());
         let files = std::fs::metadata(&vars)
             .map_or(0, |m| m.len())
-            .saturating_add(thumbnail as u64);
+            .saturating_add(thumbnail as u64)
+            .saturating_add(if vm.config.guest_os.needs_tpm() {
+                std::fs::metadata(
+                    managed_abs(&root, st::CatalogLayout::tpm_state_dir(&vm.id).as_str())
+                        .join("tpm2-00.permall"),
+                )
+                .map_or(0, |m| m.len())
+            } else {
+                0
+            });
         if let Some(gib) = vm.config.limits.storage_budget_gib {
             let need = self.budget_usage(vm.id).saturating_add(files);
             if need > gib << 30 {

@@ -43,6 +43,19 @@ They are assets of a workspace crate, not Cargo packages: `cargo-deny` and `ligh
 
 `crates/guest-net` (ADR-0033) adds `smoltcp` 0.14.0 (`0BSD`; default features off, only `std`, `medium-ethernet`, `proto-ipv4`, `socket-tcp`, `auto-icmp-echo-reply`; `proto-dhcpv4`/`socket-udp`/`socket-dhcpv4` only for the tests) with its dependencies `managed` 0.8.0 (`0BSD`), `heapless` 0.9.3 and `hash32` 0.3.1 (`MIT OR Apache-2.0`), `byteorder` 1.5.0 (`Unlicense OR MIT`), `stable_deref_trait` 1.2.1 (`MIT OR Apache-2.0`). Need: a user-mode TCP/IP stack that terminates the guest's TCP so that each guest connection to an approved endpoint gets its own host connection (QEMU `guestfwd` cannot, R6-04 §1). No network features beyond what the stack implements; it opens host connections only through `tokio::net::TcpStream` to the endpoints the user approved. `cargo deny check` result in `docs/verification/R6-06-guest-network.md`.
 
+### Native file export and clipboard images (2026-10-16)
+
+The desktop enables `arboard` 3.6.1's `image-data` feature for explicit image
+copies, and directly uses `windows`/`windows-core` 0.62.2 (MIT OR Apache-2.0)
+for Windows OLE copy drag-out from its private Outbox cache. These bindings
+were already present transitively; no third-party drag implementation ships.
+An initial `drag` 2.1.1 experiment was removed because its transitive graph
+included the unmaintained `proc-macro-error` (RUSTSEC-2024-0370). The final
+lockfile passes `cargo deny --locked check` without advisory exceptions;
+duplicate-version warnings remain. The guest image codec itself uses Win32
+and Python standard-library code; Linux PNG conversion requires optional
+Pillow supplied by the guest system.
+
 ### Patched dependencies (2026-10-10)
 
 `egui-winit` 0.36.2 (MIT OR Apache-2.0) is used as a patched copy in `vendor/egui-winit` (`[patch.crates-io]`, `vendor/README.md`) so that the host clipboard is never read (F1-13). Rules: minimal, marked patches, the same version pinned in ADR-0014, original licence unchanged, reapplication and re-verification on every upgrade; the licence inventory counts the copy as the original dependency.

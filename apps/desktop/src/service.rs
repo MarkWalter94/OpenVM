@@ -1552,6 +1552,9 @@ fn fail_pending(s: &mut ServiceState, why: &str) {
     fail(&mut s.import, why);
     fail(&mut s.delete_media, why);
     fail(&mut s.create, why);
+    if let Some((_, _, status)) = &mut s.tools {
+        fail(status, why);
+    }
     fail(&mut s.delete, why);
     if let Some(r) = &mut s.console {
         fail(&mut r.status, why);

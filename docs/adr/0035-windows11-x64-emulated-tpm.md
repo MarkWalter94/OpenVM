@@ -30,3 +30,20 @@ The spike found that no upstream QEMU build for Windows can have a TPM (`meson.b
 - **A project-built QEMU for Windows** for the Windows 11 x64 profile: pinned upstream sources plus a minimal patch set that enables `CONFIG_TPM` on Windows and replaces the descriptor-passing data channel of the `emulator` backend with a second socket (`swtpm --server type=tcp` or a named pipe), with a per-run credential/port protection; reproducible build recipe in the repository, binaries hash-approved like the upstream build (this amends ADR-0010 for this profile only; the other profiles keep the upstream build).
 - **Project-built OVMF with Secure Boot and without SMM** (`SECURE_BOOT_ENABLE=TRUE`, `SMM_REQUIRE=FALSE`), Microsoft keys enrolled in the per-VM variable store, as for ADR-0028. Declared limit: without SMM the variable store is writable by code running in the guest kernel, so Secure Boot protects against unsigned boot components, not against a guest already compromised at ring 0.
 - `swtpm` built with Cygwin from pinned, signature-verified sources; the Cygwin runtime DLLs shipped with it (licences inventoried).
+
+## Implementation checkpoint (2026-10-16)
+
+The Windows 11 x64 profile, separate manifest-approved runtime bundle,
+supervised swtpm transport and per-VM state are implemented. Windows PE x64
+reports TPM 2.0 and Secure Boot enabled; a test NV value survives a cold
+restart. Helper death stops QEMU and the real service backend starts the
+profile repeatedly without changing the runtime of ordinary guests.
+Evidence: `R6-05` §13. No setup bypass or host TPM operation is used.
+
+Later the same day, baselines and user snapshots taken with the VM stopped
+started to carry the TPM permanent state together with disk and UEFI
+variables, under the existing operation journal; a running snapshot of a TPM
+guest is refused. In real Windows PE, both a snapshot revert and a baseline
+restore brought back the original TPM NV value (`R6-05` §14). Installed
+Windows 11 is still unqualified: a Setup installation stopped at its first
+guest-initiated reboot with a WHPX vCPU fault (`R6-05` §14).

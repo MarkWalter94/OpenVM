@@ -24,6 +24,9 @@ pub enum Command {
     ClipboardWrite {
         text: String,
     },
+    ClipboardImage {
+        request: FileRequest,
+    },
     UiTree {
         max_depth: u32,
         max_nodes: u32,
@@ -43,9 +46,22 @@ pub enum Command {
 pub use lightvm_proto::{ToolReply as Reply, ToolUiAction as UiAction, ToolUiNode as UiNode};
 
 impl Command {
+    fn admitted<T>(
+        &self,
+        permit: &Permit,
+        operation: impl FnOnce() -> io::Result<T>,
+    ) -> io::Result<T> {
+        if matches!(self, Self::Flush) {
+            permit.with_run(operation)
+        } else {
+            permit.with(self.feature(), None, operation)
+        }
+    }
     pub fn feature(&self) -> Feature {
         match self {
-            Self::ClipboardRead | Self::ClipboardWrite { .. } => Feature::Clipboard,
+            Self::ClipboardRead | Self::ClipboardWrite { .. } | Self::ClipboardImage { .. } => {
+                Feature::Clipboard
+            }
             Self::UiTree { .. } => Feature::UiInspect,
             Self::UiInvoke { .. } => Feature::UiAct,
             Self::File { .. } => Feature::FilesTransfer,
@@ -77,6 +93,7 @@ impl Command {
                 Err(invalid("UI value out of bounds"))
             }
             Self::File { request } => request.validate_guest(),
+            Self::ClipboardImage { request } => request.validate_clipboard_image(),
             _ => Ok(()),
         }
     }
@@ -87,6 +104,7 @@ impl From<lightvm_proto::ToolCall> for Command {
         match call {
             lightvm_proto::ToolCall::ClipboardRead => Self::ClipboardRead,
             lightvm_proto::ToolCall::ClipboardWrite { text } => Self::ClipboardWrite { text },
+            lightvm_proto::ToolCall::ClipboardImage { request } => Self::ClipboardImage { request },
             lightvm_proto::ToolCall::UiTree {
                 max_depth,
                 max_nodes,
@@ -133,6 +151,7 @@ struct Pending {
 
 #[derive(Debug, Default)]
 struct State {
+    epoch: AtomicU64,
     stopped: AtomicBool,
     connected: AtomicBool,
     stream: Mutex<Option<TcpStream>>,
@@ -144,6 +163,7 @@ pub struct Close {
 }
 impl Close {
     pub fn disconnect(&self) {
+        self.state.epoch.fetch_add(1, Ordering::SeqCst);
         self.state.connected.store(false, Ordering::SeqCst);
         if let Some(s) = self
             .state
@@ -202,7 +222,8 @@ impl ControlServer {
                         Err(_) => break,
                     };
                     let connected = (|| -> io::Result<()> {
-                        stream.set_nonblocking(false)?;
+                        let epoch = state.epoch.load(Ordering::SeqCst);
+                        stream.set_nonblocking(true)?;
                         stream.set_nodelay(true)?;
                         stream.set_read_timeout(Some(RPC_TIMEOUT))?;
                         stream.set_write_timeout(Some(RPC_TIMEOUT))?;
@@ -211,37 +232,52 @@ impl ControlServer {
                         if state.stopped.load(Ordering::SeqCst) {
                             return Ok(());
                         }
-                        let hello = protocol::read::<_, Hello>(&mut stream)?
+                        let cancelled = || {
+                            state.stopped.load(Ordering::SeqCst)
+                                || state.epoch.load(Ordering::SeqCst) != epoch
+                        };
+                        let mut auth = crate::wire_io::Wire::new(
+                            &mut stream,
+                            Instant::now() + RPC_TIMEOUT,
+                            cancelled,
+                        );
+                        let hello = protocol::read::<_, Hello>(&mut auth)?
                             .ok_or_else(|| invalid("hello required"))?;
                         if !secret.authenticate(&hello, &vm, &run) {
                             return Err(io::ErrorKind::PermissionDenied.into());
                         }
                         drop(hello);
                         protocol::write(
-                            &mut stream,
+                            &mut auth,
                             &crate::server::Welcome {
                                 version: protocol::VERSION,
                             },
                         )?;
                         state.connected.store(true, Ordering::SeqCst);
-                        while !state.stopped.load(Ordering::SeqCst) {
+                        while !cancelled() && state.connected.load(Ordering::SeqCst) {
                             let p = match rx.recv_timeout(Duration::from_millis(50)) {
                                 Ok(p) => p,
                                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
                                 Err(_) => break,
                             };
-                            let result = p.permit.with(p.request.command.feature(), None, || {
+                            let result = p.request.command.admitted(&p.permit, || {
                                 if Instant::now() >= p.deadline {
                                     return Err(io::ErrorKind::TimedOut.into());
                                 }
-                                protocol::write(&mut stream, &p.request)?;
-                                let response: Response = protocol::read(&mut stream)?
+                                let mut wire =
+                                    crate::wire_io::Wire::new(&mut stream, p.deadline, cancelled);
+                                protocol::write(&mut wire, &p.request)?;
+                                let response: Response = protocol::read(&mut wire)?
                                     .ok_or_else(|| invalid("guest disconnected"))?;
                                 if response.id != p.request.id {
                                     return Err(invalid("wrong reply id"));
                                 }
                                 response.reply.validate()?;
-                                if !matches!(p.request.command, Command::Flush) {
+                                if matches!(p.request.command, Command::Flush) {
+                                    if !matches!(response.reply, Reply::Ok | Reply::Error { .. }) {
+                                        return Err(invalid("invalid flush reply"));
+                                    }
+                                } else {
                                     response.reply.validate_for(
                                         &p.request.command.as_call().expect("non-flush command"),
                                     )?;
@@ -296,7 +332,7 @@ impl ControlServer {
             return Err(io::ErrorKind::NotConnected.into());
         }
         let permit = self.gate.permit();
-        permit.with(command.feature(), None, || Ok(()))?;
+        command.admitted(&permit, || Ok(()))?;
         let (tx, rx) = mpsc::sync_channel(1);
         let request = Request {
             id: self.sequence.fetch_add(1, Ordering::SeqCst),
@@ -330,6 +366,9 @@ impl std::fmt::Debug for Command {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::File { request } => f.debug_tuple("File").field(request).finish(),
+            Self::ClipboardImage { request } => {
+                f.debug_tuple("ClipboardImage").field(request).finish()
+            }
             _ => f.write_str(match self {
                 Self::ClipboardRead => "ClipboardRead",
                 Self::ClipboardWrite { .. } => "ClipboardWrite(<redacted>)",
@@ -337,6 +376,7 @@ impl std::fmt::Debug for Command {
                 Self::UiInvoke { .. } => "UiInvoke(<redacted>)",
                 Self::Flush => "Flush",
                 Self::File { .. } => unreachable!(),
+                Self::ClipboardImage { .. } => unreachable!(),
             }),
         }
     }
@@ -347,6 +387,7 @@ impl Command {
         Some(match self.clone() {
             Command::ClipboardRead => T::ClipboardRead,
             Command::ClipboardWrite { text } => T::ClipboardWrite { text },
+            Command::ClipboardImage { request } => T::ClipboardImage { request },
             Command::UiTree {
                 max_depth,
                 max_nodes,

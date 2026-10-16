@@ -695,3 +695,88 @@ fn vm_deletion_removes_its_snapshots() {
     assert!(!dir.path().join("vms").join(vm.id.to_string()).exists());
     assert_eq!(cat.read(|tx| tx.snapshot_count(&vm.id)).unwrap(), 0);
 }
+
+fn tpm_vm(cat: &mut Catalog, root: &Path) -> (Vm, PathBuf) {
+    let id = cat
+        .with_tx(|tx| {
+            tx.insert_vm(&vm_storage::NewVm {
+                name: "tpm".into(),
+                guest_os: "windows11_x64".into(),
+                config_version: 1,
+                config: serde_json::json!({}),
+            })
+        })
+        .unwrap();
+    let vm = Vm {
+        id,
+        root: root.into(),
+    };
+    std::fs::create_dir_all(vm.disk().parent().unwrap()).unwrap();
+    FakeDisk::new().save(&vm.disk());
+    std::fs::create_dir_all(vm.vars().parent().unwrap()).unwrap();
+    std::fs::write(vm.vars(), b"vars v1").unwrap();
+    let dir = cat
+        .layout()
+        .ensure_private_dir(&vm_storage::CatalogLayout::tpm_state_dir(&id))
+        .unwrap();
+    let tpm = dir.join("tpm2-00.permall");
+    std::fs::write(&tpm, b"TPM v1").unwrap();
+    (vm, tpm)
+}
+
+#[test]
+fn tpm_snapshots_are_offline_and_restore_identity_after_interruption() {
+    for fault in [
+        None,
+        Some(FaultPoint::SnapshotBeforeSettle),
+        Some(FaultPoint::SnapshotRevertVarsRemoved),
+        Some(FaultPoint::SnapshotRevertTpmRemoved),
+        Some(FaultPoint::SnapshotAfterPublish),
+    ] {
+        let dir = common::tempdir();
+        let mut cat = Catalog::open(dir.path()).unwrap();
+        let (vm, tpm) = tpm_vm(&mut cat, dir.path());
+        assert!(begin_take(&mut cat, &vm, "live", true).is_err());
+        let id = take(&mut cat, &vm, "machine");
+        std::fs::write(&tpm, b"TPM v2").unwrap();
+        std::fs::write(vm.vars(), b"vars v2").unwrap();
+        FakeDisk::guest_write(&vm.disk());
+        let op = begin_revert(&mut cat, &vm, id).unwrap();
+        FakeDisk::apply(op.disk(), op.tag());
+        if let Some(point) = fault {
+            cat.inject_fault(point, FaultAction::Crash);
+        }
+        let result = cat.settle_snapshot(&op);
+        if fault.is_some() {
+            assert!(matches!(result, Err(StorageError::InjectedCrash(_))));
+        } else {
+            assert_eq!(result.unwrap(), Settled::Done);
+        }
+        drop(cat);
+        let mut cat = Catalog::open(dir.path()).unwrap();
+        assert!(cat.open_intents().unwrap().is_empty());
+        assert_eq!(std::fs::read(&tpm).unwrap(), b"TPM v1");
+        assert_eq!(std::fs::read(vm.vars()).unwrap(), b"vars v1");
+        delete(&mut cat, &vm, id);
+    }
+}
+
+#[test]
+fn altered_snapshot_tpm_is_refused_before_disk_revert() {
+    let dir = common::tempdir();
+    let mut cat = Catalog::open(dir.path()).unwrap();
+    let (vm, tpm) = tpm_vm(&mut cat, dir.path());
+    let id = take(&mut cat, &vm, "machine");
+    let snap = cat
+        .layout()
+        .resolve(&vm_storage::CatalogLayout::snapshot_tpm(&vm.id, &id))
+        .unwrap();
+    let mut perms = std::fs::metadata(&snap).unwrap().permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    perms.set_readonly(false);
+    std::fs::set_permissions(&snap, perms).unwrap();
+    std::fs::write(snap, b"other identity").unwrap();
+    std::fs::write(&tpm, b"TPM v2").unwrap();
+    assert!(begin_revert(&mut cat, &vm, id).is_err());
+    assert_eq!(std::fs::read(&tpm).unwrap(), b"TPM v2");
+}

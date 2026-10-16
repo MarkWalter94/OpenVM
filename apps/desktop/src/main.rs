@@ -245,7 +245,7 @@ impl eframe::App for DesktopApp {
         self.ui.count_discarded_pastes(outcome.discarded);
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let now = Instant::now();
         if let Some(prev) = self.last_frame.replace(now) {
             let ms = now.duration_since(prev).as_secs_f64() * 1000.0;
@@ -264,6 +264,11 @@ impl eframe::App for DesktopApp {
             self.first_frame = Some(self.started.elapsed());
         }
         self.ui.ui(ui);
+        if let Some(path) = self.ui.take_file_drag()
+            && let Err(error) = lightvm_desktop::file_drag::start(frame, path)
+        {
+            self.ui.file_drag_failed(error);
+        }
         if self.smoke.is_some() {
             for c in ui.ctx().repaint_causes() {
                 *self.repaint_causes.entry(c.to_string()).or_default() += 1;

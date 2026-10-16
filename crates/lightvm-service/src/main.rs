@@ -62,7 +62,7 @@ use lightvm_service::supervisor::{Backend, ParentLossPolicy};
 use lightvm_service::{ServiceConfig, start};
 
 const USAGE: &str = "usage: lightvm-service --catalog <dir> [--qemu-dir <dir>] \
-[--firmware-dir <dir>] [--storage-helper-dir <dir>] [--swtpm <file>] [--approved-hashes <file>] [--audit-log <file>] [--runtime-dir <dir>] [--parent-watch stdin|none] \
+[--firmware-dir <dir>] [--win11-dir <dir>] [--storage-helper-dir <dir>] [--swtpm <file>] [--approved-hashes <file>] [--audit-log <file>] [--runtime-dir <dir>] [--parent-watch stdin|none] \
 [--parent-loss-policy kill-vms|shutdown-vms|keep-vms] [--parent-loss-powerdown-s N]
        lightvm-service --emergency-stop --catalog <dir>
        lightvm-service --move-catalog --catalog <dir> --to <new dir> [--keep-source]";
@@ -77,6 +77,7 @@ struct Args {
     firmware_dir: Option<PathBuf>,
     storage_helper_dir: Option<PathBuf>,
     swtpm: Option<PathBuf>,
+    win11_dir: Option<PathBuf>,
     approved_hashes: Option<PathBuf>,
     audit_log: Option<PathBuf>,
     runtime_dir: Option<PathBuf>,
@@ -95,6 +96,7 @@ fn parse_args() -> Result<Args, String> {
     let mut firmware_dir = None;
     let mut storage_helper_dir = None;
     let mut swtpm = None;
+    let mut win11_dir = None;
     let mut approved_hashes = None;
     let mut audit_log = None;
     let mut runtime_dir = None;
@@ -116,6 +118,7 @@ fn parse_args() -> Result<Args, String> {
             "--firmware-dir" => firmware_dir = Some(PathBuf::from(value()?)),
             "--storage-helper-dir" => storage_helper_dir = Some(PathBuf::from(value()?)),
             "--swtpm" => swtpm = Some(PathBuf::from(value()?)),
+            "--win11-dir" => win11_dir = Some(PathBuf::from(value()?)),
             "--approved-hashes" => approved_hashes = Some(PathBuf::from(value()?)),
             "--audit-log" => audit_log = Some(PathBuf::from(value()?)),
             "--runtime-dir" => runtime_dir = Some(PathBuf::from(value()?)),
@@ -176,6 +179,7 @@ fn parse_args() -> Result<Args, String> {
         firmware_dir,
         storage_helper_dir,
         swtpm,
+        win11_dir,
         approved_hashes,
         audit_log,
         runtime_dir,
@@ -305,6 +309,7 @@ fn configure_aarch64_and_approvals(setup: &mut QemuSetup, args: &Args) -> Result
         .clone()
         .or_else(|| state.as_ref().map(|d| d.join("firmware")));
     setup.swtpm.clone_from(&args.swtpm);
+    setup.win11_dir.clone_from(&args.win11_dir);
     // Storage helper of the VMware import (ADR-0030): optional, separate
     // GPL image built by packaging/storage-helper.
     setup.storage_helper_dir = args

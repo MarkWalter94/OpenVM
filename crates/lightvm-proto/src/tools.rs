@@ -16,6 +16,10 @@ pub enum ToolCall {
     ClipboardWrite {
         text: String,
     },
+    /// Bounded RGBA image stream, independent of the file-transfer grant.
+    ClipboardImage {
+        request: crate::ToolFileRequest,
+    },
     UiTree {
         max_depth: u32,
         max_nodes: u32,
@@ -34,7 +38,9 @@ pub enum ToolCall {
 impl ToolCall {
     pub fn capability(&self) -> Capability {
         match self {
-            Self::ClipboardRead | Self::ClipboardWrite { .. } => Capability::Clipboard,
+            Self::ClipboardRead | Self::ClipboardWrite { .. } | Self::ClipboardImage { .. } => {
+                Capability::Clipboard
+            }
             Self::UiTree { .. } => Capability::UiInspect,
             Self::UiInvoke { .. } => Capability::UiAct,
             Self::File { .. } => Capability::FilesTransfer,
@@ -70,6 +76,9 @@ pub enum ToolReply {
     Ok,
     Clipboard {
         text: String,
+    },
+    ClipboardImage {
+        reply: crate::ToolFileReply,
     },
     Tree {
         tree: u64,
@@ -258,7 +267,7 @@ impl ToolReply {
                 }
                 Ok(())
             }
-            Self::File { reply } => reply.validate(),
+            Self::File { reply } | Self::ClipboardImage { reply } => reply.validate(),
             Self::Error { code }
                 if code.is_empty()
                     || code.len() > 64
@@ -299,26 +308,32 @@ impl ToolReply {
                         depth <= *max_depth
                     })
             }
-            (ToolCall::File { request }, Self::File { reply }) => match (request, reply) {
-                (_, crate::ToolFileReply::Error { .. }) => true,
-                (crate::ToolFileRequest::List { .. }, crate::ToolFileReply::Entries { .. }) => true,
-                (
-                    crate::ToolFileRequest::Read { offset, length, .. },
-                    crate::ToolFileReply::Data {
-                        offset: got, data, ..
-                    },
-                ) => offset == got && data.len() / 2 <= *length as usize,
-                (crate::ToolFileRequest::Begin { .. }, crate::ToolFileReply::Transfer { .. }) => {
-                    true
+            (ToolCall::File { request }, Self::File { reply })
+            | (ToolCall::ClipboardImage { request }, Self::ClipboardImage { reply }) => {
+                match (request, reply) {
+                    (_, crate::ToolFileReply::Error { .. }) => true,
+                    (crate::ToolFileRequest::List { .. }, crate::ToolFileReply::Entries { .. }) => {
+                        true
+                    }
+                    (
+                        crate::ToolFileRequest::Read { offset, length, .. },
+                        crate::ToolFileReply::Data {
+                            offset: got, data, ..
+                        },
+                    ) => offset == got && data.len() / 2 <= *length as usize,
+                    (
+                        crate::ToolFileRequest::Begin { .. },
+                        crate::ToolFileReply::Transfer { .. },
+                    ) => true,
+                    (
+                        crate::ToolFileRequest::Write { .. }
+                        | crate::ToolFileRequest::Commit { .. }
+                        | crate::ToolFileRequest::Cancel { .. },
+                        crate::ToolFileReply::Ok,
+                    ) => true,
+                    _ => false,
                 }
-                (
-                    crate::ToolFileRequest::Write { .. }
-                    | crate::ToolFileRequest::Commit { .. }
-                    | crate::ToolFileRequest::Cancel { .. },
-                    crate::ToolFileReply::Ok,
-                ) => true,
-                _ => false,
-            },
+            }
             _ => false,
         };
         if valid {
@@ -354,6 +369,7 @@ impl std::fmt::Debug for ToolReply {
                 .field("truncated", truncated)
                 .finish(),
             Self::File { reply } => f.debug_tuple("File").field(reply).finish(),
+            Self::ClipboardImage { reply } => f.debug_tuple("ClipboardImage").field(reply).finish(),
             Self::Error { code } => f.debug_tuple("Error").field(code).finish(),
         }
     }

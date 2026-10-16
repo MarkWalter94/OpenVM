@@ -75,6 +75,7 @@ pub mod screenshot;
 pub mod storage_guard;
 pub mod storage_helper;
 mod sys;
+mod tpm_transport;
 pub mod validate;
 pub mod vcpu_fault;
 

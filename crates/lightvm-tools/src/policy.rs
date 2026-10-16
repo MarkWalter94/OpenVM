@@ -107,6 +107,11 @@ impl Gate {
 }
 
 impl Permit {
+    /// Supervisor-only maintenance of the current run. This admits no public
+    /// capability; it still rejects stale generations, revoked or expired runs.
+    pub fn with_run<T>(&self, operation: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+        self.checked(None, None, operation)
+    }
     /// Serializes admission against grant replacement. Revocation rejects
     /// new admissions without waiting for a syscall already in progress.
     pub fn with<T>(
@@ -115,11 +120,20 @@ impl Permit {
         share: Option<(&str, bool)>,
         operation: impl FnOnce() -> io::Result<T>,
     ) -> io::Result<T> {
+        self.checked(Some(feature), share, operation)
+    }
+
+    fn checked<T>(
+        &self,
+        feature: Option<Feature>,
+        share: Option<(&str, bool)>,
+        operation: impl FnOnce() -> io::Result<T>,
+    ) -> io::Result<T> {
         let s = self.gate.state.lock().unwrap_or_else(|e| e.into_inner());
         if self.revoked()
             || s.generation != self.generation
             || s.grant.expires.is_some_and(|t| Instant::now() >= t)
-            || !s.grant.features.contains(&feature)
+            || feature.is_some_and(|feature| !s.grant.features.contains(&feature))
             || share.is_some_and(|(name, write)| {
                 !s.grant.shares.get(name).is_some_and(|w| !write || *w)
             })

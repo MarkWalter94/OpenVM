@@ -155,6 +155,19 @@ fn public(_: std::io::Error) -> PublicError {
 }
 
 impl ToolsRun {
+    /// Internal maintenance, never exposed as a guest or agent capability.
+    /// Acknowledges a flush, not a freeze or application-consistent snapshot.
+    pub fn flush_before_snapshot(&self) -> Result<(), PublicError> {
+        match self.control.call(lightvm_tools::control::Command::Flush) {
+            Ok(lightvm_proto::ToolReply::Ok) => Ok(()),
+            Ok(lightvm_proto::ToolReply::Error { code }) => Err(PublicError::state_conflict(
+                "Guest flush failed; cancel transfers and check guest Tools permissions before taking the snapshot",
+            ).with_detail("guest_code", code)),
+            _ => Err(PublicError::state_conflict(
+                "Guest Tools did not confirm a filesystem flush; the snapshot was not taken",
+            )),
+        }
+    }
     pub fn load_binaries() -> Result<Vec<(&'static str, Vec<u8>)>, PublicError> {
         use sha2::{Digest, Sha256};
         use std::io::Read;
@@ -249,7 +262,7 @@ impl ToolsRun {
                 .iter()
                 .map(|(name, bytes)| (*name, bytes.as_slice())),
         );
-        let iso = lightvm_fixture::iso9660::write_iso("LIGHTVM_TOOLS", &iso_files);
+        let iso = lightvm_fixture::iso9660::write_iso_level2("LIGHTVM_TOOLS", &iso_files);
         std::fs::write(private.join("tools.iso"), iso).map_err(public)?;
         let files = FileServer::start(
             vm.to_string(),

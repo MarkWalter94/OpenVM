@@ -190,7 +190,14 @@ fn full_flow_creates_the_vm() {
         .filter(|o| o.is_windows() && !o.is_aarch64())
     {
         assert!(
-            !toggled(&h, lightvm_desktop::dashboard::os_label(os)),
+            !toggled(
+                &h,
+                if os == GuestOs::Windows11X64 {
+                    "Windows 11 (64-bit)"
+                } else {
+                    lightvm_desktop::dashboard::os_label(os)
+                }
+            ),
             "{os:?}"
         );
     }
@@ -436,7 +443,14 @@ fn windows_media_prefills_the_system_step() {
         .into_iter()
         .filter(|o| o.is_windows() && !o.is_aarch64())
     {
-        h.get_by_role_and_label(Role::RadioButton, lightvm_desktop::dashboard::os_label(os));
+        h.get_by_role_and_label(
+            Role::RadioButton,
+            if os == GuestOs::Windows11X64 {
+                "Windows 11 (64-bit)"
+            } else {
+                lightvm_desktop::dashboard::os_label(os)
+            },
+        );
     }
     // An x86 host does not offer Windows 11 ARM64.
     assert!(
@@ -447,9 +461,7 @@ fn windows_media_prefills_the_system_step() {
         Role::RadioButton,
         "Ubuntu LTS (x86-64), the reference system",
     );
-    h.get_by_label(
-        "Windows guests run offline, without a network adapter. Windows 8 and Windows 11 are not supported.",
-    );
+    h.get_by_label(lightvm_desktop::wizard::X86_HOST_NOTE);
     assert!(toggled(&h, "Windows 10"));
     assert!(toggled(&h, "UEFI"), "x64 media: UEFI by default");
     assert!(!toggled(&h, "Legacy BIOS (SeaBIOS)"));

@@ -11,8 +11,8 @@
 //!   root of the ISO 9660 / Joliet hierarchy.
 //! - Linux: `.disk/info`.
 //!
-//! Windows 11 (build 22000 and later) is a guest only on ARM64 media
-//! (ADR-0028). Windows 8 (6.2), Windows 11 x86/x64, Windows 10 on ARM and
+//! Windows 11 (build 22000 and later) supports x64 and ARM64 media
+//! (ADR-0035/0028). Windows 8 (6.2), Windows 11 x86, Windows 10 on ARM and
 //! server editions are recognized and reported as `Ok(None)`: they are not
 //! supported guests. The result is a
 //! hint for the wizard, never a guarantee.
@@ -232,11 +232,11 @@ fn windows_decision(info: &wim::ImageInfo) -> Decision {
         (6, 3) => (GuestOs::Windows81, x86_arch(info.arch)),
         (10, 0) => match info.build {
             Some(b) if b < WINDOWS_11_FIRST_BUILD => (GuestOs::Windows10, x86_arch(info.arch)),
-            // Windows 11 only on ARM64 (ADR-0028); x86 Windows 11 stays
-            // excluded (ADR-0027), and so does an unknown architecture.
+            // Windows 11 requires a known 64-bit architecture (ADR-0028/0035).
             Some(_) if info.arch == Some(WIM_ARCH_ARM64) => {
                 (GuestOs::Windows11Arm64, Ok(Some(GuestArch::Aarch64)))
             }
+            Some(_) if info.arch == Some(9) => (GuestOs::Windows11X64, Ok(Some(GuestArch::X86_64))),
             _ => return Decision::Unsupported,
         },
         // 6.2 is Windows 8; anything else is not a supported desktop guest.
@@ -386,10 +386,10 @@ mod tests {
             found(windows_decision(&image(&xml(10, 0, 19045, 9)))).os,
             GuestOs::Windows10
         );
-        assert!(matches!(
-            windows_decision(&image(&xml(10, 0, 22631, 9))),
-            Decision::Unsupported
-        ));
+        assert_eq!(
+            found(windows_decision(&image(&xml(10, 0, 22631, 9)))).os,
+            GuestOs::Windows11X64
+        );
         assert!(matches!(
             windows_decision(&image(&xml(6, 2, 9200, 9))),
             Decision::Unsupported
@@ -407,7 +407,7 @@ mod tests {
             found(windows_decision(&image(&xml(10, 0, 22000, 12)))).os,
             GuestOs::Windows11Arm64
         );
-        // Windows 11 x86 / x64 and Windows 11 with unknown architecture.
+        // Windows 11 x86 and Windows 11 with unknown architecture.
         assert!(matches!(
             windows_decision(&image(&xml(10, 0, 22000, 0))),
             Decision::Unsupported

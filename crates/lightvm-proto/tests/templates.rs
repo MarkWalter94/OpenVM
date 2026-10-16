@@ -1,6 +1,6 @@
 //! Standard resource templates per guest (ADR-0027).
 
-use lightvm_proto::{GuestArch, GuestOs};
+use lightvm_proto::{Firmware, GuestArch, GuestOs};
 
 const ARCHES: [Option<GuestArch>; 4] = [
     None,
@@ -67,7 +67,10 @@ fn windows_11_arm64_template_and_profile() {
     assert_eq!((os.min_memory_mib(), os.min_disk_gib()), (4096, 32));
     assert_eq!(os.max_memory_mib(Some(GuestArch::Aarch64)), None);
     assert!(os.is_windows() && os.is_aarch64() && os.needs_tpm());
-    for other in GuestOs::ALL.into_iter().filter(|o| *o != os) {
+    for other in GuestOs::ALL
+        .into_iter()
+        .filter(|o| *o != os && *o != GuestOs::Windows11X64)
+    {
         assert!(!other.is_aarch64() && !other.needs_tpm(), "{other:?}");
         // Exactly one architecture family runs on any host.
         assert_ne!(other.runs_on_this_host(), os.runs_on_this_host());
@@ -76,6 +79,15 @@ fn windows_11_arm64_template_and_profile() {
         os.runs_on_this_host(),
         cfg!(all(target_os = "macos", target_arch = "aarch64"))
     );
+}
+
+#[test]
+fn windows_11_x64_requires_uefi_tpm_and_windows_host() {
+    let os = GuestOs::Windows11X64;
+    assert!(os.is_windows() && os.needs_tpm() && !os.is_aarch64());
+    assert_eq!(os.allowed_firmware(), &[Firmware::Uefi]);
+    assert_eq!((os.min_memory_mib(), os.min_disk_gib()), (4096, 64));
+    assert_eq!(os.runs_on_this_host(), cfg!(windows));
 }
 
 #[test]

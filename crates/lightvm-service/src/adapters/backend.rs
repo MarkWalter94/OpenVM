@@ -221,7 +221,8 @@ pub fn resolve_qemu_layout(dir: &Path) -> Result<QemuLayout, PublicError> {
 }
 
 /// Kinds of approved hashes a development approvals file can extend.
-const APPROVAL_KINDS: [&str; 5] = [
+const APPROVAL_KINDS: [&str; 6] = [
+    "win11-bundle",
     "qemu-system",
     "qemu-img",
     "firmware",
@@ -266,6 +267,7 @@ pub fn load_approvals(probe: &mut ProbeConfig, text: &str) -> Result<usize, Stri
     }
     for (kind, hash) in add {
         let list = match kind {
+            "win11-bundle" => &mut probe.approved_win11_bundle_sha256,
             "qemu-system" => &mut probe.approved_qemu_system_sha256,
             "qemu-img" => &mut probe.approved_qemu_img_sha256,
             "firmware" => &mut probe.approved_firmware_sha256,
@@ -282,6 +284,9 @@ pub fn load_approvals(probe: &mut ProbeConfig, text: &str) -> Result<usize, Stri
 /// Configuration of the real QEMU backend.
 #[derive(Debug, Clone)]
 pub struct QemuSetup {
+    /// Separate project QEMU/TPM/firmware bundle for Windows 11 x64.
+    /// Default: `win11` below the ordinary QEMU directory.
+    pub win11_dir: Option<PathBuf>,
     /// Directory of the approved QEMU distribution (binaries and `share/`).
     pub qemu_dir: PathBuf,
     /// Catalog root (`runs/` directory and managed media copies).
@@ -326,6 +331,7 @@ impl QemuSetup {
     /// Default values for a distribution and a catalog.
     pub fn new(qemu_dir: PathBuf, catalog_root: PathBuf, private_root: PathBuf) -> Self {
         Self {
+            win11_dir: None,
             qemu_dir,
             catalog_root,
             private_root,
@@ -1124,6 +1130,35 @@ impl std::fmt::Debug for QemuVmBackend {
 }
 
 impl QemuVmBackend {
+    /// A fresh, isolated probe of the project bundle. Ordinary profiles keep
+    /// using the upstream capabilities, binary and firmware.
+    pub fn windows11_capabilities(
+        &self,
+    ) -> Result<(HostCapabilities, qemu_backend::storage_guard::StorageGuards), PublicError> {
+        let root = self
+            .setup
+            .win11_dir
+            .clone()
+            .unwrap_or_else(|| self.setup.qemu_dir.join("win11"));
+        let bundle = super::win11::open(&root, &self.setup.probe.approved_win11_bundle_sha256)?;
+        let mut cfg = self.setup.probe.clone();
+        cfg.approved_qemu_system_sha256
+            .push(bundle.hashes["qemu/qemu-system-x86_64.exe"].clone());
+        cfg.approved_swtpm_sha256
+            .push(bundle.hashes["swtpm/swtpm.exe"].clone());
+        cfg.swtpm = Some(root.join("swtpm/swtpm.exe"));
+        let exe = ManagedPath::verify(root.join("qemu/qemu-system-x86_64.exe"))
+            .map_err(|e| public(&e))?;
+        let mut caps = probe_host(&exe, &self.caps.qemu_img, &cfg).map_err(|e| public(&e))?;
+        caps.firmware = Some(qemu_backend::probe::FirmwareInfo {
+            code: bundle.root.join("firmware/lightvm-x64-code.fd"),
+            code_sha256: bundle.hashes["firmware/lightvm-x64-code.fd"].clone(),
+            vars_template: bundle.root.join("firmware/lightvm-x64-vars-win.fd"),
+            vars_sha256: bundle.hashes["firmware/lightvm-x64-vars-win.fd"].clone(),
+            matches_verified: true,
+        });
+        Ok((caps, bundle.guard))
+    }
     /// F6: before every start the files the probe depends on (QEMU binaries,
     /// firmware) are hashed again; if they changed since the probe (QEMU
     /// updated or replaced, firmware changed while the service runs) the
@@ -1170,10 +1205,11 @@ impl QemuVmBackend {
     /// what is missing.
     fn ensure_profile_probe(
         &mut self,
+        caps: &mut HostCapabilities,
         profile: &DeviceProfile,
         machine: &MachineType,
     ) -> Result<(), PublicError> {
-        let missing = self.caps.missing_devices(profile);
+        let missing = caps.missing_devices(profile);
         if !missing.is_empty() {
             return Err(PublicError::unsupported(format!(
                 "the QEMU binary lacks devices of the hardware profile of this VM: {}",
@@ -1187,15 +1223,15 @@ impl QemuVmBackend {
         }
         match profile.firmware() {
             FirmwareKind::SeaBios => {
-                verified_seabios(&self.caps)?;
+                verified_seabios(caps)?;
             }
             FirmwareKind::UefiAarch64 => {
-                verified_aarch64_firmware(&self.caps)?;
+                verified_aarch64_firmware(caps)?;
             }
             FirmwareKind::Uefi => {}
         }
         if profile.needs_tpm() {
-            verified_swtpm(&self.caps)?;
+            verified_swtpm(caps)?;
         }
         let cpu = cpu_for(profile, self.cpu.as_ref())?;
         let target = profile.probe_target();
@@ -1203,21 +1239,20 @@ impl QemuVmBackend {
         // verdict on the host: it is retried at the next start.
         if target != qemu_backend::ProbeTarget::host_reference()
             && matches!(
-                self.caps.accelerator_for(target),
+                caps.accelerator_for(target),
                 AcceleratorStatus::Unavailable {
                     reason: UnavailableReason::ProbeFailed { .. },
                     ..
                 }
             )
         {
-            self.caps
-                .record_accelerator(target, AcceleratorStatus::NotProbed);
+            caps.record_accelerator(target, AcceleratorStatus::NotProbed);
         }
         let probe_dir = self.setup.private_root.join("probe");
         std::fs::create_dir_all(&probe_dir).map_err(|e| io_public("probe directory", &e))?;
         let probe_dir = ManagedPath::verify(probe_dir).map_err(|e| public(&e))?;
         let status = self.rt.block_on(probe_accelerator_for(
-            &mut self.caps,
+            caps,
             Accelerator::for_current_host(),
             profile,
             machine,
@@ -1400,11 +1435,12 @@ impl QemuVmBackend {
     /// by the probe (SeaBIOS).
     fn firmware_files(
         &self,
+        caps: &HostCapabilities,
         kind: FirmwareKind,
     ) -> Result<(Option<ManagedPath>, Option<ManagedPath>), PublicError> {
         match kind {
             FirmwareKind::Uefi => {
-                let fw = self.caps.firmware.as_ref().ok_or_else(|| {
+                let fw = caps.firmware.as_ref().ok_or_else(|| {
                     PublicError::unsupported(
                         "UEFI firmware (edk2-x86_64-code.fd) not found in the QEMU distribution: reinstall the approved QEMU build",
                     )
@@ -1413,11 +1449,11 @@ impl QemuVmBackend {
                 Ok((Some(code), None))
             }
             FirmwareKind::SeaBios => {
-                let path = verified_seabios(&self.caps)?;
+                let path = verified_seabios(caps)?;
                 Ok((None, Some(path)))
             }
             FirmwareKind::UefiAarch64 => {
-                let fw = verified_aarch64_firmware(&self.caps)?;
+                let fw = verified_aarch64_firmware(caps)?;
                 let code = ManagedPath::verify(fw.code.path.clone()).map_err(|e| public(&e))?;
                 Ok((Some(code), None))
             }
@@ -1427,15 +1463,16 @@ impl QemuVmBackend {
     /// Template of the per-VM UEFI variables of `profile`: OVMF's for the
     /// x86 UEFI profiles, the Secure Boot template with the Windows db for
     /// Windows 11 ARM64 (ADR-0028).
-    fn vars_template(&self, profile: &DeviceProfile) -> Result<Option<PathBuf>, PublicError> {
+    fn vars_template(
+        &self,
+        caps: &HostCapabilities,
+        profile: &DeviceProfile,
+    ) -> Result<Option<PathBuf>, PublicError> {
         Ok(match profile.firmware() {
-            FirmwareKind::Uefi => self.caps.firmware.as_ref().map(|f| f.vars_template.clone()),
-            FirmwareKind::UefiAarch64 => Some(
-                verified_aarch64_firmware(&self.caps)?
-                    .vars_windows
-                    .path
-                    .clone(),
-            ),
+            FirmwareKind::Uefi => caps.firmware.as_ref().map(|f| f.vars_template.clone()),
+            FirmwareKind::UefiAarch64 => {
+                Some(verified_aarch64_firmware(caps)?.vars_windows.path.clone())
+            }
             FirmwareKind::SeaBios => None,
         })
     }
@@ -1444,18 +1481,27 @@ impl QemuVmBackend {
     /// with mode 0700) for a TPM profile; `(None, None)` otherwise.
     fn tpm_files(
         &self,
+        caps: &HostCapabilities,
         vm: &VmRecord,
         profile: &DeviceProfile,
+        current: Option<&StartDisks>,
     ) -> Result<(Option<ManagedPath>, Option<ManagedPath>), PublicError> {
         if !profile.needs_tpm() {
             return Ok((None, None));
         }
-        let swtpm = verified_swtpm(&self.caps)?;
+        let swtpm = verified_swtpm(caps)?;
         let swtpm = ManagedPath::verify(swtpm.path.clone()).map_err(|e| public(&e))?;
-        let dir = managed_abs(
-            &self.setup.catalog_root,
-            CatalogLayout::tpm_state_dir(&vm.id).as_str(),
-        );
+        let dir = if let Some(current) = current {
+            current
+                .tpm_dir
+                .clone()
+                .ok_or_else(|| PublicError::state_conflict("restored VM has no TPM state"))?
+        } else {
+            managed_abs(
+                &self.setup.catalog_root,
+                CatalogLayout::tpm_state_dir(&vm.id).as_str(),
+            )
+        };
         let dir = ManagedPath::verify(dir).map_err(|e| public(&e))?;
         prepare::restrict_to_current_user(&dir).map_err(|e| public(&e))?;
         Ok((Some(swtpm), Some(dir)))
@@ -1463,6 +1509,7 @@ impl QemuVmBackend {
 
     fn prepare(
         &self,
+        caps: &HostCapabilities,
         vm: &VmRecord,
         run_id: RunId,
         media: &[VerifiedMedia],
@@ -1470,7 +1517,7 @@ impl QemuVmBackend {
         profile: &DeviceProfile,
     ) -> Result<RunPaths, PublicError> {
         let uefi = profile.firmware().has_vars();
-        let (firmware_code, seabios) = self.firmware_files(profile.firmware())?;
+        let (firmware_code, seabios) = self.firmware_files(caps, profile.firmware())?;
         let run_dir = self
             .setup
             .catalog_root
@@ -1482,7 +1529,7 @@ impl QemuVmBackend {
         // Run directory plus private directory with the user-only ACL
         // (Windows) or mode 0700 (Unix).
         prepare::prepare_run_dirs(&run_dir_m, &private_m).map_err(|e| public(&e))?;
-        let (swtpm, tpm_state) = self.tpm_files(vm, profile)?;
+        let (swtpm, tpm_state) = self.tpm_files(caps, vm, profile, current)?;
         let mut media_paths = BTreeMap::new();
         for m in media {
             // The file the start guard holds open and verified: the managed
@@ -1527,7 +1574,7 @@ impl QemuVmBackend {
             return Ok(RunPaths {
                 tools_iso: None,
                 run_id,
-                qemu_system: self.caps.qemu_system.clone(),
+                qemu_system: caps.qemu_system.clone(),
                 firmware_code,
                 firmware_vars: vars,
                 seabios,
@@ -1544,7 +1591,7 @@ impl QemuVmBackend {
         // Firmware state of a UEFI VM: created from the template on the
         // first start, then reused (boot entries written by an installer
         // persist). SeaBIOS keeps no state: nothing is created.
-        let firmware_vars = match (uefi, self.vars_template(profile)?) {
+        let firmware_vars = match (uefi, self.vars_template(caps, profile)?) {
             (true, Some(template)) => {
                 let vars = managed_abs(
                     &self.setup.catalog_root,
@@ -1566,7 +1613,7 @@ impl QemuVmBackend {
         Ok(RunPaths {
             tools_iso: None,
             run_id,
-            qemu_system: self.caps.qemu_system.clone(),
+            qemu_system: caps.qemu_system.clone(),
             firmware_code,
             firmware_vars,
             seabios,
@@ -1601,8 +1648,18 @@ impl VmBackend for QemuVmBackend {
         // ADR-0027: hardware profile of the declared guest and firmware, the
         // newest machine of its family, accelerator probed for both.
         let profile = profile_for(&vm.config)?;
-        let machine = machine_for(&self.caps, &profile)?;
-        self.ensure_profile_probe(&profile, &machine)?;
+        let (mut caps, bundle_guard) = if vm.config.guest_os == lightvm_proto::GuestOs::Windows11X64
+        {
+            let (caps, guard) = self.windows11_capabilities()?;
+            (caps, Some(guard))
+        } else {
+            (self.caps.clone(), None)
+        };
+        let machine = machine_for(&caps, &profile)?;
+        self.ensure_profile_probe(&mut caps, &profile, &machine)?;
+        if vm.config.guest_os != lightvm_proto::GuestOs::Windows11X64 {
+            self.caps = caps.clone();
+        }
         check_start_space(
             ManagedPath::verify(self.setup.catalog_root.clone())
                 .and_then(|r| prepare::host_resources(&r))
@@ -1642,7 +1699,7 @@ impl VmBackend for QemuVmBackend {
             .unwrap_or_default();
         // From here on every error path removes the private directory.
         let private_guard = PrivateDirGuard::new(self.private_dir_for(run_id));
-        let mut paths = self.prepare(vm, run_id, media, current.as_ref(), &profile)?;
+        let mut paths = self.prepare(&caps, vm, run_id, media, current.as_ref(), &profile)?;
         let tools = if vm.config.tools.enabled {
             let binaries = crate::tools::ToolsRun::load_binaries()?;
             let journal = ManagedPath::verify(
@@ -1692,7 +1749,9 @@ impl VmBackend for QemuVmBackend {
                 NetworkProfile::Nat if tools.is_some() => GuestNetwork::NatTools,
                 NetworkProfile::Offline => GuestNetwork::None,
                 NetworkProfile::Nat => GuestNetwork::Nat,
-                NetworkProfile::Endpoints => GuestNetwork::Supervisor,
+                NetworkProfile::Endpoints | NetworkProfile::FilteredInternet => {
+                    GuestNetwork::Supervisor
+                }
             },
         };
         // Windows UEFI media on a disk without an installed system: the CD
@@ -1707,7 +1766,7 @@ impl VmBackend for QemuVmBackend {
         let run = self
             .rt
             .block_on(QemuRun::start(
-                &self.caps,
+                &caps,
                 &spec,
                 &paths,
                 self.setup.run_config.clone(),
@@ -1755,6 +1814,9 @@ impl VmBackend for QemuVmBackend {
         self.runs.insert(vm.id, Arc::new(run));
         self.private_dirs.insert(vm.id, private_guard.disarm());
         let mut held: Vec<Box<dyn Send>> = Vec::new();
+        if let Some(guard) = bundle_guard {
+            held.push(Box::new(guard));
+        }
         if let Some(d) = current {
             held.push(Box::new(d.guard));
         }
@@ -2172,6 +2234,9 @@ impl BackendPort for QemuVmBackend {
 
     fn snapshot_disk(&mut self, vm_id: VmId, run_id: RunId, tag: &str) -> Result<(), PublicError> {
         let run = self.run(vm_id, run_id)?.clone();
+        if let Some(tools) = self.tools.get(&vm_id) {
+            tools.flush_before_snapshot()?;
+        }
         self.rt
             .block_on(run.snapshot_disk(tag))
             .map_err(|e| public(&e))

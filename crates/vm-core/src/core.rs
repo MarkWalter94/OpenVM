@@ -3189,7 +3189,11 @@ where
             })
         });
         if granted && !config.endpoints.is_empty() {
-            NetworkProfile::Endpoints
+            if config.network == NetworkProfile::FilteredInternet {
+                NetworkProfile::FilteredInternet
+            } else {
+                NetworkProfile::Endpoints
+            }
         } else {
             NetworkProfile::Offline
         }

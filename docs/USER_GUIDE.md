@@ -221,7 +221,7 @@ The new VM appears on the Dashboard as **Stopped**, with system, CPU, memory, vi
 
 ### 6.1 Create a Windows VM
 
-LightVM can also create VMs for **Windows XP, Vista, 7, 8.1 and 10**, with the same wizard. **This is experimental: the project has started Windows Setup from Vista 32-bit and Windows 10 images, but has not yet completed a Windows installation** (`docs/COMPATIBILITY.md`, "Windows guest profiles"). **Windows 11 (x86/x64) and Windows 8 are not supported** on Windows and Linux hosts: Windows 11 needs TPM and Secure Boot, which LightVM does not provide there and does not work around; Windows 8 is replaced by 8.1. On a Mac with Apple Silicon only Windows 11 ARM64 is offered (section 6.2).
+LightVM can also create VMs for **Windows XP, Vista, 7, 8.1 and 10**, with the same wizard. **This is experimental: the project has started Windows Setup from Vista 32-bit and Windows 10 images, but has not yet completed a Windows installation** (`docs/COMPATIBILITY.md`, "Windows guest profiles"). **Windows 11 x64 is experimental on Windows hosts** with the optional TPM/Secure Boot package (section 6.4); installed Windows 11 remains unqualified. Windows 11 x86 and Windows 8 are not supported; Windows 8 is replaced by 8.1. On a Mac with Apple Silicon only Windows 11 ARM64 is offered (section 6.2).
 
 What you need:
 
@@ -231,7 +231,7 @@ What you need:
 Steps (only what differs from section 6):
 
 1. **Installation media**: import the Windows ISO with **Import ISO…**.
-2. **System**: LightVM reads the image and shows what it found, for example *Detected: Windows 7 (64-bit, build 7601)*. If it shows *Not recognized: choose the system*, nothing is selected and you must pick the system in the list before going on; if the suggestion is wrong, pick the right one. The detection is only a suggestion; your choice is what counts. An image of Windows 8 or of Windows 11 for x86/x64 is not recognized, and those systems are not in the list. An image for another architecture (for example Windows 11 ARM64 on a Windows PC) is shown as *Detected: … — not supported on this host* and nothing is selected. **Windows Vista 64-bit does not start on a Windows PC** (its setup stops with a blue screen under the Windows hypervisor): its image is shown as *not supported on this host*, the wizard explains why and does not go on with it; use the 32-bit Vista image.
+2. **System**: LightVM reads the image and shows what it found, for example *Detected: Windows 7 (64-bit, build 7601)*. If it shows *Not recognized: choose the system*, nothing is selected and you must pick the system in the list before going on; if the suggestion is wrong, pick the right one. The detection is only a suggestion; your choice is what counts. An image of Windows 8 or Windows 11 x86 is not recognized. Windows 11 x64 media are recognized and can be selected on Windows hosts (section 6.4). An image for another architecture (for example Windows 11 ARM64 on a Windows PC) is shown as *Detected: … — not supported on this host* and nothing is selected. **Windows Vista 64-bit does not start on a Windows PC** (its setup stops with a blue screen under the Windows hypervisor): its image is shown as *not supported on this host*, the wizard explains why and does not go on with it; use the 32-bit Vista image.
 3. **Firmware** (Windows 8.1 and 10 only): choose **UEFI** or **Legacy BIOS (SeaBIOS)**. The wizard preselects **UEFI** for 64-bit images and **Legacy BIOS** for 32-bit images; keep the preselection unless you know you need the other one. Windows XP, Vista and 7 always use Legacy BIOS. Choose before installing: a system installed with one firmware does not boot with the other.
 4. **Resources**: when you choose the system, the wizard fills in the standard template for that system and for the architecture of the image (32-bit or 64-bit; see the table below), unless you already changed the values. The step names the template, for example *Template: Windows 7 64-bit — 2 vCPU, 4 GiB RAM, 40 GiB disk*. You can change the values within what the host can give, and **Reset to template** puts them back. For 32-bit Windows the memory stops at 4 GiB, the most a 32-bit Windows can use.
 5. **Network**: **Offline** only, as for every VM. Networking for Windows VMs is planned as separate work.
@@ -351,6 +351,30 @@ A VM whose disk is already on SATA, PVSCSI, LSI Logic SAS, IDE or NVMe (with UEF
 
 ---
 
+### 6.4 Windows 11 x64 on Windows (experimental)
+
+The wizard recognizes Windows 11 x64 media and offers **Windows 11 (64-bit)**
+on a Windows host. It uses UEFI with Secure Boot and a private emulated TPM
+2.0; it requires at least two vCPUs, 4 GiB RAM and a 64 GiB disk. Your host's
+physical TPM is not used.
+
+Starting this profile requires the optional Windows 11 support package. In
+development it must be explicitly hash-approved and placed under `win11/`
+in the configured QEMU directory, or selected using the supervisor's
+`--win11-dir` option. Build/provenance and developer commands are in
+`docs/verification/R6-05-windows11-x64-swtpm.md` §13. A missing or changed
+package refuses start; other guests use the ordinary QEMU installation.
+
+Windows PE has reported TPM 2.0 and Secure Boot enabled, and a test TPM value
+survived a cold restart. **A complete Windows 11 installation does not work
+yet**: in the project's test, Setup stopped at its first restart with a
+virtual CPU error under the Windows hypervisor. Baselines and snapshots of a
+Windows 11 VM save and restore the TPM state together with disk and firmware
+settings; take them with the VM shut down (a snapshot of a running Windows 11
+VM is refused).
+The project's WHPX-compatible firmware does not use SMM: Secure Boot checks
+boot signatures, but a guest kernel can rewrite its firmware variable store.
+
 ## 7. Install Ubuntu in the VM
 
 1. On the Dashboard, press **Start** on the VM. The state goes to **Starting**, then **Running**.
@@ -361,7 +385,8 @@ A VM whose disk is already on SATA, PVSCSI, LSI Logic SAS, IDE or NVMe (with UEF
    - **Screenshot** saves the current guest screen as a PNG file (you choose where).
    - **Guest keyboard layout** (toolbar, **US** or **IT**; also in **Settings** → **Console**): set it to the layout configured inside the guest.
    - Clicks on LightVM's own menus and dialogs never reach the guest, even when they are drawn over the guest screen.
-   - There is **no clipboard** between Windows and the VM (by design in the MVP).
+   - Clipboard sharing is **off by default**. Optional experimental Tools
+     integration is described in section 9.2.
    - If the display connection drops while the VM keeps running, the console reconnects by itself after a couple of seconds.
 3. Ubuntu boots from the installation image. Choose **Try or Install Ubuntu** in the boot menu (or wait), then **Install Ubuntu** in the installer.
 4. Practical tips:
@@ -441,6 +466,57 @@ What to know:
 - When an agent session ends, a VM that was running for it keeps **no** network until it is stopped and started again: a session never widens the network of a running VM.
 
 ---
+
+### 9.1 File transfer with LightVM Tools (experimental)
+
+Enable **Tools** and **File transfer** in the VM settings before starting it,
+and install/run the guest Tools from the generated Tools medium. In the
+console, expand **Files · Guest Inbox / Outbox**:
+
+- **Send file…** selects a host file to send. On Windows and macOS this opens
+  a native picker. You can also drop up to 16 local files onto the console.
+  Files arrive in the guest's `Documents/LightVM Tools/inbox` folder.
+- To receive a file, put it directly in `Documents/LightVM Tools/outbox`
+  inside the guest, press **Refresh Outbox**, then **Receive…** and choose a
+  new host file name (native save dialog on Windows and macOS).
+- On a Windows host, **Prepare drag…** downloads one selected Outbox file
+  to a private temporary cache. Drag the resulting row into a host folder
+  to copy it there. Keep LightVM open until the target finishes copying;
+  **Clear prepared copy** removes the cache. This uses the Outbox row,
+  rather than a drag gesture inside a guest application.
+- Progress and **Cancel transfer** appear during the operation. Transfers
+  continue while you visit another LightVM page. Stopping/restarting the VM,
+  losing the supervisor or handing input to an agent cancels the operation.
+
+Only regular files up to 4 GiB each are supported; folders and recursive
+copies are not available. Existing files are never overwritten. A completed
+file keeps its name; an interrupted local download removes its temporary
+file. Files already completed in a batch are kept. If completion is
+interrupted, check the destination before retrying.
+
+Sending verifies the SHA-256 in the guest before publication. Receiving
+checks chunk bounds, offsets and the listed size; it does not have a guest
+checksum manifest or a stable snapshot of a changing Outbox file. Finish
+writing a guest file before receiving it. Automated tests cover these controls;
+real Ubuntu live and Windows PE tests are recorded in
+`docs/verification/R6-07-lightvm-tools.md`. Installed guest qualification and
+an actual drag into Explorer remain open.
+
+### 9.2 Clipboard with LightVM Tools (experimental)
+
+Enable **Allow clipboard text and images** in VM settings. The console's
+text and image buttons perform one explicit copy in the indicated direction
+while its window is focused. Images are bounded to 4,194,304 pixels and
+8192 pixels per side. Linux guests additionally need Pillow and
+`wl-clipboard` or `xclip` in their graphical session; unavailable formats or
+backends produce an error.
+
+**Synchronize clipboard text while the guest screen has focus** is off by
+default and requires a fresh opt-in for a new run. While checked, it exchanges
+text only when the console captures input and no other Tools operation holds
+the channel. Focus loss pauses synchronization and discards pending guest
+text. A new host copy takes priority over a pending guest reply. Images use
+the explicit buttons. Agent sessions still need separate clipboard approval.
 
 ## 10. Baselines: save and restore the VM's disk
 
@@ -557,7 +633,7 @@ Then tick **The agent shows the code …** (after comparing it) and press **Appr
 claude mcp add lightvm -- "%LOCALAPPDATA%\Programs\LightVM\lightvm-mcp.exe"
 ```
 
-(write the full path if your shell does not expand `%LOCALAPPDATA%`), pair the client (step 2) and give a prompt such as: *"Use the lightvm MCP server (its help tool documents how it works). Task: … (the VM, what to do, how to check it, the guest login if needed)."* Before handing over a task, keep in mind that the VM has **no shared folders and no clipboard**, and **no network** unless you grant it network endpoints (the agent's `vm_status` then lists their names, addresses and ports): the agent works only through the screen, the mouse and the keyboard, typing any code or file content into the guest. It types with the **US keyboard layout**, so the guest should use the US layout; and tick only the capabilities the task needs.
+(write the full path if your shell does not expand `%LOCALAPPDATA%`), pair the client (step 2) and give a prompt such as: *"Use the lightvm MCP server (its help tool documents how it works). Task: … (the VM, what to do, how to check it, the guest login if needed)."* Before handing over a task, keep in mind that shared folders and clipboard are off unless you enable Tools and grant the corresponding session capabilities, and there is **no network** unless you grant it network endpoints (the agent's `vm_status` then lists their names, addresses and ports): without Tools grants, the agent works through the screen, the mouse and the keyboard, typing any code or file content into the guest. It types with the **US keyboard layout**, so the guest should use the US layout; and tick only the capabilities the task needs.
 
 **6. The AI Workspace.** The Agents page is titled **AI Workspace**. From the top:
 
@@ -645,7 +721,9 @@ If you used the setup `.exe`, uninstall from **Settings → Apps → Installed a
 - **Not code-signed** (ADR-0020): SmartScreen warnings are expected; rely on the checksums.
 - **QEMU not included** and only 11.1.0 accepted; its own code signature is expired.
 - **Network**: Offline by default; **NAT** for manual use and an **endpoint allowlist** (section 9.2). The allowlist has been verified with a Linux guest only; reaching a WCF service and SQL Server from a Windows guest is not verified yet. Only TCP is carried through the allowlist.
-- **No clipboard** and **no shared folders** between Windows and the VM. Files go into the VM only through an approved read-only data disc.
+- Clipboard and shared folders are **off by default**. Optional experimental
+  Tools access requires VM settings and separate session grants; approved
+  read-only data discs remain available without Tools.
 - **Keyboard**: Italian and English (US) layouts are the targets; other layouts and IME input are not verified.
 - **CPU model**: the VM uses a generic CPU model, not the host's (`-cpu host` does not boot on the test PC), so some guest software may run slower or detect fewer CPU features.
 - **One reference guest**: Ubuntu 26.04.1 LTS Desktop. Other guests are not tested. Windows XP, Vista, 7, 8.1 and 10 VMs can be created (section 6.1); the project has started Windows Setup from Vista 32-bit and Windows 10 images but has not completed an installation yet; Windows Vista 64-bit does not run on Windows PCs; Windows 8 and 11 are not supported.

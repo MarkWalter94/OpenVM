@@ -220,9 +220,14 @@ static void ui_invoke(JOut *out,JDoc *doc,int command){
     }
     if(SUCCEEDED(hr))jtext(out,"{\"result\":\"ok\"}");else error_reply(out,"action_refused");
 }
+static HWND clipboard_window;
+static int clipboard_open(void){
+    if(!clipboard_window)clipboard_window=CreateWindowExW(0,L"STATIC",L"LightVM Tools clipboard",0,0,0,0,0,HWND_MESSAGE,NULL,GetModuleHandleW(NULL),NULL);
+    return clipboard_window&&OpenClipboard(clipboard_window);
+}
 static void clipboard_read(JOut *out){
     HANDLE data;const WCHAR *text;char *utf8=NULL;SIZE_T size;int count;size_t start=out->length;
-    if(!OpenClipboard(NULL)){error_reply(out,"clipboard_busy");return;}
+    if(!clipboard_open()){error_reply(out,"clipboard_busy");return;}
     data=GetClipboardData(CF_UNICODETEXT);size=data?GlobalSize(data):0;
     if(!data){jtext(out,"{\"result\":\"clipboard\",\"text\":\"\"}");CloseClipboard();return;}
     if(!size||size>128*1024){error_reply(out,"clipboard_limit");CloseClipboard();return;}
@@ -240,7 +245,7 @@ static void clipboard_write(JOut *out,JDoc *doc,int command){
     if(text&&value&&jstring(doc,jget(doc,command,"text"),text,65537)&&wide(text,value,65537)){
         count=(int)wlength(value)+1;data=GlobalAlloc(GMEM_MOVEABLE,(SIZE_T)count*sizeof(WCHAR));
         if(data&&(target=GlobalLock(data))){memcpy(target,value,(size_t)count*sizeof(WCHAR));GlobalUnlock(data);
-            if(OpenClipboard(NULL)){if(EmptyClipboard()&&SetClipboardData(CF_UNICODETEXT,data)){ok=1;data=NULL;}CloseClipboard();}
+            if(clipboard_open()){if(EmptyClipboard()&&SetClipboardData(CF_UNICODETEXT,data)){ok=1;data=NULL;}CloseClipboard();}
         }
     }
     if(data)GlobalFree(data);release(text,65537);release(value,131074);
@@ -325,6 +330,24 @@ bad_reset:out->length=reply_start;out->ok=1;error_reply(out,"directory_limit");
 done:release(path,PATH_CAP*sizeof(WCHAR));release(bytes,CHUNK);release(hex,CHUNK*2+1);
 }
 
+#include "clipboard_image.h"
+
+static void flush_guest(JOut *out){
+    DWORD drives=GetLogicalDrives();unsigned i,flushed=0;
+    for(i=0;i<8;++i)if(transfers[i].file){error_reply(out,"file_transfer_active");return;}
+    for(i=0;i<26;++i)if(drives&(1UL<<i)){
+        WCHAR root[]=L"A:\\",volume[]=L"\\\\.\\A:";HANDLE handle;
+        root[0]=(WCHAR)(L'A'+i);volume[4]=root[0];
+        if(GetDriveTypeW(root)!=DRIVE_FIXED)continue;
+        handle=CreateFileW(volume,GENERIC_READ|GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE,NULL,OPEN_EXISTING,0,NULL);
+        if(handle==INVALID_HANDLE_VALUE){error_reply(out,"guest_flush_requires_elevation");return;}
+        if(!FlushFileBuffers(handle)){CloseHandle(handle);error_reply(out,"guest_flush_failed");return;}
+        CloseHandle(handle);++flushed;
+    }
+    if(!flushed){error_reply(out,"guest_flush_unavailable");return;}
+    jtext(out,"{\"result\":\"ok\"}");
+}
+
 static DWORD WINAPI control_thread(void *unused){
     Channel c;unsigned i;(void)unused;if(!channel_init(&c))return 1;
     CoInitializeEx(NULL,COINIT_MULTITHREADED);
@@ -336,15 +359,16 @@ static DWORD WINAPI control_thread(void *unused){
             jout(&out,c.output,FRAME);jtext(&out,"{\"id\":");juint(&out,id);jtext(&out,",\"reply\":");reply_start=out.length;
             if(jequal(&c.doc,op,"clipboard_read"))clipboard_read(&out);
             else if(jequal(&c.doc,op,"clipboard_write"))clipboard_write(&out,&c.doc,command);
+            else if(jequal(&c.doc,op,"clipboard_image")){jtext(&out,"{\"result\":\"clipboard_image\",\"reply\":");clipboard_image(&out,&c.doc,jget(&c.doc,command,"request"));jtext(&out,"}");}
             else if(jequal(&c.doc,op,"ui_tree"))ui_tree(&out,&c.doc,command,id);
             else if(jequal(&c.doc,op,"ui_invoke"))ui_invoke(&out,&c.doc,command);
             else if(jequal(&c.doc,op,"file")){jtext(&out,"{\"result\":\"file\",\"reply\":");guest_file(&out,&c.doc,jget(&c.doc,command,"request"));jtext(&out,"}");}
-            else if(jequal(&c.doc,op,"flush")){for(i=0;i<8;++i)if(transfers[i].file)FlushFileBuffers(transfers[i].file);jtext(&out,"{\"result\":\"ok\"}");}
+            else if(jequal(&c.doc,op,"flush"))flush_guest(&out);
             else error_reply(&out,"unsupported");
             if(!out.ok){out.length=reply_start;out.ok=1;error_reply(&out,"reply_limit");tree_clear();}
             jtext(&out,"}");if(!frame_send(&c,&out))break;
         }
-        channel_close(&c);tree_clear();for(i=0;i<8;++i)if(transfers[i].file)transfer_cancel(&transfers[i]);Sleep(500);
+        channel_close(&c);tree_clear();image_clear(&image_capture);image_clear(&image_upload);for(i=0;i<8;++i)if(transfers[i].file)transfer_cancel(&transfers[i]);Sleep(500);
     }
     return 0;
 }

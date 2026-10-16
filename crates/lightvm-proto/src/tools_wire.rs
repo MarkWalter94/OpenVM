@@ -207,6 +207,57 @@ fn invalid(message: &'static str) -> io::Error {
 }
 
 impl ToolFileRequest {
+    /// Clipboard images reuse the bounded chunk envelope, never host/guest
+    /// file paths. Read tokens identify an immutable per-connection capture.
+    pub fn validate_clipboard_image(&self) -> io::Result<()> {
+        const MAX: u64 = 4 * 1024 * 1024 * 4 + 12;
+        let image = |path: &ToolRelativePath| path.components() == ["image"];
+        let mut normalized = self.clone();
+        match &mut normalized {
+            Self::Begin {
+                share,
+                path,
+                size,
+                sha256,
+                ..
+            } => {
+                if !image(path)
+                    || *size > MAX
+                    || !matches!(share.as_str(), "clipboard-read" | "clipboard-write")
+                    || (share == "clipboard-read" && (*size != 0 || sha256 != &"0".repeat(64)))
+                    || (share == "clipboard-write" && *size < 12)
+                {
+                    return Err(invalid("invalid clipboard image request"));
+                }
+                *share = "inbox".into();
+            }
+            Self::Read {
+                share,
+                path,
+                offset,
+                ..
+            } => {
+                if !image(path)
+                    || *offset > MAX
+                    || share.is_empty()
+                    || share.len() > 64
+                    || !share.bytes().all(|b| b.is_ascii_hexdigit())
+                {
+                    return Err(invalid("invalid clipboard capture token"));
+                }
+                *share = "outbox".into();
+            }
+            Self::Write { offset, data, .. } => {
+                if *offset > MAX || data.len() as u64 / 2 > MAX - *offset {
+                    return Err(invalid("clipboard image write exceeds limit"));
+                }
+            }
+            Self::Commit { .. } | Self::Cancel { .. } => (),
+            _ => return Err(invalid("not a clipboard image operation")),
+        }
+        normalized.validate_guest()
+    }
+
     /// Inbox/outbox RPC is narrower than the guest's named host shares.
     pub fn validate_guest(&self) -> io::Result<()> {
         let root = |share: &str, path: &ToolRelativePath, write: bool| -> io::Result<()> {

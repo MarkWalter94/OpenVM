@@ -731,19 +731,14 @@ fn backing_reference_has_the_fixed_shape() {
     );
 }
 
-/// ADR-0028 (required evidence 3): until the swtpm state is part of
-/// baselines, baseline creation and restore are refused for a TPM guest
-/// (Windows 11 ARM64) with `unsupported`, before any file is touched; the
-/// per-VM TPM state directory is private (0700 on Unix).
-#[test]
-fn tpm_guest_has_no_baselines_yet() {
+fn tpm_fixture(os: &str) -> (Catalog, Fx) {
     let dir = common::tempdir();
     let mut cat = Catalog::open(dir.path()).unwrap();
     let vm = cat
         .with_tx(|tx| {
             tx.insert_vm(&vm_storage::NewVm {
                 name: "win11".into(),
-                guest_os: "windows11_arm64".into(),
+                guest_os: os.into(),
                 config_version: 1,
                 config: serde_json::json!({}),
             })
@@ -753,22 +748,110 @@ fn tpm_guest_has_no_baselines_yet() {
     std::fs::create_dir_all(fx.path("firmware")).unwrap();
     std::fs::write(fx.path("primary.qcow2"), qcow2(None, b"installed")).unwrap();
     std::fs::write(fx.path("firmware/primary.vars.fd"), b"VARS").unwrap();
-    let e = fx.create(&mut cat, "b").unwrap_err();
-    assert!(
-        matches!(e, StorageError::Unsupported(m) if m == vm_storage::TPM_BASELINE_UNSUPPORTED),
-        "{e}"
-    );
-    let e = fx.restore(&mut cat, &BaselineId::new_v7()).unwrap_err();
-    assert!(matches!(e, StorageError::Unsupported(_)), "{e}");
-    let tpm = cat
-        .layout()
-        .ensure_private_dir(&CatalogLayout::tpm_state_dir(&fx.vm))
+    cat.layout()
+        .ensure_private_dir(&CatalogLayout::tpm_state_dir(&vm))
         .unwrap();
-    assert_eq!(tpm, fx.path("tpm"));
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        let mode = std::fs::metadata(&tpm).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o700);
+    std::fs::write(fx.path("tpm/tpm2-00.permall"), b"TPM identity and NV v1").unwrap();
+    (cat, fx)
+}
+
+fn tpm_bytes(cat: &mut Catalog, vm: &VmId) -> Vec<u8> {
+    let dir = cat.current_tpm_dir(vm).unwrap();
+    std::fs::read(cat.layout().resolve(&dir).unwrap().join("tpm2-00.permall")).unwrap()
+}
+
+#[test]
+fn tpm_baselines_restore_disk_firmware_and_identity_together() {
+    for os in ["windows11_arm64", "windows11_x64"] {
+        let (mut cat, fx) = tpm_fixture(os);
+        let b = fx.create(&mut cat, "complete machine").unwrap();
+        assert!(cat.verify_baseline_manifest(&b, true).unwrap().is_empty());
+        std::fs::write(fx.path("tpm/tpm2-00.permall"), b"TPM changed").unwrap();
+        std::fs::write(fx.path("firmware/primary.vars.fd"), b"VARS changed").unwrap();
+        fx.restore(&mut cat, &b).unwrap();
+        assert_eq!(tpm_bytes(&mut cat, &fx.vm), b"TPM identity and NV v1");
+        assert_eq!(fx.current_content(&mut cat), b"installed");
+        let next = fx.create(&mut cat, "from restored machine").unwrap();
+        assert!(
+            cat.verify_baseline_manifest(&next, true)
+                .unwrap()
+                .is_empty()
+        );
+        // Another restore must switch state paths and remove the previous
+        // writable TPM record, without breaking the immutable base identity.
+        let old = cat.current_tpm_dir(&fx.vm).unwrap();
+        fx.restore(&mut cat, &b).unwrap();
+        assert_ne!(old, cat.current_tpm_dir(&fx.vm).unwrap());
+        assert_eq!(tpm_bytes(&mut cat, &fx.vm), b"TPM identity and NV v1");
+        cat.delete_baseline_files(&fx.vm, &next).unwrap();
+        cat.delete_vm_with_files(&fx.vm, &[]).unwrap();
     }
+}
+
+#[test]
+fn tpm_restore_crash_keeps_one_complete_machine_state() {
+    for point in [
+        FaultPoint::RestoreBeforePublish,
+        FaultPoint::RestoreAfterPublish,
+        FaultPoint::RestoreAfterFirstDiscard,
+        FaultPoint::RestoreBeforeCommit,
+        FaultPoint::AfterCommit,
+    ] {
+        let (mut cat, fx) = tpm_fixture("windows11_x64");
+        let b = fx.create(&mut cat, "checkpoint").unwrap();
+        std::fs::write(fx.path("tpm/tpm2-00.permall"), b"TPM changed").unwrap();
+        std::fs::write(fx.path("primary.qcow2"), qcow2(None, b"changed")).unwrap();
+        let job = cat
+            .begin_restore(RestoreBaseline {
+                vm_id: fx.vm,
+                baseline_id: b,
+                standalone: fx.standalone(),
+            })
+            .unwrap();
+        let done = job.run(create_overlay);
+        cat.inject_fault(point, FaultAction::Crash);
+        assert!(matches!(
+            cat.finish_restore(done),
+            Err(StorageError::InjectedCrash(_))
+        ));
+        drop(cat);
+        let mut cat = Catalog::open(fx.dir.path()).unwrap();
+        assert!(cat.open_intents().unwrap().is_empty());
+        let restored = cat.baseline_overview(&fx.vm).unwrap().current.is_some();
+        assert_eq!(
+            tpm_bytes(&mut cat, &fx.vm),
+            if restored {
+                b"TPM identity and NV v1".as_slice()
+            } else {
+                b"TPM changed".as_slice()
+            }
+        );
+        assert_eq!(
+            fx.current_content(&mut cat),
+            if restored {
+                b"installed".as_slice()
+            } else {
+                b"changed".as_slice()
+            }
+        );
+    }
+}
+
+#[test]
+fn tpm_checkpoints_refuse_missing_extra_or_changed_state() {
+    let (mut cat, fx) = tpm_fixture("windows11_x64");
+    std::fs::write(fx.path("tpm/tpm2-00.volatilestate"), b"unsupported state").unwrap();
+    assert!(fx.create(&mut cat, "incomplete").is_err());
+    std::fs::remove_file(fx.path("tpm/tpm2-00.volatilestate")).unwrap();
+    let b = fx.create(&mut cat, "checkpoint").unwrap();
+    let rel = CatalogLayout::baseline_tpm(&fx.vm, &b);
+    let path = cat.layout().resolve(&rel).unwrap();
+    let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    permissions.set_readonly(false);
+    std::fs::set_permissions(&path, permissions).unwrap();
+    std::fs::write(path, b"foreign TPM identity").unwrap();
+    assert!(!cat.verify_baseline_manifest(&b, true).unwrap().is_empty());
+    assert!(fx.restore(&mut cat, &b).is_err());
+    assert_eq!(tpm_bytes(&mut cat, &fx.vm), b"TPM identity and NV v1");
 }

@@ -661,11 +661,20 @@ impl Stack {
 
     fn start_host(&mut self, i: usize) {
         let target = self.cfg.endpoints[self.conns[i].ep].target;
+        let public_only = self
+            .cfg
+            .public_endpoints
+            .contains(&dns::normalize(&self.cfg.endpoints[self.conns[i].ep].name));
         let timeout = self.cfg.connect_timeout;
         let (to_host_tx, mut to_host_rx) = mpsc::channel::<Vec<u8>>(HOST_QUEUE);
         let (msg_tx, msg_rx) = mpsc::channel::<HostMsg>(HOST_QUEUE);
         let notify = self.notify.clone();
         let task = tokio::spawn(async move {
+            if public_only && crate::egress::validate_target(target).is_err() {
+                let _ = msg_tx.send(HostMsg::ConnectFailed).await;
+                notify.notify_one();
+                return;
+            }
             let stream =
                 match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(target)).await {
                     Ok(Ok(s)) => s,
@@ -675,6 +684,13 @@ impl Stack {
                         return;
                     }
                 };
+            if stream.peer_addr().ok() != Some(target)
+                || (public_only && crate::egress::validate_target(target).is_err())
+            {
+                let _ = msg_tx.send(HostMsg::ConnectFailed).await;
+                notify.notify_one();
+                return;
+            }
             let _ = stream.set_nodelay(true);
             let (mut r, mut w) = stream.into_split();
             if msg_tx.send(HostMsg::Connected).await.is_err() {
@@ -694,6 +710,8 @@ impl Stack {
                 }
                 let _ = w.shutdown().await;
             };
+            let policy_tx = msg_tx.clone();
+            let policy_notify = notify.clone();
             let reader = async move {
                 let mut buf = vec![0u8; CHUNK];
                 loop {
@@ -712,7 +730,25 @@ impl Stack {
                     }
                 }
             };
-            tokio::join!(writer, reader);
+            // Closing the gateway/stack or revoking the endpoint aborts this
+            // task. Route changes also close persistent Internet sockets.
+            let policy = async move {
+                if !public_only {
+                    std::future::pending::<()>().await;
+                }
+                loop {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    if crate::egress::validate_target(target).is_err() {
+                        break;
+                    }
+                }
+                let _ = policy_tx.send(HostMsg::Error).await;
+                policy_notify.notify_one();
+            };
+            tokio::select! {
+                _ = async { tokio::join!(writer,reader); } => {},
+                _ = policy => {},
+            }
         });
         let c = &mut self.conns[i];
         c.task = Some(task.abort_handle());

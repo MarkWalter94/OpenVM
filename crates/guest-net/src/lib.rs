@@ -30,6 +30,7 @@
 
 pub mod dhcp;
 pub mod dns;
+pub mod egress;
 mod frame;
 mod stack;
 pub mod transport;
@@ -110,6 +111,9 @@ impl EndpointSpec {
 /// Configuration of a stack.
 #[derive(Clone, Debug)]
 pub struct NetConfig {
+    /// Endpoint keys restricted to public Internet destinations. The
+    /// authenticated Tools endpoints are never included in this set.
+    pub public_endpoints: BTreeSet<String>,
     /// Tools beside NAT must not replace the guest's Internet DNS server.
     pub advertise_dns: bool,
     /// Endpoints of the VM (resolved). The allowed subset is given
@@ -130,6 +134,7 @@ impl NetConfig {
     #[must_use]
     pub fn new(endpoints: Vec<EndpointSpec>) -> Self {
         Self {
+            public_endpoints: BTreeSet::new(),
             advertise_dns: true,
             endpoints,
             max_connections: DEFAULT_MAX_CONNECTIONS,

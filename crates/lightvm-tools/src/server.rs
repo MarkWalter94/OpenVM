@@ -4,10 +4,10 @@
 
 use std::io;
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -26,6 +26,7 @@ pub struct Welcome {
 
 #[derive(Debug, Default)]
 struct Shared {
+    epoch: AtomicU64,
     stopped: AtomicBool,
     connection: Mutex<Option<TcpStream>>,
     records: Mutex<Vec<FileRecord>>,
@@ -42,6 +43,7 @@ pub struct Stop {
 impl Stop {
     /// Closes the active connection without destroying the run's listener.
     pub fn suspend(&self) {
+        self.shared.epoch.fetch_add(1, Ordering::SeqCst);
         self.gate.revoke();
         if let Some(s) = self
             .shared
@@ -97,6 +99,7 @@ impl FileServer {
                 while !shared.stopped.load(Ordering::SeqCst) {
                     match listener.accept() {
                         Ok((stream, peer)) if peer.ip().is_loopback() => {
+                            let epoch = shared.epoch.load(Ordering::SeqCst);
                             if shared.stopped.load(Ordering::SeqCst) {
                                 break;
                             }
@@ -109,8 +112,15 @@ impl FileServer {
                             // close() can race with registration. Check again
                             // after publishing the interruptible socket.
                             if !shared.stopped.load(Ordering::SeqCst) {
-                                let _ =
-                                    serve(stream, &vm, &run, &secret, &gate, &mut files, &shared);
+                                let _ = serve(
+                                    stream,
+                                    (&vm, &run),
+                                    &secret,
+                                    &gate,
+                                    &mut files,
+                                    &shared,
+                                    epoch,
+                                );
                             }
                             files.cancel_all();
                             shared
@@ -180,42 +190,44 @@ fn flush_records(shared: &Shared, files: &mut FileService) {
 
 fn serve(
     mut stream: TcpStream,
-    vm: &str,
-    run: &str,
+    (vm, run): (&str, &str),
     secret: &Secret,
     gate: &Gate,
     files: &mut FileService,
     shared: &Shared,
+    epoch: u64,
 ) -> io::Result<()> {
-    // Darwin inherits the listener's nonblocking flag on accepted sockets.
-    // The framed session is blocking, with explicit read/write deadlines.
-    stream.set_nonblocking(false)?;
+    stream.set_nonblocking(true)?;
     stream.set_nodelay(true)?;
     stream.set_read_timeout(Some(AUTH_TIMEOUT))?;
     stream.set_write_timeout(Some(AUTH_TIMEOUT))?;
-    let hello = protocol::read::<_, Hello>(&mut stream)?
+    let cancelled =
+        || shared.stopped.load(Ordering::SeqCst) || shared.epoch.load(Ordering::SeqCst) != epoch;
+    let mut auth = crate::wire_io::Wire::new(&mut stream, Instant::now() + AUTH_TIMEOUT, cancelled);
+    let hello = protocol::read::<_, Hello>(&mut auth)?
         .ok_or_else(|| protocol::invalid("hello required"))?;
     if !secret.authenticate(&hello, vm, run) {
         return Err(io::Error::from(io::ErrorKind::PermissionDenied));
     }
     drop(hello);
     protocol::write(
-        &mut stream,
+        &mut auth,
         &Welcome {
             version: protocol::VERSION,
         },
     )?;
-    stream.set_read_timeout(Some(IO_TIMEOUT))?;
-    stream.set_write_timeout(Some(IO_TIMEOUT))?;
+    let permit = gate.permit();
     while !shared.stopped.load(Ordering::SeqCst) {
-        let Some(request) = protocol::read::<_, FileRequest>(&mut stream)? else {
+        let mut wire =
+            crate::wire_io::Wire::new(&mut stream, Instant::now() + IO_TIMEOUT, cancelled);
+        let Some(request) = protocol::read::<_, FileRequest>(&mut wire)? else {
             break;
         };
         if shared.stopped.load(Ordering::SeqCst) {
             break;
         }
-        let reply = files.dispatch(&gate.permit(), request);
-        protocol::write(&mut stream, &reply)?;
+        let reply = files.dispatch(&permit, request);
+        protocol::write(&mut wire, &reply)?;
         flush_records(shared, files);
     }
     Ok(())

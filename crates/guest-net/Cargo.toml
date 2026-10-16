@@ -18,6 +18,10 @@ smoltcp = { version = "=0.14.0", default-features = false, features = ["std", "m
 socket2 = { version = "=0.6.5", features = ["all"] }
 tokio = { version = "=1.53.2", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
 
+[target.'cfg(windows)'.dependencies.windows-sys]
+version = "=0.61.2"
+features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock"]
+
 [dev-dependencies]
 smoltcp = { version = "=0.14.0", default-features = false, features = ["std", "medium-ethernet", "proto-ipv4", "proto-dhcpv4", "socket-tcp", "socket-udp", "socket-dhcpv4"] }
 

@@ -44,6 +44,130 @@ fn connect(server: &ControlServer, hello: &Hello) -> TcpStream {
     }
     stream
 }
+
+#[test]
+fn clipboard_images_require_clipboard_permission_not_file_permission() {
+    use lightvm_tools::protocol::{FileReply, FileRequest, RelativePath};
+    let (server, gate, hello) = setup();
+    let mut stream = connect(&server, &hello);
+    let request = FileRequest::Begin {
+        replace: false,
+        share: "clipboard-read".into(),
+        path: RelativePath::new(vec!["image".into()]).unwrap(),
+        size: 0,
+        sha256: "0".repeat(64),
+    };
+    gate.replace(Grant {
+        features: [Feature::FilesTransfer].into(),
+        ..Default::default()
+    });
+    assert!(
+        server
+            .call(Command::ClipboardImage {
+                request: request.clone()
+            })
+            .is_err()
+    );
+    gate.replace(Grant {
+        features: [Feature::Clipboard].into(),
+        ..Default::default()
+    });
+    let guest = std::thread::spawn(move || {
+        let request: Request = protocol::read(&mut stream).unwrap().unwrap();
+        assert!(matches!(request.command, Command::ClipboardImage { .. }));
+        protocol::write(
+            &mut stream,
+            &Response {
+                id: request.id,
+                reply: Reply::ClipboardImage {
+                    reply: FileReply::Transfer {
+                        transfer: "ab".repeat(32),
+                    },
+                },
+            },
+        )
+        .unwrap();
+    });
+    assert!(matches!(
+        server.call(Command::ClipboardImage { request }).unwrap(),
+        Reply::ClipboardImage { .. }
+    ));
+    guest.join().unwrap();
+}
+
+#[test]
+fn internal_flush_needs_a_live_run_but_grants_no_file_or_clipboard_access() {
+    let (server, gate, hello) = setup();
+    let mut stream = connect(&server, &hello);
+    gate.replace(Grant::default());
+    assert!(server.call(Command::ClipboardRead).is_err());
+    let guest = std::thread::spawn(move || {
+        let request: Request = protocol::read(&mut stream).unwrap().unwrap();
+        assert!(matches!(request.command, Command::Flush));
+        protocol::write(
+            &mut stream,
+            &Response {
+                id: request.id,
+                reply: Reply::Ok,
+            },
+        )
+        .unwrap();
+    });
+    assert!(matches!(server.call(Command::Flush).unwrap(), Reply::Ok));
+    guest.join().unwrap();
+    gate.revoke();
+    assert!(server.call(Command::Flush).is_err());
+}
+
+#[test]
+fn flush_rejects_an_unrelated_guest_reply() {
+    let (server, _, hello) = setup();
+    let mut stream = connect(&server, &hello);
+    let guest = std::thread::spawn(move || {
+        let request: Request = protocol::read(&mut stream).unwrap().unwrap();
+        protocol::write(
+            &mut stream,
+            &Response {
+                id: request.id,
+                reply: Reply::Clipboard {
+                    text: "wrong reply".into(),
+                },
+            },
+        )
+        .unwrap();
+    });
+    assert!(server.call(Command::Flush).is_err());
+    guest.join().unwrap();
+}
+
+#[test]
+fn an_idle_control_connection_can_reconnect_after_scope_change() {
+    let (server, gate, hello) = setup();
+    let _old = connect(&server, &hello);
+    server.close_handle().disconnect();
+    gate.replace(Grant {
+        features: [Feature::Clipboard].into(),
+        ..Default::default()
+    });
+    let mut stream = connect(&server, &hello);
+    let guest = std::thread::spawn(move || {
+        let request: Request = protocol::read(&mut stream).unwrap().unwrap();
+        protocol::write(
+            &mut stream,
+            &Response {
+                id: request.id,
+                reply: Reply::Clipboard {
+                    text: "new scope".into(),
+                },
+            },
+        )
+        .unwrap();
+    });
+    assert!(
+        matches!(server.call(Command::ClipboardRead).unwrap(), Reply::Clipboard { text } if text == "new scope")
+    );
+    guest.join().unwrap();
+}
 #[test]
 fn clipboard_roundtrip_reply_type_validation_and_no_payload_debug() {
     let (server, _, hello) = setup();

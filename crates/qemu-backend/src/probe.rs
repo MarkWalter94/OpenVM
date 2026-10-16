@@ -616,6 +616,9 @@ impl HostCapabilities {
         let mut other: Vec<&'static str> = DeviceProfile::ALL
             .iter()
             .filter(|p| p.is_aarch64() == aarch64)
+            .filter(|p| {
+                **p != DeviceProfile::WINDOWS11_X64 || *reference == DeviceProfile::WINDOWS11_X64
+            })
             .flat_map(|p| self.missing_devices(p))
             .filter(|d| !missing.contains(d))
             .collect();
@@ -983,9 +986,9 @@ pub fn run_capture(exe: &Path, args: &[&str], timeout: Duration) -> Result<Comma
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    if let Some(dir) = exe.parent() {
-        cmd.current_dir(dir);
-    }
+    // Help/version probes must not mutate the approved runtime bundle.
+    // Windows libraries can create relative caches even in these commands.
+    cmd.current_dir(std::env::temp_dir());
     let mut child = cmd.spawn().map_err(BackendError::Spawn)?;
     let mut out = child.stdout.take();
     let mut err = child.stderr.take();
@@ -1314,6 +1317,8 @@ pub const QEMU_SYSTEM_NAME: &str = if cfg!(all(target_os = "macos", target_arch 
 /// Probe configuration.
 #[derive(Clone, Debug)]
 pub struct ProbeConfig {
+    /// Approved manifests of the separate Windows 11 runtime bundle.
+    pub approved_win11_bundle_sha256: Vec<String>,
     /// Timeout for each `help`/`--version` command.
     pub command_timeout: Duration,
     /// Overall timeout of the accelerator probe.
@@ -1350,6 +1355,7 @@ impl Default for ProbeConfig {
             approved_swtpm_sha256.push(DEV_MACOS_SWTPM_SHA256.to_owned());
         }
         Self {
+            approved_win11_bundle_sha256: Vec::new(),
             command_timeout: Duration::from_secs(15),
             accelerator_timeout: Duration::from_secs(20),
             approved_qemu_system_sha256,
@@ -1690,7 +1696,7 @@ mod tests {
     #[test]
     fn real_devices() {
         let d = parse_device_help(DEVICE);
-        for p in DeviceProfile::ALL.iter().filter(|p| !p.is_aarch64()) {
+        for p in DeviceProfile::ALL.iter().filter(|p| !p.needs_tpm()) {
             for r in p.required_devices() {
                 assert!(d.contains(r), "{r} ({p:?})");
             }
@@ -1759,9 +1765,18 @@ mod tests {
         assert!(caps.machine("pc-i440fx-12.0").is_err(), "not listed");
         assert!(caps.machine("pc").is_err(), "alias");
         assert!(caps.machine("pc-q35-11.1").is_ok());
-        for p in DeviceProfile::ALL.iter().filter(|p| !p.is_aarch64()) {
+        for p in DeviceProfile::ALL.iter().filter(|p| !p.needs_tpm()) {
             assert!(caps.missing_devices(p).is_empty(), "{p:?}");
         }
+        assert_eq!(
+            caps.missing_devices(&DeviceProfile::WINDOWS11_X64),
+            ["tpm-crb"]
+        );
+        caps.devices.insert("tpm-crb".into());
+        assert!(
+            caps.missing_devices(&DeviceProfile::WINDOWS11_X64)
+                .is_empty()
+        );
         // A binary without USB tablet: only the Windows profiles are affected.
         caps.devices.remove("usb-tablet");
         assert!(caps.missing_devices(&DeviceProfile::LINUX).is_empty());

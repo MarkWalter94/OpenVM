@@ -6,8 +6,8 @@
 //! it only lets the client ask for a session, which the user then approves
 //! in the app with a verification code.
 //!
-//! The credential is never shown, never copied to the clipboard (the app
-//! has no clipboard features) and never logged. It goes to a file only the
+//! The credential is never shown, copied to the clipboard or logged.
+//! It goes to a file only the
 //! current user can read, where the adapter reads it:
 //!
 //! - Windows: `%LOCALAPPDATA%\LightVM\pairing\pairing.json`; the `pairing`
@@ -134,7 +134,7 @@ fn write_private_file(path: &Path, data: &[u8]) -> std::io::Result<()> {
 }
 
 /// Creates `dir` if missing and restricts it to the current user.
-fn private_dir(dir: &Path) -> Result<(), String> {
+pub(crate) fn private_dir(dir: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("pairing folder not created: {e}"))?;
     restrict(dir)
 }

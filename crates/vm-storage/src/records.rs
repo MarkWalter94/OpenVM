@@ -1020,6 +1020,7 @@ impl Tx<'_> {
     /// disk and its firmware state. References: [`StorageError::Referenced`].
     pub fn delete_baseline(&self, id: &BaselineId) -> Result<()> {
         let b = self.baseline(id)?;
+        let tpm = self.baseline_tpm(id)?;
         // History of ended runs: the reference is cleared (the audit keeps
         // the trace); an open run still blocks the deletion (trigger).
         self.inner
@@ -1037,6 +1038,9 @@ impl Tx<'_> {
         self.delete_disk(&b.base_disk_id)?;
         if let Some(fw) = &b.vars_fw_id {
             self.delete_firmware(fw)?;
+        }
+        if let Some(tpm) = tpm {
+            self.delete_firmware(&tpm.fw_id)?;
         }
         Ok(())
     }
