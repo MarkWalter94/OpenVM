@@ -278,13 +278,14 @@ loop. The same tests passed with the bundle built by the recipe
 (`R6-05` §15). BitLocker on a fully encrypted system volume with protection
 on unlocks from the emulated TPM after a cold reboot; with an empty TPM boot
 stops at BitLocker recovery, and reverting a user snapshot brings the TPM
-state back so that Windows unlocks by itself again (`R6-05` §19). An installation
+state back so that Windows unlocks by itself again; restoring a baseline of
+the same encrypted system over a TPM without its keys does the same
+(`R6-05` §19). An installation
 completing OOBE with a local account survives a Reset decided by the host,
 and through the service the console of the same run shows the new process
 after a cold reboot (`R6-05` §17). Since the same reset fault hit
 installed Linux with the ordinary QEMU (R6-07b), every WHPX run now reboots
-cold (`R6-05` §18; verified by a Reset of an Ubuntu VM through the service). Windows Hello, a baseline (rather than snapshot) restore
-of an installed encrypted system, the desktop UI's own
+cold (`R6-05` §18; verified by a Reset of an Ubuntu VM through the service). Windows Hello, the desktop UI's own
 reconnection across a reboot, and the release
 bundle (recipe build, release review of the licence/source inventory of
 `R6-05` §20, signing) remain open.

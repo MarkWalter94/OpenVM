@@ -1235,6 +1235,10 @@ fn qualify_install(bitlocker: bool, oobe: bool, snapshot: bool) {
                 assert_eq!(stopped.active_after, 0);
                 stack.stop();
                 assert_eq!(guest.close().await.unwrap().active_at_close, 0);
+                // The fresh state swtpm created for that boot: a valid TPM
+                // without the BitLocker keys, used again before step 5.
+                let fresh_tpm = base.join("fresh-tpm.permall");
+                std::fs::copy(tpm_dir.join("tpm2-00.permall"), &fresh_tpm).unwrap();
                 // 3. Revert: disk, UEFI variables and the TPM state together.
                 let record = cat.read(|tx| tx.vm(&vm)).unwrap();
                 let op = cat
@@ -1328,7 +1332,8 @@ fn qualify_install(bitlocker: bool, oobe: bool, snapshot: bool) {
                 .unwrap();
                 // 5. Baseline restore of the same state: the snapshot is
                 //    deleted first (a restore never discards snapshots), the
-                //    TPM is emptied again, then the baseline is restored.
+                //    TPM is replaced by the fresh one (a restore refuses a
+                //    missing state), then the baseline is restored.
                 let stopped = guest.shutdown(power_off(180)).await.unwrap();
                 assert_eq!(stopped.active_after, 0);
                 stack.stop();
@@ -1338,7 +1343,7 @@ fn qualify_install(bitlocker: bool, oobe: bool, snapshot: bool) {
                     .unwrap();
                 image(&["snapshot", "-d", op.tag()], op.disk());
                 assert_eq!(cat.settle_snapshot(&op).unwrap(), vm_storage::Settled::Done);
-                std::fs::remove_file(tpm_dir.join("tpm2-00.permall")).unwrap();
+                std::fs::copy(&fresh_tpm, tpm_dir.join("tpm2-00.permall")).unwrap();
                 let job = cat
                     .begin_restore(vm_storage::RestoreBaseline {
                         vm_id: vm,
@@ -1398,7 +1403,45 @@ fn qualify_install(bitlocker: bool, oobe: bool, snapshot: bool) {
                     }
                     tokio::time::sleep(Duration::from_secs(3)).await;
                 }
-                let after_restore = read_log();
+                // The connection of the boot stopped in step 5 may still be
+                // reported until a call fails on it: retry on the new one.
+                let wait = Instant::now();
+                let after_restore = loop {
+                    let reply = tools.control.call(lightvm_tools::control::Command::File {
+                        request: lightvm_tools::protocol::FileRequest::Read {
+                            share: "outbox".into(),
+                            path: lightvm_tools::protocol::RelativePath::new(vec![
+                                "installed.log".into(),
+                            ])
+                            .unwrap(),
+                            offset: 0,
+                            length: 16384,
+                        },
+                    });
+                    if let Ok(lightvm_proto::ToolReply::File {
+                        reply: lightvm_tools::protocol::FileReply::Data { data, .. },
+                    }) = reply
+                    {
+                        break String::from_utf8_lossy(
+                            &lightvm_tools::protocol::decode(&data, 16384).unwrap(),
+                        )
+                        .into_owned();
+                    }
+                    assert!(
+                        wait.elapsed() < Duration::from_secs(600),
+                        "no Tools after the baseline restore: {reply:?}"
+                    );
+                    if rebooted(&guest) {
+                        stack.stop();
+                        assert_eq!(guest.close().await.unwrap().active_at_close, 0);
+                        (guest, stack) = launch(true).await;
+                        continue;
+                    }
+                    if let Ok(shot) = guest.screenshot().await {
+                        std::fs::write(base.join("after-baseline.png"), shot.png).unwrap();
+                    }
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                };
                 std::fs::write(base.join("installed-after-baseline.log"), &after_restore).unwrap();
                 assert_ne!(after_revert, after_restore, "a new boot after the restore");
                 let boot_line = after_restore

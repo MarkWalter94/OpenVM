@@ -742,6 +742,38 @@ final lab script in 1396 s with the same results
 (`evidence-snapshot-01a149ef`) and
 `evidence-snapshot-01a14913`, `-01a14926`, `-01a1493d` (the earlier runs).
 
+### Baseline restore of the encrypted system
+
+The same test continues from the reverted system:
+
+6. A baseline is created from the encrypted system before the TPM is
+   emptied (step 2), together with the snapshot.
+7. After the revert, the guest is stopped, the snapshot deleted, and the TPM
+   state replaced by the fresh state that swtpm created for the empty-TPM
+   boot of step 2: a valid TPM without the BitLocker keys. (A restore
+   refuses a missing TPM state before discarding anything; deleting the
+   file is therefore not a way to empty it.)
+8. The baseline is restored (new overlay over the baseline disk, its UEFI
+   variables and TPM state); Windows starts and unlocks by itself.
+
+Passed in 2100 s:
+
+```text
+BitLocker after the revert:            Unlocked, {Tpm, RecoveryPassword}
+BitLocker after the baseline restore:
+VolumeStatus         : FullyEncrypted
+ProtectionStatus     : On
+LockStatus           : Unlocked
+KeyProtector         : {Tpm, RecoveryPassword}
+LastBootUpTime : 17/10/2026 17:00:05
+```
+
+Evidence: `E:\OpenVM-tests\lab\win11-real\evidence-baseline-01a14aae\`
+(`fresh-tpm.permall`, `after-baseline.png`, logs). Earlier attempts stopped
+on the lab, not the product: E: full during the baseline promotion, the
+deleted TPM file refused by the restore (above), and a read on the Tools
+connection of the previous boot (`evidence-snapshot-01a14a6b`, `-01a14a8d`).
+
 ## 20. Runtime licence and source inventory (2026-10-17)
 
 Each recipe now has a script that inventories the third-party runtime of its
