@@ -601,8 +601,12 @@ test) runs the §15 installation, then, after the guest's own reboot:
 2. `Enable-BitLocker -TpmProtector -UsedSpaceOnly -SkipHardwareTest` on C:,
    then a reboot requested by Windows once encryption is under way: a cold
    reboot of this profile (new QEMU and swtpm, same TPM state).
-3. Windows starts again from the partly encrypted volume, so the emulated TPM
-   released the volume key at boot with no recovery prompt.
+3. Windows starts again from the partly encrypted volume with no recovery
+   prompt. **Correction (§19):** while encryption is in progress
+   `ProtectionStatus` is `Off` and a later boot with an empty TPM also got
+   past BitLocker, so this step does not show that the TPM released the
+   key; it shows only that the volume and its TPM protector survive a cold
+   reboot. §19 qualifies the TPM unlock with a fully encrypted volume.
 
 Passed in 760 s with the recipe bundle (§15):
 
@@ -683,3 +687,57 @@ Checks:
 Not yet verified: a reboot requested by an installed Linux guest
 (`installed_linux_guest_warm_reboot`, Codex's harness) and by Windows 10 or
 older guests with this change.
+
+## 19. BitLocker sealed to the TPM; snapshot revert restores the TPM (2026-10-17)
+
+`windows11_snapshot_revert_restores_the_tpm_of_a_bitlocker_system` (ignored
+lab test, recipe bundle) installs Windows 11 Pro with the OOBE local account
+(§17) **inside a catalog**, so that user snapshots carry disk, UEFI
+variables and TPM state together. The lab script now runs elevated after
+every logon: a logon task with the highest privileges for the OOBE account
+(an unelevated account cannot manage BitLocker), the Run key for the
+audit-mode Administrator (the logon task does not start there); an
+unelevated instance exits. It also turns hibernation off (a shutdown is not
+a fast-startup hibernation). The audit-mode qualification of §15 passed
+again with this script (1003 s). Steps:
+
+1. BitLocker on C: with a TPM protector and a recovery password; the script
+   waits until the volume is **fully encrypted** and resumes protection
+   (`ProtectionStatus On`; while encrypting, or with protection suspended,
+   the volume key is kept in clear and a boot does not need the TPM).
+2. A reboot requested by Windows (a cold reboot): the volume unlocks by
+   itself, protection on.
+3. Clean shutdown, then a user snapshot of the stopped VM.
+4. The current TPM state is deleted (swtpm starts with an empty TPM): boot
+   stops at **"Ripristino BitLocker"** asking for the recovery key, and the
+   guest never reaches the Tools (240 s).
+5. The snapshot is reverted (disk, UEFI variables, TPM state): Windows starts
+   from the encrypted volume by itself.
+
+Passed in 2029 s:
+
+```text
+BitLocker before reboot:
+VolumeStatus         : FullyEncrypted
+ProtectionStatus     : On
+KeyProtector         : {Tpm, RecoveryPassword}
+BitLocker after reboot:      ProtectionStatus On, LockStatus Unlocked
+(empty TPM: "Ripristino BitLocker" screen, see without-tpm.png)
+BitLocker after the revert:
+VolumeStatus         : FullyEncrypted
+ProtectionStatus     : On
+LockStatus           : Unlocked
+KeyProtector         : {Tpm, RecoveryPassword}
+LastBootUpTime : 17/10/2026 11:51:44
+```
+
+Earlier runs of the same test explain the conditions: with protection off
+(encryption in progress, or suspended after adding the recovery password)
+the empty-TPM boot got past BitLocker and Windows stopped later with
+`0x8007139f` at logon; with only a TPM protector and protection on, the
+empty TPM gave the same generic error (no recovery protector to ask for).
+Evidence: `E:\OpenVM-tests\lab\win11-real\evidence-snapshot-01a14995\`
+(this run; `without-tpm.png`, `after-revert.png`, logs); repeated with the
+final lab script in 1396 s with the same results
+(`evidence-snapshot-01a149ef`) and
+`evidence-snapshot-01a14913`, `-01a14926`, `-01a1493d` (the earlier runs).

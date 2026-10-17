@@ -375,8 +375,9 @@ the new picture was available about a second later; close and reopen the
 console if it does not come back).
 The Reset button does the same. BitLocker with the TPM works in the
 project's test: remove the installation media first (Windows refuses to
-turn BitLocker on while a bootable DVD is attached); in the test the system
-unlocked by itself when Windows restarted. Baselines and snapshots of a
+turn BitLocker on while a bootable DVD is attached); in the test the
+encrypted system unlocked by itself at every start, and reverting a snapshot
+also brought back the TPM state it needs. Baselines and snapshots of a
 Windows 11 VM save and restore the TPM state together with disk and firmware
 settings; take them with the VM shut down (a snapshot of a running Windows 11
 VM is refused).

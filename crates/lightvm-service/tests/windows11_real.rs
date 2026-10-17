@@ -589,7 +589,7 @@ fn service_backend_starts_windows11_twice_and_keeps_other_profiles_working() {
 #[test]
 #[ignore = "requires an explicitly approved development Windows 11 bundle and test ISO on E:"]
 fn windows11_installs_and_reboots_with_tpm_and_secure_boot() {
-    qualify_install(false, false);
+    qualify_install(false, false, false);
 }
 
 /// R6-05 §16: after the qualification above, BitLocker with a TPM
@@ -599,7 +599,7 @@ fn windows11_installs_and_reboots_with_tpm_and_secure_boot() {
 #[test]
 #[ignore = "requires an explicitly approved development Windows 11 bundle and test ISO on E:"]
 fn windows11_bitlocker_unlocks_from_the_tpm_after_a_cold_reboot() {
-    qualify_install(true, false);
+    qualify_install(true, false, false);
 }
 
 /// R6-05 §17: the installation completes OOBE with a local lab account
@@ -609,10 +609,21 @@ fn windows11_bitlocker_unlocks_from_the_tpm_after_a_cold_reboot() {
 #[test]
 #[ignore = "requires an explicitly approved development Windows 11 bundle and test ISO on E:"]
 fn windows11_completes_oobe_and_survives_a_host_reset() {
-    qualify_install(false, true);
+    qualify_install(false, true, false);
 }
 
-fn qualify_install(bitlocker: bool, oobe: bool) {
+/// R6-05 §19: an installed Windows 11 (OOBE account) with BitLocker sealed
+/// to the TPM, inside a catalog. A user snapshot of the stopped VM; the
+/// current TPM state is then deleted (a new, empty TPM: the next boot must
+/// stop at BitLocker recovery); reverting the snapshot brings the TPM state
+/// back with disk and UEFI variables, and Windows unlocks by itself again.
+#[test]
+#[ignore = "requires an explicitly approved development Windows 11 bundle and test ISO on E:"]
+fn windows11_snapshot_revert_restores_the_tpm_of_a_bitlocker_system() {
+    qualify_install(true, true, true);
+}
+
+fn qualify_install(bitlocker: bool, oobe: bool, snapshot: bool) {
     let env = |name: &str| PathBuf::from(std::env::var_os(name).expect(name));
     let lab = env("LIGHTVM_LAB");
     let bundle = env("LIGHTVM_WIN11_BUNDLE");
@@ -622,10 +633,31 @@ fn qualify_install(bitlocker: bool, oobe: bool) {
     assert_eq!(detected.os, GuestOs::Windows11X64);
     assert_eq!(detected.arch, Some(lightvm_proto::GuestArch::X86_64));
     let resume = std::env::var_os("LIGHTVM_WIN11_RESUME").map(PathBuf::from);
-    let base = resume.clone().unwrap_or_else(|| {
-        lab.join("win11-real")
-            .join(format!("installed-{}", RunId::new_v7()))
+    // Snapshot variant: the VM lives in a catalog (short root: the private
+    // sockets must fit the path limit), so that its user snapshots carry
+    // disk, UEFI variables and TPM state together.
+    let mut catalog = snapshot.then(|| {
+        let root = lab.join("w11").join(&RunId::new_v7().to_string()[24..]);
+        let mut cat = vm_storage::Catalog::open(&root).unwrap();
+        let vm = cat
+            .with_tx(|tx| {
+                tx.insert_vm(&vm_storage::NewVm {
+                    name: "BitLocker TPM snapshot".into(),
+                    guest_os: "windows11_x64".into(),
+                    config_version: 1,
+                    config: serde_json::json!({"guest_os":"windows11_x64"}),
+                })
+            })
+            .unwrap();
+        (cat, vm, root)
     });
+    let base = match (&catalog, resume.clone()) {
+        (Some((_, vm, root)), _) => root.join("vms").join(vm.to_string()),
+        (None, Some(r)) => r,
+        (None, None) => lab
+            .join("win11-real")
+            .join(format!("installed-{}", RunId::new_v7())),
+    };
     if resume.is_some() {
         assert!(
             base.canonicalize()
@@ -703,7 +735,7 @@ fn qualify_install(bitlocker: bool, oobe: bool) {
     for dir in ["run", "p", "tpm", "journal"] {
         qemu_backend::prepare::restrict_to_current_user(&paths.path(dir).unwrap()).unwrap();
     }
-    let vm = VmId::new_v7();
+    let vm = catalog.as_ref().map_or_else(VmId::new_v7, |(_, vm, _)| *vm);
     for cycle in 0..1 {
         let run = RunId::new_v7();
         let config = ToolsConfig {
@@ -1029,7 +1061,8 @@ fn qualify_install(bitlocker: bool, oobe: bool) {
                 let mut before = None;
                 let after = loop {
                     assert!(
-                        wait.elapsed() < Duration::from_secs(1200),
+                        // Full encryption of the used space takes a while.
+                        wait.elapsed() < Duration::from_secs(6000),
                         "BitLocker timeout: {}",
                         base.display()
                     );
@@ -1081,17 +1114,14 @@ fn qualify_install(bitlocker: bool, oobe: bool) {
                         .map(|(_, v)| v.trim().to_owned())
                         .unwrap_or_default()
                 };
-                // Encryption started with a TPM protector before the reboot ...
-                assert!(
-                    matches!(
-                        field(&before, "VolumeStatus").as_str(),
-                        "EncryptionInProgress" | "FullyEncrypted"
-                    ),
-                    "{before}"
-                );
+                // Fully encrypted, protection on, TPM protector before the
+                // reboot (while encrypting, the key is kept in clear) ...
+                assert_eq!(field(&before, "VolumeStatus"), "FullyEncrypted", "{before}");
+                assert_eq!(field(&before, "ProtectionStatus"), "On", "{before}");
                 assert!(field(&before, "KeyProtector").contains("Tpm"), "{before}");
                 // ... and Windows started again from the volume: the TPM
                 // released its key with no recovery prompt.
+                assert_eq!(field(&after, "ProtectionStatus"), "On", "{after}");
                 assert!(
                     cold_reboots >= reboots_before + 2,
                     "detach and BitLocker reboots expected"
@@ -1102,6 +1132,173 @@ fn qualify_install(bitlocker: bool, oobe: bool) {
                 std::fs::write(
                     base.join("bitlocker-results.txt"),
                     "bitlocker_tpm_protector=passed\nunlocked_from_tpm_after_cold_reboot=passed\n",
+                )
+                .unwrap();
+            }
+            if let Some((cat, vm, _)) = catalog.as_mut() {
+                let vm = *vm;
+                let image = |args: &[&str], path: &std::path::Path| {
+                    assert!(
+                        std::process::Command::new(caps.qemu_img.as_path())
+                            .args(args)
+                            .arg(path)
+                            .status()
+                            .unwrap()
+                            .success()
+                    );
+                };
+                let power_off = |powerdown: u64| qemu_backend::run::ShutdownPolicy {
+                    powerdown_timeout: Duration::from_secs(powerdown),
+                    quit_timeout: Duration::from_secs(5),
+                    kill_timeout: Duration::from_secs(10),
+                };
+                // 1. A real shutdown (hibernation is off), then the user
+                //    snapshot of the stopped VM: disk, UEFI variables, TPM.
+                let before_revert = read_log();
+                let stopped = guest.shutdown(power_off(180)).await.unwrap();
+                assert_eq!(stopped.active_after, 0);
+                stack.stop();
+                assert_eq!(guest.close().await.unwrap().active_at_close, 0);
+                let standalone = vm_storage::CurrentStateFiles {
+                    disk: vm_storage::ManagedPath::parse(&format!("vms/{vm}/disk.qcow2")).unwrap(),
+                    vars: Some(
+                        vm_storage::ManagedPath::parse(&format!("vms/{vm}/vars.fd")).unwrap(),
+                    ),
+                };
+                let op = cat
+                    .begin_take_snapshot(vm_storage::TakeSnapshot {
+                        vm_id: vm,
+                        name: "BitLocker sealed to the TPM".into(),
+                        description: String::new(),
+                        running: false,
+                        clean_shutdown: true,
+                        config: serde_json::json!({"guest_os":"windows11_x64"}),
+                        config_revision: 1,
+                        disk: standalone.disk.clone(),
+                        vars: standalone.vars.clone(),
+                        thumbnail: None,
+                    })
+                    .unwrap();
+                image(&["snapshot", "-c", op.tag()], op.disk());
+                assert_eq!(cat.settle_snapshot(&op).unwrap(), vm_storage::Settled::Done);
+                let snapshot_id = op.snapshot_id();
+                // 2. A new, empty TPM: BitLocker must not unlock.
+                let tpm_rel = cat.current_tpm_dir(&vm).unwrap();
+                let tpm_dir = cat.layout().resolve(&tpm_rel).unwrap();
+                std::fs::remove_file(tpm_dir.join("tpm2-00.permall")).unwrap();
+                tools.control.close_handle().disconnect();
+                (guest, stack) = launch(true).await;
+                let wait = Instant::now();
+                while wait.elapsed() < Duration::from_secs(240) {
+                    assert!(
+                        !tools.control.connected(),
+                        "Windows started without its TPM state: {}",
+                        base.display()
+                    );
+                    if rebooted(&guest) {
+                        stack.stop();
+                        assert_eq!(guest.close().await.unwrap().active_at_close, 0);
+                        (guest, stack) = launch(true).await;
+                        continue;
+                    }
+                    if let Ok(shot) = guest.screenshot().await {
+                        std::fs::write(base.join("without-tpm.png"), shot.png).unwrap();
+                    }
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                }
+                let stopped = guest.shutdown(power_off(0)).await.unwrap();
+                assert_eq!(stopped.active_after, 0);
+                stack.stop();
+                assert_eq!(guest.close().await.unwrap().active_at_close, 0);
+                // 3. Revert: disk, UEFI variables and the TPM state together.
+                let record = cat.read(|tx| tx.vm(&vm)).unwrap();
+                let op = cat
+                    .begin_revert_snapshot(vm_storage::RevertSnapshot {
+                        vm_id: vm,
+                        snapshot_id,
+                        disk: standalone.disk.clone(),
+                        vars: standalone.vars.clone(),
+                        config: record.config,
+                        config_version: 1,
+                        expected_revision: record.revision,
+                    })
+                    .unwrap();
+                image(&["snapshot", "-a", op.tag()], op.disk());
+                assert_eq!(cat.settle_snapshot(&op).unwrap(), vm_storage::Settled::Done);
+                assert!(tpm_dir.join("tpm2-00.permall").is_file());
+                // 4. Windows starts from the encrypted volume again.
+                (guest, stack) = launch(true).await;
+                let wait = Instant::now();
+                while !tools.control.connected() {
+                    assert!(
+                        wait.elapsed() < Duration::from_secs(600),
+                        "no start after the revert: {}",
+                        base.display()
+                    );
+                    if rebooted(&guest) {
+                        stack.stop();
+                        assert_eq!(guest.close().await.unwrap().active_at_close, 0);
+                        (guest, stack) = launch(true).await;
+                        continue;
+                    }
+                    if let Ok(shot) = guest.screenshot().await {
+                        std::fs::write(base.join("after-revert.png"), shot.png).unwrap();
+                    }
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                }
+                let after_revert = read_log();
+                std::fs::write(base.join("installed-after-revert.log"), &after_revert).unwrap();
+                assert_ne!(before_revert, after_revert, "a new boot after the revert");
+                // The reverted disk still holds the log of the snapshot's
+                // boot: wait for the one of this boot (same boot time).
+                let boot_line = after_revert
+                    .lines()
+                    .find(|l| l.starts_with("LastBootUpTime"))
+                    .and_then(|l| l.split_once(':'))
+                    .map(|(_, v)| v.trim().to_owned())
+                    .expect("boot time");
+                let wait = Instant::now();
+                let state = loop {
+                    // The guest may still be writing it (sharing refusal).
+                    let state = tools
+                        .control
+                        .call(lightvm_tools::control::Command::File {
+                            request: lightvm_tools::protocol::FileRequest::Read {
+                                share: "outbox".into(),
+                                path: lightvm_tools::protocol::RelativePath::new(vec![
+                                    "bitlocker-after.log".into(),
+                                ])
+                                .unwrap(),
+                                offset: 0,
+                                length: 16384,
+                            },
+                        })
+                        .ok()
+                        .and_then(|r| match r {
+                            lightvm_proto::ToolReply::File {
+                                reply: lightvm_tools::protocol::FileReply::Data { data, .. },
+                            } => lightvm_tools::protocol::decode(&data, 16384)
+                                .ok()
+                                .map(|b| String::from_utf8_lossy(&b).into_owned()),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    if state.contains(&boot_line) {
+                        break state;
+                    }
+                    assert!(
+                        wait.elapsed() < Duration::from_secs(120),
+                        "no BitLocker state of this boot: {state}"
+                    );
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                };
+                std::fs::write(base.join("bitlocker-after-revert.log"), &state).unwrap();
+                println!("BitLocker after the revert:\n{state}");
+                assert!(state.contains("Unlocked"), "{state}");
+                assert!(state.contains("Tpm"), "{state}");
+                std::fs::write(
+                    base.join("snapshot-results.txt"),
+                    "empty_tpm_blocks_bitlocker=passed\nsnapshot_revert_restores_tpm=passed\n",
                 )
                 .unwrap();
             }

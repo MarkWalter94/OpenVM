@@ -1,13 +1,24 @@
 @echo off
-rem Runs only in the disposable installed guest, under its audit account.
-rem auditUser starts it at the first audit logon; the Run key starts the copy
-rem on the current run's CD again after every later boot (warm reboot).
+rem Runs only in the disposable installed guest, under its lab account (the
+rem audit Administrator or the local OOBE account). The first logon starts it
+rem elevated (auditUser or FirstLogonCommands); it registers a logon task
+rem with the highest privileges that starts the copy on the current run's CD
+rem again after every later boot, elevated (BitLocker needs it), and turns
+rem hibernation off so that a shutdown is a real one (no fast startup).
 setlocal
 set OUT=C:\LightVMGuestDocs\LightVM Tools\outbox
 mkdir "%OUT%" 2>nul
+rem An unelevated start (the Run key of the OOBE account) leaves the work to
+rem the elevated logon task.
+net session >nul 2>&1 || (echo %date% %time% not elevated, left to the task>>"%OUT%\lab.log" & exit /b 0)
 tasklist /fi "imagename eq TOOLS.EXE" | find /i "TOOLS.EXE" >nul && (echo %date% %time% tools already running>>"%OUT%\lab.log" & exit /b 0)
 echo %date% %time% lab start>>"%OUT%\lab.log"
+schtasks /create /tn LightVMLab /sc onlogon /rl highest /f /tr "cmd.exe /c for %%d in (D E F G H I J K L M N O P Q R S T U V W Y Z) do @if exist %%d:\LAB.CMD (%%d:\LAB.CMD & exit)" >>"%OUT%\lab.log" 2>&1
+rem The logon task does not start for the audit-mode Administrator: the Run
+rem key starts the copy on the CD too. Only an elevated instance continues
+rem (audit: the Run key; OOBE account: the task), see the check above.
 reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v LightVMLab /t REG_SZ /d "cmd.exe /c for %%d in (D E F G H I J K L M N O P Q R S T U V W Y Z) do @if exist %%d:\LAB.CMD (%%d:\LAB.CMD & exit)" /f >>"%OUT%\lab.log" 2>&1
+powercfg /h off >>"%OUT%\lab.log" 2>&1
 reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders" /v Personal /t REG_SZ /d C:\LightVMGuestDocs /f >nul
 reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders" /v Personal /t REG_EXPAND_SZ /d C:\LightVMGuestDocs /f >nul
 sc start tbs >nul 2>&1
