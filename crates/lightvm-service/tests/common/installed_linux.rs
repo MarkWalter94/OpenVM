@@ -9,6 +9,10 @@ use sha2::{Digest, Sha256};
 #[path = "desktop_linux.rs"]
 mod desktop_linux;
 
+#[cfg(windows)]
+#[path = "filtered_crash.rs"]
+mod filtered_crash;
+
 struct ExternalService(std::process::Child);
 
 impl Drop for ExternalService {

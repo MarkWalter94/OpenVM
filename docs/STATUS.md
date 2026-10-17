@@ -1,6 +1,6 @@
 # Project status
 
-Last updated: 2026-10-16
+Last updated: 2026-10-17
 
 Operational document required by section 17 of `docs/ROADMAP.md`: current phase, impediments and progress. **This file does not change the Definition of Done (section 11), the scope or the exit criteria.** A status reported here does not count as verification: the evidence is in `docs/verification/`.
 
@@ -240,8 +240,9 @@ qualification remain open. Snapshot flush is implemented, but filesystem
 freeze/application quiescence is not. Permanent lab evidence and build caches
 use `E:\OpenVM-tests`. Physical USB tests remain deferred.
 On 2026-10-16 the owner deferred USB tests and requested the Windows 11 TPM
-work below. Filtered Internet product-path evidence is in `R1-02`; VPN/proxy
-and gateway-crash qualification remain open.
+work below. Filtered Internet product-path evidence is in `R1-02`; the
+actual packaged-supervisor crash/recovery with installed Ubuntu passed in
+`R1-03`. VPN/proxy and isolated gateway-thread crash qualification remain open.
 Evidence, commands and the handoff are in
 `docs/verification/R6-07-lightvm-tools.md` (2026-10-16 follow-up).
 
@@ -309,7 +310,9 @@ only. Agent sessions get it only through the `network.endpoints` grant.
 | Configuration: exact names, 80/443, no IP literals | `lightvm-proto` `tests/roundtrip.rs` | verified in simulation/test |
 | A public-only endpoint pinned to loopback never reaches the host | `guest-net` `tests/stack.rs` | verified in simulation/test |
 | Real Linux guest: HTTPS to the allowed name (TLS 1.3, 200), other names/ports, host, LAN, Internet IPs, UDP DNS, IPv6, ICMP refused; name pinned to loopback never reaches the host; persistent TLS connection reset on revocation | `guest-net` `tests/real_guest.rs` (`--ignored`), R1-01 §3 | verified on hardware (Windows, WHPX), stack level |
-| Product end to end, real resolver rebinding, VPN, system proxy, route change, gateway crash, Windows guests | — | not verified |
+| Product service and agent grant: real HTTPS, endpoint subset, denials, revocation, guest application/log return | R1-02 | verified on hardware for Ubuntu live, in-process service |
+| Packaged supervisor killed during real filtered HTTPS, owned QEMU termination, rotated credentials, stopped reconciliation, explicit restart retaining policy and guest Tools | R1-03 | verified on hardware for installed Ubuntu and ZIP .3; QEMU gone in 117 ms; clean installation completed before crash |
+| Real resolver rebinding, VPN, system proxy, host route mutation, isolated gateway-thread crash, Windows guests | — | not verified |
 
 R1 is not complete: the release conditions of ROADMAP 12 (R1) need the
 real-guest evidence above. Evidence file: `docs/verification/R1-01-filtered-internet.md`.

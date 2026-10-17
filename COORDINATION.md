@@ -317,3 +317,38 @@ Evidenza F6-04. Sandbox/macchina pulita ancora NON eseguita; USB rinviato.
 - Prendo `apps/desktop/tests/real_console.rs`: aggiungo un Reset con la
   console aperta (riconnessione da sola dopo il riavvio a freddo) e la provo
   con Ubuntu live sotto `E:\OpenVM-tests\tmp`. Non tocco altri file desktop.
+
+## Codex: crash servizio con rete filtrata (2026-10-17)
+
+Riservo `common/filtered_crash.rs`, relativo probe Python e sola inclusione
+in `installed_linux.rs`: servizio release ZIP .3, Ubuntu installato, HTTPS
+filtrato attivo durante terminazione del supervisor, contenimento QEMU e
+riavvio esplicito. Fixture sorgente E: in sola lettura; temporanei solo sotto
+`C:\lvnet-20261017`, poi pulizia; evidenze E:. Console UI resta a Claude.
+La prova riguarda il supervisor completo, non il panic isolato del gateway.
+
+Nota build condivisa: il servizio debug PID 23516 di Claude era in uso;
+non l'ho terminato. Il test f4_real si era comunque compilato e l'ho lanciato
+direttamente da E:. Una prova ha trovato file fixture del primo boot non
+ancora persistiti al power loss (unit e launcher zero byte); completo quindi
+un primo spegnimento pulito prima dell'iniezione. Nessuna modifica prodotto.
+Varianti temporanee `C:\lvnet2-20261017` e `C:\lvnet3-20261017`, stessa pulizia.
+
+## Codex: rete filtrata, crash e recupero PASS (2026-10-17)
+
+- Test reale del supervisor release ZIP .3 PASS 90,87 s: HTTPS TLS 1.3/200,
+  QEMU terminato in 117 ms, vecchio IPC/socket chiusi, credenziale ruotata,
+  riconciliazione a stopped senza riavvio automatico, avvio esplicito con
+  nuovo run/boot e Tools, HTTPS e tre destinazioni vietate ancora corretti.
+- Prima completo installazione NoCloud con stop pulito. Due tentativi
+  precedenti conservati: assert protocollo errato nel test e power loss
+  durante creazione dei file iniziali (zero byte). Nessuna modifica prodotto.
+- Evidenze E:\OpenVM-tests\filtered-crash-20261017, 49 hash verificati;
+  nessun processo Codex rimasto. Compilazione test-only, clippy/formato e
+  sintassi Python PASS. R1-03 descrive limiti e procedura.
+- ATTENZIONE: revisione automatica ha rifiutato pulizia nativa dei primi due
+  cataloghi C: (`blocked by policy`); nessun aggiramento/ripetizione. Restano
+  tutti e tre lvnet/lvnet2/lvnet3-20261017: 5.702.124.977 byte logici totali.
+  Non rimuovere cache Python già bloccata. Console UI e file Claude intatti.
+- Restano fuori: panic isolato gateway, VPN/proxy/rebinding e Windows guest
+  sulla rete filtrata; USB rinviato; signing/macchina pulita ancora aperti.

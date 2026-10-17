@@ -4,6 +4,8 @@ Date: 2026-10-17. Passed on this Windows host with a real Ubuntu 26.04.1
 live guest under WHPX. This is an in-process service harness using the
 production CoreEngine, IPC, QemuVmBackend, agent grants and Tools transfer.
 It does not qualify a separately packaged supervisor process.
+The complementary installed-guest/packaged-supervisor crash and recovery
+qualification is recorded separately in [R1-03](R1-03-supervisor-crash.md).
 
 Test: `filtered_product::filtered_internet_through_service_and_agent_grant`
 in `crates/lightvm-service/tests/common/filtered_product.rs`, included by
