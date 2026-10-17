@@ -29,6 +29,7 @@ async fn image(ui: &mut Client, vm: VmId, run: RunId, request: ToolFileRequest) 
 #[ignore = "prepared Xfce VM, WHPX and an extracted release supervisor required"]
 fn installed_xfce_autostart_gvfs_and_clipboard() {
     let lab = PathBuf::from(std::env::var_os("LIGHTVM_DESKTOP_LAB").unwrap());
+    let expect_login = std::env::var_os("LIGHTVM_DESKTOP_EXPECT_LOGIN").is_some();
     let fixture = lab.join("fixture");
     let root = lab.join("runs").join(&RunId::new_v7().to_string()[24..]);
     std::fs::create_dir_all(&root).unwrap();
@@ -75,6 +76,14 @@ fn installed_xfce_autostart_gvfs_and_clipboard() {
             assert_eq!(processes.len(), 1, "installed Tools must run once");
             assert_eq!(processes[0]["uid"], status["uid"]);
             assert_eq!(processes[0]["args"].as_array().unwrap().len(), 2, "autostart without explicit bootstrap arguments");
+            if expect_login {
+                assert_eq!(status["session"]["Active"], "yes");
+                assert_eq!(status["session"]["Remote"], "no");
+                assert_eq!(status["session"]["Type"], "x11");
+                assert_eq!(status["session"]["Seat"], "seat0");
+                assert!(!status["tools_mounts"].as_array().unwrap().is_empty(), "Tools CD was not mounted by the desktop");
+                assert_ne!(status["display"], ":99.0", "unexpected Xvfb session");
+            }
             previous_boot = status["boot_id"].as_str().unwrap().to_owned();
             std::fs::write(root.join(format!("desktop-{attempt}.json")), serde_json::to_vec_pretty(&status).unwrap()).unwrap();
             for action in ["gio", "clipboard"] {
@@ -114,6 +123,21 @@ fn installed_xfce_autostart_gvfs_and_clipboard() {
         }
         service.shutdown().await;
     });
+    if expect_login {
+        let diagnostic = std::fs::read_to_string(root.join("packaged-service.stderr.log")).unwrap();
+        assert!(
+            !diagnostic.contains("phase Quit") && !diagnostic.contains("phase Kill"),
+            "desktop stop used fallback; inspect retained logind/input diagnostics"
+        );
+        assert_eq!(
+            diagnostic
+                .matches("phase Powerdown, cause GuestShutdown")
+                .count(),
+            2,
+            "both desktop stops must be clean guest shutdowns"
+        );
+        std::fs::write(root.join("login-results.txt"), "active_lightdm_xorg_login=passed\ndesktop_cd_automount=passed\nacpi_clean_poweroff_two_boots=passed\n").unwrap();
+    }
     assert_eq!(hash_file(&fixture.join("ubuntu.vmdk")), source_sha);
     std::fs::write(root.join("results.txt"), "xfce_autostart_two_boots=passed\ngvfs_mount_and_file_operations=passed\nread_only_refusal=passed\nunicode_filenames=passed\nx11_text_image_clipboard=passed\nactual_release_supervisor=passed\nsource_unchanged=passed\n").unwrap();
 }

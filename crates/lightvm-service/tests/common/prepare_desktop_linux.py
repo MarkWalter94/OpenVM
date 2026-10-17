@@ -16,6 +16,7 @@ p.add_argument('--root', type=pathlib.Path, required=True)
 p.add_argument('--image', type=pathlib.Path, required=True)
 p.add_argument('--qemu', type=pathlib.Path, required=True)
 p.add_argument('--refresh-probe', action='store_true', help='Stopped owned fixture only: refresh seed/probe, retaining prepared disk')
+p.add_argument('--session', choices=['xvfb', 'lightdm'], default='xvfb')
 a = p.parse_args()
 assert str(a.root) == r'C:\lvdesktop-20261017\fixture'
 assert a.root.is_dir() if a.refresh_probe else not a.root.exists(), 'new directory, or existing owned fixture for refresh'
@@ -90,11 +91,46 @@ cfg = dict(package_update=True, package_upgrade=False, ssh_pwauth=False,
                    ['sh', '-c', 'dpkg-query -W xfce4-session gvfs-backends xclip python3-pil xvfb > /opt/lightvm-desktop/packages.txt'],
                    ['sh', '-c', 'echo LIGHTVM_DESKTOP_PREPARED > /dev/ttyS0']],
            power_state=dict(mode='poweroff', timeout=30, condition=True))
+if a.session == 'lightdm':
+    cfg['packages'] = ['xserver-xorg', 'lightdm', 'lightdm-gtk-greeter',
+                       'xfce4-session', 'xfwm4', 'xfdesktop4', 'xfce4-panel',
+                       'xfce4-settings', 'thunar', 'thunar-volman', 'gvfs-backends',
+                       'gvfs-fuse', 'dbus-x11', 'xclip', 'python3-pil',
+                       'policykit-1', 'udisks2', 'acpid', 'acpi-support-base']
+    cfg['users'][0]['groups'] = ['adm']
+    config_dir = '/home/desktop/.config/'
+    cfg['write_files'] = [
+        f('/etc/apt/apt.conf.d/90-lightvm-lab', 'APT::Install-Recommends "false";\n'),
+        f('/etc/lightdm/lightdm.conf.d/50-lightvm-lab.conf',
+          '[Seat:*]\nautologin-user=desktop\nautologin-user-timeout=0\nuser-session=xfce\nautologin-session=xfce\nxserver-allow-tcp=false\n'),
+        f(config_dir + 'xfce4/xfconf/xfce-perchannel-xml/thunar-volman.xml',
+          '<?xml version="1.0" encoding="UTF-8"?><channel name="thunar-volman" version="1.0">' +
+          ''.join('<property name="' + name + '" type="empty"><property name="enabled" type="bool" value="' + value + '"/></property>'
+                  for name, value in [('automount-drives', 'false'), ('automount-media', 'false'), ('autobrowse', 'false'), ('autorun', 'false')]) + '</channel>'),
+        f(config_dir + 'xfce4/xfconf/xfce-perchannel-xml/thunar.xml',
+          '<?xml version="1.0" encoding="UTF-8"?><channel name="thunar" version="1.0"><property name="misc-volume-management" type="bool" value="true"/></channel>'),
+        f(config_dir + 'autostart/lightvm-thunar.desktop',
+          '[Desktop Entry]\nType=Application\nName=Lab Thunar volume monitor\nExec=Thunar --daemon\nTerminal=false\n'),
+        f('/opt/lightvm-desktop/installer/TOOLS.PY',
+          (pathlib.Path(__file__).resolve().parents[4] / 'packaging/tools/TOOLS.PY').read_text()),
+        f('/opt/lightvm-desktop/installer/INSTALL.SH',
+          (pathlib.Path(__file__).resolve().parents[4] / 'packaging/tools/INSTALL.SH').read_text()),
+        f('/opt/lightvm-desktop/probe.py', probe),
+        f(config_dir + 'autostart/lightvm-probe.desktop', probe_desktop),
+    ]
+    cfg['runcmd'] = [
+        ['chown', '-R', 'desktop:desktop', '/home/desktop'],
+        ['sh', '-c', 'runuser -u desktop -- timeout 3 sh /opt/lightvm-desktop/installer/INSTALL.SH; code=$?; test "$code" -eq 124'],
+        ['systemctl', 'set-default', 'graphical.target'],
+        ['systemctl', 'enable', 'lightdm.service', 'acpid.service'],
+        ['sh', '-c', 'dpkg-query -W lightdm xserver-xorg-core thunar thunar-volman gvfs-backends xclip python3-pil acpid > /opt/lightvm-desktop/packages.txt'],
+        ['sh', '-c', 'echo LIGHTVM_DESKTOP_PREPARED > /dev/ttyS0'],
+    ]
 iso = pycdlib.PyCdlib()
 iso.new(interchange_level=3, vol_ident='CIDATA', rock_ridge='1.09')
 for name, iso_name, content in [
     ('user-data', 'USERDATA.;1', '#cloud-config\n' + json.dumps(cfg)),
-    ('meta-data', 'METADATA.;1', 'instance-id: lightvm-xfce-' + hashlib.sha256(probe.encode()).hexdigest()[:16] + '\nlocal-hostname: lightvm-xfce\n'),
+    ('meta-data', 'METADATA.;1', 'instance-id: lightvm-xfce-' + hashlib.sha256(json.dumps(cfg).encode()).hexdigest()[:16] + '\nlocal-hostname: lightvm-xfce\n'),
     ('network-config', 'NETWORK.;1', 'version: 2\nethernets:\n  lab:\n    match:\n      name: "e*"\n    dhcp4: true\n    dhcp6: false\n')]:
     data = content.encode()
     iso.add_fp(io.BytesIO(data), len(data), iso_path='/' + iso_name, rr_name=name)
@@ -116,5 +152,5 @@ nvme0:0.fileName = "ubuntu.vmdk"
 ''')
 (a.root / 'SOURCE.json').write_text(json.dumps(dict(sha256=expected,
     source='official Ubuntu release-20260926 cloud image; lab-added Xfce packages',
-    scope='synthetic desktop session on Xvfb, not display-manager login'), indent=2))
+    scope='LightDM/Xorg auto-login session; desktop volume management' if a.session == 'lightdm' else 'synthetic desktop session on Xvfb, not display-manager login'), indent=2))
 print(a.root)

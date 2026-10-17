@@ -149,3 +149,10 @@ within the service's 60-second graceful-stop deadline. The service used
 QMP Quit (`phase Quit, cause QmpQuit`) and the next boot recovered normally.
 The two-boot Tools checks do not qualify clean guest shutdown. No production
 shutdown behavior was changed to hide or shorten this fallback.
+
+## Follow-up — complete desktop session
+
+`R6-07d-desktop-login.md` records a later LightDM/Xorg session with active
+local login, automatic read-only CD mounting by the updated production
+Tools and two clean ACPI shutdowns. That extends these earlier Xvfb results;
+the fallback above remains the recorded outcome for the older lab session.

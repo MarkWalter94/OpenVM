@@ -718,6 +718,28 @@ def find_bootstrap():
     return None
 
 
+def mount_tools_cd():
+    """Ask the desktop disk service for this labelled optical disc only."""
+    import re
+    import stat
+    try:
+        device = pathlib.Path('/dev/disk/by-label/LIGHTVM_TOOLS').resolve(strict=True)
+        # Do not mount a hard disk/USB device even if it has this label.
+        if not re.fullmatch(r'/dev/sr[0-9]+', str(device)) or not stat.S_ISBLK(device.stat().st_mode):
+            return
+        subprocess.run([
+            'gdbus', 'call', '--system', '--dest', 'org.freedesktop.UDisks2',
+            '--object-path', '/org/freedesktop/UDisks2/block_devices/' + device.name,
+            '--method', 'org.freedesktop.UDisks2.Filesystem.Mount',
+            "{'options': <'ro'>, 'auth.no_user_interaction': <true>}",
+        ], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, timeout=8, check=False)
+    except (OSError, subprocess.SubprocessError):
+        # Missing desktop support or denied policy: keep waiting for the
+        # user to open the disc. Never use sudo, an auth dialog or a shell.
+        pass
+
+
 def main():
     parser = argparse.ArgumentParser(description="LightVM guest Tools")
     parser.add_argument("--install", action="store_true")
@@ -725,8 +747,13 @@ def main():
     arguments = parser.parse_args()
     if arguments.install:
         install(pathlib.Path(__file__))
+    next_mount = 0.0
     while True:
         file = arguments.config or find_bootstrap()
+        if not file and not arguments.config and time.monotonic() >= next_mount:
+            mount_tools_cd()
+            next_mount = time.monotonic() + 30
+            file = find_bootstrap()
         if file:
             with file.open("rb") as stream:
                 data = stream.read(16 * 1024 + 1)

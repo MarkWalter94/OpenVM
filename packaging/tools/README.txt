@@ -7,6 +7,10 @@ and its large-file limit. No host driver is installed.
 Linux: run sh INSTALL.SH in the graphical guest session. Python 3 is required;
 clipboard needs wl-clipboard or xclip (plus Pillow for images), accessibility
 needs python3-pyatspi.
+At login Tools can request read-only mounting of their labelled optical CD
+through the desktop's UDisks2 service (gdbus). This uses the guest user's
+existing permission, without an administrator prompt. Other disks are not
+mounted. If desktop mounting is unavailable or denied, open the CD manually.
 
 Named shared folders are available through guest-loopback WebDAV:
 http://127.0.0.1:47081/<ShareName>/. Windows attempts drive mapping. Linux can
@@ -38,8 +42,9 @@ image streaming and file-channel tests with a lab-only x64 build. Installed
 Ubuntu 24.04 with installed Tools passed application build and checkpoint
 tests. A separate installed Xfce/X11 lab session passed unprivileged XDG
 autostart, native GIO/GVfs WebDAV file operations and text/RGBA clipboard on
-two boots. The Tools CD was mounted by lab setup; automatic CD mounting,
-display-manager login, GNOME/Wayland and installed Windows remain unqualified.
+two boots. A later LightDM/Xorg session passed local graphical auto-login,
+automatic read-only CD mounting by Tools and two clean ACPI shutdowns.
+GNOME/Wayland and installed Windows remain unqualified.
 The shipped PE is cross-compiled
 for i686, subsystem 5.1, without UCRT imports; static checks and x64 WinPE tests
 do not certify XP or another installed Windows release.

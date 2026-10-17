@@ -222,6 +222,13 @@ was already mounted by lab setup; this does not qualify automatic CD
 mounting, a display-manager login or GNOME/Wayland. Its ACPI stop reached
 the service's QMP Quit fallback; clean guest shutdown is not qualified there.
 
+The later complete LightDM/Xorg fixture (`R6-07d`) passed active local login,
+Tools CD mounting as UID 1000 in read-only mode with general desktop
+automount disabled, all file/clipboard checks and two clean ACPI shutdowns
+(about one second each). Linux Tools now request their own labelled optical
+CD through UDisks2 without an authentication dialog; other disks are excluded.
+This extends the earlier Xvfb evidence without claiming GNOME/Wayland support.
+
 **Tools remain incomplete.** USB capture/redirection and verified detach,
 installed Windows Tools, Linux desktop/CD automount compatibility beyond
 the tested Xfce session, external native drag, Wayland image clipboard,

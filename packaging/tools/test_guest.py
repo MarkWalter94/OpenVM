@@ -8,11 +8,50 @@ import unittest
 import threading
 import urllib.error
 import urllib.request
+from unittest import mock
 
 loader = importlib.machinery.SourceFileLoader('guest_tools', str(pathlib.Path(__file__).with_name('TOOLS.PY')))
 spec = importlib.util.spec_from_loader(loader.name, loader)
 guest = importlib.util.module_from_spec(spec)
 loader.exec_module(guest)
+
+class OpticalMount(unittest.TestCase):
+    def test_only_optical_tools_disc_requested_readonly_without_auth_prompt(self):
+        import stat
+        from types import SimpleNamespace
+        with mock.patch.object(guest.pathlib.Path, 'resolve', return_value=pathlib.Path('/dev/sr2')), \
+             mock.patch.object(guest.pathlib.Path, 'stat', return_value=SimpleNamespace(st_mode=stat.S_IFBLK)), \
+             mock.patch.object(guest.subprocess, 'run') as run:
+            guest.mount_tools_cd()
+        args, options = run.call_args
+        self.assertIn('/org/freedesktop/UDisks2/block_devices/sr2', args[0])
+        self.assertIn("{'options': <'ro'>, 'auth.no_user_interaction': <true>}", args[0])
+        self.assertEqual(options['timeout'], 8)
+        self.assertNotIn('shell', options)
+
+    def test_disks_usb_regular_files_and_missing_labels_never_mount(self):
+        import stat
+        from types import SimpleNamespace
+        for device, mode in [('/dev/sda', stat.S_IFBLK), ('/dev/sdb1', stat.S_IFBLK), ('/dev/sr0', stat.S_IFREG)]:
+            with self.subTest(device=device, mode=mode), \
+                 mock.patch.object(guest.pathlib.Path, 'resolve', return_value=pathlib.Path(device)), \
+                 mock.patch.object(guest.pathlib.Path, 'stat', return_value=SimpleNamespace(st_mode=mode)), \
+                 mock.patch.object(guest.subprocess, 'run') as run:
+                guest.mount_tools_cd()
+                run.assert_not_called()
+        with mock.patch.object(guest.pathlib.Path, 'resolve', side_effect=FileNotFoundError), \
+             mock.patch.object(guest.subprocess, 'run') as run:
+            guest.mount_tools_cd()
+            run.assert_not_called()
+
+    def test_unavailable_desktop_or_timeout_does_not_crash_tools(self):
+        import stat
+        from types import SimpleNamespace
+        for error in [FileNotFoundError(), guest.subprocess.TimeoutExpired('gdbus', 8)]:
+            with mock.patch.object(guest.pathlib.Path, 'resolve', return_value=pathlib.Path('/dev/sr0')), \
+                 mock.patch.object(guest.pathlib.Path, 'stat', return_value=SimpleNamespace(st_mode=stat.S_IFBLK)), \
+                 mock.patch.object(guest.subprocess, 'run', side_effect=error):
+                guest.mount_tools_cd()
 
 class Files(unittest.TestCase):
     def setUp(self):

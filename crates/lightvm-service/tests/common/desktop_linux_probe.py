@@ -39,8 +39,19 @@ def status():
                                   args=[x.decode() for x in cmd if x]))
         except (OSError, ValueError):
             pass
+    session_id = os.environ.get('XDG_SESSION_ID')
+    session = {}
+    if session_id:
+        report = subprocess.run(['loginctl', 'show-session', session_id, '-p', 'Active', '-p', 'Remote', '-p', 'Type', '-p', 'Seat'], capture_output=True, text=True, timeout=10)
+        session = dict(line.split('=', 1) for line in report.stdout.splitlines() if '=' in line)
+    mounts = [line for line in pathlib.Path('/proc/self/mountinfo').read_text().splitlines() if 'LIGHTVM_TOOLS' in line]
     return dict(boot_id=boot, uid=os.getuid(), desktop=os.environ.get('XDG_CURRENT_DESKTOP'),
                 display=os.environ.get('DISPLAY'), tools=tools,
+                session=session, tools_mounts=mounts,
+                input_devices=pathlib.Path('/proc/bus/input/devices').read_text(),
+                inhibitors=subprocess.run(['systemd-inhibit', '--list', '--no-pager'], capture_output=True, text=True).stdout[-4000:],
+                logind_journal=subprocess.run(['journalctl', '-b', '-u', 'systemd-logind', '-n', '30', '--no-pager'], capture_output=True, text=True).stdout[-4000:],
+                services=subprocess.run(['systemctl', 'is-active', 'lightdm', 'acpid', 'systemd-logind'], capture_output=True, text=True).stdout,
                 packages=subprocess.check_output(['cat', '/opt/lightvm-desktop/packages.txt']).decode())
 
 for _ in range(90):

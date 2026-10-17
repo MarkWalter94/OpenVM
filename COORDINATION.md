@@ -267,3 +267,31 @@ Preparo una VM Linux desktop separata; eventuali temporanei solo sotto
   Materiale pronto in `E:\OpenVM-tests\desktop-20261017\sandbox-ready`.
 - Dettagli `R6-07c-linux-desktop.md` e appendice F2-03. Preparo commit solo
   dei file Codex, lasciando fuori `windows11_real.rs` e i due collector licenze.
+
+## Codex: sessione Linux normale e spegnimento (2026-10-17)
+
+Su richiesta dell'utente proseguo dopo `29833dc`: nuova fixture con LightDM,
+Xorg e sessione Xfce vera (non Xvfb/runuser), automount del CD dal desktop e
+diagnostica ACPI/logind. File riservati Codex: fixture/test Linux desktop,
+`packaging/tools/TOOLS.PY` solo se necessario. Temporanei nuovamente solo
+`C:\lvdesktop-20261017`, poi pulizia; evidenze nuove su E: senza sovrascrivere
+R6-07c. Windows 11/TPM e licenze restano a Claude.
+
+## Codex: login e CD Tools automatico verificati (2026-10-17)
+
+- PASS 141,23 s: LightDM/Xorg, sessione locale attiva UID 1000, due avvii
+  completi con GVfs/clipboard e CD montato in sola lettura senza helper root.
+  Entrambi gli stop: Powerdown/GuestShutdown (0,93 e 1,06 s), zero fallback.
+- Corretto `TOOLS.PY`: se il CD non è montato, richiesta UDisks2 via gdbus
+  soltanto per LIGHTVM_TOOLS su dispositivo ottico srN, ro, senza dialogo
+  autorizzativo. Timeout 8 s, tentativi distanziati 30 s; dischi/partizioni
+  USB esclusi. Test reale con automount Thunar generale DISABILITATO.
+- 11 test guest PASS in WSL; clippy, formato e sintassi PASS. Le prime due
+  prove LightDM sono state interrotte dopo diagnosi, non contate come pass.
+- Evidenze `E:\OpenVM-tests\desktop-login-20261017\evidence`, 27 hash
+  verificati. C: test ELIMINATO (12.445.048.858 byte logici); nessun processo
+  Codex rimasto. Cache Python 57 KB lasciata nel repo: rimozione respinta
+  dalla revisione automatica (`blocked by policy`), esclusa dal commit.
+- Preparo ZIP alpha.20261017.3 con il nuovo Tools; le prove usano lo stesso
+  servizio release della .2 e una copia privata del bundle Python aggiornato.
+  Dettagli R6-07d; nessuna modifica ai file Windows/TPM/licenze di Claude.
