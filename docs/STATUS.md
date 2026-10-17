@@ -245,9 +245,12 @@ starts the same run again with new QEMU and swtpm processes, because a
 reset inside the running processes left Windows Boot Manager in a reset
 loop. The same tests passed with the bundle built by the recipe
 (`R6-05` §15), and BitLocker with a TPM protector unlocked the partly
-encrypted system volume after a cold reboot (`R6-05` §16). OOBE with a
-user account, Windows Hello, BitLocker with encryption completed,
-TPM-aware restore of an installed system, the console reconnection observed across a reboot, and the release
+encrypted system volume after a cold reboot (`R6-05` §16). An installation
+completing OOBE with a local account survives a Reset decided by the host,
+and through the service the console of the same run shows the new process
+after a cold reboot (`R6-05` §17). Windows Hello, BitLocker with encryption
+completed, TPM-aware restore of an installed system, the desktop UI's own
+reconnection across a reboot, and the release
 bundle (recipe build, licences, signing) remain open.
 
 ## R1 work: filtered Internet, first increment (ADR-0037)

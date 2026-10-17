@@ -655,3 +655,170 @@ fn e2e_real_windows_iso_reaches_setup() {
     });
     let _ = std::fs::remove_dir_all(&private_root);
 }
+
+async fn open_console(c: &mut Client, vm_id: VmId) -> ConsoleTicket {
+    match req(c, Request::OpenConsole { vm_id }).await {
+        ServerMessage::Response {
+            result: ResponseBody::Console { ticket },
+            ..
+        } => ticket,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// R6-05 §17: Windows 11 x64 through the service. The Reset action is a
+/// cold reboot of the same run (new QEMU and swtpm): the VM stays `running`
+/// with the same run, the old console ends, and a new ticket for the same
+/// run (what the desktop does after a dropped display) shows the guest.
+/// Requires `LIGHTVM_E2E_QEMU_DIR`, `LIGHTVM_WIN11_BUNDLE` (development
+/// bundle, approved here for this test only) and `LIGHTVM_WIN11_ISO`.
+#[test]
+#[ignore = "requires approved QEMU, the Windows 11 lab bundle and ISO, WHPX"]
+fn e2e_windows11_reset_is_a_cold_reboot_and_the_console_reconnects() {
+    let env = |k: &str| PathBuf::from(std::env::var_os(k).unwrap_or_else(|| panic!("{k}")));
+    let bundle = env("LIGHTVM_WIN11_BUNDLE");
+    let iso = env("LIGHTVM_WIN11_ISO");
+    let evidence = std::env::var_os("LIGHTVM_WIN_EVIDENCE_DIR").map_or_else(
+        || std::env::temp_dir().join("lightvm-win-evidence"),
+        PathBuf::from,
+    );
+    std::fs::create_dir_all(&evidence).unwrap();
+    let dir = temp_dir("win11-e2e");
+    let _cleanup = RemoveCatalog(dir.clone());
+    let private_root = short_dir("lv11");
+    let marker = private_root
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let store = SqliteStore::open(&dir).unwrap();
+    let mut setup = QemuSetup::new(qemu_dir(), store.root(), private_root.clone());
+    setup.win11_dir = Some(bundle.clone());
+    setup
+        .probe
+        .approved_win11_bundle_sha256
+        .push(qemu_backend::probe::sha256_file(&bundle.join("SHA256SUMS")).unwrap());
+    setup.stop_policy = qemu_backend::ShutdownPolicy {
+        powerdown_timeout: Duration::from_secs(20),
+        quit_timeout: Duration::from_secs(5),
+        kill_timeout: Duration::from_secs(10),
+    };
+    let (host, vm_backend, mut capacity) = probe(setup).expect("QEMU probe");
+    // Lab host only: the 64 GiB minimum disk of the profile is a sparse
+    // qcow2 that Setup barely fills here; the creation check would demand
+    // that much free space on the lab volume, so the test raises it.
+    capacity.free_storage_gib = capacity
+        .free_storage_gib
+        .max(capacity.reserved_storage_gib + 64);
+    let audit = FileAuditSink::open(&dir.join("audit").join("audit.jsonl")).unwrap();
+    let inspector = ManagedMediaInspector::new(store.root());
+    let engine =
+        CoreEngine::new(store, audit, vm_backend, inspector, core_config(capacity)).unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let mut cfg = ServiceConfig::new(&dir);
+        cfg.runtime_dir = Some(dir.join("run"));
+        cfg.display_dir = Some(short_dir("lvd"));
+        let (handle, ui) = start(cfg, Box::new(engine), Box::new(host)).await.unwrap();
+        let mut c = tokio::time::timeout(T, Client::connect(handle.endpoint()))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            c.hello(&ui).await.unwrap(),
+            ServerMessage::HelloOk { role: Role::Ui, .. }
+        ));
+        let install = import(&mut c, &iso, MediaKind::InstallIso).await;
+        assert_eq!(
+            install.detected_guest.as_ref().map(|d| d.os),
+            Some(GuestOs::Windows11X64)
+        );
+        let mut vmc = sample_guest_config("win11-e2e", GuestOs::Windows11X64, Firmware::Uefi);
+        vmc.install_media = Some(install.id);
+        vmc.vcpus = 2;
+        vmc.memory_mib = 4096;
+        vmc.disk_gib = 64;
+        let vm = match req(&mut c, Request::CreateVm { config: vmc }).await {
+            ServerMessage::Response {
+                result: ResponseBody::VmCreated { vm },
+                ..
+            } => vm.id,
+            other => panic!("{other:?}"),
+        };
+        let m = submit(&mut c, vm, VmAction::Start).await;
+        assert!(op_ok(&m), "start: {m:?}");
+        assert!(wait_state(&mut c, vm, VmState::Running, T).await);
+        let run = status(&mut c, vm).await.run_id.expect("run");
+        let screen = watch(&open_console(&mut c, vm).await);
+        let setup_shown = wait_lit(
+            &screen,
+            300,
+            Duration::from_secs(300),
+            &evidence,
+            "win11-before-reset",
+        )
+        .await;
+        assert!(setup_shown.is_some(), "Windows Setup not shown");
+        save_png(&screen, &evidence.join("win11-setup.png"));
+
+        let m = req(
+            &mut c,
+            Request::SubmitVm {
+                request: VmRequest {
+                    operation_id: OperationId::new_v7(),
+                    vm_id: vm,
+                    expected_run_id: Some(run),
+                    action: VmAction::Reset,
+                },
+            },
+        )
+        .await;
+        assert!(op_ok(&m), "reset: {m:?}");
+        // The old display ends with its QEMU process.
+        let t0 = Instant::now();
+        while screen.lock().unwrap().ended.is_none() {
+            assert!(
+                t0.elapsed() < Duration::from_secs(30),
+                "old console still open"
+            );
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        // Same run, still running, after the cold reboot.
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let st = status(&mut c, vm).await;
+        assert_eq!(st.state, VmState::Running, "{st:?}");
+        assert_eq!(st.run_id, Some(run), "the reset must keep the run");
+        let again = watch(&open_console(&mut c, vm).await);
+        // After the reset the firmware shows text on black (CD prompt, no
+        // bootable disk yet): any lit pixel on a frame of the new process.
+        let t0 = Instant::now();
+        let shown = loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let (w, h, rgb) = snap(&again);
+            if w > 0 && rgb.iter().any(|&c| c > 64) {
+                break Some((t0.elapsed(), w, h));
+            }
+            if again.lock().unwrap().ended.is_some() || t0.elapsed() > Duration::from_secs(120) {
+                break None;
+            }
+        };
+        save_png(&again, &evidence.join("win11-after-reset.png"));
+        assert!(
+            shown.is_some(),
+            "no frame on the new console after the reset"
+        );
+        eprintln!("console after the cold reboot: {shown:?}");
+
+        let m = submit(&mut c, vm, VmAction::ForceStop).await;
+        assert!(op_ok(&m), "force stop: {m:?}");
+        assert!(wait_state(&mut c, vm, VmState::Stopped, T).await);
+        handle.shutdown().await;
+        let left = qemu_processes_with(&marker);
+        assert!(left.is_empty(), "orphan QEMU processes: {left:?}");
+    });
+    let _ = std::fs::remove_dir_all(&private_root);
+}

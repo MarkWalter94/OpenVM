@@ -589,7 +589,7 @@ fn service_backend_starts_windows11_twice_and_keeps_other_profiles_working() {
 #[test]
 #[ignore = "requires an explicitly approved development Windows 11 bundle and test ISO on E:"]
 fn windows11_installs_and_reboots_with_tpm_and_secure_boot() {
-    qualify_install(false);
+    qualify_install(false, false);
 }
 
 /// R6-05 §16: after the qualification above, BitLocker with a TPM
@@ -599,10 +599,20 @@ fn windows11_installs_and_reboots_with_tpm_and_secure_boot() {
 #[test]
 #[ignore = "requires an explicitly approved development Windows 11 bundle and test ISO on E:"]
 fn windows11_bitlocker_unlocks_from_the_tpm_after_a_cold_reboot() {
-    qualify_install(true);
+    qualify_install(true, false);
 }
 
-fn qualify_install(bitlocker: bool) {
+/// R6-05 §17: the installation completes OOBE with a local lab account
+/// (documented unattend settings, automatic logon) instead of audit mode;
+/// besides the guest's own reboot, a Reset decided by the host (a cold
+/// reboot of this profile) must bring the guest and its Tools back.
+#[test]
+#[ignore = "requires an explicitly approved development Windows 11 bundle and test ISO on E:"]
+fn windows11_completes_oobe_and_survives_a_host_reset() {
+    qualify_install(false, true);
+}
+
+fn qualify_install(bitlocker: bool, oobe: bool) {
     let env = |name: &str| PathBuf::from(std::env::var_os(name).expect(name));
     let lab = env("LIGHTVM_LAB");
     let bundle = env("LIGHTVM_WIN11_BUNDLE");
@@ -713,7 +723,11 @@ fn qualify_install(bitlocker: bool) {
             ),
             (
                 "AUTOUNATTEND.XML",
-                include_bytes!("common/win11-install.xml").to_vec(),
+                if oobe {
+                    include_bytes!("common/win11-install-oobe.xml").to_vec()
+                } else {
+                    include_bytes!("common/win11-install.xml").to_vec()
+                },
             ),
             ("LAB.CMD", include_bytes!("common/win11-lab.cmd").to_vec()),
         ];
@@ -856,15 +870,13 @@ fn qualify_install(bitlocker: bool) {
             assert!(text.contains("tpm_version=2"), "{text}");
             // Windows provisions its owner authorization; the PE-only NV test
             // is not required to be writable under the installed OS.
-            let read_log = || match tools
+            let read_named = |name: &str| match tools
                 .control
                 .call(lightvm_tools::control::Command::File {
                     request: lightvm_tools::protocol::FileRequest::Read {
                         share: "outbox".into(),
-                        path: lightvm_tools::protocol::RelativePath::new(vec![
-                            "installed.log".into(),
-                        ])
-                        .unwrap(),
+                        path: lightvm_tools::protocol::RelativePath::new(vec![name.into()])
+                            .unwrap(),
                         offset: 0,
                         length: 16384,
                     },
@@ -879,6 +891,7 @@ fn qualify_install(bitlocker: bool) {
                 }
                 other => panic!("{other:?}"),
             };
+            let read_log = || read_named("installed.log");
             let first = read_log();
             std::fs::write(base.join("installed-before.log"), &first).unwrap();
             println!("Installed guest connected: {}\n{first}", base.display());
@@ -929,6 +942,60 @@ fn qualify_install(bitlocker: bool) {
                 format!("cold_reboots={cold_reboots}\n"),
             )
             .unwrap();
+            if oobe {
+                // A Reset decided by the host: QEMU ends and the run starts
+                // again from cold; the automatic logon of the lab account
+                // starts the Tools again.
+                guest.reset().await.unwrap();
+                let wait = Instant::now();
+                let mut disconnected = false;
+                loop {
+                    assert!(
+                        wait.elapsed() < Duration::from_secs(600),
+                        "no reconnect after the host reset: {}",
+                        base.display()
+                    );
+                    if rebooted(&guest) {
+                        stack.stop();
+                        let closed = guest.close().await.unwrap();
+                        assert_eq!(closed.active_at_close, 0);
+                        tools.control.close_handle().disconnect();
+                        (guest, stack) = launch(false).await;
+                        cold_reboots += 1;
+                        println!("host reset: cold reboot {cold_reboots}");
+                        continue;
+                    }
+                    if let Some(halt) = guest.vcpu_halt() {
+                        panic!("guest halted: {halt:?}");
+                    }
+                    if let Ok(shot) = guest.screenshot().await {
+                        std::fs::write(base.join("host-reset.png"), shot.png).unwrap();
+                    }
+                    disconnected |= !tools.control.connected();
+                    if disconnected && tools.control.connected() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+                let third = read_log();
+                std::fs::write(base.join("installed-after-host-reset.log"), &third).unwrap();
+                println!("after host reset:\n{third}");
+                assert_ne!(
+                    second, third,
+                    "boot timestamp must change after the host reset"
+                );
+                assert!(third.contains("Windows 11"), "{third}");
+                // The lab account runs without elevation after the automatic
+                // logon (UAC): Get-Tpm needs it, the TBS probe does not.
+                let tpm = read_named("tpm.log");
+                std::fs::write(base.join("tpm-after-host-reset.log"), &tpm).unwrap();
+                assert!(tpm.contains("tpm_version=2"), "{tpm}");
+                std::fs::write(
+                    base.join("oobe-results.txt"),
+                    "oobe_local_account=passed\nhost_reset_cold_reboot=passed\n",
+                )
+                .unwrap();
+            }
             if bitlocker {
                 let read_out = |name: &str| -> Option<String> {
                     match tools

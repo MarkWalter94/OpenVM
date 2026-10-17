@@ -518,7 +518,8 @@ Artifacts: `E:\OpenVM-tests\lab\win11-real\installed-01a1450c-537e-717b-832a-650
   5 minutes; the next reset ends the run as an ordinary exit.
 - The console connection of the previous process drops on a reboot; the
   desktop reconnects a dropped display after 2 s with a new ticket for the
-  same run (`sync_console`). Not yet observed with a cold reboot.
+  same run (`sync_console`). A new ticket for the run after a cold reboot
+  shows the new process (§17).
 - Other profiles keep resetting inside QEMU (upstream build).
 
 ### Evidence
@@ -580,10 +581,10 @@ the lab guest's audit-mode behaviour, not a VM fault (Windows boots and
 shows the logon screen); the lab scripts therefore only use reboots
 requested by the guest. Not investigated further.
 
-OOBE with a user account (the qualification stops in audit mode),
+OOBE with a user account (done in §17),
 BitLocker and Windows Hello, TPM-aware baseline/snapshot restore of an
-installed system, the console's automatic reconnection observed across a
-cold reboot, the release
+installed system, the desktop UI's own console reconnection across a cold
+reboot (the service ticket path is verified in §17), the release
 bundle from the recipe (licences, signing), and whether the SEC-phase AP
 fault of finding 3 also affects other WHPX profiles with more than one vCPU
 (Vista Setup's first-reboot triple fault in R2c-01 has the same exit code).
@@ -627,3 +628,32 @@ baseline/snapshot restore of an encrypted installed system, and an OOBE user
 account remain open. Logs: `E:\OpenVM-tests\lab\win11-real\evidence-bitlocker-01a1477f-3df9-75b1-b064-7d84f927728a\`
 (the disk was removed for space), test output
 `E:\OpenVM-tests\win11\bitlocker-install3.log`.
+
+## 17. OOBE with a local account, host reset, console across a cold reboot (2026-10-17)
+
+- `windows11_completes_oobe_and_survives_a_host_reset` (ignored lab test,
+  recipe bundle) installs with `win11-install-oobe.xml`: Setup checks as
+  before, then OOBE with the documented unattend settings for a local lab
+  account (`lightvm`, member of Administrators, automatic logon; password in
+  clear in this disposable answer file only) instead of audit mode. Passed
+  in 656 s: 2 Setup reboots, the reboot requested by the installed system,
+  then a **Reset decided by the host** (QMP reset → cold reboot of the same
+  run): Windows 11 Pro started again, logged on automatically, the Tools
+  reconnected and the TBS probe reported `tpm_version=2`. The account runs
+  without elevation after the automatic logon (UAC), so `Get-Tpm` is not
+  used there. Unlike audit mode (§15, "Still open"), the host reset keeps
+  the logon. Reference disk:
+  `E:\OpenVM-tests\lab\win11-real\installed-01a148ab-32c0-7313-9ce1-e230788328e8`
+  (the audit-mode reference disk of §15 was removed for space; logs in
+  `evidence-01a14729`).
+- `e2e_windows11_reset_is_a_cold_reboot_and_the_console_reconnects`
+  (`tests/windows_real.rs`, ignored) goes through the whole service: ISO
+  import (detected as Windows 11 x64), VM creation, start, the RFB console
+  shows Windows Setup; then the **Reset action** from the IPC: the service
+  log reads `guest reset: run … started again from cold`, the old console
+  ends, the VM stays `running` with the same run, and a new console ticket
+  for that run receives frames of the new process after about 1 s (the
+  firmware's text after the reboot). Passed in 198 s. This exercises the
+  ticket path the desktop uses to reconnect; the desktop UI itself was not
+  driven. The lab test raises the host's free-storage figure so that the
+  profile's 64 GiB sparse disk can be created on the lab volume.

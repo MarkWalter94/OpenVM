@@ -367,11 +367,12 @@ package refuses start; other guests use the ordinary QEMU installation.
 
 Windows PE has reported TPM 2.0 and Secure Boot enabled, and a test TPM value
 survived a cold restart. A complete Windows 11 installation has been tested
-up to the desktop (in the project's test it stops before the first-run
-account setup). When Windows restarts, LightVM restarts the virtual machine
+up to the desktop, including the first-run setup with a local account. When
+Windows restarts, LightVM restarts the virtual machine
 completely, as if it were switched off and on again; the console loses its
-picture for a moment; it is designed to reconnect by itself, which has not
-yet been checked for this case (close and reopen the console if needed).
+picture for a moment and then reconnects by itself (in the project's test
+the new picture was available about a second later; close and reopen the
+console if it does not come back).
 The Reset button does the same. BitLocker with the TPM works in the
 project's test: remove the installation media first (Windows refuses to
 turn BitLocker on while a bootable DVD is attached); in the test the system
