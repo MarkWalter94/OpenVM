@@ -285,8 +285,9 @@ completing OOBE with a local account survives a Reset decided by the host,
 and through the service the console of the same run shows the new process
 after a cold reboot (`R6-05` §17). Since the same reset fault hit
 installed Linux with the ordinary QEMU (R6-07b), every WHPX run now reboots
-cold (`R6-05` §18; verified by a Reset of an Ubuntu VM through the service). Windows Hello, the desktop UI's own
-reconnection across a reboot, and the release
+cold (`R6-05` §18; verified by a Reset of an Ubuntu VM through the service, and in the desktop UI,
+whose open console reconnects by itself about 2.5 s after the Reset).
+Windows Hello and the release
 bundle (recipe build, release review of the licence/source inventory of
 `R6-05` §20, signing) remain open.
 

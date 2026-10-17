@@ -683,6 +683,16 @@ Checks:
   through the service; Reset → `guest reset: run … started again from cold`,
   the VM stays `running` in the same run, a new console ticket shows the new
   process after about 1 s. Passed in 136 s.
+- `wizard_start_and_console_with_real_qemu` (`apps/desktop/tests/real_console.rs`,
+  ignored), the desktop UI driven headless with `egui_kittest` against the
+  real service: after the existing wizard → start → console → input →
+  screenshot path, the Dashboard's `Reset` command is sent with the console
+  open. The console's display drops 0.2 s later and the UI reconnects by
+  itself, without input, 2.4 s after that (a new console connection
+  receiving frames of the new process, the VM `running` in the same run).
+  Passed in 196 s (log `E:\OpenVM-tests\win11\ui-reset.log`). The Reset
+  button and confirmation dialog themselves are covered by the UI tests
+  with the fake service, not in this run.
 
 Not yet verified: a reboot requested by an installed Linux guest
 (`installed_linux_guest_warm_reboot`, Codex's harness) and by Windows 10 or

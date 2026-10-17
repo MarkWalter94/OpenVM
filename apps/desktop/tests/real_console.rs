@@ -3,7 +3,8 @@
 //! `egui_kittest`. ISO import through the (fake) file picker, VM created in
 //! the wizard, start from the Dashboard, console opened with the per-run
 //! display ticket, framebuffer received, keyboard sent as `Input` batches,
-//! screenshot saved, orderly stop and deletion.
+//! screenshot saved, a reset with the console reconnecting by itself,
+//! orderly stop and deletion.
 //!
 //! It goes through neither winit nor the operating system (the scancode →
 //! `egui::Key` layer remains untested here).
@@ -210,6 +211,50 @@ fn wizard_start_and_console_with_real_qemu() {
     h.run_steps(3);
     let png = std::fs::read(&shot).expect("screenshot saved");
     println!("E2E screenshot={} bytes={}", shot.display(), png.len());
+
+    // Reset (the dashboard's command) with the console open: under WHPX the
+    // run reboots cold with a new QEMU, the display drops and the console
+    // reconnects by itself, without input.
+    let (vm_id, run_id) = {
+        let s = h.state().service().unwrap().state();
+        let v = s
+            .vms
+            .iter()
+            .find(|v| v.name.as_str() == "e2e-ubuntu")
+            .unwrap();
+        (v.vm_id, v.run_id.expect("running"))
+    };
+    assert!(
+        h.state()
+            .service()
+            .unwrap()
+            .send(lightvm_desktop::service::ServiceCommand::Reset { vm_id, run_id })
+    );
+    h.run_steps(3);
+    wait(&mut h, "display dropped by the reset", 60, |h| {
+        h.state()
+            .live_console()
+            .is_none_or(|c| c.disconnected_at().is_some())
+    });
+    wait(&mut h, "console reconnected after the reset", 120, |h| {
+        h.state().live_console().is_some_and(|c| {
+            c.disconnected_at().is_none() && c.geometry().0 > 0 && c.stats.texture_uploads > 0
+        })
+    });
+    assert_eq!(h.state().section(), Section::Console);
+    let after = h.state().service().unwrap().state();
+    let v = after
+        .vms
+        .iter()
+        .find(|v| v.name.as_str() == "e2e-ubuntu")
+        .unwrap();
+    assert_eq!(v.state, VmState::Running);
+    assert_eq!(v.run_id, Some(run_id), "a cold reboot keeps the run");
+    println!(
+        "E2E after reset: link=\"{}\" stats={:?}",
+        h.state().live_console().unwrap().link().describe().0,
+        h.state().live_console().unwrap().stats
+    );
 
     // Orderly stop of the supervisor (VMs stopped by it).
     let mut app = h.into_state();
