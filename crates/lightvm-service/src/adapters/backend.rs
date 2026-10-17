@@ -301,7 +301,7 @@ pub struct QemuSetup {
     /// refused (ADR-0011). Hosts whose CPU lacks the model's features are not
     /// verified (single reference host).
     pub cpu_model: String,
-    /// Ordinary stop policy (`system_powerdown` Ã¢â€ â€™ `quit` Ã¢â€ â€™ kill).
+    /// Ordinary stop policy (`system_powerdown` â†’ `quit` â†’ kill).
     pub stop_policy: ShutdownPolicy,
     /// Maximum wait for the Emergency Stop and the forced stop.
     pub emergency_timeout: Duration,
@@ -364,7 +364,7 @@ fn logical_cpus() -> u32 {
 /// Job Object limits from the VM limits (ADR-0017):
 /// - CPU cap: `cpu_max_percent` of the capacity of the assigned vCPUs,
 ///   expressed as a share of the whole machine in hundredths of a percentage
-///   point (`vcpus Ãƒâ€” percent Ãƒâ€” 100 / logical processors`); 100 % = no cap;
+///   point (`vcpus × percent × 100 / logical processors`); 100 % = no cap;
 /// - job memory: guest RAM plus `memory_margin_mib`.
 pub fn job_limits(config: &lightvm_proto::VmConfig, logical: u32) -> JobLimits {
     let l = config.limits;
@@ -1063,12 +1063,13 @@ pub struct QemuVmBackend {
     net_records: Vec<crate::engine::NetworkRecord>,
     tools: BTreeMap<VmId, crate::tools::ToolsRun>,
     tools_records: Vec<crate::engine::ToolsRecord>,
-    /// What a cold reboot of a running VM needs (Windows 11 x64: QEMU ends on
+    /// What a cold reboot of a running VM needs (WHPX runs: QEMU ends on
     /// every reset and the run starts again with new processes).
     relaunch: BTreeMap<VmId, Relaunch>,
 }
 
-/// Launch inputs kept for a cold reboot within the same run (R6-05 Â§15).
+/// Launch inputs kept for a cold reboot within the same run (R6-05 §15,
+/// R6-07b).
 #[derive(Debug)]
 struct Relaunch {
     vm: VmRecord,
@@ -1384,11 +1385,11 @@ impl QemuVmBackend {
         self.setup.private_root.join(short)
     }
 
-    /// Reset of a Windows 11 x64 guest: its QEMU ended (`-action
-    /// reboot=shutdown`). The same run starts again with new QEMU and swtpm
-    /// processes on the same disk, UEFI variables and TPM state, as a power
-    /// cycle would; the network is attached again with the endpoints last
-    /// applied and the Tools of the run stay. The core sees no exit: the VM
+    /// Reset of a WHPX guest: its QEMU ended (`-action reboot=shutdown`).
+    /// The same run starts again with new QEMU (and swtpm) processes on the
+    /// same disk, UEFI variables and TPM state, as a power cycle would; the
+    /// network is attached again with the endpoints last applied and the
+    /// Tools of the run stay. The core sees no exit: the VM
     /// stays running in the same run. At most [`COLD_REBOOTS`] in
     /// [`COLD_REBOOT_WINDOW`].
     fn cold_reboot(&mut self, vm_id: VmId) -> Result<(), String> {
@@ -1877,7 +1878,7 @@ impl VmBackend for QemuVmBackend {
                 self.setup.run_config.clone(),
             ))
             .map_err(|e| public(&e))?;
-        if vm.config.guest_os == lightvm_proto::GuestOs::Windows11X64 {
+        if spec.accelerator == Accelerator::Whpx {
             self.relaunch.insert(
                 vm.id,
                 Relaunch {
@@ -2520,7 +2521,7 @@ impl Backend for QemuHost {
         // already revoked by the service; the core sessions arrive with F4.
     }
     fn prepare_shutdown(&mut self) {
-        // ACPI 15 s Ã¢â€ â€™ `quit` 5 s Ã¢â€ â€™ termination 5 s per VM: within the 30 s per
+        // ACPI 15 s â†’ `quit` 5 s â†’ termination 5 s per VM: within the 30 s per
         // VM of the service shutdown budget. A guest that powers off earlier
         // ends earlier; a `shutdown_vms` policy already set stays.
         let mut o = lock(&self.stop_override);

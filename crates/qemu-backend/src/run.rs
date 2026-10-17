@@ -66,7 +66,7 @@ pub enum ExitCause {
     GuestShutdown,
     /// A reset ended the process (`-action reboot=shutdown`, `SHUTDOWN`
     /// event with a reset cause: the guest's reboot or QMP `system_reset`).
-    /// The run is to be started again from cold (Windows 11 x64 profile).
+    /// The run is to be started again from cold (every WHPX run).
     Reboot,
     /// Exit after `quit` requested by the backend.
     QmpQuit,

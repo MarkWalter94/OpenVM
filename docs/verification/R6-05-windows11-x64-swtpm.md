@@ -657,3 +657,29 @@ account remain open. Logs: `E:\OpenVM-tests\lab\win11-real\evidence-bitlocker-01
   ticket path the desktop uses to reconnect; the desktop UI itself was not
   driven. The lab test raises the host's free-storage figure so that the
   profile's 64 GiB sparse disk can be created on the lab volume.
+
+## 18. Cold reboots for every WHPX run (2026-10-17)
+
+Codex reported the same reset failure for installed Ubuntu 24.04 with the
+ordinary upstream QEMU 11.1.0 (`failed to get xsave state`, then
+`WHPX: Unexpected VP exit code 4` at the guest's warm reboot; R6-07b), and
+Vista Setup's first reboot faults the same way (R2c-01). The cold reboot of
+§15 therefore applies to **every run under WHPX**: the command line carries
+`-action reboot=shutdown` whenever the accelerator is WHPX (KVM and HVF runs
+reset in place), and the service keeps the launch inputs of every WHPX run
+for `cold_reboot`.
+
+Checks:
+
+- `cmdline` unit test `whpx_runs_turn_resets_into_shutdowns` (all profiles
+  under WHPX, none under KVM) and the exact-argv rows; workspace tests and
+  clippy pass.
+- `e2e_reset_is_a_cold_reboot_with_the_ordinary_qemu` (`windows_real.rs`,
+  ignored): an Ubuntu VM booting the reference ISO with the ordinary QEMU,
+  through the service; Reset → `guest reset: run … started again from cold`,
+  the VM stays `running` in the same run, a new console ticket shows the new
+  process after about 1 s. Passed in 136 s.
+
+Not yet verified: a reboot requested by an installed Linux guest
+(`installed_linux_guest_warm_reboot`, Codex's harness) and by Windows 10 or
+older guests with this change.

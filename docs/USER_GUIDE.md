@@ -396,6 +396,7 @@ boot signatures, but a guest kernel can rewrite its firmware variable store.
    - Clipboard sharing is **off by default**. Optional experimental Tools
      integration is described in section 9.2.
    - If the display connection drops while the VM keeps running, the console reconnects by itself after a couple of seconds.
+   - On a Windows PC, when the guest restarts (or you press Reset) LightVM restarts the virtual machine completely, as if it were switched off and on again: the picture disappears for a moment and the console reconnects. The Windows hypervisor does not restart a running guest reliably, so this is done on purpose.
 3. Ubuntu boots from the installation image. Choose **Try or Install Ubuntu** in the boot menu (or wait), then **Install Ubuntu** in the installer.
 4. Practical tips:
    - **Keyboard layout**: choose in the Ubuntu installer the same layout as your physical keyboard (for example *Italian* or *English (US)*), and select the same one (**IT** or **US**) in the console toolbar. LightVM sends keys by their physical position, so the layouts must match. Italian and English (US) are the layouts the alpha targets.

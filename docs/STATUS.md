@@ -248,7 +248,9 @@ loop. The same tests passed with the bundle built by the recipe
 encrypted system volume after a cold reboot (`R6-05` §16). An installation
 completing OOBE with a local account survives a Reset decided by the host,
 and through the service the console of the same run shows the new process
-after a cold reboot (`R6-05` §17). Windows Hello, BitLocker with encryption
+after a cold reboot (`R6-05` §17). Since the same reset fault hit
+installed Linux with the ordinary QEMU (R6-07b), every WHPX run now reboots
+cold (`R6-05` §18; verified by a Reset of an Ubuntu VM through the service). Windows Hello, BitLocker with encryption
 completed, TPM-aware restore of an installed system, the desktop UI's own
 reconnection across a reboot, and the release
 bundle (recipe build, licences, signing) remain open.

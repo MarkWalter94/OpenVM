@@ -1120,6 +1120,16 @@ impl VmLaunchSpec {
             (_, None) => a.opt("-machine", format!("type={}{fixed}", self.machine.as_str())),
         }
         a.opt("-accel", self.accelerator.qemu_name());
+        if self.accelerator == Accelerator::Whpx {
+            // A reset inside a running QEMU 11.1.0 under WHPX is not a power
+            // cycle: application processors ran the reset vector with the
+            // BSP, Windows 11 Boot Manager looped (with its swtpm) and
+            // installed Linux faulted (`failed to get xsave state`, exit 4)
+            // (R6-05 §15, R6-07b). Every reset (the guest's or QMP's) ends
+            // the process instead, and the supervisor starts the same run
+            // again with new processes: a cold boot.
+            a.opt("-action", "reboot=shutdown");
+        }
         a.opt("-cpu", self.cpu.as_str());
         match self.cores_per_socket {
             Some(c) if c > 1 => a.opt(
@@ -1309,12 +1319,6 @@ impl VmLaunchSpec {
                 "emulator,id=tpm0,chardev=chrtpm,data-chardev=chrtpmdata",
             );
             a.opt("-device", "tpm-crb,tpmdev=tpm0");
-            // A reset inside the running QEMU and swtpm is not a power
-            // cycle: after one, Windows Boot Manager reset again at once and
-            // looped (R6-05 §15). Every reset (the guest's or QMP's) ends
-            // the process instead, and the supervisor starts the same run
-            // again with new QEMU and swtpm processes: a cold boot.
-            a.opt("-action", "reboot=shutdown");
             let args = [
                 "socket".into(),
                 "--tpm2".into(),
@@ -1941,10 +1945,11 @@ pub(crate) mod tests {
             .collect()
     }
 
-    /// R6-05 §15: only the Windows 11 x64 profile ends QEMU on a reset (the
-    /// supervisor starts the run again from cold); the others reset in place.
+    /// R6-05 §15, R6-07b: every WHPX run ends QEMU on a reset (the
+    /// supervisor starts the run again from cold); other accelerators reset
+    /// in place.
     #[test]
-    fn only_windows11_x64_turns_resets_into_shutdowns() {
+    fn whpx_runs_turn_resets_into_shutdowns() {
         for profile in DeviceProfile::ALL {
             let Ok(cmd) = spec_for(profile).build(&FakePaths::for_profile(&profile)) else {
                 assert!(profile == DeviceProfile::WINDOWS11_X64 && !cfg!(windows));
@@ -1954,10 +1959,14 @@ pub(crate) mod tests {
             let joined = strs(&cmd).join(" ");
             assert_eq!(
                 joined.contains("-action reboot=shutdown"),
-                profile == DeviceProfile::WINDOWS11_X64,
+                spec_for(profile).accelerator == Accelerator::Whpx,
                 "{profile:?}: {joined}"
             );
         }
+        let mut kvm = spec();
+        kvm.accelerator = Accelerator::Kvm;
+        let joined = strs(&kvm.build(&FakePaths::new()).unwrap()).join(" ");
+        assert!(!joined.contains("-action"), "{joined}");
     }
 
     /// ADR-0033: the three network modes on every profile.
@@ -2329,6 +2338,8 @@ pub(crate) mod tests {
             want.extend(vec_of(&[
                 "-accel",
                 "whpx",
+                "-action",
+                "reboot=shutdown",
                 "-cpu",
                 "qemu64",
                 "-smp",

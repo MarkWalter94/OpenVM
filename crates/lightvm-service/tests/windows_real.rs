@@ -822,3 +822,121 @@ fn e2e_windows11_reset_is_a_cold_reboot_and_the_console_reconnects() {
     });
     let _ = std::fs::remove_dir_all(&private_root);
 }
+
+/// R6-05 §18: every WHPX run turns a reset into a cold reboot of the same
+/// run, with the ordinary (upstream) QEMU too. Through the service, a Linux
+/// VM booting the reference Ubuntu ISO is reset: it stays `running` in the
+/// same run and a new console ticket shows the new process.
+#[test]
+#[ignore = "requires approved QEMU, WHPX and the Ubuntu ISO (LIGHTVM_E2E_QEMU_DIR)"]
+fn e2e_reset_is_a_cold_reboot_with_the_ordinary_qemu() {
+    let lab = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../lab");
+    let iso = std::env::var_os("LIGHTVM_E2E_ISO").map_or_else(
+        || lab.join("media").join("ubuntu-26.04.1-desktop-amd64.iso"),
+        PathBuf::from,
+    );
+    let dir = temp_dir("reset-e2e");
+    let _cleanup = RemoveCatalog(dir.clone());
+    let private_root = short_dir("lvr");
+    let marker = private_root
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let store = SqliteStore::open(&dir).unwrap();
+    let mut setup = QemuSetup::new(qemu_dir(), store.root(), private_root.clone());
+    setup.cpu_model = "Skylake-Client-v4".into();
+    setup.stop_policy = qemu_backend::ShutdownPolicy {
+        powerdown_timeout: Duration::from_secs(20),
+        quit_timeout: Duration::from_secs(5),
+        kill_timeout: Duration::from_secs(10),
+    };
+    let (host, vm_backend, mut capacity) = probe(setup).expect("QEMU probe");
+    // Lab host only: the sparse 32 GiB disk stays nearly empty here.
+    capacity.free_storage_gib = capacity
+        .free_storage_gib
+        .max(capacity.reserved_storage_gib + 32);
+    let audit = FileAuditSink::open(&dir.join("audit").join("audit.jsonl")).unwrap();
+    let inspector = ManagedMediaInspector::new(store.root());
+    let engine =
+        CoreEngine::new(store, audit, vm_backend, inspector, core_config(capacity)).unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let mut cfg = ServiceConfig::new(&dir);
+        cfg.runtime_dir = Some(dir.join("run"));
+        cfg.display_dir = Some(short_dir("lvd"));
+        let (handle, ui) = start(cfg, Box::new(engine), Box::new(host)).await.unwrap();
+        let mut c = tokio::time::timeout(T, Client::connect(handle.endpoint()))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            c.hello(&ui).await.unwrap(),
+            ServerMessage::HelloOk { role: Role::Ui, .. }
+        ));
+        let install = import(&mut c, &iso, MediaKind::InstallIso).await;
+        let mut vmc = sample_guest_config("reset-linux", GuestOs::UbuntuLtsX86_64, Firmware::Uefi);
+        vmc.install_media = Some(install.id);
+        let vm = match req(&mut c, Request::CreateVm { config: vmc }).await {
+            ServerMessage::Response {
+                result: ResponseBody::VmCreated { vm },
+                ..
+            } => vm.id,
+            other => panic!("{other:?}"),
+        };
+        let m = submit(&mut c, vm, VmAction::Start).await;
+        assert!(op_ok(&m), "start: {m:?}");
+        assert!(wait_state(&mut c, vm, VmState::Running, T).await);
+        let run = status(&mut c, vm).await.run_id.expect("run");
+        let screen = watch(&open_console(&mut c, vm).await);
+        assert!(
+            wait_not_black(&screen, Duration::from_secs(180))
+                .await
+                .is_some(),
+            "no frame before the reset"
+        );
+        let m = req(
+            &mut c,
+            Request::SubmitVm {
+                request: VmRequest {
+                    operation_id: OperationId::new_v7(),
+                    vm_id: vm,
+                    expected_run_id: Some(run),
+                    action: VmAction::Reset,
+                },
+            },
+        )
+        .await;
+        assert!(op_ok(&m), "reset: {m:?}");
+        let t0 = Instant::now();
+        while screen.lock().unwrap().ended.is_none() {
+            assert!(
+                t0.elapsed() < Duration::from_secs(30),
+                "old console still open"
+            );
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let st = status(&mut c, vm).await;
+        assert_eq!(st.state, VmState::Running, "{st:?}");
+        assert_eq!(st.run_id, Some(run), "the reset must keep the run");
+        let again = watch(&open_console(&mut c, vm).await);
+        let shown = wait_not_black(&again, Duration::from_secs(180)).await;
+        assert!(
+            shown.is_some(),
+            "no frame on the new console after the reset"
+        );
+        eprintln!("console after the cold reboot: {shown:?}");
+        let m = submit(&mut c, vm, VmAction::ForceStop).await;
+        assert!(op_ok(&m), "force stop: {m:?}");
+        assert!(wait_state(&mut c, vm, VmState::Stopped, T).await);
+        handle.shutdown().await;
+        let left = qemu_processes_with(&marker);
+        assert!(left.is_empty(), "orphan QEMU processes: {left:?}");
+    });
+    let _ = std::fs::remove_dir_all(&private_root);
+}
