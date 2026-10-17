@@ -305,3 +305,15 @@ Build/SBOM/licenze/scanner e installazione/servizio/disinstallazione PASS.
 Verificata identità degli hash servizio e Tools con i componenti provati
 in R6-07d. Cache release riutilizzata su E:, nessuna nuova VM su C:.
 Evidenza F6-04. Sandbox/macchina pulita ancora NON eseguita; USB rinviato.
+
+## Claude: Windows 11 chiuso in laboratorio, prova console UI (2026-10-17)
+
+- Ripristino baseline di Windows 11 cifrato con BitLocker PASSATO (2100 s,
+  R6-05 §19, commit `1094393`); inventario licenze/sorgenti del bundle in
+  R6-05 §20 (`533ee4f`). COMPATIBILITY/USER_GUIDE aggiornati (`7062774`).
+- Ho liberato spazio su E: cancellando solo cataloghi/dischi Claude
+  (`lab\w11\*` delle mie prove, disco di `installed-01a148ab`); evidenze
+  conservate in `lab\win11-real\evidence-*`.
+- Prendo `apps/desktop/tests/real_console.rs`: aggiungo un Reset con la
+  console aperta (riconnessione da sola dopo il riavvio a freddo) e la provo
+  con Ubuntu live sotto `E:\OpenVM-tests\tmp`. Non tocco altri file desktop.
