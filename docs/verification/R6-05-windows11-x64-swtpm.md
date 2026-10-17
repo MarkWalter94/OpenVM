@@ -516,8 +516,9 @@ Artifacts: `E:\OpenVM-tests\lab\win11-real\installed-01a1450c-537e-717b-832a-650
   connections are closed (`ToolsRun::guest_restarted`). The core sees no
   exit: the VM stays running in the same run. At most 10 cold reboots in
   5 minutes; the next reset ends the run as an ordinary exit.
-- The console connection of the previous process is lost on a reboot and
-  must be opened again (not yet automated in the UI).
+- The console connection of the previous process drops on a reboot; the
+  desktop reconnects a dropped display after 2 s with a new ticket for the
+  same run (`sync_console`). Not yet observed with a cold reboot.
 - Other profiles keep resetting inside QEMU (upstream build).
 
 ### Evidence
@@ -541,16 +542,88 @@ guest reboot: cold reboot 3
 test result: ok. 1 passed; finished in 584.15s
 ```
 
-Artifacts: `E:\OpenVM-tests\lab\win11-real\installed-01a14712-2883-74da-b732-386ad3399350\`
+Artifacts (the disk of this first run was removed for space; its logs are
+kept): `E:\OpenVM-tests\lab\win11-real\evidence-01a14712\`
 (`results.txt`, `cold-reboots.txt`, `installed-before.log`,
-`installed-after.log`, `tpm-0.log`, screenshots) and
+`installed-after.log`, `tpm-0.log`, screenshots, `run\`) and
 `E:\OpenVM-tests\lab\win11-real\backend-01a1471c-1dd4-73a1-b124-4ad28f2dbcd4\`.
+
+### The same tests with the bundle built by the recipe
+
+`build-qemu.sh` was run from an empty work directory (signed tarball,
+patches 0001-0003) and `assemble.ps1` (now also runs on Windows PowerShell
+5.1) assembled it with the approved swtpm and firmware:
+
+| File | SHA-256 |
+| --- | --- |
+| QEMU executable (recipe, patches 0001-0003) | `0587429028595c427d9b95ac4f545a609076457a1cec33d25977329d16c8e387` |
+| swtpm executable (unchanged) | `350e2698d00d3261ca1de550cbb51a75c44c8c0c903fea1cf7e1072a81318572` |
+| Secure Boot code (unchanged) | `939bc01ba166b849f5296457b2658fff78fb622c8dc34cfa8204ba3ce2d88d2c` |
+| Enrolled variables template (unchanged) | `a1003e1c5fa5e776b35392745f878f4a4bb38b611699e03ec3fce4a682e62a4f` |
+| `bundle-recipe/SHA256SUMS` | `7528a78481ec095c954f9d48e5b48e1612c051a456a832301b8f4a74fdaddb5a` |
+
+The three tests above passed together with it in 656 s (Setup reboots at
+255 s and 379 s, then the guest's own reboot). Log
+`E:\OpenVM-tests\win11\recipe-qual.log`; installed disk (reference for the
+next tests) `E:\OpenVM-tests\lab\win11-real\installed-01a14729-4d12-7355-b12e-e2f7da0d20cf\`.
+These are development hashes, not release approvals.
 
 ### Still open
 
+After a shutdown or reset decided by the host (the test's ACPI shutdown,
+or a QMP reset turned into a cold reboot), the next boot of these audit-mode
+lab guests stopped at the logon screen with "L'account utente è stato
+disattivato" (built-in Administrator disabled, no automatic audit logon),
+with or without the installation ISO attached. Reboots requested by
+Windows itself (Setup's and `shutdown /r`) kept the audit logon. This is
+the lab guest's audit-mode behaviour, not a VM fault (Windows boots and
+shows the logon screen); the lab scripts therefore only use reboots
+requested by the guest. Not investigated further.
+
 OOBE with a user account (the qualification stops in audit mode),
 BitLocker and Windows Hello, TPM-aware baseline/snapshot restore of an
-installed system, console reconnection after a cold reboot, the release
+installed system, the console's automatic reconnection observed across a
+cold reboot, the release
 bundle from the recipe (licences, signing), and whether the SEC-phase AP
 fault of finding 3 also affects other WHPX profiles with more than one vCPU
 (Vista Setup's first-reboot triple fault in R2c-01 has the same exit code).
+
+## 16. BitLocker with a TPM protector across a cold reboot (2026-10-17)
+
+`windows11_bitlocker_unlocks_from_the_tpm_after_a_cold_reboot` (ignored lab
+test) runs the §15 installation, then, after the guest's own reboot:
+
+1. BitLocker refuses while bootable media is attached (`0x80310030`, "rilevato
+   supporto di avvio (CD o DVD)"), as on a physical PC. The lab script asks
+   Windows to reboot; the test starts that boot without the installation ISO
+   (the Tools ISO, not bootable, stays).
+2. `Enable-BitLocker -TpmProtector -UsedSpaceOnly -SkipHardwareTest` on C:,
+   then a reboot requested by Windows once encryption is under way: a cold
+   reboot of this profile (new QEMU and swtpm, same TPM state).
+3. Windows starts again from the partly encrypted volume, so the emulated TPM
+   released the volume key at boot with no recovery prompt.
+
+Passed in 760 s with the recipe bundle (§15):
+
+```text
+BitLocker before reboot:
+VolumeStatus         : EncryptionInProgress
+ProtectionStatus     : Off
+LockStatus           : Unlocked
+EncryptionPercentage : 71
+KeyProtector         : {Tpm}
+BitLocker reboot: cold reboot 5
+BitLocker after reboot:
+VolumeStatus         : EncryptionInProgress
+ProtectionStatus     : Off
+LockStatus           : Unlocked
+EncryptionPercentage : 77
+KeyProtector         : {Tpm}
+```
+
+`ProtectionStatus` stays `Off` until encryption completes; a fully encrypted
+volume with protection on was not observed. Windows Hello, a TPM-aware
+baseline/snapshot restore of an encrypted installed system, and an OOBE user
+account remain open. Logs: `E:\OpenVM-tests\lab\win11-real\evidence-bitlocker-01a1477f-3df9-75b1-b064-7d84f927728a\`
+(the disk was removed for space), test output
+`E:\OpenVM-tests\win11\bitlocker-install3.log`.

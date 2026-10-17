@@ -589,6 +589,20 @@ fn service_backend_starts_windows11_twice_and_keeps_other_profiles_working() {
 #[test]
 #[ignore = "requires an explicitly approved development Windows 11 bundle and test ISO on E:"]
 fn windows11_installs_and_reboots_with_tpm_and_secure_boot() {
+    qualify_install(false);
+}
+
+/// R6-05 §16: after the qualification above, BitLocker with a TPM
+/// protector on C:; the guest reboots (a cold reboot of this profile) once
+/// encryption started and Windows must start again from the volume, i.e.
+/// the emulated TPM released the key with no recovery prompt.
+#[test]
+#[ignore = "requires an explicitly approved development Windows 11 bundle and test ISO on E:"]
+fn windows11_bitlocker_unlocks_from_the_tpm_after_a_cold_reboot() {
+    qualify_install(true);
+}
+
+fn qualify_install(bitlocker: bool) {
     let env = |name: &str| PathBuf::from(std::env::var_os(name).expect(name));
     let lab = env("LIGHTVM_LAB");
     let bundle = env("LIGHTVM_WIN11_BUNDLE");
@@ -688,27 +702,39 @@ fn windows11_installs_and_reboots_with_tpm_and_secure_boot() {
             ..Default::default()
         };
         let fixture = env("LIGHTVM_WINPE_FIXTURE");
+        let mut files = vec![
+            (
+                "TOOLS.EXE",
+                std::fs::read(fixture.join("TOOLS64.EXE")).unwrap(),
+            ),
+            (
+                "TPMTEST.EXE",
+                std::fs::read(fixture.join("TPMTEST.EXE")).unwrap(),
+            ),
+            (
+                "AUTOUNATTEND.XML",
+                include_bytes!("common/win11-install.xml").to_vec(),
+            ),
+            ("LAB.CMD", include_bytes!("common/win11-lab.cmd").to_vec()),
+        ];
+        if bitlocker {
+            // Their presence on the CD turns on the BitLocker step of LAB.CMD.
+            files.push((
+                "BLENABLE.PS1",
+                include_bytes!("common/win11-blenable.ps1").to_vec(),
+            ));
+            files.push((
+                "BLSTATE.PS1",
+                include_bytes!("common/win11-blstate.ps1").to_vec(),
+            ));
+        }
         let mut tools = ToolsRun::start(
             vm,
             run,
             &config,
             &base.join("p"),
             &base.join("journal"),
-            &[
-                (
-                    "TOOLS.EXE",
-                    std::fs::read(fixture.join("TOOLS64.EXE")).unwrap(),
-                ),
-                (
-                    "TPMTEST.EXE",
-                    std::fs::read(fixture.join("TPMTEST.EXE")).unwrap(),
-                ),
-                (
-                    "AUTOUNATTEND.XML",
-                    include_bytes!("common/win11-install.xml").to_vec(),
-                ),
-                ("LAB.CMD", include_bytes!("common/win11-lab.cmd").to_vec()),
-            ],
+            &files,
         )
         .unwrap();
         tools.apply(Policy::manual(&config));
@@ -732,8 +758,17 @@ fn windows11_installs_and_reboots_with_tpm_and_secure_boot() {
         rt.block_on(async {
             // What the service does (`cold_reboot`): QEMU ends on every
             // reset of this profile and the same run starts again from cold.
-            let launch = || async {
-                let guest = qemu_backend::QemuRun::start(&caps, &spec, &paths, Default::default())
+            // `detached`: without the installation ISO (BitLocker refuses
+            // while bootable media is attached).
+            let detached_spec = VmLaunchSpec {
+                install_media: None,
+                ..spec.clone()
+            };
+            let (caps, spec, detached_spec, paths, tools) =
+                (&caps, &spec, &detached_spec, &paths, &tools);
+            let launch = move |detached: bool| async move {
+                let s = if detached { detached_spec } else { spec };
+                let guest = qemu_backend::QemuRun::start(caps, s, paths, Default::default())
                     .await
                     .unwrap();
                 let socket =
@@ -762,7 +797,7 @@ fn windows11_installs_and_reboots_with_tpm_and_secure_boot() {
                 )
             };
             let mut cold_reboots = 0u32;
-            let (mut guest, mut stack) = launch().await;
+            let (mut guest, mut stack) = launch(false).await;
             let boot = if resume.is_none() {
                 Some(tokio::spawn(guest.boot_prompt_keys()))
             } else {
@@ -780,7 +815,7 @@ fn windows11_installs_and_reboots_with_tpm_and_secure_boot() {
                     let closed = guest.close().await.unwrap();
                     assert_eq!(closed.active_at_close, 0);
                     tools.control.close_handle().disconnect();
-                    (guest, stack) = launch().await;
+                    (guest, stack) = launch(false).await;
                     cold_reboots += 1;
                     println!("cold reboot {cold_reboots} at {:?}", start.elapsed());
                     continue;
@@ -859,7 +894,7 @@ fn windows11_installs_and_reboots_with_tpm_and_secure_boot() {
                     let closed = guest.close().await.unwrap();
                     assert_eq!(closed.active_at_close, 0);
                     tools.control.close_handle().disconnect();
-                    (guest, stack) = launch().await;
+                    (guest, stack) = launch(false).await;
                     cold_reboots += 1;
                     println!("guest reboot: cold reboot {cold_reboots}");
                     continue;
@@ -894,6 +929,115 @@ fn windows11_installs_and_reboots_with_tpm_and_secure_boot() {
                 format!("cold_reboots={cold_reboots}\n"),
             )
             .unwrap();
+            if bitlocker {
+                let read_out = |name: &str| -> Option<String> {
+                    match tools
+                        .control
+                        .call(lightvm_tools::control::Command::File {
+                            request: lightvm_tools::protocol::FileRequest::Read {
+                                share: "outbox".into(),
+                                path: lightvm_tools::protocol::RelativePath::new(vec![name.into()])
+                                    .ok()?,
+                                offset: 0,
+                                length: 16384,
+                            },
+                        })
+                        .ok()?
+                    {
+                        lightvm_proto::ToolReply::File {
+                            reply: lightvm_tools::protocol::FileReply::Data { data, .. },
+                        } => Some(
+                            String::from_utf8_lossy(
+                                &lightvm_tools::protocol::decode(&data, 16384).ok()?,
+                            )
+                            .into_owned(),
+                        ),
+                        _ => None,
+                    }
+                };
+                // From here every (guest-requested) reboot starts without the
+                // installation ISO: LAB.CMD reboots once while it is attached.
+                let wait = Instant::now();
+                let reboots_before = cold_reboots;
+                let mut before = None;
+                let after = loop {
+                    assert!(
+                        wait.elapsed() < Duration::from_secs(1200),
+                        "BitLocker timeout: {}",
+                        base.display()
+                    );
+                    if rebooted(&guest) {
+                        stack.stop();
+                        let closed = guest.close().await.unwrap();
+                        assert_eq!(closed.active_at_close, 0);
+                        tools.control.close_handle().disconnect();
+                        (guest, stack) = launch(true).await;
+                        cold_reboots += 1;
+                        println!("BitLocker reboot: cold reboot {cold_reboots}");
+                        continue;
+                    }
+                    if let Some(halt) = guest.vcpu_halt() {
+                        panic!("guest halted: {halt:?}");
+                    }
+                    if let Ok(shot) = guest.screenshot().await {
+                        std::fs::write(base.join("bitlocker.png"), shot.png).unwrap();
+                    }
+                    if tools.control.connected() {
+                        if before.is_none() {
+                            before = read_out("bitlocker-before.log")
+                                .filter(|t| t.contains("VolumeStatus"));
+                            if let Some(t) = &before {
+                                println!("BitLocker before reboot:\n{t}");
+                            }
+                        }
+                        if read_out("bitlocker-done.log").is_some() {
+                            break read_out("bitlocker-after.log").unwrap_or_default();
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                };
+                let before = before.expect("BitLocker state read before the reboot");
+                for (name, text) in [
+                    ("bitlocker-before.log", &before),
+                    ("bitlocker-after.log", &after),
+                ] {
+                    std::fs::write(base.join(name), text).unwrap();
+                }
+                if let Some(e) = read_out("bitlocker-enable.log") {
+                    std::fs::write(base.join("bitlocker-enable.log"), e).unwrap();
+                }
+                println!("BitLocker after reboot:\n{after}");
+                let field = |text: &str, name: &str| {
+                    text.lines()
+                        .find(|l| l.starts_with(name))
+                        .and_then(|l| l.split_once(':'))
+                        .map(|(_, v)| v.trim().to_owned())
+                        .unwrap_or_default()
+                };
+                // Encryption started with a TPM protector before the reboot ...
+                assert!(
+                    matches!(
+                        field(&before, "VolumeStatus").as_str(),
+                        "EncryptionInProgress" | "FullyEncrypted"
+                    ),
+                    "{before}"
+                );
+                assert!(field(&before, "KeyProtector").contains("Tpm"), "{before}");
+                // ... and Windows started again from the volume: the TPM
+                // released its key with no recovery prompt.
+                assert!(
+                    cold_reboots >= reboots_before + 2,
+                    "detach and BitLocker reboots expected"
+                );
+                assert_eq!(field(&after, "LockStatus"), "Unlocked", "{after}");
+                assert!(field(&after, "KeyProtector").contains("Tpm"), "{after}");
+                assert_ne!(field(&after, "VolumeStatus"), "FullyDecrypted", "{after}");
+                std::fs::write(
+                    base.join("bitlocker-results.txt"),
+                    "bitlocker_tpm_protector=passed\nunlocked_from_tpm_after_cold_reboot=passed\n",
+                )
+                .unwrap();
+            }
             let stopped = guest
                 .shutdown(qemu_backend::run::ShutdownPolicy {
                     powerdown_timeout: Duration::from_secs(60),

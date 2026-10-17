@@ -7,6 +7,12 @@ param(
   [Parameter(Mandatory)][string]$Out
 )
 $ErrorActionPreference = 'Stop'
+# [IO.Path]::GetRelativePath needs PowerShell 7; this also runs on 5.1.
+function Get-Relative([string]$Root, [string]$Path) {
+  $prefix = $Root.TrimEnd('\') + '\'
+  if (-not $Path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { throw "Outside $Root" }
+  $Path.Substring($prefix.Length)
+}
 if (Test-Path -LiteralPath $Out) { throw 'Output must be a new directory' }
 $destination = [IO.Path]::GetFullPath($Out)
 New-Item -ItemType Directory -Path $destination | Out-Null
@@ -16,7 +22,7 @@ foreach ($component in @(@('qemu', $Qemu), @('swtpm', $Swtpm), @('firmware', $Fi
   New-Item -ItemType Directory -Path $target | Out-Null
   foreach ($entry in Get-ChildItem -LiteralPath $source -Recurse -File) {
     if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Link in build output' }
-    $relative = [IO.Path]::GetRelativePath($source, $entry.FullName)
+    $relative = Get-Relative $source $entry.FullName
     $file = Join-Path $target $relative
     New-Item -ItemType Directory -Force -Path ([IO.Path]::GetDirectoryName($file)) | Out-Null
     Copy-Item -LiteralPath $entry.FullName -Destination $file
@@ -24,7 +30,7 @@ foreach ($component in @(@('qemu', $Qemu), @('swtpm', $Swtpm), @('firmware', $Fi
 }
 [IO.File]::WriteAllText((Join-Path $destination 'DEVELOPMENT.txt'), 'Development only. Not release-qualified. See docs/verification/R6-05-windows11-x64-swtpm.md.' + "`n", [Text.UTF8Encoding]::new($false))
 $lines = Get-ChildItem -LiteralPath $destination -Recurse -File | Sort-Object FullName | ForEach-Object {
-  $relative = [IO.Path]::GetRelativePath($destination, $_.FullName).Replace('\','/')
+  $relative = (Get-Relative $destination $_.FullName).Replace('\','/')
   '{0} *{1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $relative
 }
 $manifest = Join-Path $destination 'SHA256SUMS'
