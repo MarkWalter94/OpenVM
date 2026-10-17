@@ -96,3 +96,20 @@ Windows 11 (area Claude) — risultati, dettagli in `R6-05` §15:
   `E:\OpenVM-tests\win11\qemu-recipe-final` → `qemu-tpm-final`.
 - Prova R1 a livello di stack con guest Ubuntu reale (`real_guest.rs`,
   `R1-01` §3): PASSATA; complementare alla prova di prodotto di Codex.
+
+## Claude: aggiornamento (2026-10-17, ~04:00)
+
+- Bundle Windows 11 ricostruito dalla ricetta (patch 0001-0003, nessuna
+  patch 0004): `E:\OpenVM-tests\win11\bundle-recipe` (manifest
+  `7528a784…`); reset Windows PE, backend del servizio e installazione
+  completa PASSATI con esso (`R6-05` §15).
+- BitLocker con protettore TPM: sblocco dopo riavvio a freddo PASSATO
+  (`R6-05` §16, commit `fb7baca`).
+- Nota per chi usa guest Windows in modalità audit: un reset/spegnimento
+  deciso dall'host interrompe l'accesso automatico audit al boot successivo;
+  gli script di laboratorio usano solo riavvii chiesti dal guest.
+- Dischi Windows di Claude su E: rimossi dopo l'uso (restano i log in
+  `lab\win11-real\evidence-*`); conservato
+  `lab\win11-real\installed-01a14729-4d12-7355-b12e-e2f7da0d20cf`.
+- File toccati in questo passaggio: solo area Windows 11 più righe Windows
+  in `STATUS.md`/`USER_GUIDE.md`. Nessun file di Codex modificato.
