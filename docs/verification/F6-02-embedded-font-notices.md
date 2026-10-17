@@ -58,3 +58,10 @@ closure, signing and independent review remain separate work. QEMU, swtpm,
 firmware and guest images are not bundled. Windows 11 runtime work is owned
 by Claude; no diagnostic QEMU bundle was changed or packaged here, and his
 uncommitted Windows work is absent from this isolated package.
+
+## Follow-up — 2026-10-17
+
+The newer clean-source ZIP `0.0.0-alpha.20261017.2` contains the WHPX reboot
+fix and preserves these font notices. Its separate build, installation and
+actual service-process verifications are recorded in `F6-03-reboot-package.md`.
+The ZIP and results above remain the historical pre-fix artifact.

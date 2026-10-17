@@ -35,7 +35,12 @@ Corrupt records or links stop recovery. Host power-loss durability is unqualifie
 Ubuntu live/WHPX passed a synthetic 750 MB transfer, WebDAV operations and
 revocation/reconnect/flush. Disposable Windows PE x64 passed native clipboard,
 image streaming and file-channel tests with a lab-only x64 build. Installed
-guest interoperability remains unqualified. The shipped PE is cross-compiled
+Ubuntu 24.04 with installed Tools passed application build and checkpoint
+tests. A separate installed Xfce/X11 lab session passed unprivileged XDG
+autostart, native GIO/GVfs WebDAV file operations and text/RGBA clipboard on
+two boots. The Tools CD was mounted by lab setup; automatic CD mounting,
+display-manager login, GNOME/Wayland and installed Windows remain unqualified.
+The shipped PE is cross-compiled
 for i686, subsystem 5.1, without UCRT imports; static checks and x64 WinPE tests
 do not certify XP or another installed Windows release.
 

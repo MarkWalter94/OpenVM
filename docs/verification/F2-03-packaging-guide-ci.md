@@ -196,3 +196,26 @@ Artefacts (`dist\`, git-ignored):
 | `SBOM.cdx.json` | `63465e8392ae11abe6c907c2ca6ab57b35985f72d32532977b51077b0d4c53a8` |
 
 Not executed: the setup.exe install/uninstall test and the Windows Sandbox run (unchanged required action 1); package built from an uncommitted tree, to be rebuilt from the commit. The crate version is still `0.0.0` (`lightvm-mcp --version`, the app's start line), only the file names carry `0.1.0-alpha`.
+
+## 2026-10-17 — Automated clean-machine procedure strengthened
+
+`sandbox-test.ps1` now requires both desktop rendering **and** supervisor
+startup, verifies all three CLI programs and clean desktop closure without
+a leftover packaged service, and exits nonzero on failure. Previously the
+supervisor flag was logged but not required, and caught failures did not
+produce a failing process exit code.
+
+Optional `-Uninstall` checks removal of every manifest payload and the Start
+Menu shortcut, preservation of an added user file and unchanged user PATH.
+The builder emits `LightVM-sandbox-auto.wsb` for this full sequence; the
+existing `LightVM-sandbox.wsb` still leaves installation available for the
+manual UI checks. Both keep networking/clipboard disabled and map the package
+directory read-only. The script refuses execution outside the Sandbox account.
+
+Prepared a standalone copy beside the already verified alpha.20261017.2 ZIP:
+`E:\OpenVM-tests\desktop-20261017\sandbox-ready\LightVM-sandbox-auto.wsb`.
+This changes the external test procedure, not the ZIP or its recorded hash.
+Both PowerShell sources passed parser validation; generated XML parsed.
+**Sandbox execution: not executed** — `WindowsSandbox.exe` remains absent on
+this host. No host feature was enabled and no host reboot was requested.
+Actual Windows desktop rendering/uninstall on a clean machine remains open.

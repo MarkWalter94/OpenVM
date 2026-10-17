@@ -414,3 +414,35 @@ Windows 11 TPM took priority. Product integration and Windows PE evidence
 (TPM 2.0, Secure Boot, NV persistence and helper-failure shutdown) are now
 recorded in `R6-05` §13. Installed Windows, warm reboot and TPM-aware
 baseline/snapshot restore remain open; filtered Internet has not started.
+
+### 2026-10-17 installed Linux follow-up
+
+The headless installed-Ubuntu work below supersedes the live-only limitation
+for this particular fixture. `R6-07b-installed-linux-tools.md` records a full
+production-service test: application source upload, guest build/execution,
+artifact/log return with SHA-256, persistent installed Python Tools, clean
+stop/start and snapshot/baseline restore. A second complete run at `bc15d03`
+adds two guest-requested WHPX reboots with the same run, new boot IDs, Tools
+reconnection and unchanged artifact/state (359.20 s, passed). Temporary C:
+catalogs were explicitly authorized, then removed after evidence preservation.
+
+This does not qualify desktop-session autostart, desktop drive mappings,
+installed Windows Tools, native drag, Linux image clipboard or WPF automation.
+USB hardware remains deferred. See `R6-05` for the separate Windows TPM work
+and `R1-02` for the now-completed real-guest filtered Internet product test;
+the older subsequent-work notes above are historical, not current blockers.
+
+`F6-03-reboot-package.md` additionally records the complete installed-Linux
+scenario against the actual release supervisor in ZIP `0.0.0-alpha.20261017.2`:
+passed in 363.18 s, including both guest-requested reboots. Actual package
+install/uninstall and service-process authentication/locking/renewal passed
+on the development host; clean-machine qualification remains open.
+
+`R6-07c-linux-desktop.md` extends Linux evidence to two real installed
+Xfce/X11 sessions as an unprivileged user: installed XDG autostart, native
+GIO/GVfs DAV operations, read-only refusals, Unicode names and text/RGBA
+clipboard passed (353.43 s), using the actual ZIP supervisor. The fixture
+mounts the CD and starts Xvfb/Xfce; display-manager login, CD automount and
+GNOME/Wayland remain unqualified. ACPI stop used QMP Quit after its timeout,
+so this desktop fixture does not qualify clean guest shutdown. Evidence
+was verified on E: and the temporary C: root removed (14.44 GB logical).

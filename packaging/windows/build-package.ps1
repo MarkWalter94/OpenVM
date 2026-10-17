@@ -377,7 +377,8 @@ if ($NoSetupExe) {
 # --- Windows Sandbox files ----------------------------------------------------
 Write-Step 'Writing Windows Sandbox configuration'
 $wsb = (Get-Content -Raw (Join-Path $PSScriptRoot 'sandbox\LightVM-sandbox.wsb.template')).Replace('@DIST_DIR@', [System.Security.SecurityElement]::Escape((Resolve-Path $OutDir).Path))
-[System.IO.File]::WriteAllText((Join-Path $OutDir 'LightVM-sandbox.wsb'), $wsb, $utf8)
+[System.IO.File]::WriteAllText((Join-Path $OutDir 'LightVM-sandbox.wsb'), $wsb.Replace('@TEST_ARGS@', ''), $utf8)
+[System.IO.File]::WriteAllText((Join-Path $OutDir 'LightVM-sandbox-auto.wsb'), $wsb.Replace('@TEST_ARGS@', '-Uninstall'), $utf8)
 Copy-Item (Join-Path $PSScriptRoot 'sandbox\sandbox-test.ps1') (Join-Path $OutDir 'sandbox-test.ps1') -Force
 
 Write-Step 'Done'

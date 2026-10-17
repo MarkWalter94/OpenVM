@@ -24,6 +24,6 @@
     </MappedFolder>
   </MappedFolders>
   <LogonCommand>
-    <Command>powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Users\WDAGUtilityAccount\Desktop\dist\sandbox-test.ps1</Command>
+    <Command>powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Users\WDAGUtilityAccount\Desktop\dist\sandbox-test.ps1 @TEST_ARGS@</Command>
   </LogonCommand>
 </Configuration>

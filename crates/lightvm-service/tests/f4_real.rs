@@ -40,6 +40,9 @@ const T: Duration = Duration::from_secs(120);
 #[path = "common/filtered_product.rs"]
 mod filtered_product;
 
+#[path = "common/installed_linux.rs"]
+mod installed_linux;
+
 fn qemu_dir() -> PathBuf {
     PathBuf::from(std::env::var_os("LIGHTVM_E2E_QEMU_DIR").expect("LIGHTVM_E2E_QEMU_DIR not set"))
 }

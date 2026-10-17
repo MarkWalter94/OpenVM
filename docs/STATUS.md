@@ -171,8 +171,8 @@ Started on 2026-10-14 at the owner's request (ROADMAP 12, R6, in parallel; not a
 | Through the IPC: take off and running, delete running, revert off only, rename; failed tool and cancellation consistent; promote/restore refused with snapshots | `lightvm-service` `tests/user_snapshots.rs` | verified in simulation/test |
 | UI: page, tree, take dialog, running-VM revert flow (orderly shutdown first, offered snapshot of the current state), refusals, progress, one operation at a time | `lightvm-desktop` `tests/snapshots_ui.rs`, snapshots | verified in simulation/test |
 | Disk operations on real QEMU 11.1.0: off (the exact `qemu-img` command) and running (QMP, WHPX), the data restored byte by byte after every apply | `qemu-backend` `tests/real_snapshots.rs` (`--ignored`, lab), `docs/verification/R6-03-user-snapshots.md` items 8–9 | verified on hardware (Windows, WHPX) |
-| Real guests (Windows and Linux) reverted to an earlier snapshot boot normally | — | not verified (no guest installed for this feature) |
-| A running take with the guest file systems flushed first (LightVM Tools, ADR-0031) | `R6-07`, Tools control tests and Ubuntu live | implemented: waits for guest flush acknowledgement, refuses disconnected/failed/busy Tools; no freeze, VSS or application-consistency guarantee; actual snapshot/restore with installed guests remains unverified |
+| Real guests reverted to an earlier snapshot boot normally | `R6-07b`; `R6-05` | installed headless Ubuntu: verified boot, Tools and original application hash after offline snapshot restore; Windows 11/TPM snapshot evidence is recorded separately in R6-05 |
+| A running take with the guest file systems flushed first (LightVM Tools, ADR-0031) | `R6-07`, Tools control tests and Ubuntu live | implemented: waits for guest flush acknowledgement, refuses disconnected/failed/busy Tools; no freeze, VSS or application-consistency guarantee; installed-Linux R6-07b verifies offline snapshots, not this running-snapshot path |
 
 ## R6 work: LightVM Tools (ADR-0031, ADR-0034, ADR-0036)
 
@@ -202,15 +202,36 @@ round trip, hashed file upload and log return using a lab-only x64 Tools build.
 The shipped i686/XP-targeted build passed static import/subsystem checks;
 WinPE evidence does not qualify installed Windows or the i686 binary.
 
+Installed headless Ubuntu 24.04.5 has now passed application source upload,
+guest build/execution, artifact/log return with SHA-256, persistent Tools across
+stop/start, snapshot and baseline restore, and two guest-requested WHPX reboots
+retaining the same run and Tools (`R6-07b`, 2026-10-17). The owner authorized
+temporary C: catalogs to avoid contention on E:; those catalogs/disks were
+removed after evidence preservation.
+
+The same complete Linux scenario also passed using the actual release
+supervisor extracted from the clean-source experimental Windows ZIP
+`0.0.0-alpha.20261017.2` (`F6-03`, 363.18 s). Install/uninstall, service
+authentication, catalog locking and credential renewal passed on this host;
+the package remains unsigned and clean-machine qualification remains open.
+
+An installed Xfce/X11 lab session also passed unprivileged XDG Tools
+autostart, native GIO/GVfs DAV file operations (including read-only refusals
+and Unicode names) and text/RGBA clipboard on two boots (`R6-07c`). The CD
+was already mounted by lab setup; this does not qualify automatic CD
+mounting, a display-manager login or GNOME/Wayland. Its ACPI stop reached
+the service's QMP Quit fallback; clean guest shutdown is not qualified there.
+
 **Tools remain incomplete.** USB capture/redirection and verified detach,
-installed Windows/Linux mapping compatibility, installed-guest restart/rollback,
-an actual application build/log workflow, installer/package execution and WPF
-UI Automation remain open. Snapshot flush is implemented, but filesystem
-freeze/application quiescence is not. Lab outputs, build cache and temporary
-VM media use `E:\OpenVM-tests` at the owner's request; no Windows installation
-or requirements bypass was performed.
+installed Windows Tools, Linux desktop/CD automount compatibility beyond
+the tested Xfce session, external native drag, Wayland image clipboard,
+WPF UI Automation and clean-machine package
+qualification remain open. Snapshot flush is implemented, but filesystem
+freeze/application quiescence is not. Permanent lab evidence and build caches
+use `E:\OpenVM-tests`. Physical USB tests remain deferred.
 On 2026-10-16 the owner deferred USB tests and requested the Windows 11 TPM
-work below. Filtered Internet remains subsequent work.
+work below. Filtered Internet product-path evidence is in `R1-02`; VPN/proxy
+and gateway-crash qualification remain open.
 Evidence, commands and the handoff are in
 `docs/verification/R6-07-lightvm-tools.md` (2026-10-16 follow-up).
 
