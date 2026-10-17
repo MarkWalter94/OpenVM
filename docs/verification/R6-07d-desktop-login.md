@@ -115,3 +115,10 @@ No host configuration, Windows/TPM VM or physical USB device was changed.
 The test does not qualify GNOME/Wayland or a human following the installer
 UI. Optional desktop services must already be available; denied mount
 authorization is not bypassed. The previous ZIP remains historical evidence.
+
+## Packaged follow-up
+
+`F6-04-linux-mount-package.md` records the new clean-source experimental ZIP
+alpha.20261017.3, containing these exact tested service and Tools bytes.
+Actual install/service-process/uninstall checks passed on the development
+host. It remains unsigned; Windows clean-machine qualification is still open.

@@ -228,6 +228,9 @@ automount disabled, all file/clipboard checks and two clean ACPI shutdowns
 (about one second each). Linux Tools now request their own labelled optical
 CD through UDisks2 without an authentication dialog; other disks are excluded.
 This extends the earlier Xvfb evidence without claiming GNOME/Wayland support.
+The clean-source ZIP alpha.20261017.3 contains the exact tested components;
+build, SBOM/scan and installation/service/uninstallation checks passed
+(`F6-04`). It remains unsigned and unqualified on a clean Windows machine.
 
 **Tools remain incomplete.** USB capture/redirection and verified detach,
 installed Windows Tools, Linux desktop/CD automount compatibility beyond

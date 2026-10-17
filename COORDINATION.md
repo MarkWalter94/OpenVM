@@ -295,3 +295,13 @@ R6-07c. Windows 11/TPM e licenze restano a Claude.
 - Preparo ZIP alpha.20261017.3 con il nuovo Tools; le prove usano lo stesso
   servizio release della .2 e una copia privata del bundle Python aggiornato.
   Dettagli R6-07d; nessuna modifica ai file Windows/TPM/licenze di Claude.
+
+## Codex: ZIP .3 pronto (2026-10-17)
+
+Fix/test in `14eb703`. ZIP pulito alpha.20261017.3 in
+`E:\OpenVM-tests\package-login-20261017\dist`, SHA-256
+`4fee43a4a56b603cc4bacbaaa8ff96af3db55e3791fb64fb24797b40c6825f84`.
+Build/SBOM/licenze/scanner e installazione/servizio/disinstallazione PASS.
+Verificata identità degli hash servizio e Tools con i componenti provati
+in R6-07d. Cache release riutilizzata su E:, nessuna nuova VM su C:.
+Evidenza F6-04. Sandbox/macchina pulita ancora NON eseguita; USB rinviato.
