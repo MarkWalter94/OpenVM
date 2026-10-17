@@ -19,7 +19,8 @@ struct Paths {
     bundle: PathBuf,
     iso: PathBuf,
     id: MediaId,
-    restored: Option<(PathBuf, Option<PathBuf>, PathBuf)>,
+    /// Current state after a baseline restore (overlay, variables, TPM).
+    restored: std::sync::Mutex<Option<(PathBuf, Option<PathBuf>, PathBuf)>>,
 }
 impl Paths {
     fn path(&self, p: &str) -> qemu_backend::error::Result<ManagedPath> {
@@ -34,14 +35,14 @@ impl ManagedPaths for Paths {
         ManagedPath::verify(self.bundle.join("firmware/lightvm-x64-code.fd"))
     }
     fn firmware_vars(&self, _: &RunId) -> qemu_backend::error::Result<Option<ManagedPath>> {
-        if let Some((_, vars, _)) = &self.restored {
+        if let Some((_, vars, _)) = &*self.restored.lock().unwrap() {
             vars.as_ref().map(ManagedPath::verify).transpose()
         } else {
             self.path("vars.fd").map(Some)
         }
     }
     fn disk(&self, _: &RunId) -> qemu_backend::error::Result<Option<ManagedPath>> {
-        if let Some((disk, _, _)) = &self.restored {
+        if let Some((disk, _, _)) = &*self.restored.lock().unwrap() {
             ManagedPath::verify(disk).map(Some)
         } else {
             self.path("disk.qcow2").map(Some)
@@ -67,7 +68,7 @@ impl ManagedPaths for Paths {
         ManagedPath::verify(self.bundle.join("swtpm/swtpm.exe"))
     }
     fn tpm_state_dir(&self, _: &RunId) -> qemu_backend::error::Result<Option<ManagedPath>> {
-        if let Some((_, _, tpm)) = &self.restored {
+        if let Some((_, _, tpm)) = &*self.restored.lock().unwrap() {
             ManagedPath::verify(tpm).map(Some)
         } else {
             self.path("tpm").map(Some)
@@ -166,12 +167,12 @@ fn qualify_pe(checkpoints: bool, warm_reset: bool) {
         base.join("vars.fd"),
     )
     .unwrap();
-    let mut paths = Paths {
+    let paths = Paths {
         base: base.clone(),
         bundle,
         iso: env("LIGHTVM_WINPE_ISO"),
         id: MediaId::new_v7(),
-        restored: None,
+        restored: Default::default(),
     };
     for dir in ["run", "p", "tpm", "journal"] {
         qemu_backend::prepare::restrict_to_current_user(&paths.path(dir).unwrap()).unwrap();
@@ -498,7 +499,7 @@ fn qualify_pe(checkpoints: bool, warm_reset: bool) {
                     })
                     .unwrap();
                 let tpm = cat.current_tpm_dir(&vm).unwrap();
-                paths.restored = Some((
+                *paths.restored.lock().unwrap() = Some((
                     cat.layout().resolve(&disk).unwrap(),
                     vars.map(|v| cat.layout().resolve(&v).unwrap()),
                     cat.layout().resolve(&tpm).unwrap(),
@@ -730,7 +731,7 @@ fn qualify_install(bitlocker: bool, oobe: bool, snapshot: bool) {
         bundle,
         iso: env("LIGHTVM_WINPE_ISO"),
         id: MediaId::new_v7(),
-        restored: None,
+        restored: Default::default(),
     };
     for dir in ["run", "p", "tpm", "journal"] {
         qemu_backend::prepare::restrict_to_current_user(&paths.path(dir).unwrap()).unwrap();
@@ -1182,6 +1183,30 @@ fn qualify_install(bitlocker: bool, oobe: bool, snapshot: bool) {
                 image(&["snapshot", "-c", op.tag()], op.disk());
                 assert_eq!(cat.settle_snapshot(&op).unwrap(), vm_storage::Settled::Done);
                 let snapshot_id = op.snapshot_id();
+                // A baseline of the same stopped state (its own copy of the
+                // disk, UEFI variables and TPM state), restored at the end.
+                let job = cat
+                    .begin_create_baseline(vm_storage::CreateBaseline {
+                        vm_id: vm,
+                        label: "BitLocker sealed to the TPM".into(),
+                        clean_shutdown: true,
+                        protected: false,
+                        standalone: standalone.clone(),
+                    })
+                    .unwrap();
+                let done = job.run(|src, dst| {
+                    assert!(
+                        std::process::Command::new(caps.qemu_img.as_path())
+                            .args(["convert", "-f", "qcow2", "-O", "qcow2"])
+                            .arg(src)
+                            .arg(dst)
+                            .status()
+                            .unwrap()
+                            .success()
+                    );
+                    Ok(64 << 30)
+                });
+                let baseline_id = cat.finish_create_baseline(done).unwrap().baseline_id;
                 // 2. A new, empty TPM: BitLocker must not unlock.
                 let tpm_rel = cat.current_tpm_dir(&vm).unwrap();
                 let tpm_dir = cat.layout().resolve(&tpm_rel).unwrap();
@@ -1299,6 +1324,130 @@ fn qualify_install(bitlocker: bool, oobe: bool, snapshot: bool) {
                 std::fs::write(
                     base.join("snapshot-results.txt"),
                     "empty_tpm_blocks_bitlocker=passed\nsnapshot_revert_restores_tpm=passed\n",
+                )
+                .unwrap();
+                // 5. Baseline restore of the same state: the snapshot is
+                //    deleted first (a restore never discards snapshots), the
+                //    TPM is emptied again, then the baseline is restored.
+                let stopped = guest.shutdown(power_off(180)).await.unwrap();
+                assert_eq!(stopped.active_after, 0);
+                stack.stop();
+                assert_eq!(guest.close().await.unwrap().active_at_close, 0);
+                let op = cat
+                    .begin_delete_snapshot(&vm, &snapshot_id, &standalone.disk)
+                    .unwrap();
+                image(&["snapshot", "-d", op.tag()], op.disk());
+                assert_eq!(cat.settle_snapshot(&op).unwrap(), vm_storage::Settled::Done);
+                std::fs::remove_file(tpm_dir.join("tpm2-00.permall")).unwrap();
+                let job = cat
+                    .begin_restore(vm_storage::RestoreBaseline {
+                        vm_id: vm,
+                        baseline_id,
+                        standalone: standalone.clone(),
+                    })
+                    .unwrap();
+                let done = job.run(|backing, size, dst| {
+                    assert!(
+                        std::process::Command::new(caps.qemu_img.as_path())
+                            .args(["create", "-u", "-f", "qcow2", "-F", "qcow2", "-b", backing])
+                            .arg(dst)
+                            .arg(size.to_string())
+                            .status()
+                            .unwrap()
+                            .success()
+                    );
+                    Ok(())
+                });
+                let current = cat.finish_restore(done).unwrap();
+                let (disk, vars) = cat
+                    .read(|tx| {
+                        Ok((
+                            tx.disk(&current.overlay_disk_id)?.managed_path,
+                            current
+                                .vars_fw_id
+                                .map(|id| tx.firmware(&id).map(|f| f.managed_path))
+                                .transpose()?,
+                        ))
+                    })
+                    .unwrap();
+                let tpm = cat.current_tpm_dir(&vm).unwrap();
+                let restored_tpm = cat.layout().resolve(&tpm).unwrap();
+                assert!(restored_tpm.join("tpm2-00.permall").is_file());
+                *paths.restored.lock().unwrap() = Some((
+                    cat.layout().resolve(&disk).unwrap(),
+                    vars.map(|v| cat.layout().resolve(&v).unwrap()),
+                    restored_tpm,
+                ));
+                // 6. Windows starts from the encrypted volume again.
+                (guest, stack) = launch(true).await;
+                let wait = Instant::now();
+                while !tools.control.connected() {
+                    assert!(
+                        wait.elapsed() < Duration::from_secs(600),
+                        "no start after the baseline restore: {}",
+                        base.display()
+                    );
+                    if rebooted(&guest) {
+                        stack.stop();
+                        assert_eq!(guest.close().await.unwrap().active_at_close, 0);
+                        (guest, stack) = launch(true).await;
+                        continue;
+                    }
+                    if let Ok(shot) = guest.screenshot().await {
+                        std::fs::write(base.join("after-baseline.png"), shot.png).unwrap();
+                    }
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                }
+                let after_restore = read_log();
+                std::fs::write(base.join("installed-after-baseline.log"), &after_restore).unwrap();
+                assert_ne!(after_revert, after_restore, "a new boot after the restore");
+                let boot_line = after_restore
+                    .lines()
+                    .find(|l| l.starts_with("LastBootUpTime"))
+                    .and_then(|l| l.split_once(':'))
+                    .map(|(_, v)| v.trim().to_owned())
+                    .expect("boot time");
+                let wait = Instant::now();
+                let state = loop {
+                    let state = tools
+                        .control
+                        .call(lightvm_tools::control::Command::File {
+                            request: lightvm_tools::protocol::FileRequest::Read {
+                                share: "outbox".into(),
+                                path: lightvm_tools::protocol::RelativePath::new(vec![
+                                    "bitlocker-after.log".into(),
+                                ])
+                                .unwrap(),
+                                offset: 0,
+                                length: 16384,
+                            },
+                        })
+                        .ok()
+                        .and_then(|r| match r {
+                            lightvm_proto::ToolReply::File {
+                                reply: lightvm_tools::protocol::FileReply::Data { data, .. },
+                            } => lightvm_tools::protocol::decode(&data, 16384)
+                                .ok()
+                                .map(|b| String::from_utf8_lossy(&b).into_owned()),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    if state.contains(&boot_line) {
+                        break state;
+                    }
+                    assert!(
+                        wait.elapsed() < Duration::from_secs(120),
+                        "no BitLocker state of this boot: {state}"
+                    );
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                };
+                std::fs::write(base.join("bitlocker-after-baseline.log"), &state).unwrap();
+                println!("BitLocker after the baseline restore:\n{state}");
+                assert!(state.contains("Unlocked"), "{state}");
+                assert!(state.contains("Tpm"), "{state}");
+                std::fs::write(
+                    base.join("baseline-results.txt"),
+                    "baseline_restore_restores_tpm=passed\n",
                 )
                 .unwrap();
             }

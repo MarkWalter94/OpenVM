@@ -276,7 +276,8 @@ installed Linux with the ordinary QEMU (R6-07b), every WHPX run now reboots
 cold (`R6-05` §18; verified by a Reset of an Ubuntu VM through the service). Windows Hello, a baseline (rather than snapshot) restore
 of an installed encrypted system, the desktop UI's own
 reconnection across a reboot, and the release
-bundle (recipe build, licences, signing) remain open.
+bundle (recipe build, release review of the licence/source inventory of
+`R6-05` §20, signing) remain open.
 
 ## R1 work: filtered Internet, first increment (ADR-0037)
 

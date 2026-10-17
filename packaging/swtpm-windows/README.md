@@ -20,7 +20,16 @@ Windows uses two loopback channels; listener and connected peer PIDs are
 checked using the kernel TCP table before guest execution. These checks do
 not turn swtpm's protocol into an authenticated transport.
 
-Distribution still requires all runtime licence texts, corresponding source
-and the applicable LGPL source/relinking provisions, as inventoried in
+`collect-licenses.sh <swtpm-out> <setup.ini> <dest>` (the same Cygwin, with
+the `setup.ini` that installed it) maps every Cygwin DLL of the output to its
+package and version (`cygcheck -f`, `installed.db`), downloads the Cygwin
+source package of that version into `<dest>/sources`, checks its SHA-512
+against `setup.ini` (which Cygwin setup verified with its signature), and
+copies the package's licence docs, or the licence files of the upstream
+archive in the source package. libtpms and swtpm themselves are covered by
+`LICENSE-libtpms`/`LICENSE-swtpm`.
+
+Distribution still requires the applicable LGPL source/relinking
+provisions and signing, as inventoried in
 `docs/verification/R6-05-windows11-x64-swtpm.md`. This development bundle is
 not release-qualified.

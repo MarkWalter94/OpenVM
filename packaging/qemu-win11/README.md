@@ -96,6 +96,19 @@ bundle needs the licence texts and the corresponding source (the QEMU tarball
 plus these patches, and the MSYS2 source packages at the versions in
 `msys2-packages.txt`).
 
+`collect-licenses.sh <qemu-out> <dest>` (MSYS2 UCRT64, the installation that
+built QEMU) maps every DLL of the output to its MSYS2 package and version,
+copies the installed licence texts and writes `INVENTORY.tsv`. With
+`FETCH=1` it also downloads the corresponding MSYS2 source packages into
+`<dest>/sources`, checks their signatures against the MSYS2 packager keys of
+the pacman keyring (a private copy, `VALIDSIG` required), and takes the
+licence files missing from the installation from the upstream archives
+inside; `MISSING.txt` then lists what is still unresolved. The swtpm and
+firmware recipes have their own `collect-licenses` script.
+`assemble.ps1 ... -Licenses <dir>,<dir>,<dir>` copies those outputs (without
+`sources/`) into the bundle under `licenses/`, and refuses one whose
+`MISSING.txt` is not empty. The sources are distributed beside the bundle.
+
 Evidence: `docs/verification/R6-05-windows11-x64-swtpm.md`.
 
 ## Development product bundle (2026-10-16)
@@ -116,5 +129,7 @@ vCPUs, at least 4096 MiB and 64 GiB. Missing/unapproved components refuse start.
 Build tools, source trees, binaries and lab disks currently live on E: under
 `E:\OpenVM-tests\win11`. The source/output build directories must be new or
 empty; the build recipe does not recursively delete an existing directory.
-The product bundle is experimental, not release-qualified. Its complete
-runtime licence/source inventory and code signing remain release work.
+The product bundle is experimental, not release-qualified. The runtime
+licence/source inventory is produced by the `collect-licenses` scripts
+(R6-05 §20); code signing and the release review of that inventory remain
+release work.

@@ -741,3 +741,26 @@ Evidence: `E:\OpenVM-tests\lab\win11-real\evidence-snapshot-01a14995\`
 final lab script in 1396 s with the same results
 (`evidence-snapshot-01a149ef`) and
 `evidence-snapshot-01a14913`, `-01a14926`, `-01a1493d` (the earlier runs).
+
+## 20. Runtime licence and source inventory (2026-10-17)
+
+Each recipe now has a script that inventories the third-party runtime of its
+output, copies the licence texts and fetches the corresponding source:
+
+| Recipe | Script | Result on the recipe outputs |
+| --- | --- | --- |
+| QEMU (`packaging/qemu-win11`) | `collect-licenses.sh`, `FETCH=1` | 25 DLLs from 20 MSYS2 packages; 19 MSYS2 source packages (`*.src.tar.zst`), each `VALIDSIG` against the MSYS2 packager keys of the pacman keyring; gmp, gnutls, nettle, libidn2 and p11-kit install no licence directory, their texts come from the upstream archives in the signed sources; `MISSING.txt` empty |
+| swtpm (`packaging/swtpm-windows`) | `collect-licenses.sh` | 14 DLLs: libtpms (built by the recipe) and 10 Cygwin packages (cygwin 3.6.11-1, glib 2.90.0-1, json-glib 1.4.2-1, OpenSSL 3.5.9-1, pcre2, libffi, libgcc1, libiconv, libintl, zlib); 10 Cygwin source packages, SHA-512 equal to the signed `setup.ini`; `MISSING.txt` empty |
+| OVMF (`packaging/firmware/edk2-x64`) | `collect-licenses.ps1` | edk2 and its 7 initialised submodules (brotli ×2, mbedtls, openssl, libfdt, mipisyst, libspdm) with commit and URL; `MISSING.txt` empty |
+
+`assemble.ps1 -Licenses` puts the three inventories (without `sources/`)
+under `licenses/` of the bundle and refuses an inventory with unresolved
+entries. The bundle assembled this way from the recipe outputs
+(`E:\OpenVM-tests\win11\bundle-licensed`, manifest
+`2f7598316f301b3543305c1370b69fc0841acf9d26c5a1cf2e6fa911aa2e3cf4`)
+passed `windows_pe_boots_with_tpm_and_secure_boot_through_the_product` in
+81 s with that manifest approved.
+
+Not concluded here: the legal review of the inventory (notices, the LGPL
+relinking offer for the Cygwin/MSYS2 libraries, where the sources are
+published) and code signing remain release work (ADR-0020).

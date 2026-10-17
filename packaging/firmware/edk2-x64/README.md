@@ -39,6 +39,12 @@ host administrator), and the resulting files are pinned by SHA-256 in
 ADR-0035 when released. The key enrolment step was verified separately
 (R6-05).
 
+`collect-licenses.ps1 -Edk2 <edk2-tree> -Out <new-dir>` copies the licence
+files of edk2 and of every submodule initialised by `build.ps1` and writes
+`INVENTORY.tsv` (component, path, commit, URL). The corresponding source is
+that edk2 commit, those submodule commits and `0001-*.patch`. Its output is
+one of the `-Licenses` inputs of `../../qemu-win11/assemble.ps1`.
+
 Declared limit (ADR-0035): without SMM the variable store is writable by code
 running in the guest kernel; Secure Boot protects against unsigned boot
 components, not against a guest already compromised at ring 0.
