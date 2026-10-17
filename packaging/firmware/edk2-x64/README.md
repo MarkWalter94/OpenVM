@@ -30,14 +30,13 @@ with `cryptography` (MSYS2 UCRT64 Python 3.14.8).
 powershell -File build.ps1 -Work <dir> -Out <dir> -Python <python.exe> -NasmDir <dir\> -IaslDir <dir\>
 ```
 
-**Status: not yet completed end to end.** On the project host, all modules
-compile and link, but the corporate antivirus removes the freshly built
-BaseTools host tool `BaseTools\Bin\Win32\LzmaCompress.exe` seconds after it
-is linked, so the firmware volumes cannot be compressed. The build must run
-on a machine where that tool is allowed (or after an exclusion granted by the
-host administrator), and the resulting files are pinned by SHA-256 in
-ADR-0035 when released. The key enrolment step was verified separately
-(R6-05).
+**Status: built on the project host** (R6-05 §13). An earlier attempt
+stopped because the corporate antivirus removed the freshly built BaseTools
+host tool `BaseTools\Bin\Win32\LzmaCompress.exe` (R6-05 §8); the later build
+completed with MSVC and the Microsoft KEK/db certificates enrolled. Its
+output is the `firmware/` of the development bundles that installed and
+qualified Windows 11 (R6-05 §15–§19). The build is not bit-reproducible: the
+released files are pinned by SHA-256 in ADR-0035.
 
 `collect-licenses.ps1 -Edk2 <edk2-tree> -Out <new-dir>` copies the licence
 files of edk2 and of every submodule initialised by `build.ps1` and writes
