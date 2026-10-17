@@ -221,7 +221,7 @@ The new VM appears on the Dashboard as **Stopped**, with system, CPU, memory, vi
 
 ### 6.1 Create a Windows VM
 
-LightVM can also create VMs for **Windows XP, Vista, 7, 8.1 and 10**, with the same wizard. **This is experimental: the project has started Windows Setup from Vista 32-bit and Windows 10 images, but has not yet completed a Windows installation** (`docs/COMPATIBILITY.md`, "Windows guest profiles"). **Windows 11 x64 is experimental on Windows hosts** with the optional TPM/Secure Boot package (section 6.4); installed Windows 11 remains unqualified. Windows 11 x86 and Windows 8 are not supported; Windows 8 is replaced by 8.1. On a Mac with Apple Silicon only Windows 11 ARM64 is offered (section 6.2).
+LightVM can also create VMs for **Windows XP, Vista, 7, 8.1 and 10**, with the same wizard. **This is experimental: the project has started Windows Setup from Vista 32-bit and Windows 10 images, but has not yet completed a Windows installation** (`docs/COMPATIBILITY.md`, "Windows guest profiles"). **Windows 11 x64 is experimental on Windows hosts** with the optional TPM/Secure Boot package (section 6.4); installed Windows 11 has been tested on the project's PC (section 6.4) but is not qualified. Windows 11 x86 and Windows 8 are not supported; Windows 8 is replaced by 8.1. On a Mac with Apple Silicon only Windows 11 ARM64 is offered (section 6.2).
 
 What you need:
 
@@ -376,8 +376,8 @@ console if it does not come back).
 The Reset button does the same. BitLocker with the TPM works in the
 project's test: remove the installation media first (Windows refuses to
 turn BitLocker on while a bootable DVD is attached); in the test the
-encrypted system unlocked by itself at every start, and reverting a snapshot
-also brought back the TPM state it needs. Baselines and snapshots of a
+encrypted system unlocked by itself at every start, and both reverting a
+snapshot and restoring a baseline brought back the TPM state it needs. Baselines and snapshots of a
 Windows 11 VM save and restore the TPM state together with disk and firmware
 settings; take them with the VM shut down (a snapshot of a running Windows 11
 VM is refused).

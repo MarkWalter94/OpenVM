@@ -71,10 +71,23 @@ Its separately approved runtime bundle is required. Real Windows PE x64
 reports Secure Boot enabled and TPM 2.0, preserves a test NV value across
 cold restart, and the run stops if its TPM helper dies (`R6-05` §13).
 The real service backend starts this profile repeatedly and still starts the
-ordinary Linux profile. This does **not** qualify an installed Windows 11:
-the guest/mode matrix remains **not verified**. Installation, warm reboot,
-BitLocker/Hello and TPM-aware baselines/snapshots remain open; TPM baselines
-and user snapshots are currently refused.
+ordinary Linux profile.
+
+Lab tests with the project-built bundle (QEMU with the WHPX xsave fix,
+`R6-05` §15–§19) on the development host: Windows 11 Pro 26300 installs
+without bypass and restarts. Every guest or host reset is a cold reboot with
+new QEMU and swtpm processes (also for the other WHPX profiles, §18). OOBE
+with a local account works. BitLocker sealed to the emulated TPM unlocks by
+itself after a reboot and stops at recovery with an empty TPM. Snapshot
+revert and baseline restore bring the TPM state back with the disk. Snapshots
+and baselines of this profile are taken with the VM stopped only.
+
+The guest/mode matrix stays **not verified**:
+- These are lab tests on one host and one build of Windows.
+- Windows Hello was not tested.
+- The bundle is unsigned.
+- The release review of its licence/source inventory (`R6-05` §20) has not
+  been done.
 
 ## Windows 11 ARM64 on macOS Apple Silicon (ADR-0028)
 
