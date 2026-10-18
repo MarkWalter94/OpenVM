@@ -148,6 +148,7 @@ impl Catalog {
                 detail,
             });
         }
+        self.remove_empty_tpm_dirs();
         report.leftover_temps_removed = self.remove_committed_leftovers()?;
         report.integrity = self.integrity_scan()?;
         Ok(report)
@@ -324,6 +325,18 @@ impl Catalog {
     ) -> Result<(RecoveryOutcome, String, IntentState)> {
         use RecoveryOutcome::*;
         match (temp_exists, final_exists, row_exists) {
+            // Moved, rows still present, but the rest of the group was
+            // already put back (aborted with its files in place, e.g. the
+            // abort of this one failed): completing the deletion would
+            // orphan those files, so this one is put back too.
+            (true, false, true) if self.group_has(i, IntentState::Aborted, false)? => {
+                let d = self.rollback_fs(i, prior)?;
+                Ok((
+                    RolledBack,
+                    format!("group_aborted+{d}"),
+                    IntentState::Aborted,
+                ))
+            }
             // Moved, rows still present: complete the deletion.
             (true, false, true) => {
                 let tid = i.target_id.clone().unwrap_or_default();
@@ -374,6 +387,17 @@ impl Catalog {
                     IntentState::Committed,
                 ))
             }
+            // Nothing moved, rows present, but an earlier file of the group
+            // is unresolved (`needs_review`): the group is not decided yet.
+            // This file waits with it, so the group is completed or undone
+            // as a whole (aborting it now would orphan this file once the
+            // earlier intent deletes the rows).
+            (false, true, true) if self.group_has(i, IntentState::NeedsReview, true)? => {
+                Err(StorageError::StateConflict(
+                    "deletion group unresolved: waiting for an earlier file of the same operation"
+                        .into(),
+                ))
+            }
             // Nothing moved and the VM is still there: nothing to undo.
             (false, true, true) => Ok((
                 RolledBack,
@@ -393,6 +417,26 @@ impl Catalog {
                 Ok((RolledBack, d, IntentState::Aborted))
             }
         }
+    }
+
+    /// `true` if another intent of `i`'s group (same operation) is in
+    /// `state`; with `earlier`, only among the intents recorded before `i`
+    /// (already processed by this reconciliation, which goes in order).
+    fn group_has(&self, i: &Intent, state: IntentState, earlier: bool) -> Result<bool> {
+        let Some(op) = &i.operation_id else {
+            return Ok(false);
+        };
+        let n: i64 = self
+            .conn
+            .query_row(
+                "SELECT count(*) FROM journal
+                 WHERE operation_id = ?1 AND intent_id <> ?2 AND state = ?3
+                   AND (?4 = 0 OR intent_id < ?2)",
+                params![op, i.id, state, earlier],
+                |r| r.get(0),
+            )
+            .db()?;
+        Ok(n > 0)
     }
 
     /// DB present and file missing: VM in `recovering`; a non-base disk

@@ -855,3 +855,124 @@ fn tpm_checkpoints_refuse_missing_extra_or_changed_state() {
     assert!(fx.restore(&mut cat, &b).is_err());
     assert_eq!(tpm_bytes(&mut cat, &fx.vm), b"TPM identity and NV v1");
 }
+
+/// A restore that did not commit (cancelled, or interrupted and rolled back
+/// at the next open) leaves no per-overlay directory inside the standalone
+/// TPM state directory, which accepts nothing but its state: checkpoints
+/// keep working. A catalog that already holds such an empty directory is
+/// cleaned at the next open.
+#[test]
+fn uncommitted_tpm_restore_keeps_the_standalone_tpm_state_usable() {
+    let (mut cat, fx) = tpm_fixture("windows11_x64");
+    let b = fx.create(&mut cat, "checkpoint").unwrap();
+    let tpm_entries = || std::fs::read_dir(fx.path("tpm")).unwrap().count();
+    let begin = |cat: &mut Catalog| {
+        cat.begin_restore(RestoreBaseline {
+            vm_id: fx.vm,
+            baseline_id: b,
+            standalone: fx.standalone(),
+        })
+        .unwrap()
+    };
+    // Cancelled after the file work.
+    let job = begin(&mut cat);
+    cat.abort_restore_job(job.run(create_overlay)).unwrap();
+    assert_eq!(tpm_entries(), 1);
+    fx.create(&mut cat, "after cancel").unwrap();
+    // Process gone during the file work: rolled back at the next open.
+    let job = begin(&mut cat);
+    drop(job);
+    drop(cat);
+    let mut cat = Catalog::open(fx.dir.path()).unwrap();
+    assert_eq!(tpm_entries(), 1);
+    fx.create(&mut cat, "after crash").unwrap();
+    // Left by an older version: removed by reconciliation.
+    drop(cat);
+    std::fs::create_dir(fx.path(&format!("tpm/{}", vm_storage::DiskId::new_v7()))).unwrap();
+    let mut cat = Catalog::open(fx.dir.path()).unwrap();
+    assert_eq!(tpm_entries(), 1);
+    fx.restore(&mut cat, &b).unwrap();
+    assert_eq!(tpm_bytes(&mut cat, &fx.vm), b"TPM identity and NV v1");
+}
+
+/// The VM manifest is rewritten after the commit: if that fails the
+/// committed operation is still reported as done.
+#[test]
+fn manifest_failure_after_the_commit_does_not_fail_the_operation() {
+    let dir = common::tempdir();
+    let mut cat = Catalog::open(dir.path()).unwrap();
+    let fx = Fx::new(&mut cat, dir);
+    let manifest = cat
+        .layout()
+        .resolve(&CatalogLayout::vm_manifest(&fx.vm))
+        .unwrap();
+    let _ = std::fs::remove_file(&manifest);
+    std::fs::create_dir_all(manifest.join("in the way")).unwrap();
+    let b1 = fx.create(&mut cat, "one").unwrap();
+    let b2 = fx.create(&mut cat, "two").unwrap();
+    fx.restore(&mut cat, &b1).unwrap();
+    cat.delete_baseline_files(&fx.vm, &b2).unwrap();
+    assert_eq!(cat.baseline_overview(&fx.vm).unwrap().count, 1);
+    assert!(cat.open_intents().unwrap().is_empty());
+    // Once the obstacle is gone the next change rewrites it.
+    std::fs::remove_dir_all(&manifest).unwrap();
+    fx.create(&mut cat, "three").unwrap();
+    assert!(cat.verify_vm_manifest(&fx.vm).unwrap().is_empty());
+}
+
+/// Baseline deletion interrupted after the first move, whose reconciliation
+/// then fails before deleting the rows: the other files of the group wait
+/// with it (not aborted), so when it completes no file is orphaned.
+#[test]
+fn deletion_group_waits_for_its_unresolved_first_file() {
+    let dir = common::tempdir();
+    let mut cat = Catalog::open(dir.path()).unwrap();
+    let fx = Fx::new(&mut cat, dir);
+    let b1 = fx.create(&mut cat, "one").unwrap();
+    let b2 = fx.create(&mut cat, "two").unwrap();
+    fx.restore(&mut cat, &b1).unwrap();
+    cat.inject_fault(FaultPoint::DeleteAfterFirstMove, FaultAction::Crash);
+    assert!(matches!(
+        cat.delete_baseline_files(&fx.vm, &b2),
+        Err(StorageError::InjectedCrash(_))
+    ));
+    drop(cat);
+    // The row deletion fails with an error that is not a reference.
+    let db = fx.dir.path().join(vm_storage::DB_FILE);
+    let sql = rusqlite::Connection::open(&db).unwrap();
+    sql.execute_batch(
+        "CREATE TRIGGER test_fail BEFORE DELETE ON baselines
+         BEGIN SELECT lightvm_test_no_such_function(); END;",
+    )
+    .unwrap();
+    drop(sql);
+    let cat = Catalog::open(fx.dir.path()).unwrap();
+    let report = cat.open_report().unwrap().recovery.intents.clone();
+    assert!(report.len() > 1, "{report:?}");
+    assert!(
+        report
+            .iter()
+            .all(|r| r.outcome == vm_storage::RecoveryOutcome::NeedsReview),
+        "{report:?}"
+    );
+    drop(cat);
+    let sql = rusqlite::Connection::open(&db).unwrap();
+    sql.execute_batch("DROP TRIGGER test_fail;").unwrap();
+    drop(sql);
+    let mut cat = Catalog::open(fx.dir.path()).unwrap();
+    let ids: Vec<BaselineId> = cat
+        .read(|tx| {
+            Ok(tx
+                .baselines_of_vm(&fx.vm)?
+                .into_iter()
+                .map(|b| b.baseline_id)
+                .collect())
+        })
+        .unwrap();
+    assert_eq!(ids, vec![b1]);
+    assert!(!fx.path(&format!("base/{b2}")).exists());
+    // The VM was left `recovering` by the unresolved attempt.
+    cat.with_tx(|tx| tx.set_vm_lifecycle(&fx.vm, Lifecycle::Stopped))
+        .unwrap();
+    assert_reconciled(&mut cat, &fx);
+}

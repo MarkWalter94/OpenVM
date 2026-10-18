@@ -780,3 +780,55 @@ fn altered_snapshot_tpm_is_refused_before_disk_revert() {
     assert!(begin_revert(&mut cat, &vm, id).is_err());
     assert_eq!(std::fs::read(&tpm).unwrap(), b"TPM v2");
 }
+
+/// Overwrites a catalog file made read-only (tampering in the tests).
+fn tamper(path: &Path, bytes: &[u8]) {
+    let mut perms = std::fs::metadata(path).unwrap().permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    perms.set_readonly(false);
+    std::fs::set_permissions(path, perms).unwrap();
+    std::fs::write(path, bytes).unwrap();
+}
+
+#[test]
+fn promoting_a_snapshot_checks_its_uefi_variables() {
+    let dir = common::tempdir();
+    let mut cat = Catalog::open(dir.path()).unwrap();
+    let (vm, _) = tpm_vm(&mut cat, dir.path());
+    let id = take(&mut cat, &vm, "machine");
+    let req = || vm_storage::CreateBaseline {
+        vm_id: vm.id,
+        label: "promoted".into(),
+        clean_shutdown: true,
+        protected: false,
+        standalone: vm_storage::CurrentStateFiles {
+            disk: vm.disk_rel(),
+            vars: Some(vm.vars_rel()),
+        },
+    };
+    let vars = cat.snapshot_vars(&vm.id, &id).unwrap().unwrap();
+    tamper(&vars, b"other vars");
+    let e = cat.begin_promote_snapshot(req(), &id).err().unwrap();
+    assert!(matches!(e, StorageError::IntegrityMismatch { .. }), "{e}");
+    assert!(cat.open_intents().unwrap().is_empty());
+    tamper(&vars, b"vars v1");
+    let job = cat.begin_promote_snapshot(req(), &id).unwrap();
+    cat.abort_baseline_job(job.run(|_, dst| {
+        std::fs::write(dst, b"image").unwrap();
+        Ok(1)
+    }))
+    .unwrap();
+    assert!(cat.open_intents().unwrap().is_empty());
+}
+
+#[test]
+fn snapshot_tpm_copies_count_in_the_storage_usage() {
+    let dir = common::tempdir();
+    let mut cat = Catalog::open(dir.path()).unwrap();
+    let (vm, _) = tpm_vm(&mut cat, dir.path());
+    take(&mut cat, &vm, "machine");
+    let usage = cat.storage_usage(Some(&vm.id)).unwrap();
+    // UEFI variables ("vars v1") and TPM permanent state ("TPM v1").
+    assert_eq!(usage.snapshots, 7 + 6);
+    assert_eq!(cat.storage_usage(None).unwrap().snapshots, 7 + 6);
+}

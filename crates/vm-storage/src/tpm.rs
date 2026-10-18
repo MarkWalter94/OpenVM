@@ -28,6 +28,16 @@ pub(crate) fn state_file(dir: &ManagedPath) -> ManagedPath {
     ManagedPath::parse(&format!("{dir}/{PERMANENT}")).expect("bounded catalog TPM path")
 }
 
+/// `true` for the permanent state of a per-overlay emulator directory
+/// (`vms/<vm>/tpm/<disk_id>/tpm2-00.permall`,
+/// [`CatalogLayout::state_tpm_dir`]): that directory lies inside the
+/// standalone state directory, which accepts nothing but its own state
+/// ([`Catalog::open_tpm_state`]), so it must not outlive its state.
+pub(crate) fn is_state_tpm_file(rel: &ManagedPath) -> bool {
+    let c: Vec<&str> = rel.components().collect();
+    matches!(c.as_slice(), ["vms", _, "tpm", _, PERMANENT])
+}
+
 impl Tx<'_> {
     pub(crate) fn current_tpm(&self, id: &VmId) -> Result<Option<FirmwareRecord>> {
         let fw: Option<FirmwareId> = self
@@ -100,6 +110,79 @@ impl Catalog {
             Some(s) => CatalogLayout::state_tpm_dir(vm, &s.overlay_disk_id),
             None => CatalogLayout::tpm_state_dir(vm),
         })
+    }
+
+    /// Removes the empty per-overlay emulator directories
+    /// (`vms/<vm>/tpm/<disk_id>/`) left by a restore that did not commit
+    /// (catalogs written before its rollback removed them) or by a state
+    /// that was replaced: inside the standalone state directory they make
+    /// [`Self::open_tpm_state`] refuse it. The current state's directory and
+    /// those named by unfinished intents are kept; links, files and
+    /// non-empty directories are never touched. Best effort: run by
+    /// reconciliation, it never prevents opening the catalog.
+    pub(crate) fn remove_empty_tpm_dirs(&mut self) {
+        let open: Vec<String> = {
+            let Ok(mut st) = self.conn.prepare(
+                "SELECT final_path FROM journal
+                 WHERE state IN ('pending','applied','needs_review') AND final_path IS NOT NULL",
+            ) else {
+                return;
+            };
+            let Ok(rows) = st.query_map([], |r| r.get::<_, String>(0)) else {
+                return;
+            };
+            let Ok(v) = rows.collect::<rusqlite::Result<_>>() else {
+                return;
+            };
+            v
+        };
+        let Ok(vms) = std::fs::read_dir(self.layout.root().join("vms")) else {
+            return;
+        };
+        for vm_entry in vms.flatten() {
+            let Some(vm) = vm_entry
+                .file_name()
+                .to_str()
+                .and_then(|n| n.parse::<VmId>().ok())
+            else {
+                continue;
+            };
+            let current = match self.read(|tx| tx.current_state(&vm)) {
+                Ok(c) => c.map(|c| c.overlay_disk_id.to_string()),
+                Err(_) => continue,
+            };
+            let rel = CatalogLayout::tpm_state_dir(&vm);
+            let Ok(abs) = self.layout.resolve(&rel) else {
+                continue;
+            };
+            let Ok(entries) = std::fs::read_dir(&abs) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
+                if current.as_deref() == Some(name.as_str()) {
+                    continue;
+                }
+                let Ok(child) = rel.join(&name) else {
+                    continue;
+                };
+                let prefix = format!("{child}/");
+                if open.iter().any(|f| f.starts_with(&prefix)) {
+                    continue;
+                }
+                let p = entry.path();
+                let is_dir = std::fs::symlink_metadata(&p)
+                    .is_ok_and(|m| !crate::paths::is_link(&m) && m.is_dir());
+                if is_dir
+                    && let Ok(mut it) = std::fs::read_dir(&p)
+                    && it.next().is_none()
+                {
+                    let _ = std::fs::remove_dir(&p);
+                }
+            }
+        }
     }
 
     pub(crate) fn open_tpm_state(&self, dir: &ManagedPath) -> Result<(PathBuf, File)> {

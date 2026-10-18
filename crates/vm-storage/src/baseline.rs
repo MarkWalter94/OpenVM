@@ -541,6 +541,8 @@ impl Catalog {
         let mut vm = self.stopped_without_runs(&req.vm_id, "baseline")?;
         let tpm_guest = crate::tpm::needs_tpm(&vm.guest_os);
         let mut snapshot_tag = None;
+        // Recorded hash of the snapshot's UEFI variables (promotion only).
+        let mut snapshot_vars_sha = None;
         if let Some(sid) = snapshot {
             let s = self.read(|tx| tx.snapshot(sid))?;
             if s.vm_id != req.vm_id {
@@ -559,6 +561,7 @@ impl Catalog {
             vm.config = s.config.clone();
             vm.revision = s.config_revision;
             snapshot_tag = Some(s.disk_tag);
+            snapshot_vars_sha = s.vars_sha256;
         }
         let current = self.read(|tx| {
             let Some(cs) = tx.current_state(&req.vm_id)? else {
@@ -609,6 +612,25 @@ impl Catalog {
             }
             None => None,
         };
+        // A promoted snapshot's variables are checked against the hash
+        // recorded when it was taken (as a revert does): through the guard
+        // handle, so the copy made by the job reads the verified bytes.
+        if let (Some(expected), Some(sid)) = (&snapshot_vars_sha, snapshot) {
+            let rel = CatalogLayout::snapshot_vars(&req.vm_id, sid);
+            let Some((abs, handle)) = &source_vars else {
+                return Err(StorageError::IntegrityMismatch {
+                    path: rel.to_string(),
+                    detail: "the snapshot's UEFI variables are missing".into(),
+                });
+            };
+            let (actual, _) = fsx::sha256_handle(handle, abs)?;
+            if actual != *expected {
+                return Err(StorageError::IntegrityMismatch {
+                    path: rel.to_string(),
+                    detail: "the snapshot's UEFI variables were altered".into(),
+                });
+            }
+        }
         let source_tpm = if tpm_guest {
             Some(if let Some(sid) = snapshot {
                 let expected = self.read(|tx| tx.snapshot_tpm(sid))?.ok_or_else(|| {
@@ -854,7 +876,7 @@ impl Catalog {
         let _ = job.op;
         match result {
             Ok(r) => {
-                self.write_vm_manifest(&job.req.vm_id)?;
+                self.refresh_vm_manifest(&job.req.vm_id);
                 Ok(r)
             }
             Err(e @ StorageError::InjectedCrash(_)) => Err(e),
@@ -1181,7 +1203,7 @@ impl Catalog {
         match result {
             Ok(s) => {
                 drop(job.guard);
-                self.write_vm_manifest(&job.vm_id)?;
+                self.refresh_vm_manifest(&job.vm_id);
                 Ok(s)
             }
             Err(e @ StorageError::InjectedCrash(_)) => Err(e),
@@ -1270,9 +1292,11 @@ impl Catalog {
         })();
         match result {
             Ok(()) => {
-                let dir = self.layout.resolve(&CatalogLayout::baseline_dir(vm, id))?;
-                let _ = std::fs::remove_dir(dir);
-                self.write_vm_manifest(vm)?;
+                // Committed: what follows is best effort.
+                if let Ok(dir) = self.layout.resolve(&CatalogLayout::baseline_dir(vm, id)) {
+                    let _ = std::fs::remove_dir(dir);
+                }
+                self.refresh_vm_manifest(vm);
                 Ok(())
             }
             Err(e @ StorageError::InjectedCrash(_)) => Err(e),

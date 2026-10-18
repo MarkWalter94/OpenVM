@@ -486,7 +486,9 @@ impl Catalog {
     /// exist (creation) or no longer exist (deletion); otherwise it rolls back
     /// the transaction and returns an error, leaving the intents `applied`
     /// (to be aborted or reconciled). After the commit it removes the
-    /// temporaries of deletions and exports.
+    /// temporaries of deletions and exports, best effort: the change is
+    /// committed, so a failure there is not an error of the operation (a
+    /// temporary left behind is removed by the next reconciliation).
     pub fn commit_many(
         &mut self,
         intents: &[Intent],
@@ -523,7 +525,7 @@ impl Catalog {
                 IntentKind::DeleteFile | IntentKind::DiscardFile | IntentKind::Export
             ) && remove_temp(&self.layout, &i.temp_rel).is_ok()
             {
-                self.set_resolution(i.id, "temp_removed")?;
+                let _ = self.set_resolution(i.id, "temp_removed");
             }
         }
         Ok(())
@@ -731,8 +733,14 @@ impl Catalog {
                     remove_baseline_leftovers(&self.layout, rel)?;
                 }
                 // An import that did not commit leaves no VM directory
-                // (created by `begin_intent`) behind.
-                if i.kind == IntentKind::ImportVm
+                // (created by `begin_intent`) behind; neither does the TPM
+                // state of a restore that did not commit: its per-overlay
+                // directory lies inside the standalone TPM state directory,
+                // which accepts nothing else.
+                if (i.kind == IntentKind::ImportVm
+                    || i.final_rel
+                        .as_ref()
+                        .is_some_and(crate::tpm::is_state_tpm_file))
                     && !row_exists
                     && let Some(rel) = &i.final_rel
                 {
@@ -793,6 +801,15 @@ impl Catalog {
         let sha = manifest::write_atomic(&self.layout, &CatalogLayout::vm_manifest(vm), &m)?;
         self.with_tx(|tx| tx.set_vm_manifest_hash(vm, &sha))?;
         Ok(sha)
+    }
+
+    /// [`Self::write_vm_manifest`] after a committed change. The manifest
+    /// is an export of committed rows: failing to rewrite it must not turn
+    /// the committed operation into an error. A stale manifest is reported
+    /// by [`Self::verify_vm_manifest`] and rewritten by the next change of
+    /// the VM.
+    pub(crate) fn refresh_vm_manifest(&mut self, vm: &VmId) {
+        let _ = self.write_vm_manifest(vm);
     }
 
     /// Compares the VM manifest with the DB.

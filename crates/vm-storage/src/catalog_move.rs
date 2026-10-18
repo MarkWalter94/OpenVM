@@ -20,7 +20,9 @@
 //!    the supervisor), which are reported;
 //! 4. fast path, when the source is not kept: `rename` of the root, atomic on
 //!    one volume. Across volumes it fails without changing anything and the
-//!    copy follows;
+//!    copy follows. The named runtime entries moved with the root are
+//!    removed from the destination once it validated (as the copy path
+//!    removes them with the source);
 //! 5. copy, after checking the free space at the destination: each file
 //!    opened without following links and with `FILE_SHARE_READ` only (no
 //!    writer during the copy), created with `CREATE_NEW`, hashed while
@@ -291,13 +293,23 @@ pub fn move_catalog(
                 if let Err(e) = validate(to, before) {
                     return Err(undo_rename(from, to, to_existed, e));
                 }
+                // The rename carried the runtime entries along: they are
+                // not part of the catalog (stale, the supervisor is stopped
+                // and recreates them), so they are removed as the copy path
+                // removes them with the source, and reported the same way.
+                let cleanup = remove_children(to, |n| {
+                    n.to_str()
+                        .is_some_and(|n| plan.left_behind.iter().any(|l| l == n))
+                })
+                .err()
+                .map(|e| format!("runtime entries moved with the catalog not removed: {e}"));
                 return Ok(report(
                     MoveMethod::Renamed,
                     &plan,
                     before,
-                    Vec::new(),
+                    plan.left_behind.clone(),
                     true,
-                    None,
+                    cleanup,
                 ));
             }
             // Different volume (or rename not possible): nothing changed,

@@ -132,6 +132,23 @@ fn a_missing_file_marks_the_medium_missing_until_it_is_back() {
         cat.read(|tx| tx.media(&m.media_id)).unwrap().status,
         MediaStatus::Missing
     );
+    // A different file in its place: still missing, not attachable.
+    std::fs::write(&src, b"CD001 other").unwrap();
+    let err = cat.verify_media(&m.media_id).unwrap_err();
+    assert!(
+        matches!(err, StorageError::IntegrityMismatch { .. }),
+        "{err:?}"
+    );
+    assert_eq!(
+        cat.read(|tx| tx.media(&m.media_id)).unwrap().status,
+        MediaStatus::Missing
+    );
+    let vm = common::new_vm(&mut cat, "vm");
+    assert!(
+        cat.with_tx(|tx| tx.attach_media(&vm, MediaSlot::Data, &m.media_id))
+            .is_err()
+    );
+    std::fs::remove_file(&src).unwrap();
     std::fs::rename(&moved, &src).unwrap();
     let check = cat.verify_media(&m.media_id).unwrap();
     assert_eq!(check.record.status, MediaStatus::Approved);

@@ -182,7 +182,7 @@ impl Catalog {
         })();
         match result {
             Ok(id) => {
-                self.write_vm_manifest(&req.vm_id)?;
+                self.refresh_vm_manifest(&req.vm_id);
                 Ok(id)
             }
             Err(e) => {

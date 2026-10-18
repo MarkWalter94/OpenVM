@@ -455,7 +455,6 @@ impl Catalog {
                     record.status
                 )));
             }
-            self.with_tx(|tx| tx.set_media_status(id, MediaStatus::Approved))?;
         }
         let (sha, size) = guard.sha256_with(&|| false, &|_| {})?;
         if sha != record.sha256 || size != record.size_bytes {
@@ -466,6 +465,11 @@ impl Catalog {
                     record.sha256, record.size_bytes
                 ),
             });
+        }
+        if record.status == MediaStatus::Missing {
+            // Approved again only once the reappeared file is the one
+            // registered: a different file leaves the media `missing`.
+            self.with_tx(|tx| tx.set_media_status(id, MediaStatus::Approved))?;
         }
         let readonly_restored = match &record.location {
             MediaLocation::Managed(_) => fsx::ensure_readonly(&guard.abs)?,

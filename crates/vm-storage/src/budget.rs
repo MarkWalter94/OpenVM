@@ -207,8 +207,12 @@ impl Catalog {
             media: 0,
             metadata: 0,
             snapshots: sum(
-                "SELECT coalesce(sum(vars_bytes + thumbnail_bytes),0) FROM snapshots
-                 WHERE (?1 IS NULL OR vm_id = ?1)",
+                // The offline TPM copy of a snapshot (`snapshot_tpm`) is a
+                // file of the snapshot like its UEFI variables.
+                "SELECT coalesce(sum(s.vars_bytes + s.thumbnail_bytes
+                                     + coalesce(t.size_bytes, 0)),0)
+                 FROM snapshots s LEFT JOIN snapshot_tpm t ON t.snapshot_id = s.snapshot_id
+                 WHERE (?1 IS NULL OR s.vm_id = ?1)",
             )?,
         };
         if vm.is_none() {

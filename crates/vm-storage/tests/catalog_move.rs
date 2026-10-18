@@ -475,6 +475,33 @@ fn named_runtime_entries_stay_behind_and_are_reported() {
     assert!(!from.exists());
 }
 
+/// The rename fast path treats the named runtime entries as the copy does:
+/// reported, and not part of the catalog at the new location.
+#[test]
+fn rename_reports_and_drops_the_named_runtime_entries() {
+    let base = common::tempdir();
+    let from = base.path().join("catalog");
+    let to = base.path().join("moved");
+    let vm = populated(&from);
+    std::fs::write(from.join("emergency.endpoint"), b"pipe").unwrap();
+    std::fs::create_dir_all(from.join("p").join("d")).unwrap();
+    std::fs::write(from.join("p").join("d").join("qmp.sock"), b"").unwrap();
+    std::fs::write(from.join("unknown.txt"), b"kept").unwrap();
+    let report = run(&MoveRequest {
+        leave_behind: vec!["emergency.endpoint".into(), "p".into(), ".run".into()],
+        ..request(&from, &to)
+    })
+    .unwrap();
+    assert_eq!(report.method, MoveMethod::Renamed);
+    assert_eq!(report.left_behind, vec!["emergency.endpoint", "p"]);
+    assert_eq!(report.source_cleanup_error, None);
+    assert!(!to.join("emergency.endpoint").exists());
+    assert!(!to.join("p").exists());
+    assert_eq!(std::fs::read(to.join("unknown.txt")).unwrap(), b"kept");
+    assert!(!from.exists());
+    opens_with_vm(&to, &vm);
+}
+
 /// A junction inside the catalog is refused like everywhere else in
 /// storage: nothing is copied (Windows; elsewhere a symbolic link).
 #[test]
