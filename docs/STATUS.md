@@ -1,6 +1,6 @@
 # Project status
 
-Last updated: 2026-10-17
+Last updated: 2026-10-18
 
 Operational document required by section 17 of `docs/ROADMAP.md`: current phase, impediments and progress. **This file does not change the Definition of Done (section 11), the scope or the exit criteria.** A status reported here does not count as verification: the evidence is in `docs/verification/`.
 
@@ -108,7 +108,7 @@ Started on 2026-10-11 at the owner's request; not usable for the exit criteria u
 
 | Item | Evidence | Declared outcome |
 | --- | --- | --- |
-| F5: MCP stdio adapter `lightvm-mcp` (pairing file, verification code, tool catalogue v0.2 with `_` names, image content, schema-validated results) | `F5-01` | verified with a real service and a scripted client; **0 real LLM clients run** (Claude Code CLI logged out on this host; pi has no MCP support) |
+| F5: MCP stdio adapter `lightvm-mcp` (pairing file, verification code, tool catalogue v0.2 with `_` names, image content, schema-validated results) | `F5-01`, `F5-04` | verified with the real adapter/service and **two real LLM clients**: Claude Code 2.1.302 and Codex CLI 0.163.0-alpha.10.2 each completed the fixture, independent pixel verdict, revocation and baseline restore; one attempt each, both passed |
 | F5: session reports (JSON canonical, Markdown export by the user, outcome states with their source, typed text never stored) and AI Workspace / history / verdict / export UI | `F5-01`, `F5-02` | verified headless and with real QEMU |
 | F5: deterministic fixture ten times with restore | `F5-03` | 10/10 runs completed and restored, 0 infrastructure errors (scripted client); failed, inconclusive, cancelled, timed_out and infrastructure_error produced on real QEMU |
 | F6: migrations (backup, downgrade refusal, refusal with open runs), re-probe after QEMU/firmware change, disk-full handling, host resume, SBOM, licence check, release artefact scan, regression script | `F6-01` | verified in simulation/test (injected faults, injected clock jump, fake distribution); real full volume, real suspend and a second QEMU build not executed |
@@ -118,7 +118,7 @@ Started on 2026-10-11 at the owner's request; not usable for the exit criteria u
 - F2: a user installs Ubuntu following `docs/USER_GUIDE.md`; IT/US keyboard and coordinates after resize by hand; screen reader, DPI, multi-monitor; installer on a clean machine (Windows Sandbox procedure ready).
 - F3: a human driving the baseline screen on an installed system.
 - F4: a human driving the sessions UI; host sleep/resume for real.
-- F5: two real LLM clients with a successful path each (Claude Code: `claude auth login`, then the F5 real-client test; a second client with native MCP stdio support to be chosen).
+- F5's two-real-client requirement is **closed on 2026-10-18** (`F5-04`); the earlier phase exit conditions and human UI checks above remain open.
 - F6: code signing and independent review (ADR-0020, not available), tests on at least two physical hosts (Intel/AMD if both declared), Linux (R2a).
 
 ## Catalog move (Settings)
@@ -242,7 +242,10 @@ use `E:\OpenVM-tests`. Physical USB tests remain deferred.
 On 2026-10-16 the owner deferred USB tests and requested the Windows 11 TPM
 work below. Filtered Internet product-path evidence is in `R1-02`; the
 actual packaged-supervisor crash/recovery with installed Ubuntu passed in
-`R1-03`. VPN/proxy and isolated gateway-thread crash qualification remain open.
+`R1-03`. R1-04 adds Windows PE HTTPS, isolated gateway panic with a real
+Linux guest, actual current-user Windows PAC and controlled DNS/policy evidence.
+Real VPN, host route mutation, additional proxy configurations and an installed
+Windows browser remain open.
 Evidence, commands and the handoff are in
 `docs/verification/R6-07-lightvm-tools.md` (2026-10-16 follow-up).
 
@@ -296,9 +299,10 @@ bundle (recipe build, release review of the licence/source inventory of
 
 Started on 2026-10-16 (owner: "vai con tutto"). A fourth network mode,
 **Filtered Internet (experimental)**, reuses the supervisor's isolated stack
-of ADR-0033: the guest reaches only the exact DNS names listed for the VM,
-on TCP 80/443, with names resolved by the supervisor at start and pinned for
-the run. Every address must be public IPv4 and reached through the host's
+of ADR-0033: the supervisor resolves the exact DNS names listed for the VM
+and pins their addresses on TCP 80/443 for the run. This controls IP/port,
+not website identity on shared addresses (ADR-0037 limitation below).
+Every address must be public IPv4 and reached through the host's
 default route; host, LAN, special-use ranges, non-default (VPN/LAN) routes,
 IPv6 and UDP are refused, and every connection is rechecked against the host
 routing table at connect time and every second while open. Windows hosts
@@ -312,7 +316,13 @@ only. Agent sessions get it only through the `network.endpoints` grant.
 | Real Linux guest: HTTPS to the allowed name (TLS 1.3, 200), other names/ports, host, LAN, Internet IPs, UDP DNS, IPv6, ICMP refused; name pinned to loopback never reaches the host; persistent TLS connection reset on revocation | `guest-net` `tests/real_guest.rs` (`--ignored`), R1-01 §3 | verified on hardware (Windows, WHPX), stack level |
 | Product service and agent grant: real HTTPS, endpoint subset, denials, revocation, guest application/log return | R1-02 | verified on hardware for Ubuntu live, in-process service |
 | Packaged supervisor killed during real filtered HTTPS, owned QEMU termination, rotated credentials, stopped reconciliation, explicit restart retaining policy and guest Tools | R1-03 | verified on hardware for installed Ubuntu and ZIP .3; QEMU gone in 117 ms; clean installation completed before crash |
-| Real resolver rebinding, VPN, system proxy, host route mutation, isolated gateway-thread crash, Windows guests | — | not verified |
+| Windows PE native resolver/WinHTTP: HTTPS 200 with normal certificate verification, forbidden names/destinations, same path with host proxy environment pointed at unused sentinel | R1-04 | verified on hardware at QemuRun/NetStack level; excludes installed Windows/browser, packaged service and configured Windows system proxy |
+| Current-user Windows PAC: native API confirms configured proxy, real WinPE HTTPS/denials still pass without using proxy; original flags and PAC value presence restored | R1-04 | verified on hardware for the test-domain-only PAC; first orchestration cleanup-handle error recorded, complete fixed cycle passed; machine-wide static/authenticated enterprise proxies excluded |
+| Isolated gateway-thread panic during a real guest's HTTPS; host process and QEMU survive, old/new egress unavailable, status/counters cleared | R1-04 | verified on hardware at stack level (22 ms worker cleanup; guest old TLS times out); injection compiled only into the test executable |
+| Controlled DNS answer changes through Windows resolver and production public-address policy; mixed/oversized/IPv6-only replies | R1-04 | real resolver/policy boundary and portable tests passed; normal production resolver path with a rebinding domain still open |
+| SYN/SYN-ACK/RST slot leak and same-batch replacement | R1-04 | review finding reproduced before fix; host task/slot now collected, six aborted handshakes with a two-slot limit and subsequent echo pass |
+| Website identity on a shared public IP/CDN (Host/SNI/domain fronting) | ADR-0037, R1-04 | implementation limitation explicitly documented in settings and guide; current filter enforces IP/port, not strict website identity; stronger domain isolation unresolved |
+| Real VPN, host route mutation, installed Windows/browser, rebinding through the product's normal resolver path, additional proxy configurations | — | not verified; route test needs an elevated lab; attempted external rebinding domain did not resolve |
 
 R1 is not complete: the release conditions of ROADMAP 12 (R1) need the
 real-guest evidence above. Evidence file: `docs/verification/R1-01-filtered-internet.md`.

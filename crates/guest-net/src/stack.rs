@@ -65,6 +65,8 @@ impl std::error::Error for StackError {}
 enum Cmd {
     SetAllowed(BTreeSet<String>),
     Stop,
+    #[cfg(test)]
+    Panic,
 }
 
 #[derive(Debug, Default)]
@@ -85,6 +87,23 @@ impl Shared {
         q.push_back(r);
     }
 }
+
+// The status must reflect an unexpected worker unwind as well as an orderly
+// stop. Declared before the runtime/link so it clears only after their cleanup.
+struct WorkerExit(Arc<Shared>);
+
+impl Drop for WorkerExit {
+    fn drop(&mut self) {
+        lock(&self.0.stats).open_connections = 0;
+        self.0
+            .running
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+#[path = "real_panic_tests.rs"]
+mod real_panic_tests;
 
 /// A running stack. Dropping it stops it.
 #[derive(Debug)]
@@ -114,6 +133,7 @@ impl NetStack {
         let thread = std::thread::Builder::new()
             .name("guest-net".into())
             .spawn(move || {
+                let _exit = WorkerExit(sh.clone());
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build();
@@ -124,7 +144,6 @@ impl NetStack {
                     rt.block_on(stack.run(from_guest, cmd_rx));
                     link.close();
                 }
-                sh.running.store(false, std::sync::atomic::Ordering::SeqCst);
             })
             .map_err(StackError::Io)?;
         Ok(Self {
@@ -419,6 +438,8 @@ impl Stack {
                 c = cmd.recv() => match c {
                     Some(Cmd::SetAllowed(set)) => self.apply_allowed(set),
                     Some(Cmd::Stop) | None => break,
+                    #[cfg(test)]
+                    Some(Cmd::Panic) => panic!("injected guest-net worker panic"),
                 },
                 f = from_guest.recv() => match f {
                     Some(f) => {
@@ -535,6 +556,9 @@ impl Stack {
     /// will take it if the endpoint is allowed and under the limit;
     /// otherwise smoltcp resets it.
     fn on_syn(&mut self, dst: SocketAddrV4, src_port: u16) {
+        // RST followed by a new SYN can arrive in the same frame batch.
+        // Reap the reset listener before treating its tuple as a retransmit.
+        self.reap_finished();
         let Some(&ep) = self.by_vaddr.get(&dst) else {
             self.deny(dst, DenyReason::NotAnEndpoint);
             return;
@@ -781,17 +805,22 @@ impl Stack {
             self.service(i);
         }
         self.poll();
-        // Finished connections: socket closed (or in TIME-WAIT) on the
-        // guest side, or never left LISTEN (an invalid SYN).
+        self.reap_finished();
+        self.publish();
+    }
+
+    fn reap_finished(&mut self) {
+        // A reset in SYN-RECEIVED returns the socket to LISTEN even when
+        // its host connection already started. That listener must not
+        // retain its slot, task or host connection.
         let mut i = 0;
         while i < self.conns.len() {
             let c = &self.conns[i];
             let state = self.sockets.get::<tcp::Socket<'_>>(c.handle).state();
-            let finished = match state {
-                tcp::State::Listen => c.host == HostState::NotStarted,
-                tcp::State::Closed | tcp::State::TimeWait => true,
-                _ => false,
-            };
+            let finished = matches!(
+                state,
+                tcp::State::Listen | tcp::State::Closed | tcp::State::TimeWait
+            );
             if finished {
                 let c = self.conns.swap_remove(i);
                 self.finish(c, state);
@@ -799,7 +828,6 @@ impl Stack {
                 i += 1;
             }
         }
-        self.publish();
     }
 
     fn finish(&mut self, mut c: Conn, state: tcp::State) {
@@ -960,5 +988,82 @@ impl Stack {
             self.finish(c, state);
         }
         self.publish();
+    }
+}
+
+#[cfg(test)]
+#[allow(dead_code)] // shared guest fixture also supports the integration suite
+mod panic_tests {
+    include!("../tests/common/stack_guest.rs");
+    use super::Cmd;
+
+    #[test]
+    fn new_syn_reaps_reset_listener_before_the_batch_is_pumped() {
+        let target = "127.0.0.1:7".parse().unwrap();
+        let (link, _guest) = Link::pair();
+        let shared = Arc::new(super::Shared::default());
+        let mut stack = super::Stack::new(
+            NetConfig::new(endpoints(target, target)),
+            link.to_guest.clone(),
+            ["sql.lan".into()].into_iter().collect(),
+            shared.clone(),
+        );
+        let destination = std::net::SocketAddrV4::new(VIP_SQL, 1433);
+        stack.on_syn(destination, 40000);
+        // This is the state after a SYN-RECEIVED socket gets RST, before
+        // pump services the next frame in the same input batch.
+        stack.conns[0].host = super::HostState::Connected;
+        stack.conns[0].counted = true;
+        stack.stats.open_connections = 1;
+        stack.on_syn(destination, 40000);
+        assert_eq!(stack.conns.len(), 1);
+        assert_eq!(stack.conns[0].host, super::HostState::NotStarted);
+        assert!(!stack.conns[0].counted);
+        assert_eq!(stack.stats.open_connections, 0);
+        assert!(
+            matches!(super::lock(&shared.records).front(),Some(NetRecord::Connection(record)) if record.outcome==guest_net::ConnOutcome::ResetByGuest)
+        );
+    }
+
+    #[test]
+    fn isolated_worker_panic_closes_active_host_connection_and_link() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (mut stack, mut guest) =
+            start(NetConfig::new(endpoints(address, address)), &["sql.lan"]);
+        guest.configure();
+        let connection = guest.connect(VIP_SQL, 1433);
+        guest.established(connection);
+        let (mut host, _) = listener.accept().unwrap();
+        host.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        host.write_all(b"live").unwrap();
+        assert_eq!(guest.recv_exact(connection, 4), b"live");
+        assert!(stack.is_running());
+        let started = Instant::now();
+        stack.cmd.send(Cmd::Panic).unwrap();
+        while stack.is_running() {
+            assert!(
+                started.elapsed() < Duration::from_secs(3),
+                "worker status stayed alive after panic"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let mut byte = [0];
+        match host.read(&mut byte) {
+            Ok(0) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+                ) => {}
+            other => panic!("host connection survived the worker: {other:?}"),
+        }
+        assert!(
+            guest.dev.end.to_stack.blocking_send(vec![0; 60]).is_err(),
+            "guest input link survived worker"
+        );
+        stack.stop(); // joining the panicked worker must remain safe and bounded
+        assert_eq!(stack.stats().open_connections, 0);
+        assert!(started.elapsed() < Duration::from_secs(3));
     }
 }

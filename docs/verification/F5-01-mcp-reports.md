@@ -1,5 +1,10 @@
 # F5-01 — MCP stdio adapter, session reports, real clients (backend)
 
+**Follow-up, 2026-10-18:** the historical real-client exclusions below are
+superseded by [F5-04](F5-04-real-clients.md): Claude Code and Codex CLI each
+passed the complete fixture/verdict/revocation/restore path. Earlier
+observations and attempts are retained below.
+
 - Execution date (UTC): 2026-10-11
 - Executed by: development agent "backend F5" (Claude Code session); F5 work split (the sessions UI is a separate agent)
 - Roadmap step: section 10 F5 ("MCP e report"): stdio adapter, pairing/local authorization, handshake and tool schemas; at least two real clients with documented versions; JSON/Markdown reports with distinct outcome states; complete scenario (control of an app in the guest, report, revocation, restore). Sections 7.3, 7.4, 9, 11 (points 7–12).

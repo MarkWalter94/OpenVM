@@ -28,6 +28,9 @@
 //! proxied connection and every refused attempt is reported as a
 //! [`NetRecord`] (endpoint, addresses, byte counts, outcome; never content).
 
+#[cfg(test)]
+extern crate self as guest_net;
+
 pub mod dhcp;
 pub mod dns;
 pub mod egress;

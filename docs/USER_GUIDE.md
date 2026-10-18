@@ -447,15 +447,26 @@ To remove an image from the list, press **Delete…** next to it and confirm wit
 
 An image that a VM uses as installation or data media cannot be deleted: **Delete…** is disabled and its tooltip names the VMs. Remove it first with **Edit** → **Installation media** (or **Data media**) → **Remove** → **Save settings**, or with **Remove installation media…** on the Dashboard, or delete the VM. If the supervisor still refuses (for example a VM started using it from another window meanwhile), the dialog stays open and says why: *The medium was not deleted: it is used by 1 VM: "…"*, or *a running VM or another operation holds it open*. Agent sessions can never delete media. If LightVM is interrupted during a deletion, it finishes or undoes it the next time it starts.
 
-### 9.2 Network: Offline, NAT, endpoint allowlist
+### 9.2 Network: Offline, NAT, endpoint allowlist, filtered Internet
 
-A VM has one of three network modes, chosen in **Edit** → **Network** → **Mode** while the VM is **Stopped** (a running VM never changes network):
+A VM has one of four network modes, chosen in **Edit** → **Network** → **Mode** while the VM is **Stopped** (a running VM never changes network):
 
 | Mode | What the guest reaches | Agent sessions |
 | --- | --- | --- |
 | **Offline (no network adapter)** — the default | Nothing: the VM has no network adapter. | Same. |
 | **NAT (manual use only)** | This PC, the local network and the Internet, like VMware NAT. The guest gets its address automatically (DHCP); this PC is `10.0.2.2` inside the guest. | **Never.** While an agent session uses the VM, the VM starts with the endpoints granted to the session, or with no network. A session cannot be approved while the VM runs with NAT: stop it first. |
 | **Endpoint allowlist** | Only the endpoints you list (below), each one TCP service. Nothing else on this PC, the local network or the Internet; no UDP (except the name lookups of the listed names), no IPv6. | Only the endpoints you tick when you approve the session; none ticked: no network. |
+| **Filtered Internet (experimental)** | Public IPv4 addresses resolved from the listed DNS names, on TCP 80 or 443. This PC, LAN, private addresses, IPv6 and other protocols stay blocked. Several websites can share an allowed address; see the limitation below. | Only endpoints granted to the session; no NAT or unrestricted DNS. |
+
+**Filtered Internet.** Add endpoints with the same exact DNS name in **Name**
+and **Host**, and port **80** or **443**. The name selects an address when the
+VM starts; that address stays fixed until the next start. The filter checks
+the destination address and port. Several websites can share that address,
+so another website there may be reachable even when its name is not listed.
+This experimental mode is unsuitable for enforcing a strict list of permitted
+websites. HTTPS contents and the website identity inside the connection are
+not inspected. Real VPN/route changes and installed-browser qualification
+remain open; see `verification/R1-04-network-faults-windows.md`.
 
 The guest needs a driver for the network adapter: Linux and Windows Vista and later find it on their own (Intel PRO/1000, `e1000`); Windows XP uses a Realtek RTL8139. Windows 11 on ARM (Mac) VMs can only be offline.
 

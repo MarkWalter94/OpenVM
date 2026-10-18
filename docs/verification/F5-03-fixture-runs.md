@@ -1,5 +1,9 @@
 # F5-03 — Ten fixture runs end to end and the six outcome states on real QEMU (scripted MCP client)
 
+**Follow-up, 2026-10-18:** [F5-04](F5-04-real-clients.md) separately closes
+the two-real-LLM-client requirement. These ten infrastructure attempts
+remain scripted; they are not relabelled as model-driven runs.
+
 - Execution date (UTC): 2026-10-11, 05:43–06:24 (one test run, 2 325 s)
 - Executed by: development agent "F5/F6 backend" (Claude Code session)
 - Roadmap step: section 10 F5, exit criterion "fixture deterministica completata e ripristinata dieci volte senza errori infrastrutturali; ... report corretti anche per fallimento, timeout e inconcludente. Registrare tutti i tentativi del campione, inclusi i fallimenti." Sections 7.3, 8, 9.

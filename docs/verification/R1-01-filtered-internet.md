@@ -91,6 +91,13 @@ connection. Evidence file: `E:\OpenVM-tests\lab\net\logs\filtered-real.txt`.
 
 ## 4. Not verified
 
+Historical list; subsequent scopes and results are recorded in R1-02
+(product/grants), R1-03 (packaged supervisor crash) and
+[R1-04](R1-04-network-faults-windows.md) (Windows PE, isolated worker panic
+and controlled Windows DNS/policy boundary). The normal-resolver rebinding,
+VPN, additional proxy configurations, host route mutation and installed browser
+cases still remain open.
+
 The product path end to end (VM settings, service resolution at run start,
 agent session grant) with a real guest; DNS rebinding through a real
 resolver; host VPN (split and full tunnel) and a system proxy; a route

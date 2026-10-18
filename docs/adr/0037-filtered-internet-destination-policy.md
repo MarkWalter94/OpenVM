@@ -25,7 +25,7 @@ the owner asked to proceed with the open items, filtered Internet included.
 
 Add the network mode `FilteredInternet` on top of the ADR-0033 stack:
 
-- **Destinations are exact DNS names**, listed per VM (endpoint name equals
+- **Endpoint configuration uses exact DNS names**, listed per VM (endpoint name equals
   host name, no wildcard, no IP literal, at least one dot), on **TCP 80 or
   443**. They are resolved by the supervisor once at run start and pinned
   for the run; AAAA answers are ignored, and every A answer must pass the
@@ -53,9 +53,10 @@ Add the network mode `FilteredInternet` on top of the ADR-0033 stack:
   clients.
 - **NAT with `restrict=on` and host firewall rules**: rejected by the
   roadmap and dependent on host firewall state.
-- **Wildcard domains / following redirects**: needs per-connection DNS or
-  SNI inspection; out of the first increment. Redirects to other names fail
-  unless those names are listed too.
+- **Wildcard domains / following redirects**: out of the first increment.
+  A normal browser cannot resolve a redirect's unlisted name through the
+  guest DNS. This does not enforce the authority sent over an already
+  permitted socket; see the implementation limitation below.
 
 ## Consequences
 
@@ -68,6 +69,26 @@ Add the network mode `FilteredInternet` on top of the ADR-0033 stack:
 - R1 stays incomplete until the real-guest evidence below exists.
 
 ## Required evidence
+
+### Implementation limitation identified on 2026-10-18
+
+The current gateway enforces the pinned **IPv4 address and TCP port** and
+controls guest DNS. It does not validate HTTP Host, TLS SNI or the encrypted
+HTTP authority. A guest can send arbitrary bytes through an approved socket;
+when its public address is shared by a CDN or virtual hosts, another website
+on that address may be reachable by supplying a different authority. This
+is not a strict website/domain allowlist, even though configuration uses
+DNS names. Network audit endpoint names identify configuration entries,
+not an independently authenticated HTTP authority.
+
+This is a limitation of the implementation, not a newly approved weakening
+of R1 or a declaration that R1 is complete. SNI checking alone cannot prove
+the encrypted HTTP Host/authority, and transparent TLS interception is
+outside the accepted scope. A stronger domain-isolation design still needs
+resolution before claiming that guarantee. The settings help and user
+guide now describe the IP/port boundary explicitly (R1-04).
+
+### Qualification references
 
 `docs/verification/R1-01-filtered-internet.md`: unit/simulation evidence
 (policy, configuration, stack refusal) and, still open, a real guest

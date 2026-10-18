@@ -14,6 +14,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "common/filtered_windows.rs"]
+mod filtered_windows;
+
 struct Paths {
     base: PathBuf,
     bundle: PathBuf,

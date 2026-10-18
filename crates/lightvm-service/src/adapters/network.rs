@@ -113,12 +113,21 @@ pub(crate) fn resolve(host: &str, port: u16) -> Result<SocketAddr, String> {
 /// Pin the DNS answer for the run. Every returned IPv4 address must pass
 /// the public-route policy; AAAA answers are never used for this mode.
 fn public_address(addresses: &[SocketAddr]) -> Result<SocketAddr, String> {
+    public_address_checked(addresses, |address| {
+        guest_net::egress::validate_target(address).map_err(str::to_owned)
+    })
+}
+
+fn public_address_checked(
+    addresses: &[SocketAddr],
+    validate: impl Fn(SocketAddr) -> Result<(), String>,
+) -> Result<SocketAddr, String> {
     if addresses.len() > 64 {
         return Err("DNS answer exceeds limit".into());
     }
     let mut selected = None;
     for &address in addresses.iter().filter(|a| a.is_ipv4()) {
-        guest_net::egress::validate_target(address).map_err(str::to_owned)?;
+        validate(address)?;
         selected.get_or_insert(address);
     }
     selected.ok_or_else(|| "no approved public IPv4 address".into())
@@ -338,4 +347,51 @@ pub(crate) fn records(vm_id: VmId, run_id: RunId, recs: Vec<NetRecord>) -> Vec<N
             },
         })
         .collect()
+}
+
+#[cfg(all(test, windows))]
+#[path = "network_dns_real.rs"]
+mod dns_real;
+
+#[cfg(test)]
+mod public_dns_tests {
+    use super::*;
+
+    fn select(addresses: &[SocketAddr]) -> Result<SocketAddr, String> {
+        public_address_checked(addresses, |address| {
+            guest_net::egress::validate_routes(
+                address,
+                &[guest_net::egress::Route {
+                    address: std::net::Ipv4Addr::UNSPECIFIED,
+                    prefix: 0,
+                }],
+            )
+            .map_err(str::to_owned)
+        })
+    }
+
+    #[test]
+    fn mixed_public_and_private_dns_answers_are_rejected_in_either_order() {
+        let public: SocketAddr = "1.1.1.1:443".parse().unwrap();
+        for private in ["127.0.0.1:443", "10.0.0.1:443", "169.254.169.254:443"] {
+            let private = private.parse().unwrap();
+            assert!(select(&[public, private]).is_err());
+            assert!(select(&[private, public]).is_err());
+        }
+        assert_eq!(select(&[public]).unwrap(), public);
+        // A later private answer must not be accepted for a new run.
+        assert!(select(&["127.0.0.1:443".parse().unwrap()]).is_err());
+    }
+
+    #[test]
+    fn ipv6_empty_and_oversized_dns_answers_cannot_create_egress() {
+        assert!(select(&[]).is_err());
+        assert!(select(&["[2606:4700:4700::1111]:443".parse().unwrap()]).is_err());
+        let public = "1.1.1.1:443".parse().unwrap();
+        assert!(select(&vec![public; 65]).is_err());
+        assert_eq!(
+            select(&["[::1]:443".parse().unwrap(), public]).unwrap(),
+            public
+        );
+    }
 }

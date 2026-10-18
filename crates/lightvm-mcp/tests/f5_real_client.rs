@@ -787,13 +787,26 @@ fn e2e_real_client_runs_the_fixture() {
             if let Ok(m) = std::env::var("LIGHTVM_F5_MODEL") {
                 cmd.args(["--model", &m]);
             }
+        } else if client == "codex" {
+            // Invocation-local configuration: leave the user's MCP settings
+            // untouched and expose only this disposable adapter to the model.
+            let server = format!("mcp_servers.lightvm={{command={},args=[],required=true,tool_timeout_sec=120,env={{LIGHTVM_PAIRING_FILE={}}}}}",
+                serde_json::to_string(env!("CARGO_BIN_EXE_lightvm-mcp")).unwrap(),
+                serde_json::to_string(pfile.to_str().unwrap()).unwrap());
+            cmd.args(["exec", "--ignore-user-config", "--ephemeral", "--skip-git-repo-check", "--sandbox", "read-only", "--json",
+                "-c", "features.shell_tool=false", "-c", "features.multi_agent=false",
+                "-c", "features.plugins=false", "-c", "web_search=\"disabled\"", "-c", &server]);
+            if let Ok(m) = std::env::var("LIGHTVM_F5_MODEL") {
+                cmd.args(["--model", &m]);
+            }
+            cmd.arg(PROMPT);
         } else if client == "scripted" {
             // Deterministic MCP client (not an LLM): the real adapter is
             // driven over stdio with the fixed fixture steps.
             cmd = Command::new(env!("CARGO_BIN_EXE_lightvm-mcp"));
             cmd.env("LIGHTVM_PAIRING_FILE", &pfile);
         } else {
-            panic!("client {client} not scripted");
+            panic!("unsupported client {client}");
         }
         // Started from a terminal of its own, not nested in another
         // agent session that may be running the harness.
@@ -846,9 +859,12 @@ fn e2e_real_client_runs_the_fixture() {
         // once the agent declared its result.
         let mut session: Option<SessionId> = None;
         let mut revoked = false;
+        let mut client_success = false;
+        let mut verified_success = false;
         let limit = Duration::from_secs(1500);
         loop {
             if let Ok(Some(st)) = child.try_wait() {
+                client_success = st.success();
                 log(&evidence, &format!("client exited: {st} after {:?}", started.elapsed()));
                 break;
             }
@@ -889,6 +905,7 @@ fn e2e_real_client_runs_the_fixture() {
                 other => panic!("{other:?}"),
             };
             log(&evidence, &format!("verifier: outcome {:?}, source {:?}, rationale {:?}; termination {:?}; screenshots {}; events {}", r.outcome, r.outcome_source, r.verdicts.last().map(|v| v.rationale.clone()), r.termination, r.screenshots_retained, r.events_total));
+            verified_success = r.outcome == TestOutcome::Passed;
             for (fmt, name) in [(ReportFormat::Json, "report.json"), (ReportFormat::Markdown, "report.md")] {
                 ok(&mut u, Request::ExportSessionReport { session_id: sid, format: fmt, destination: evidence.join(name).to_str().unwrap().into(), overwrite: true, include_screenshots: fmt == ReportFormat::Json }).await;
             }
@@ -919,6 +936,10 @@ fn e2e_real_client_runs_the_fixture() {
         }
         handle.shutdown().await;
         assert_eq!(check, Check::Ok(Marker::Absent), "V6 after restore");
+        assert!(session.is_some(), "client did not request a session");
+        assert!(revoked, "client did not declare an outcome before revocation");
+        assert!(client_success, "client process did not exit successfully");
+        assert!(verified_success, "fixture verifier did not observe success");
     });
     let _ = std::fs::remove_file(&fx_iso);
 }

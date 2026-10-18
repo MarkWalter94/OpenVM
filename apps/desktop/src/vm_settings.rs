@@ -292,7 +292,7 @@ fn network_ui(ui: &mut egui::Ui, c: &mut VmConfig, ports: &mut Vec<String>) {
         NetworkProfile::FilteredInternet => {
             theme::notice(
                 ui,
-                "Filtered Internet: only the exact DNS destinations below on TCP 80 or 443. Public IPv4 only; this computer, LAN, non-default host routes, IPv6 and UDP are blocked. Requires Windows. Each new connection and persistent connection is checked against host routes; an allowed destination can receive guest data. Experimental: full VPN and browser qualification is pending.",
+                "Filtered Internet: TCP 80 or 443 to the public IPv4 addresses resolved from the names below. This computer, LAN, non-default host routes, IPv6 and UDP are blocked. Shared addresses may serve other websites too; this filter does not check which website is requested over an allowed connection. Requires Windows. An allowed destination can receive guest data. Experimental: VPN and browser qualification is pending.",
                 Tone::Warning,
             );
         }
