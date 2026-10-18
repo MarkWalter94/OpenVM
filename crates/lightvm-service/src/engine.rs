@@ -429,6 +429,11 @@ pub enum GateChange {
         cause: TerminationCause,
         /// Stop the running VM of the session.
         stop: bool,
+        /// An `end_session` of the service follows (user revocation, client
+        /// loss) and replies with the report of this termination; `false`
+        /// for the bulk terminations (Emergency Stop, UI loss, agent access
+        /// off), whose report nobody asks for.
+        awaited: bool,
     },
 }
 
@@ -1253,6 +1258,10 @@ pub trait BackendPort: VmBackend + Send + 'static {
         _guards: Vec<Box<dyn GuardedMedia>>,
     ) {
     }
+    /// Drops the files and handles given for the start of `run_id` that the
+    /// backend did not take (the core refused the start before launching):
+    /// the files are not kept open until the next start.
+    fn discard_start_guards(&mut self, _vm_id: VmId, _run_id: RunId) {}
     /// Runs ended since the last call, with `true` for an observed clean
     /// guest shutdown (F3: a baseline is "verified" only after one).
     fn take_exits(&mut self) -> Vec<(VmId, RunId, bool)> {
@@ -1514,14 +1523,23 @@ where
                 GateChange::Pause => {
                     let _ = self.core.pause_session(id);
                 }
-                GateChange::Terminate { cause, stop } => {
+                GateChange::Terminate {
+                    cause,
+                    stop,
+                    awaited,
+                } => {
                     let r = if stop {
                         self.core.terminate_session_with_stop(id, cause)
                     } else {
                         self.core.revoke_session(id, cause)
                     };
                     if let Ok(t) = r {
-                        self.gate_reports.insert(id, t.report.clone());
+                        // Kept only for the `end_session` that follows: a
+                        // report nobody takes would stay forever and be
+                        // returned by a much later `end_session`.
+                        if awaited {
+                            self.gate_reports.insert(id, t.report.clone());
+                        }
                         ended.push(t);
                     }
                 }
@@ -1768,7 +1786,10 @@ where
                         self.backend.set_start_media(vm_id, run_id, guards);
                     }
                     let mut pre = PrecomputedInspector(facts);
-                    self.core.execute_dispatch(d, &mut self.backend, &mut pre)
+                    let r = self.core.execute_dispatch(d, &mut self.backend, &mut pre);
+                    // Taken by the backend if it launched; otherwise released.
+                    self.backend.discard_start_guards(vm_id, run_id);
+                    r
                 }
             }
         };

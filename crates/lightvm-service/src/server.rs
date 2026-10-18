@@ -1079,7 +1079,13 @@ async fn handle_connection(shared: Arc<Shared>, stream: BoxedStream, peer: PeerI
                     if send(&mut wr, &m, max).await.is_err() { Flow::Close(None) } else { Flow::Continue }
                 }
                 Some(Ok(ClientMessage::Request { request_id, body })) => {
-                    if role == Role::Pairing && let Some(p) = pending_call(&body) {
+                    // Recorded only for the session bound to this connection:
+                    // a call naming another session (rejected by the gate as
+                    // unauthenticated) never reaches that session's report.
+                    if role == Role::Pairing
+                        && let Some(p) = pending_call(&body)
+                        && shared.agents.bound_to(connection_id, p.session_id)
+                    {
                         pending_calls.insert(request_id, p);
                     }
                     if !bucket.try_acquire() {

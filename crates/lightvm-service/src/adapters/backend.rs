@@ -1306,15 +1306,32 @@ impl QemuVmBackend {
     /// Releases a terminated run: QMP, sockets, protected files, Job Object,
     /// private directory.
     fn release(&mut self, vm_id: VmId) {
+        // F3: only an observed guest shutdown is a clean end.
+        let ended = self.runs.get(&vm_id).map(|run| {
+            let clean = matches!(
+                run.state(),
+                ProcessState::Exited {
+                    cause: ExitCause::GuestShutdown,
+                    ..
+                }
+            );
+            (run.run_id(), clean)
+        });
+        self.release_ended(vm_id, ended);
+    }
+
+    /// [`Self::release`] of the run `ended` (`(run, clean end)`), also when
+    /// its processes are already gone from `runs` (failed cold reboot).
+    fn release_ended(&mut self, vm_id: VmId, ended: Option<(RunId, bool)>) {
         self.relaunch.remove(&vm_id);
         if let Some(mut t) = self.tools.remove(&vm_id) {
             t.stop_handle().close();
             t.files.stop();
-            if let Some(run) = self.runs.get(&vm_id) {
+            if let Some((run_id, _)) = ended {
                 self.tools_records.extend(
                     t.records()
                         .into_iter()
-                        .map(|r| crate::engine::ToolsRecord::file(vm_id, run.run_id(), r)),
+                        .map(|r| crate::engine::ToolsRecord::file(vm_id, run_id, r)),
                 );
             }
         }
@@ -1335,16 +1352,8 @@ impl QemuVmBackend {
         if let Some((_, task)) = self.stops.remove(&vm_id) {
             let _ = self.rt.block_on(task);
         }
-        if let Some(run) = self.runs.get(&vm_id) {
-            // F3: only an observed guest shutdown is a clean end.
-            let clean = matches!(
-                run.state(),
-                ProcessState::Exited {
-                    cause: ExitCause::GuestShutdown,
-                    ..
-                }
-            );
-            self.exits.push((vm_id, run.run_id(), clean));
+        if let Some((run_id, clean)) = ended {
+            self.exits.push((vm_id, run_id, clean));
         }
         if let Some(run) = self.runs.remove(&vm_id) {
             let Ok(run) = Arc::try_unwrap(run) else {
@@ -1417,8 +1426,16 @@ impl QemuVmBackend {
             task.abort();
         }
         self.last_shots.remove(&vm_id);
+        let run_id = r.spec.run_id;
         let old = self.runs.remove(&vm_id).ok_or("no run")?;
-        let old = Arc::try_unwrap(old).map_err(|_| "run still referenced".to_owned())?;
+        // Still referenced: put back, the run ends through the ordinary
+        // release (which reports the case).
+        let old = Arc::try_unwrap(old).map_err(|old| {
+            self.runs.insert(vm_id, old);
+            "run still referenced".to_owned()
+        })?;
+        // From here on a failure leaves no run: `drain_observations` reports
+        // the exit of `run_id` and releases the rest (`release_ended`).
         match self.rt.block_on(old.close()) {
             Ok(c) if c.active_at_close > 0 => {
                 return Err(format!(
@@ -1429,6 +1446,11 @@ impl QemuVmBackend {
             Ok(_) => {}
             Err(e) => return Err(format!("closing the run: {e}")),
         }
+        // An Emergency Stop that marked the run while it was rebooting: no
+        // new processes (it already reported the run terminated).
+        if self.priority_killed(vm_id, run_id) {
+            return Err("Emergency Stop during the cold reboot".to_owned());
+        }
         let run = self
             .rt
             .block_on(QemuRun::start(
@@ -1438,6 +1460,35 @@ impl QemuVmBackend {
                 self.setup.run_config.clone(),
             ))
             .map_err(|e| format!("starting again: {e}"))?;
+        // The new processes are registered for the Emergency Stop under the
+        // registry lock, after checking that no Emergency Stop marked the
+        // run meanwhile: the priority path marks its runs under the same
+        // lock (`emergency_stop_all`), so it either sees the new handle or
+        // has marked the run before this check.
+        {
+            let mut registry = lock(&self.registry);
+            if self.priority_killed(vm_id, run_id) {
+                drop(registry);
+                let timeout = self.setup.emergency_timeout;
+                if let Err(e) = self.rt.block_on(run.emergency_stop(timeout)) {
+                    crate::diag!("lightvm-service: terminating the rebooted run: {e}");
+                }
+                if let Err(e) = self.rt.block_on(run.close()) {
+                    crate::diag!("lightvm-service: closing the rebooted run: {e}");
+                }
+                return Err("Emergency Stop during the cold reboot".to_owned());
+            }
+            registry.insert(
+                vm_id,
+                (
+                    run_id,
+                    run.emergency_stop_handle(),
+                    self.tools
+                        .get(&vm_id)
+                        .map(crate::tools::ToolsRun::stop_handle),
+                ),
+            );
+        }
         if let Some(t) = self.tools.get_mut(&vm_id) {
             t.guest_restarted();
         }
@@ -1450,14 +1501,6 @@ impl QemuVmBackend {
             }
             self.nets.insert(vm_id, n);
         }
-        lock(&self.registry).insert(
-            vm_id,
-            (
-                r.spec.run_id,
-                run.emergency_stop_handle(),
-                tools.map(crate::tools::ToolsRun::stop_handle),
-            ),
-        );
         self.runs.insert(vm_id, Arc::new(run));
         crate::diag!(
             "lightvm-service: guest reset: run {} started again from cold ({} in {:?})",
@@ -1742,6 +1785,24 @@ impl VmBackend for QemuVmBackend {
         run_id: RunId,
         media: &[VerifiedMedia],
     ) -> Result<(), PublicError> {
+        // F3: files of the current state for this run, if the catalog gave
+        // them (with its guard, kept until the run is released). Taken
+        // first: every early error below drops them (and the handles on the
+        // baseline, overlay and media) instead of leaving them held until
+        // the next start.
+        let current = self
+            .start_disks
+            .remove(&vm.id)
+            .filter(|(r, _)| *r == run_id)
+            .map(|(_, d)| d);
+        // Handles of the media verified for this run: kept from before the
+        // hash until the run is released (dropped here if the start fails).
+        let media_guards = self
+            .start_media
+            .remove(&vm.id)
+            .filter(|(r, _)| *r == run_id)
+            .map(|(_, g)| g)
+            .unwrap_or_default();
         if self.exited(vm.id) {
             // Previous run exited but never released (for example a stop that
             // completed after the escalation timeout).
@@ -1788,21 +1849,6 @@ impl VmBackend for QemuVmBackend {
                     .with_detail("budget_gib", budget.to_string()));
             }
         }
-        // F3: files of the current state for this run, if the catalog gave
-        // them (with its guard, kept until the run is released).
-        let current = self
-            .start_disks
-            .remove(&vm.id)
-            .filter(|(r, _)| *r == run_id)
-            .map(|(_, d)| d);
-        // Handles of the media verified for this run: kept from before the
-        // hash until the run is released (dropped here if the start fails).
-        let media_guards = self
-            .start_media
-            .remove(&vm.id)
-            .filter(|(r, _)| *r == run_id)
-            .map(|(_, g)| g)
-            .unwrap_or_default();
         // From here on every error path removes the private directory.
         let private_guard = PrivateDirGuard::new(self.private_dir_for(run_id));
         let mut paths = self.prepare(&caps, vm, run_id, media, current.as_ref(), &profile)?;
@@ -2208,6 +2254,24 @@ impl BackendPort for QemuVmBackend {
         self.start_media.insert(vm_id, (run_id, guards));
     }
 
+    fn discard_start_guards(&mut self, vm_id: VmId, run_id: RunId) {
+        // `start` takes them first thing: left here only if it never ran.
+        if self
+            .start_disks
+            .get(&vm_id)
+            .is_some_and(|(r, _)| *r == run_id)
+        {
+            self.start_disks.remove(&vm_id);
+        }
+        if self
+            .start_media
+            .get(&vm_id)
+            .is_some_and(|(r, _)| *r == run_id)
+        {
+            self.start_media.remove(&vm_id);
+        }
+    }
+
     fn take_exits(&mut self) -> Vec<(VmId, RunId, bool)> {
         std::mem::take(&mut self.exits)
     }
@@ -2423,9 +2487,25 @@ impl BackendPort for QemuVmBackend {
                 )
             });
             if reboot {
+                // Taken before the reboot closes the old processes: if it
+                // fails after that, the core still gets the end of the run.
+                let ended = self.runs.get(&vm_id).map(|r| (r.run_id(), r.observation()));
                 match self.cold_reboot(vm_id) {
                     Ok(()) => continue,
                     Err(e) => crate::diag!("lightvm-service: cold reboot not done, run ends: {e}"),
+                }
+                if !self.runs.contains_key(&vm_id) {
+                    if let Some((run_id, obs)) = ended {
+                        // An Emergency Stop during the reboot: its end is
+                        // the core's `after_emergency_stop` (`force_stop`
+                        // then finds no run), as for any priority kill.
+                        if !self.priority_killed(vm_id, run_id) {
+                            out.push((vm_id, obs));
+                        }
+                        // A reset is never a clean end (F3).
+                        self.release_ended(vm_id, Some((run_id, false)));
+                    }
+                    continue;
                 }
             }
             if let Some(run) = self.runs.get(&vm_id) {
@@ -2478,13 +2558,20 @@ impl EmergencyStop for QemuEmergency {
     fn emergency_stop_all(&self) -> EmergencyOutcome {
         self.suspend_tools(None);
         // Copy of the handlers: the registry does not stay locked during the wait.
-        let handles: Vec<(VmId, RunId, qemu_backend::EmergencyStop)> = lock(&self.registry)
-            .iter()
-            .map(|(vm, (run, h, _))| (*vm, *run, h.clone()))
-            .collect();
-        // Marked before terminating: the exits that follow belong to the
-        // Emergency Stop, never to a graceful stop or an ordinary exit.
-        lock(&self.priority_killed).extend(handles.iter().map(|(vm, run, _)| (*vm, *run)));
+        let handles: Vec<(VmId, RunId, qemu_backend::EmergencyStop)> = {
+            let registry = lock(&self.registry);
+            let handles: Vec<_> = registry
+                .iter()
+                .map(|(vm, (run, h, _))| (*vm, *run, h.clone()))
+                .collect();
+            // Marked before terminating: the exits that follow belong to the
+            // Emergency Stop, never to a graceful stop or an ordinary exit.
+            // Marked under the registry lock: a cold reboot registering new
+            // processes for one of these runs sees the mark
+            // (`QemuVmBackend::cold_reboot`).
+            lock(&self.priority_killed).extend(handles.iter().map(|(vm, run, _)| (*vm, *run)));
+            handles
+        };
         let mut out = EmergencyOutcome {
             processes_terminated: 0,
             completed: true,

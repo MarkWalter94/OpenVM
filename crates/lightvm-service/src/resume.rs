@@ -20,6 +20,20 @@
 //! while the host sleeps; the wall clock does). A forward jump of the wall
 //! clock without a suspend (manual change, large NTP correction) is treated
 //! the same way: the sessions end and the user authorizes again (fail-safe).
+//!
+//! Only the bounded wait is measured that way ([`ResumeDetector::check`]).
+//! Serving a command and observing the VMs may legitimately take longer
+//! than the threshold (name resolution of the endpoints, a cold reboot, a
+//! report export, a Tools call). There both clocks advance by the work
+//! time and, on Windows (`Instant` is `QueryPerformanceCounter`), the
+//! monotonic clock also counts the time the host slept, so the length of a
+//! work segment cannot tell work from a suspend. After work
+//! ([`ResumeDetector::check_work`]) only a wall clock running ahead of the
+//! monotonic one by more than the threshold counts (a suspend on a platform
+//! whose monotonic clock stops, or a forward wall-clock jump). A suspend in
+//! the middle of work on a host whose monotonic clock counts it is not seen
+//! here: the leases of the sessions (at most 10 s) expire and the expiry
+//! check ends them on the same emergency path.
 //! No Windows power broadcast is used: it needs a window procedure and
 //! `unsafe` code, which the service does not have.
 //!
@@ -91,9 +105,25 @@ impl ResumeDetector {
     }
 
     /// Gap since the last mark if it exceeds the threshold by either clock;
-    /// the detector is marked again.
+    /// the detector is marked again. Only after a bounded idle wait: after
+    /// work of unbounded length see [`Self::check_work`].
     pub fn check(&mut self) -> Option<Duration> {
         self.check_at(self.clock.now(), Instant::now())
+    }
+
+    /// Check at the end of a work segment (serving a command, observing):
+    /// only a wall clock that ran ahead of the monotonic clock by more than
+    /// the threshold is a resume, never the length of the work itself; the
+    /// detector is marked again.
+    pub fn check_work(&mut self) -> Option<Duration> {
+        self.check_work_at(self.clock.now(), Instant::now())
+    }
+
+    fn check_work_at(&mut self, wall: SystemTime, mono: Instant) -> Option<Duration> {
+        let by_wall = wall.duration_since(self.last_wall).unwrap_or_default();
+        let by_mono = mono.saturating_duration_since(self.last_mono);
+        self.mark_at(wall, mono);
+        (by_wall.saturating_sub(by_mono) > self.threshold).then_some(by_wall)
     }
 
     fn mark_at(&mut self, wall: SystemTime, mono: Instant) {
@@ -159,6 +189,42 @@ mod tests {
         d.mark_at(w4, m4);
         assert_eq!(
             d.check_at(w4 + Duration::from_secs(5), m4 + Duration::from_secs(5)),
+            None
+        );
+    }
+
+    /// A command or an observation longer than the threshold is not a
+    /// resume: only the idle wait is measured by its length; after work,
+    /// only a wall clock running ahead of the monotonic one counts.
+    #[test]
+    fn long_work_is_not_a_resume() {
+        let mut d = ResumeDetector::new(WallClock::default(), Duration::from_secs(5));
+        let w0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let m0 = Instant::now();
+        // Idle wait of 1 s, then a command served for 40 s (both clocks).
+        d.mark_at(w0, m0);
+        let (w1, m1) = (w0 + Duration::from_secs(1), m0 + Duration::from_secs(1));
+        assert_eq!(d.check_at(w1, m1), None);
+        let (w2, m2) = (w1 + Duration::from_secs(40), m1 + Duration::from_secs(40));
+        assert_eq!(d.check_work_at(w2, m2), None);
+        // The next idle wait measures only itself.
+        assert_eq!(
+            d.check_at(w2 + Duration::from_secs(1), m2 + Duration::from_secs(1)),
+            None
+        );
+        // Work during which the wall clock ran 10 min ahead of the monotonic
+        // one (suspend with a stopped monotonic clock, or a forward jump).
+        let (w3, m3) = (w2 + Duration::from_secs(1), m2 + Duration::from_secs(1));
+        d.mark_at(w3, m3);
+        assert_eq!(
+            d.check_work_at(w3 + Duration::from_secs(602), m3 + Duration::from_secs(2)),
+            Some(Duration::from_secs(602))
+        );
+        // Wall clock stepped back during work: not a resume.
+        let (w4, m4) = (w3 + Duration::from_secs(602), m3 + Duration::from_secs(2));
+        d.mark_at(w4, m4);
+        assert_eq!(
+            d.check_work_at(w4 - Duration::from_secs(3600), m4 + Duration::from_secs(30)),
             None
         );
     }

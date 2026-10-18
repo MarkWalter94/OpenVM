@@ -613,13 +613,17 @@ impl SupervisorThread {
         let mut next_observe = Instant::now() + OBSERVE_INTERVAL;
         loop {
             let wait = next_observe.saturating_duration_since(Instant::now());
-            // Check jumps that happened while the previous command was
-            // served too; marking first would erase that evidence.
-            self.check_resume();
+            // End of the work segment (previous command and observation):
+            // its length is not a gap, only a wall clock that ran ahead of
+            // the monotonic one is (`ResumeDetector::check_work`); marking
+            // without a check would erase that evidence. The check also
+            // marks the start of the wait.
+            self.check_resume(true);
             let received = rx.recv_timeout(wait);
             // Before serving anything and before the expiry check: a host
-            // resume ends the agent sessions first (ROADMAP 7.3).
-            self.check_resume();
+            // resume ends the agent sessions first (ROADMAP 7.3). Only the
+            // bounded wait is measured by its length.
+            self.check_resume(false);
             match received {
                 Ok(cmd) => {
                     let what = format!("{cmd:?}");
@@ -691,9 +695,15 @@ impl SupervisorThread {
     /// the wall clock) the agent sessions do not continue: they end with
     /// `host_resumed`, their VMs are stopped on the emergency path and
     /// their gates and connections close before any queued request is
-    /// served. Resuming the agent needs a new approval.
-    fn check_resume(&mut self) {
-        let Some(gap) = self.resume.check() else {
+    /// served. Resuming the agent needs a new approval. `after_work`: the
+    /// segment since the last check was work, not a bounded wait.
+    fn check_resume(&mut self, after_work: bool) {
+        let gap = if after_work {
+            self.resume.check_work()
+        } else {
+            self.resume.check()
+        };
+        let Some(gap) = gap else {
             return;
         };
         let r = catch_unwind(AssertUnwindSafe(|| {
@@ -1412,7 +1422,8 @@ impl SupervisorThread {
             && let Some(op) = rec.operation_id
             && let Some((meta, png)) = self.engine.session_screenshot(rec.session_id, op)
         {
-            self.reports.screenshot(rec.session_id, &meta, &png);
+            // An idempotent repeat of the request is not recorded twice.
+            self.reports.screenshot(rec.session_id, op, &meta, &png);
         }
     }
 

@@ -86,6 +86,9 @@ struct Live {
     report: SessionReport,
     dirty: bool,
     shot_bytes: u64,
+    /// Operation of the last screenshot recorded: an idempotent repeat of
+    /// the same request returns the same shot and is not recorded again.
+    last_shot: Option<OperationId>,
 }
 
 /// Reserve kept on the catalog volume for the reports (ROADMAP 8: "una
@@ -442,6 +445,7 @@ impl ReportStore {
                 report,
                 dirty: false,
                 shot_bytes: 0,
+                last_shot: None,
             },
         );
     }
@@ -499,8 +503,15 @@ impl ReportStore {
         l.dirty = true;
     }
 
-    /// A screenshot of the agent: hash always, file within the limits.
-    pub(crate) fn screenshot(&mut self, id: SessionId, meta: &Screenshot, png: &[u8]) {
+    /// A screenshot of the agent (request `operation`): hash always, file
+    /// within the limits; a repeat of the same request is not recorded.
+    pub(crate) fn screenshot(
+        &mut self,
+        id: SessionId,
+        operation: OperationId,
+        meta: &Screenshot,
+        png: &[u8],
+    ) {
         let dir = self.session_dir(id);
         let Some(l) = self
             .live
@@ -509,6 +520,9 @@ impl ReportStore {
         else {
             return;
         };
+        if l.last_shot == Some(operation) {
+            return;
+        }
         let shot = l.report.screenshots_retained + l.report.screenshots_dropped;
         let bytes = png.len() as u64;
         let mut retained = l.report.screenshots_retained < MAX_REPORT_SCREENSHOTS
@@ -531,6 +545,7 @@ impl ReportStore {
         let Some(l) = self.live_mut(id) else {
             return;
         };
+        l.last_shot = Some(operation);
         let r = &mut l.report;
         if retained {
             r.screenshots_retained += 1;
@@ -1692,7 +1707,7 @@ mod tests {
         };
         std::fs::remove_file(dir.join(RESERVE_FILE)).unwrap();
         s.volume.as_ref().unwrap().set(0);
-        s.screenshot(id, &meta, &png);
+        s.screenshot(id, OperationId::new_v7(), &meta, &png);
         assert!(
             !dir.join(id.to_string())
                 .join(SHOTS_DIR)
@@ -1748,6 +1763,35 @@ mod tests {
             versions: ReportVersions::default(),
         });
         id
+    }
+
+    /// An idempotent repeat of a screenshot request (same operation) returns
+    /// the cached shot: it is not recorded again, a new request is.
+    #[test]
+    fn repeated_screenshot_request_is_recorded_once() {
+        let mut s = ReportStore::default();
+        let id = open_report(&mut s);
+        let png = vec![7u8; 100];
+        let meta = Screenshot {
+            vm_id: VmId::new_v7(),
+            run_id: RunId::new_v7(),
+            geometry: lightvm_proto::DisplayGeometry::new(1280, 800).unwrap(),
+            format: lightvm_proto::ImageFormat::Png,
+            sha256: sha256(&png),
+            byte_len: png.len() as u64,
+            captured_at: UtcTimestamp::now(),
+        };
+        let op = OperationId::new_v7();
+        for _ in 0..3 {
+            s.screenshot(id, op, &meta, &png);
+        }
+        let shots = |s: &ReportStore| {
+            let r = &s.live[&id].report;
+            r.screenshots_retained + r.screenshots_dropped
+        };
+        assert_eq!(shots(&s), 1);
+        s.screenshot(id, OperationId::new_v7(), &meta, &png);
+        assert_eq!(shots(&s), 2);
     }
 
     #[test]

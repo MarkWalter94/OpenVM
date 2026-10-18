@@ -453,6 +453,15 @@ impl AgentRegistry {
         }
     }
 
+    /// `true` if the session is bound to the connection (its calls may be
+    /// recorded in the session report; any other connection's are not).
+    pub(crate) fn bound_to(&self, connection_id: ConnectionId, session_id: SessionId) -> bool {
+        lock(&self.inner)
+            .sessions
+            .get(&session_id)
+            .is_some_and(|b| b.connection_id == connection_id)
+    }
+
     /// Pause on the gate (priority): `false` if not active.
     pub(crate) fn pause(&self, session_id: SessionId) -> bool {
         let mut inner = lock(&self.inner);
@@ -520,6 +529,7 @@ impl AgentRegistry {
             Some(GateChange::Terminate {
                 cause: TerminationCause::Revoked,
                 stop: false,
+                awaited: true,
             }),
         )
     }
@@ -534,7 +544,16 @@ impl AgentRegistry {
             .map(|(id, _)| *id)
             .collect();
         ids.into_iter()
-            .filter_map(|id| self.terminate(id, false, Some(GateChange::Terminate { cause, stop })))
+            .filter_map(|id| {
+                // No `end_session` follows: the core ends them through the
+                // gate only.
+                let change = GateChange::Terminate {
+                    cause,
+                    stop,
+                    awaited: false,
+                };
+                self.terminate(id, false, Some(change))
+            })
             .collect()
     }
 
@@ -571,6 +590,7 @@ impl AgentRegistry {
                 GateChange::Terminate {
                     cause: TerminationCause::ClientLost,
                     stop: true,
+                    awaited: true,
                 },
             ));
         }
@@ -764,6 +784,10 @@ mod tests {
             lightvm_proto::ErrorCode::Unauthenticated
         );
         assert_eq!(r.revoke(s), None);
+        // Bound to its own connection only (report records, F5).
+        assert!(r.bound_to(1, s));
+        assert!(!r.bound_to(2, s));
+        assert!(!r.bound_to(1, SessionId::new_v7()));
         // The pause and the revocation are queued for the core, in order.
         assert_eq!(
             r.take_changes(),
@@ -773,10 +797,49 @@ mod tests {
                     s,
                     GateChange::Terminate {
                         cause: TerminationCause::Revoked,
-                        stop: false
+                        stop: false,
+                        awaited: true
                     }
                 )
             ]
+        );
+    }
+
+    /// The bulk terminations (Emergency Stop, UI loss, agent access off)
+    /// are not followed by an `end_session`: the engine must not keep their
+    /// report waiting for one; a revocation and a client loss are.
+    #[test]
+    fn only_awaited_terminations_keep_their_report() {
+        let r = reg();
+        let _end = r.register_conn(1);
+        let (info, _) = r
+            .open_request(
+                1,
+                None,
+                "a",
+                "b",
+                Vec::new(),
+                CapabilitySet::new(),
+                Vec::new(),
+            )
+            .unwrap();
+        r.begin_approval(info.request_id).unwrap();
+        let s = SessionId::from_unix_millis(1, [2; 10]);
+        assert!(r.complete_approval(info.request_id, s, ResponseBody::Pong));
+        assert_eq!(
+            r.terminate_all(TerminationCause::EmergencyStop, false),
+            vec![1]
+        );
+        assert_eq!(
+            r.take_changes(),
+            vec![(
+                s,
+                GateChange::Terminate {
+                    cause: TerminationCause::EmergencyStop,
+                    stop: false,
+                    awaited: false
+                }
+            )]
         );
     }
 
