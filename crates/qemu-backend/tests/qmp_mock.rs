@@ -379,6 +379,65 @@ fn whpx_pause_after_an_unrecoverable_exit_is_reset_and_resumed() {
     server.join().unwrap();
 }
 
+/// `-action reboot=shutdown` (every WHPX run): the reset ends QEMU with a
+/// reset cause. That exit is the reset: no halt, no `cont`.
+#[test]
+fn whpx_fault_reset_that_ends_the_process_is_a_successful_reset() {
+    use qemu_backend::vcpu_fault::{
+        ResetMode, VcpuFaultEvent, VcpuFaultPolicy, VcpuFaults, reset_guest, watch_vcpu_faults_with,
+    };
+    use qemu_backend::{ExitCause, ProcessState};
+    let path = socket_path("vcpu-exit");
+    let log = std::sync::Arc::default();
+    let server = qemu_faulting_to(&path, 1, "paused", std::sync::Arc::clone(&log));
+    rt().block_on(async {
+        let c = std::sync::Arc::new(
+            QmpClient::connect(&path, QmpConfig::default())
+                .await
+                .unwrap(),
+        );
+        let (tx, rx) = tokio::sync::watch::channel(ProcessState::Running);
+        let tx = std::sync::Arc::new(tx);
+        // The process waiter: QEMU ends on the reset.
+        let exits = {
+            let (log, tx) = (std::sync::Arc::clone(&log), tx.clone());
+            tokio::spawn(async move {
+                until(|| count(&log, "system_reset") == 1).await;
+                tx.send_replace(ProcessState::Exited {
+                    code: Some(0),
+                    cause: ExitCause::Reboot,
+                });
+            })
+        };
+        let faults = std::sync::Arc::new(VcpuFaults::new(VcpuFaultPolicy::default()));
+        let w = tokio::spawn(watch_vcpu_faults_with(
+            c.clone(),
+            rx.clone(),
+            faults.clone(),
+            ResetMode::ProcessExit,
+        ));
+        tokio::time::timeout(Duration::from_secs(5), w)
+            .await
+            .unwrap()
+            .unwrap();
+        exits.await.unwrap();
+        assert_eq!(
+            faults.take_events(),
+            vec![VcpuFaultEvent::AutoReset {
+                reason: lightvm_proto::ipc::VcpuHaltReason::InternalError,
+                resets_in_window: 1
+            }]
+        );
+        assert_eq!(faults.halt(), None);
+        assert_eq!(count(&log, "cont"), 0);
+        // The user's reset of a run already ended by its reset: done.
+        assert!(!reset_guest(&c, &rx, ResetMode::ProcessExit).await.unwrap());
+        assert_eq!(count(&log, "cont"), 0);
+        c.close(Duration::from_secs(2)).await;
+    });
+    server.join().unwrap();
+}
+
 #[test]
 fn repeated_internal_error_is_left_halted_and_a_manual_reset_resumes() {
     use lightvm_proto::ipc::{VcpuHalt, VcpuHaltReason};

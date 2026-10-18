@@ -426,6 +426,9 @@ pub(crate) fn spawn(spec: &SpawnSpec<'_>) -> io::Result<Spawned> {
     let stdin = std::fs::File::open("NUL")?;
     let stdout = std::fs::File::create(spec.stdout)?;
     let stderr = std::fs::File::create(spec.stderr)?;
+    // The handle list needs inheritable handles: no std spawn of this crate
+    // may run while they exist (`spawn_lock`), until they are closed below.
+    let _spawn = crate::process::spawn_lock();
     let h_in = inheritable_dup(&OwnedHandle::from(stdin))?;
     let h_out = inheritable_dup(&OwnedHandle::from(stdout))?;
     let h_err = inheritable_dup(&OwnedHandle::from(stderr))?;

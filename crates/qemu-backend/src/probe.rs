@@ -989,7 +989,12 @@ pub fn run_capture(exe: &Path, args: &[&str], timeout: Duration) -> Result<Comma
     // Help/version probes must not mutate the approved runtime bundle.
     // Windows libraries can create relative caches even in these commands.
     cmd.current_dir(std::env::temp_dir());
-    let mut child = cmd.spawn().map_err(BackendError::Spawn)?;
+    // Not while `sys::windows::spawn` holds inheritable handles.
+    let spawned = {
+        let _spawn = crate::process::spawn_lock();
+        cmd.spawn()
+    };
+    let mut child = spawned.map_err(BackendError::Spawn)?;
     let mut out = child.stdout.take();
     let mut err = child.stderr.take();
     let t_out = std::thread::spawn(move || {

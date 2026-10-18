@@ -974,6 +974,52 @@ pub struct TpmCommand {
     pub stdout: ManagedPath,
     /// stderr file.
     pub stderr: ManagedPath,
+    /// Loopback listeners that picked `tcp_ports`, kept bound until
+    /// [`PortReservation::release`] right before swtpm is spawned, so no
+    /// other process gets the ports while the run is being prepared.
+    pub(crate) reservation: PortReservation,
+}
+
+/// Bound loopback listeners holding the swtpm TCP ports (shared by clones of
+/// the command; released once).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct PortReservation(
+    std::sync::Arc<std::sync::Mutex<Option<Vec<std::net::TcpListener>>>>,
+);
+
+impl PortReservation {
+    fn hold(listeners: Vec<std::net::TcpListener>) -> Self {
+        Self(std::sync::Arc::new(std::sync::Mutex::new(Some(listeners))))
+    }
+
+    /// Closes the listeners: the ports become free for swtpm to bind.
+    pub(crate) fn release(&self) {
+        let held = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        drop(held);
+    }
+
+    /// `true` while the ports are still held.
+    #[cfg(test)]
+    pub(crate) fn is_held(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+    }
+}
+
+impl QemuCommand {
+    /// `true` if a reset ends the QEMU process (`-action reboot=shutdown`,
+    /// every WHPX run) instead of resetting the machine in place.
+    pub fn reset_exits_process(&self) -> bool {
+        self.args
+            .windows(2)
+            .any(|w| w[0] == "-action" && w[1] == "reboot=shutdown")
+    }
 }
 
 struct Args(Vec<OsString>);
@@ -1300,11 +1346,13 @@ impl VmLaunchSpec {
             let state = paths
                 .tpm_state_dir(run)?
                 .ok_or_else(|| BackendError::invalid("tpm_state", "missing per-VM TPM state"))?;
-            // Hold both bind probes until both ports are chosen; the runtime
-            // verifies listener ownership without opening probe connections.
+            // The bind probes stay bound in the command until right before
+            // swtpm is spawned (`reservation`); the runtime verifies listener
+            // ownership without opening probe connections.
             let first = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
             let second = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
             let ports = [first.local_addr()?.port(), second.local_addr()?.port()];
+            let reservation = PortReservation::hold(vec![first, second]);
             let log = run_dir.join_file(names::SWTPM_LOG)?;
             a.opt(
                 "-chardev",
@@ -1342,6 +1390,7 @@ impl VmLaunchSpec {
                 log,
                 stdout: run_dir.join_file(names::SWTPM_STDOUT)?,
                 stderr: run_dir.join_file(names::SWTPM_STDERR)?,
+                reservation,
             })
         } else if profile.needs_tpm() {
             let program = paths.swtpm()?;
@@ -1379,6 +1428,7 @@ impl VmLaunchSpec {
                 log,
                 stdout: run_dir.join_file(names::SWTPM_STDOUT)?,
                 stderr: run_dir.join_file(names::SWTPM_STDERR)?,
+                reservation: PortReservation::default(),
             })
         } else {
             None
@@ -1962,6 +2012,30 @@ pub(crate) mod tests {
                 spec_for(profile).accelerator == Accelerator::Whpx,
                 "{profile:?}: {joined}"
             );
+            assert_eq!(
+                cmd.reset_exits_process(),
+                spec_for(profile).accelerator == Accelerator::Whpx,
+                "{profile:?}"
+            );
+            // The swtpm TCP ports stay bound by the backend until swtpm is
+            // about to start, then are free for it.
+            if let Some(tpm) = &cmd.tpm
+                && let Some(ports) = tpm.tcp_ports
+            {
+                assert!(tpm.reservation.is_held());
+                for port in ports {
+                    assert!(
+                        std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).is_err()
+                    );
+                }
+                cmd.clone().tpm.unwrap().reservation.release();
+                assert!(!tpm.reservation.is_held());
+                for port in ports {
+                    drop(
+                        std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).unwrap(),
+                    );
+                }
+            }
         }
         let mut kvm = spec();
         kvm.accelerator = Accelerator::Kvm;

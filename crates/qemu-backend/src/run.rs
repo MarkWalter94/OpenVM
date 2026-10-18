@@ -54,7 +54,7 @@ use crate::qmp::{
 use crate::screenshot::{CapturedScreenshot, RgbImage};
 use crate::storage_guard::StorageGuards;
 use crate::vcpu_fault::{
-    VcpuFaultEvent, VcpuFaultPolicy, VcpuFaults, reset_and_resume, watch_vcpu_faults,
+    ResetMode, VcpuFaultEvent, VcpuFaultPolicy, VcpuFaults, reset_guest, watch_vcpu_faults_with,
 };
 
 pub use crate::process::EMERGENCY_EXIT_CODE;
@@ -223,6 +223,52 @@ pub(crate) struct RunFlags {
     quit_requested: AtomicBool,
     stop_requested: AtomicBool,
     emergency: AtomicBool,
+    /// QMP `SHUTDOWN` seen: QEMU is ending (and stops swtpm on its way out).
+    shutdown_announced: AtomicBool,
+}
+
+impl RunFlags {
+    /// QEMU is on its way out: `SHUTDOWN` announced or `quit` requested.
+    fn qemu_exiting(&self) -> bool {
+        self.shutdown_announced.load(Ordering::SeqCst) || self.quit_requested.load(Ordering::SeqCst)
+    }
+}
+
+/// Wait for QEMU after swtpm ended before the TPM lifeline ends the run.
+const TPM_LIFELINE_GRACE: Duration = Duration::from_millis(500);
+
+/// Longer wait for a QEMU that announced its exit: during every orderly exit
+/// QEMU itself stops swtpm (`CMD_SHUTDOWN` in its TPM cleanup) and then
+/// still flushes and closes its devices.
+const TPM_LIFELINE_EXIT_GRACE: Duration = Duration::from_secs(30);
+
+/// Decision of the TPM lifeline once swtpm ended: `true` = terminate the
+/// container (swtpm crashed under a running QEMU). `qemu_exits_within`
+/// waits for QEMU's exit up to the given time; `qemu_exiting` tells whether
+/// QEMU announced its exit.
+fn tpm_lifeline_kills(
+    mut qemu_exits_within: impl FnMut(Duration) -> bool,
+    qemu_exiting: impl Fn() -> bool,
+) -> bool {
+    if qemu_exits_within(TPM_LIFELINE_GRACE) {
+        return false;
+    }
+    !(qemu_exiting() && qemu_exits_within(TPM_LIFELINE_EXIT_GRACE))
+}
+
+/// Interval between attempts when waiting on the process handle fails.
+const WAIT_RETRY: Duration = Duration::from_millis(250);
+
+/// Exit code of the process, waiting until it is observed. A failed wait is
+/// retried: it is never taken for an exit (the run stays live and the
+/// Emergency Stop available).
+fn wait_until_exit(mut wait: impl FnMut() -> Result<Option<u32>>, retry: Duration) -> u32 {
+    loop {
+        match wait() {
+            Ok(Some(code)) => return code,
+            Ok(None) | Err(_) => std::thread::sleep(retry),
+        }
+    }
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -325,6 +371,9 @@ async fn start_swtpm(
         stdout: tpm.stdout.clone(),
         stderr: tpm.stderr.clone(),
     };
+    // The TCP ports were held since the command was built: free them only
+    // now, for swtpm to bind (`ready` then checks that swtpm owns them).
+    tpm.reservation.release();
     let child = {
         let c = container.clone();
         tokio::task::spawn_blocking(move || c.spawn(&req))
@@ -439,17 +488,24 @@ pub(crate) async fn launch(
         return Err(e);
     }
     let child = Arc::new(child);
+    let flags = Arc::new(RunFlags::default());
     let tpm_identity = tpm_child.as_ref().map(|p| p.identity());
+    let has_tpm = tpm_child.is_some();
     if let Some(tpm) = tpm_child {
         let monitor_tpm = tpm.clone();
         let monitor_qemu = child.clone();
         let monitor_container = container.clone();
+        let monitor_flags = flags.clone();
         std::thread::Builder::new()
             .name("tpm-lifeline".into())
             .spawn(move || {
                 let _ = monitor_tpm.wait(None);
-                std::thread::sleep(Duration::from_millis(100));
-                if !matches!(monitor_qemu.try_exit_code(), Ok(Some(_))) {
+                // swtpm also ends when QEMU stops it during an orderly exit:
+                // only a swtpm gone under a QEMU that keeps running is a crash.
+                if tpm_lifeline_kills(
+                    |t| matches!(monitor_qemu.wait(Some(t)), Ok(Some(_))),
+                    || monitor_flags.qemu_exiting(),
+                ) {
                     let _ = monitor_container.kill_all(EMERGENCY_EXIT_CODE);
                 }
             })
@@ -479,7 +535,6 @@ pub(crate) async fn launch(
         }
     }
     let state_tx = Arc::new(watch::channel(ProcessState::Starting).0);
-    let flags = Arc::new(RunFlags::default());
     let deadline = Instant::now() + timeout;
     let qmp = loop {
         if let Some(code) = child.try_exit_code()? {
@@ -525,6 +580,24 @@ pub(crate) async fn launch(
         qmp.subscribe_state(),
         cmd.clone(),
     )?;
+    if has_tpm {
+        // Tells the TPM lifeline that QEMU announced its exit (QEMU is
+        // paused with `-S` until now: no `SHUTDOWN` can be missed).
+        let mut events = qmp.subscribe_events();
+        let announced = flags.clone();
+        tokio::spawn(async move {
+            loop {
+                match events.recv().await {
+                    Ok(e) if matches!(e.kind(), EventKind::Shutdown { .. }) => {
+                        announced.shutdown_announced.store(true, Ordering::SeqCst);
+                        return;
+                    }
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => return,
+                }
+            }
+        });
+    }
     startup_guard.0 = None;
     Ok(Launched {
         tpm_identity,
@@ -551,7 +624,7 @@ fn spawn_waiter(
     std::thread::Builder::new()
         .name("qemu-waiter".into())
         .spawn(move || {
-            let code = child.wait(None).ok().flatten();
+            let code = Some(wait_until_exit(|| child.wait(None), WAIT_RETRY));
             // The handle is only needed for the wait: releasing it right away prevents the
             // exited process from staying referenced beyond the close.
             drop(child);
@@ -738,6 +811,8 @@ pub struct QemuRun {
     faults: Arc<VcpuFaults>,
     /// Watcher of the vCPU faults, aborted with the run.
     fault_watch: Option<tokio::task::JoinHandle<()>>,
+    /// How a reset takes effect (a WHPX run ends QEMU on a reset).
+    reset_mode: ResetMode,
 }
 
 impl QemuRun {
@@ -861,7 +936,13 @@ impl QemuRun {
             child: launched.child.clone(),
             flags: launched.flags.clone(),
         };
+        let reset_mode = if command.reset_exits_process() {
+            ResetMode::ProcessExit
+        } else {
+            ResetMode::InPlace
+        };
         let run = Self {
+            reset_mode,
             tpm_identity: launched.tpm_identity,
             run_id: spec.run_id,
             identity,
@@ -904,10 +985,11 @@ impl QemuRun {
                         stderr_tail: read_stderr_tail(&run.command.stderr),
                     });
                 }
-                run.fault_watch = Some(tokio::spawn(watch_vcpu_faults(
+                run.fault_watch = Some(tokio::spawn(watch_vcpu_faults_with(
                     run.qmp.clone(),
                     run.state_tx.subscribe(),
                     run.faults.clone(),
+                    run.reset_mode,
                 )));
                 Ok(run)
             }
@@ -1171,10 +1253,12 @@ impl QemuRun {
     /// `system_reset`; a guest whose vCPUs were stopped on an error
     /// (`internal-error`, `guest-panicked`) or before start is resumed with
     /// `cont` after the reset ([`crate::vcpu_fault::reset_and_resume`]), and
-    /// its halt is cleared.
+    /// its halt is cleared. In a run whose resets end QEMU
+    /// (`-action reboot=shutdown`, every WHPX run) it returns once the
+    /// process ended as [`ExitCause::Reboot`]: the owner starts it again.
     pub async fn reset(&self) -> Result<()> {
         self.ensure_running()?;
-        reset_and_resume(&self.qmp).await?;
+        reset_guest(&self.qmp, &self.state_tx.subscribe(), self.reset_mode).await?;
         self.faults.cleared();
         Ok(())
     }
@@ -1603,6 +1687,51 @@ mod tests {
         assert!(check_network(GuestNetwork::None, "", &[]).is_ok());
         let two = format!("{nat}hub0port1: index=0,type=user,net=10.0.3.0\r\n");
         assert!(check_network(GuestNetwork::Nat, &two, &pci).is_err());
+    }
+
+    #[test]
+    fn swtpm_stopped_by_an_exiting_qemu_is_not_a_crash() {
+        // QEMU ends right after swtpm: nothing to do.
+        assert!(!tpm_lifeline_kills(|_| true, || false));
+        // QEMU keeps running without announcing an exit: swtpm crashed.
+        assert!(tpm_lifeline_kills(|_| false, || false));
+        // A slow orderly exit (SHUTDOWN seen or quit requested) gets the
+        // longer grace and is not killed.
+        let mut waits = Vec::new();
+        assert!(!tpm_lifeline_kills(
+            |t| {
+                waits.push(t);
+                t == TPM_LIFELINE_EXIT_GRACE
+            },
+            || true
+        ));
+        assert_eq!(waits, [TPM_LIFELINE_GRACE, TPM_LIFELINE_EXIT_GRACE]);
+        // An announced exit that never completes is still ended.
+        assert!(tpm_lifeline_kills(|_| false, || true));
+        let flags = RunFlags::default();
+        assert!(!flags.qemu_exiting());
+        flags.shutdown_announced.store(true, Ordering::SeqCst);
+        assert!(flags.qemu_exiting());
+        let flags = RunFlags::default();
+        flags.quit_requested.store(true, Ordering::SeqCst);
+        assert!(flags.qemu_exiting());
+    }
+
+    #[test]
+    fn a_failed_wait_is_not_an_exit() {
+        let mut calls = 0;
+        let code = wait_until_exit(
+            || {
+                calls += 1;
+                match calls {
+                    1 | 2 => Err(BackendError::Io(std::io::Error::other("wait failed"))),
+                    3 => Ok(None),
+                    _ => Ok(Some(7)),
+                }
+            },
+            Duration::from_millis(1),
+        );
+        assert_eq!((code, calls), (7, 4));
     }
 
     #[test]

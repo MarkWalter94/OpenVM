@@ -8,7 +8,10 @@
 //! [`CapturedScreenshot::metadata`] produces the `lightvm-proto` metadata
 //! ([`lightvm_proto::Screenshot`]) that travels over IPC/MCP.
 
+use std::collections::BTreeSet;
 use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -209,12 +212,62 @@ pub fn downscale(img: &RgbImage, max_w: u32, max_h: u32) -> RgbImage {
     }
 }
 
+/// Screendump files of the captures in progress (process-wide: names are
+/// unique thanks to [`COUNTER`]).
+static IN_FLIGHT: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+
+fn in_flight() -> std::sync::MutexGuard<'static, BTreeSet<PathBuf>> {
+    IN_FLIGHT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Removes the temporary file when leaving the scope, even on error.
 struct TempFile<'a>(&'a ManagedPath);
+
+impl<'a> TempFile<'a> {
+    /// Registers `file` as in progress, first removing the screendumps that
+    /// QEMU wrote after an earlier capture had already given up (timeout):
+    /// their guard removed the path before the file existed.
+    fn new(file: &'a ManagedPath) -> Self {
+        let mut active = in_flight();
+        if let Some(dir) = file.as_path().parent() {
+            remove_stale_screendumps(dir, &active);
+        }
+        active.insert(file.as_path().to_owned());
+        drop(active);
+        let _ = std::fs::remove_file(file.as_path());
+        Self(file)
+    }
+}
 
 impl Drop for TempFile<'_> {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(self.0.as_path());
+        in_flight().remove(self.0.as_path());
+    }
+}
+
+/// `true` for the names this module gives its screendumps.
+fn is_screendump_name(name: &str) -> bool {
+    name.strip_prefix("screendump-")
+        .and_then(|n| n.strip_suffix(".ppm"))
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Removes from `dir` the screendump files not in `active`.
+fn remove_stale_screendumps(dir: &Path, active: &BTreeSet<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if entry.file_name().to_str().is_some_and(is_screendump_name)
+            && entry.file_type().is_ok_and(|t| t.is_file())
+            && !active.contains(&path)
+        {
+            let _ = std::fs::remove_file(&path);
+        }
     }
 }
 
@@ -231,8 +284,7 @@ pub(crate) async fn capture(
 ) -> Result<(CapturedScreenshot, RgbImage)> {
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let file = private_dir.join_file(&format!("screendump-{n}.ppm"))?;
-    let _ = std::fs::remove_file(file.as_path());
-    let guard = TempFile(&file);
+    let guard = TempFile::new(&file);
     qmp.screendump_ppm(&file, timeout).await?;
     let path = file.as_path().to_owned();
     let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
@@ -284,8 +336,7 @@ pub(crate) async fn capture_geometry(
 ) -> Result<DisplayGeometry> {
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let file = private_dir.join_file(&format!("screendump-{n}.ppm"))?;
-    let _ = std::fs::remove_file(file.as_path());
-    let guard = TempFile(&file);
+    let guard = TempFile::new(&file);
     qmp.screendump_ppm(&file, timeout).await?;
     let path = file.as_path().to_owned();
     let (w, h) = tokio::task::spawn_blocking(move || -> Result<(u32, u32)> {
@@ -366,6 +417,36 @@ mod tests {
         assert!(parse_ppm(b"P6\n1 1\n255\n\x00\x00\x00\x00", MAX_SIDE).is_err());
         assert!(parse_ppm(b"P6", MAX_SIDE).is_err());
         assert!(parse_ppm(b"", MAX_SIDE).is_err());
+    }
+
+    #[test]
+    fn screendumps_left_by_a_timeout_are_removed_by_the_next_capture() {
+        let dir = std::env::temp_dir().join(format!("lightvm-screendump-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir_m = ManagedPath::verify(dir.clone()).unwrap();
+        // Written by QEMU after its capture gave up.
+        let orphan = dir.join("screendump-900001.ppm");
+        std::fs::write(&orphan, b"P6").unwrap();
+        // Another capture still in progress, and an unrelated file.
+        let busy = dir_m.join_file("screendump-900002.ppm").unwrap();
+        let other = dir.join("qmp.sock.txt");
+        std::fs::write(&other, b"x").unwrap();
+        let busy_guard = TempFile::new(&busy);
+        std::fs::write(busy.as_path(), b"P6").unwrap();
+        let next = dir_m.join_file("screendump-900003.ppm").unwrap();
+        let guard = TempFile::new(&next);
+        assert!(!orphan.exists());
+        assert!(busy.as_path().exists());
+        assert!(other.exists());
+        drop(guard);
+        drop(busy_guard);
+        assert!(!busy.as_path().exists());
+        assert!(!in_flight().contains(busy.as_path()));
+        assert!(is_screendump_name("screendump-0.ppm"));
+        assert!(!is_screendump_name("screendump-.ppm"));
+        assert!(!is_screendump_name("screendump-1.png"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

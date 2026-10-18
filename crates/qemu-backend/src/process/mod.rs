@@ -170,6 +170,21 @@ pub fn minimal_environment() -> Vec<(OsString, OsString)> {
     env
 }
 
+/// Serializes the process creations of this crate on Windows.
+///
+/// [`crate::sys::windows::spawn`] passes stdin/stdout/stderr through
+/// `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`, which only accepts *inheritable*
+/// handles: for the few instructions between their duplication and their
+/// close they are inheritable process-wide. A `std::process::Command` spawn
+/// (no handle list: it inherits every inheritable handle) running at that
+/// moment would inherit them. The std spawns of this crate take this lock
+/// too, so neither can see the other's inheritable handles.
+pub(crate) fn spawn_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Container of the processes of a run.
 pub trait ProcessContainer: Send + Sync + fmt::Debug {
     /// Starts the process already inside the container (no time window

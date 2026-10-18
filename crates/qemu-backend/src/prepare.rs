@@ -296,15 +296,23 @@ pub fn restrict_to_current_user(private_dir: &ManagedPath) -> Result<RunDirs> {
 fn restrict_windows(private_dir: &ManagedPath) -> Result<RunDirs> {
     let sid = current_user_sid()?;
     let grant = format!("*{sid}:(OI)(CI)F");
-    let st = Command::new(system32("icacls.exe"))
+    let mut icacls = Command::new(system32("icacls.exe"));
+    icacls
         .arg(private_dir.as_path())
         .args(["/inheritance:r", "/grant:r", &grant])
         .env_clear()
         .envs(crate::process::minimal_environment())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+        .stderr(Stdio::null());
+    // Not while `sys::windows::spawn` holds inheritable handles; the wait
+    // happens outside the lock.
+    let spawned = {
+        let _spawn = crate::process::spawn_lock();
+        icacls.spawn()
+    };
+    let st = spawned
+        .and_then(|mut c| c.wait())
         .map_err(BackendError::Spawn)?;
     if !st.success() {
         return Err(BackendError::Io(std::io::Error::other(format!(

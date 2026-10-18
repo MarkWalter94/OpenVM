@@ -26,6 +26,15 @@
 //!
 //! Every decision is queued for the caller ([`VcpuFaults::take_events`]),
 //! which logs and audits it.
+//!
+//! A run with `-action reboot=shutdown` (every WHPX run, [`ResetMode::ProcessExit`])
+//! does not reset in place: `system_reset` ends QEMU with a reset cause
+//! ([`crate::run::ExitCause::Reboot`]) and the owner starts the run again
+//! from cold. There the exit *is* the reset: it counts as a successful
+//! automatic reset and no halt is published. The fault count belongs to one
+//! QEMU process, so across such cold reboots it starts again from zero; a
+//! guest that keeps faulting is bounded by the owner's cap on cold reboots
+//! (the service allows at most 10 in 300 s, then leaves the VM failed).
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -35,7 +44,20 @@ use lightvm_proto::ipc::{VcpuHalt, VcpuHaltReason};
 use tokio::sync::{broadcast, watch};
 
 use crate::qmp::{ConnectionState, EventKind, QmpClient, QmpError, RunState};
-use crate::run::ProcessState;
+use crate::run::{ExitCause, ProcessState};
+
+/// How a reset takes effect in a run.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ResetMode {
+    /// QEMU resets the machine in place: `system_reset`, then `cont` when
+    /// the guest was stopped ([`reset_and_resume`]).
+    #[default]
+    InPlace,
+    /// `-action reboot=shutdown`: `system_reset` ends the QEMU process with
+    /// a reset cause and the owner starts the run again from cold. The reset
+    /// succeeded when the process exited as [`ExitCause::Reboot`].
+    ProcessExit,
+}
 
 /// Automatic reset policy for a guest whose virtual CPUs stopped on an error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -254,6 +276,56 @@ pub async fn reset_and_resume(qmp: &QmpClient) -> Result<bool, QmpError> {
     Ok(true)
 }
 
+/// Maximum wait for QEMU to end after `system_reset` under
+/// [`ResetMode::ProcessExit`] (QEMU flushes the disks and stops its helpers
+/// before exiting).
+const RESET_EXIT_SETTLE: Duration = Duration::from_secs(30);
+
+/// Resets the guest of a run according to `mode`. [`ResetMode::InPlace`] is
+/// [`reset_and_resume`]. [`ResetMode::ProcessExit`] sends `system_reset` and
+/// waits for the process to end with [`ExitCause::Reboot`] (observed on
+/// `process`): that exit is the reset, done also when the reply to
+/// `system_reset` was lost with the closing channel. Returns `true` if
+/// `cont` was sent.
+pub async fn reset_guest(
+    qmp: &QmpClient,
+    process: &watch::Receiver<ProcessState>,
+    mode: ResetMode,
+) -> Result<bool, QmpError> {
+    match mode {
+        ResetMode::InPlace => reset_and_resume(qmp).await,
+        ResetMode::ProcessExit => {
+            reset_by_exit(qmp, process.clone(), RESET_EXIT_SETTLE).await?;
+            Ok(false)
+        }
+    }
+}
+
+async fn reset_by_exit(
+    qmp: &QmpClient,
+    mut process: watch::Receiver<ProcessState>,
+    settle: Duration,
+) -> Result<(), QmpError> {
+    let sent = qmp.system_reset().await;
+    let exited = tokio::time::timeout(
+        settle,
+        process.wait_for(|s| matches!(s, ProcessState::Exited { .. })),
+    )
+    .await;
+    let rebooted = matches!(
+        &exited,
+        Ok(Ok(s)) if matches!(**s, ProcessState::Exited { cause: ExitCause::Reboot, .. })
+    );
+    drop(exited);
+    if rebooted {
+        return Ok(());
+    }
+    sent?;
+    Err(QmpError::Timeout {
+        command: "system_reset",
+    })
+}
+
 /// Interval at which the watcher checks the process state while no QMP
 /// event arrives.
 const IDLE_CHECK: Duration = Duration::from_millis(500);
@@ -261,11 +333,22 @@ const IDLE_CHECK: Duration = Duration::from_millis(500);
 /// Follows the QMP events of a run and resets the guest when its virtual
 /// CPUs stop on an error, according to the policy of `faults`. Ends when the
 /// process exits or the QMP channel closes; never fails. Not active while a
-/// stop is in progress (`Stopping`).
+/// stop is in progress (`Stopping`). Resets in place
+/// ([`ResetMode::InPlace`]); see [`watch_vcpu_faults_with`].
 pub async fn watch_vcpu_faults(
     qmp: Arc<QmpClient>,
     process: watch::Receiver<ProcessState>,
     faults: Arc<VcpuFaults>,
+) {
+    watch_vcpu_faults_with(qmp, process, faults, ResetMode::InPlace).await;
+}
+
+/// [`watch_vcpu_faults`] with the reset carried out as `mode` says.
+pub async fn watch_vcpu_faults_with(
+    qmp: Arc<QmpClient>,
+    process: watch::Receiver<ProcessState>,
+    faults: Arc<VcpuFaults>,
+    mode: ResetMode,
 ) {
     let mut events = qmp.subscribe_events();
     // A fault before the subscription is seen by the first check.
@@ -279,7 +362,7 @@ pub async fn watch_vcpu_faults(
         if check {
             check = false;
             if matches!(*process.borrow(), ProcessState::Running) {
-                handle_fault(&qmp, &faults).await;
+                handle_fault(&qmp, &process, &faults, mode).await;
             }
         }
         match tokio::time::timeout(IDLE_CHECK, events.recv()).await {
@@ -293,7 +376,12 @@ pub async fn watch_vcpu_faults(
     }
 }
 
-async fn handle_fault(qmp: &QmpClient, faults: &VcpuFaults) {
+async fn handle_fault(
+    qmp: &QmpClient,
+    process: &watch::Receiver<ProcessState>,
+    faults: &VcpuFaults,
+    mode: ResetMode,
+) {
     let Ok(status) = qmp.query_status().await else {
         return;
     };
@@ -303,7 +391,7 @@ async fn handle_fault(qmp: &QmpClient, faults: &VcpuFaults) {
         _ => return,
     };
     if let FaultDecision::Reset(n) = faults.decide(reason, Instant::now()) {
-        let r = reset_and_resume(qmp)
+        let r = reset_guest(qmp, process, mode)
             .await
             .map(drop)
             .map_err(|e| e.public_summary().to_string());
