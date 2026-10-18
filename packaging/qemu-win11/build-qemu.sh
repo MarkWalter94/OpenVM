@@ -32,8 +32,12 @@ export GNUPGHOME=$WORK/gnupg
 mkdir -p "$GNUPGHOME" && chmod 700 "$GNUPGHOME"
 gpg --batch --quiet --list-keys "$QEMU_KEY" >/dev/null 2>&1 ||
   gpg --batch --keyserver hkps://keyserver.ubuntu.com --recv-keys "$QEMU_KEY"
-gpg --batch --status-fd 1 --verify "$TARBALL.sig" "$TARBALL" 2>/dev/null |
-  grep -q "VALIDSIG $QEMU_KEY " || { echo "bad QEMU signature" >&2; exit 1; }
+# VALIDSIG is also printed for a revoked or expired key: require GOODSIG too.
+status=$(gpg --batch --status-fd 1 --verify "$TARBALL.sig" "$TARBALL" 2>/dev/null || true)
+grep -q "^\[GNUPG:\] GOODSIG " <<<"$status" &&
+  grep -q "^\[GNUPG:\] VALIDSIG $QEMU_KEY " <<<"$status" &&
+  ! grep -Eq "^\[GNUPG:\] (REVKEYSIG|EXPKEYSIG|EXPSIG|BADSIG|ERRSIG) " <<<"$status" ||
+  { echo "bad QEMU signature" >&2; exit 1; }
 
 SRC=$WORK/qemu-$QEMU_VERSION
 [[ ! -e "$SRC" ]] || { echo 'source directory already exists; use a fresh work directory' >&2; exit 1; }

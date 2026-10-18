@@ -81,6 +81,27 @@ public static extern System.IntPtr SendMessageTimeout(System.IntPtr hWnd, uint M
     }
 }
 
+# Deletes a folder tree WITHOUT following links: Remove-Item -Recurse of
+# Windows PowerShell 5.1 descends into junctions and directory symlinks and
+# deletes the contents of their targets. A junction or symlink met here
+# (the root included) is removed as a link only; its target is untouched.
+function Remove-TreeNoFollow([string]$Path) {
+    $item = Get-Item -LiteralPath $Path -Force
+    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        # RemoveDirectory / DeleteFile on a reparse point delete the link itself.
+        if ($item.PSIsContainer) { [System.IO.Directory]::Delete($item.FullName, $false) }
+        else { [System.IO.File]::Delete($item.FullName) }
+        return
+    }
+    if ($item.PSIsContainer) {
+        foreach ($child in @(Get-ChildItem -LiteralPath $item.FullName -Force)) { Remove-TreeNoFollow $child.FullName }
+        $item.Attributes = [IO.FileAttributes]::Directory
+        [System.IO.Directory]::Delete($item.FullName, $false)
+    } else {
+        Remove-Item -LiteralPath $item.FullName -Force
+    }
+}
+
 if (-not $Prefix) {
     if (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'install-manifest.json')) { $Prefix = $PSScriptRoot }
     else { $Prefix = Join-Path $env:LOCALAPPDATA 'Programs\LightVM' }
@@ -92,6 +113,9 @@ if (-not (Test-Path -LiteralPath $manifestPath)) {
 }
 $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
 if ($manifest.product -ne 'LightVM') { throw "$manifestPath is not a LightVM manifest. Nothing removed." }
+if (($manifest.PSObject.Properties.Name -contains 'state') -and $manifest.state -eq 'installing') {
+    Write-Warning 'The installation in this prefix was interrupted: removing the files it lists that are present.'
+}
 
 $running = @(Get-Process -Name 'lightvm-desktop', 'lightvm-service', 'lightvm-mcp' -ErrorAction SilentlyContinue |
     Where-Object { $_.Path -and $_.Path.StartsWith($Prefix + '\', [StringComparison]::OrdinalIgnoreCase) })
@@ -163,7 +187,7 @@ if ($RemoveUserData) {
     $data = [System.IO.Path]::GetFullPath($UserDataDir).TrimEnd('\')
     if (Test-Path -LiteralPath $data) {
         if ($Force -or $PSCmdlet.ShouldContinue("Delete $data with ALL virtual machines, disks, imported media, settings and audit log? This cannot be undone.", 'Remove LightVM user data')) {
-            Remove-Item -LiteralPath $data -Recurse -Force
+            Remove-TreeNoFollow $data
             Write-Host "User data removed: $data"
         } else {
             Write-Host "User data kept: $data"

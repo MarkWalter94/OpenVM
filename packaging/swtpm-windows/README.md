@@ -21,10 +21,16 @@ checked using the kernel TCP table before guest execution. These checks do
 not turn swtpm's protocol into an authenticated transport.
 
 `collect-licenses.sh <swtpm-out> <setup.ini> <dest>` (the same Cygwin, with
-the `setup.ini` that installed it) maps every Cygwin DLL of the output to its
+the `setup.ini` that installed it and its detached signature `setup.ini.sig`
+from the mirror next to it) first verifies that signature with gpg, in a
+private keyring, against the Cygwin key
+`56405CF6FCC81574682A5D561A698DE9E2E56300` (from the file named by
+`CYGWIN_KEY`, e.g. `https://cygwin.com/key/pubring.asc`, otherwise fetched
+by fingerprint from keyserver.ubuntu.com) and stops without a good
+signature by that key. It then maps every Cygwin DLL of the output to its
 package and version (`cygcheck -f`, `installed.db`), downloads the Cygwin
 source package of that version into `<dest>/sources`, checks its SHA-512
-against `setup.ini` (which Cygwin setup verified with its signature), and
+against the verified `setup.ini`, and
 copies the package's licence docs, or the licence files of the upstream
 archive in the source package. libtpms and swtpm themselves are covered by
 `LICENSE-libtpms`/`LICENSE-swtpm`.

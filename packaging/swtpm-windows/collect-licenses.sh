@@ -4,11 +4,16 @@
 # installation, with the setup.ini that installed it.
 #
 # usage: collect-licenses.sh <swtpm-out> <setup.ini> <dest>
+# <setup.ini>.sig (the detached signature published beside setup.ini on the
+# mirror) must be next to <setup.ini>: it is verified with gpg against the
+# Cygwin signing key 56405CF6FCC81574682A5D561A698DE9E2E56300, taken from
+# CYGWIN_KEY (a file, e.g. https://cygwin.com/key/pubring.asc) or, if
+# unset, fetched by fingerprint from keyserver.ubuntu.com, in a private
+# keyring. Without a good signature by that key nothing is collected.
 # <dest> must not exist. Output:
 #   <dest>/<package>/...     licence files (installed docs, else from source)
 #   <dest>/sources/          Cygwin source packages, SHA-512 checked against
-#                            setup.ini (which Cygwin setup verified with its
-#                            signature when installing)
+#                            the signature-checked setup.ini
 #   <dest>/INVENTORY.tsv     file, package, version, source
 #   <dest>/MISSING.txt       entries to resolve before a distribution
 # libtpms (cygtpms-0.dll) and swtpm are built from source by build.sh and
@@ -19,6 +24,31 @@ export LANG=C LC_ALL=C
 OUT=$(cd "$1" && pwd)
 INI=$2
 [[ ! -e "$3" ]] || { echo 'destination must not exist' >&2; exit 1; }
+
+# setup.ini is the hash source of the source packages: it must carry a good
+# signature (GOODSIG and VALIDSIG, no revoked/expired key or signature) by
+# the Cygwin key, whose fingerprint is recorded in
+# docs/verification/R6-05-windows11-x64-swtpm.md.
+CYGWIN_FPR=56405CF6FCC81574682A5D561A698DE9E2E56300
+[[ -f $INI && -f $INI.sig ]] ||
+  { echo "$INI and its detached signature $INI.sig are required" >&2; exit 1; }
+GPGDIR=$(mktemp -d)
+trap 'rm -rf "$GPGDIR"' EXIT
+chmod 700 "$GPGDIR"
+if [[ -n ${CYGWIN_KEY:-} ]]; then
+  gpg --homedir "$GPGDIR" --batch --import "$CYGWIN_KEY" 2>/dev/null
+else
+  gpg --homedir "$GPGDIR" --batch --keyserver hkps://keyserver.ubuntu.com \
+    --recv-keys "$CYGWIN_FPR" 2>/dev/null
+fi
+status=$(gpg --homedir "$GPGDIR" --batch --status-fd 1 \
+  --verify "$INI.sig" "$INI" 2>/dev/null) || status=
+grep -q '^\[GNUPG:\] GOODSIG ' <<<"$status" &&
+  ! grep -qE '^\[GNUPG:\] (REVKEYSIG|EXPKEYSIG|EXPSIG|BADSIG|ERRSIG) ' <<<"$status" &&
+  awk -v fpr="$CYGWIN_FPR" '$1 == "[GNUPG:]" && $2 == "VALIDSIG" &&
+    (toupper($3) == fpr || toupper($NF) == fpr) { ok = 1 } END { exit !ok }' <<<"$status" ||
+  { echo "$INI: no good signature by the Cygwin key $CYGWIN_FPR" >&2; exit 1; }
+
 mkdir -p "$3/sources"
 DEST=$(cd "$3" && pwd)
 MIRROR=${MIRROR:-https://mirrors.kernel.org/sourceware/cygwin}

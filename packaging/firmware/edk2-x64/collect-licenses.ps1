@@ -8,9 +8,36 @@ param(
   [Parameter(Mandatory)][string]$Out     # new directory
 )
 $ErrorActionPreference = 'Stop'
-if (Test-Path -LiteralPath $Out) { throw 'Output must be a new directory' }
-New-Item -ItemType Directory -Path $Out | Out-Null
+# git with its exit code checked (a native command failure does not stop
+# the script on 5.1): a failed query must not leave an empty commit, URL or
+# submodule list in the inventory.
+function Invoke-Git {
+  $output = & git @args
+  if ($LASTEXITCODE -ne 0) { throw "git $($args -join ' ') failed (exit $LASTEXITCODE)" }
+  $output
+}
+function Get-GitValue {
+  $value = [string](Invoke-Git @args | Select-Object -First 1)
+  if (-not $value.Trim()) { throw "git $($args -join ' ') returned nothing" }
+  $value.Trim()
+}
 $Edk2 = (Resolve-Path -LiteralPath $Edk2).Path
+if (Test-Path -LiteralPath $Out) { throw 'Output must be a new directory' }
+# Every git query runs before the output directory is created.
+$commit = Get-GitValue -C $Edk2 rev-parse --verify HEAD
+if ($commit -notmatch '^[0-9a-f]{40}$') { throw "Unexpected edk2 commit '$commit'" }
+$url = Get-GitValue -C $Edk2 config --get remote.origin.url
+$submodules = @()
+foreach ($row in @(Invoke-Git -C $Edk2 submodule status)) {
+  # Leading '-': not initialised, hence not part of the build.
+  if ($row -match '^-') { continue }
+  if ($row -notmatch '^[ +U]?([0-9a-f]{40}) (\S+)') { throw "Unexpected submodule status line '$row'" }
+  $sha = $Matches[1]
+  $path = $Matches[2]
+  $subUrl = Get-GitValue -C $Edk2 config --get "submodule.$path.url"
+  $submodules += ,@($sha, $path, $subUrl)
+}
+New-Item -ItemType Directory -Path $Out | Out-Null
 $lines = @("component`tpath`tcommit`turl`tlicence files")
 
 function Copy-Licences([string]$Dir, [string]$Name) {
@@ -22,19 +49,12 @@ function Copy-Licences([string]$Dir, [string]$Name) {
   ($files | ForEach-Object Name) -join ' '
 }
 
-$commit = git -C $Edk2 rev-parse HEAD
-$url = git -C $Edk2 config --get remote.origin.url
 $lic = Copy-Licences $Edk2 'edk2'
 $lines += "edk2`t.`t$commit`t$url`t$lic"
 $missing = @()
-foreach ($row in (git -C $Edk2 submodule status)) {
-  # Leading '-': not initialised, hence not part of the build.
-  if ($row -match '^-') { continue }
-  $parts = $row.Trim().Split(' ')
-  $sha = $parts[0].TrimStart('+', 'U')
-  $path = $parts[1]
+foreach ($sub in $submodules) {
+  $sha, $path, $subUrl = $sub
   $dir = Join-Path $Edk2 $path
-  $subUrl = git -C $Edk2 config --get "submodule.$path.url"
   $name = $path.Replace('/', '_')
   $lic = Copy-Licences $dir $name
   if (-not $lic) { $missing += "$path ($sha): no top-level licence file" }

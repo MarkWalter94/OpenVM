@@ -17,31 +17,49 @@ function Get-Relative([string]$Root, [string]$Path) {
   if (-not $Path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { throw "Outside $Root" }
   $Path.Substring($prefix.Length)
 }
-if (Test-Path -LiteralPath $Out) { throw 'Output must be a new directory' }
-$destination = [IO.Path]::GetFullPath($Out)
-New-Item -ItemType Directory -Path $destination | Out-Null
-foreach ($component in @(@('qemu', $Qemu), @('swtpm', $Swtpm), @('firmware', $Firmware))) {
-  $source = (Resolve-Path -LiteralPath $component[1]).Path
-  $target = Join-Path $destination $component[0]
-  New-Item -ItemType Directory -Path $target | Out-Null
-  foreach ($entry in Get-ChildItem -LiteralPath $source -Recurse -File) {
-    if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Link in build output' }
-    $relative = Get-Relative $source $entry.FullName
-    $file = Join-Path $target $relative
-    New-Item -ItemType Directory -Force -Path ([IO.Path]::GetDirectoryName($file)) | Out-Null
-    Copy-Item -LiteralPath $entry.FullName -Destination $file
+# Every file under $Root, walked without following links: Get-ChildItem
+# -Recurse of 5.1 descends into junctions and directory symlinks, and the
+# files reached through them are not reparse points themselves. Any
+# reparse point (the root, a directory or a file) is refused.
+function Get-InputFiles([string]$Root) {
+  $rootItem = Get-Item -LiteralPath $Root -Force
+  if (-not $rootItem.PSIsContainer) { throw "$Root is not a directory" }
+  $pending = New-Object System.Collections.Generic.Stack[System.IO.FileSystemInfo]
+  $pending.Push($rootItem)
+  while ($pending.Count -gt 0) {
+    $dir = $pending.Pop()
+    if ($dir.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Link in input: $($dir.FullName)" }
+    foreach ($entry in Get-ChildItem -LiteralPath $dir.FullName -Force) {
+      if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Link in input: $($entry.FullName)" }
+      if ($entry.PSIsContainer) { $pending.Push($entry) } else { $entry }
+    }
   }
 }
+# Relative paths against the PowerShell location, resolved once.
+$destination = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Out)
+if (Test-Path -LiteralPath $destination) { throw 'Output must be a new directory' }
+# All inputs are walked and checked before anything is written.
+$plan = @()
+foreach ($component in @(@('qemu', $Qemu), @('swtpm', $Swtpm), @('firmware', $Firmware))) {
+  $source = (Resolve-Path -LiteralPath $component[1]).ProviderPath
+  $plan += ,@($source, (Join-Path $destination $component[0]), @(Get-InputFiles $source), $false)
+}
 foreach ($dir in $Licenses) {
-  $source = (Resolve-Path -LiteralPath $dir).Path
+  $source = (Resolve-Path -LiteralPath $dir).ProviderPath
+  $files = @(Get-InputFiles $source)
   if (Test-Path -LiteralPath (Join-Path $source 'MISSING.txt')) {
-    $missing = (Get-Content -LiteralPath (Join-Path $source 'MISSING.txt') | Where-Object { $_.Trim() }).Count
+    $missing = @(Get-Content -LiteralPath (Join-Path $source 'MISSING.txt') | Where-Object { $_.Trim() }).Count
     if ($missing -gt 0) { throw "$source lists $missing component(s) without a licence" }
   }
-  $target = Join-Path (Join-Path $destination 'licenses') (Split-Path -Leaf $source)
-  foreach ($entry in Get-ChildItem -LiteralPath $source -Recurse -File) {
+  $plan += ,@($source, (Join-Path (Join-Path $destination 'licenses') (Split-Path -Leaf $source)), $files, $true)
+}
+New-Item -ItemType Directory -Path $destination | Out-Null
+foreach ($step in $plan) {
+  $source, $target, $files, $isLicence = $step
+  New-Item -ItemType Directory -Force -Path $target | Out-Null
+  foreach ($entry in $files) {
     $relative = Get-Relative $source $entry.FullName
-    if ($relative -like 'sources\*' -or $relative -like 'MISSING*') { continue }
+    if ($isLicence -and ($relative -like 'sources\*' -or $relative -like 'MISSING*')) { continue }
     $file = Join-Path $target $relative
     New-Item -ItemType Directory -Force -Path ([IO.Path]::GetDirectoryName($file)) | Out-Null
     Copy-Item -LiteralPath $entry.FullName -Destination $file

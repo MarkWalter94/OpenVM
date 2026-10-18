@@ -16,7 +16,11 @@ echo "edac03680f8a4a1c5c1d609a10e3f41e1a129e38ff5158f0c8deaedc719fb127 *$WORK/li
 echo "f61cf6f1e9bbcb4cefb30b70cafaf1c4df54c6961e65cfa63830e8ad0e220134 *$WORK/swtpm.tar.gz" | sha256sum -c -
 for name in libtpms swtpm; do
     status=$(gpg --batch --status-fd 1 --verify "$WORK/$name.tar.gz.asc" "$WORK/$name.tar.gz" 2>/dev/null)
-    grep -Eq "^\[GNUPG:\] VALIDSIG .*($KEY)( |$)" <<< "$status" || { echo "signature refused: $name" >&2; exit 1; }
+    # VALIDSIG is also printed for a revoked or expired key: require GOODSIG too.
+    grep -q "^\[GNUPG:\] GOODSIG " <<< "$status" &&
+        grep -Eq "^\[GNUPG:\] VALIDSIG .*($KEY)( |$)" <<< "$status" &&
+        ! grep -Eq "^\[GNUPG:\] (REVKEYSIG|EXPKEYSIG|EXPSIG|BADSIG|ERRSIG) " <<< "$status" ||
+        { echo "signature refused: $name" >&2; exit 1; }
     [[ -d "$WORK/$name-0.10.2" ]] || tar -xzf "$WORK/$name.tar.gz" -C "$WORK"
 done
 PREFIX="$WORK/prefix"

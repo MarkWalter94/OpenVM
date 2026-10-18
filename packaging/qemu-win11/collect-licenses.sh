@@ -61,8 +61,14 @@ if [[ ${FETCH:-0} == 1 ]]; then
       KEYRING=$(mktemp -d)
       find /etc/pacman.d/gnupg -maxdepth 1 -type f -exec cp {} "$KEYRING/" \;
     fi
-    gpg --homedir "$KEYRING" --batch --no-auto-check-trustdb --status-fd 1 \
-      --verify "$file.sig" "$file" 2>/dev/null | grep -q '^\[GNUPG:\] VALIDSIG ' ||
+    # A good signature needs GOODSIG and VALIDSIG; VALIDSIG alone is also
+    # emitted for signatures by revoked or expired keys (REVKEYSIG,
+    # EXPKEYSIG) and for expired signatures (EXPSIG).
+    status=$(gpg --homedir "$KEYRING" --batch --no-auto-check-trustdb --status-fd 1 \
+      --verify "$file.sig" "$file" 2>/dev/null) || status=
+    grep -q '^\[GNUPG:\] GOODSIG ' <<<"$status" &&
+      grep -q '^\[GNUPG:\] VALIDSIG ' <<<"$status" &&
+      ! grep -qE '^\[GNUPG:\] (REVKEYSIG|EXPKEYSIG|EXPSIG|BADSIG|ERRSIG) ' <<<"$status" ||
       { echo "$pkg: bad or unknown signature on $(basename "$url")" >&2; exit 1; }
     short=${pkg#"$PREFIX"}
     [[ ! -d "$DEST/$short" ]] || continue
