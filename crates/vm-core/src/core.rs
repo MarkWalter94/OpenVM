@@ -48,6 +48,11 @@ use crate::session::{SessionRegistry, SessionSpec, discard_code_for};
 pub const MAX_QUEUE_LEN: usize = 256;
 /// Finished operations remembered per VM for idempotency purposes.
 pub const IDEMPOTENCY_WINDOW: usize = 1024;
+/// Identifiers of operations that left the idempotency history (or the VM)
+/// still reserved in the operation index: a late replay of one of them is
+/// refused instead of running again. Beyond this number the oldest ones
+/// are released, so the index stays bounded.
+pub const RETIRED_OPERATION_IDS: usize = 16 * IDEMPOTENCY_WINDOW;
 /// Refusal of a user snapshot operation while an agent session targets the
 /// VM (ADR-0032: snapshots are a manual-use feature).
 pub const SNAPSHOT_AGENT_SESSION: &str =
@@ -290,15 +295,19 @@ impl VmRuntime {
             .any(|p| p.record.kind == OperationKind::ForceStop)
     }
 
-    fn remember(&mut self, p: Pending) {
+    /// Keeps a finished operation; returns the ones that left the window.
+    fn remember(&mut self, p: Pending) -> Vec<OperationId> {
         let id = p.record.id;
         self.history.insert(id, p);
         self.history_order.push_back(id);
+        let mut evicted = Vec::new();
         while self.history_order.len() > IDEMPOTENCY_WINDOW {
             if let Some(old) = self.history_order.pop_front() {
                 self.history.remove(&old);
+                evicted.push(old);
             }
         }
+        evicted
     }
 }
 
@@ -367,11 +376,13 @@ pub struct Core<S, C, I, A> {
     revision: PolicyRevision,
     sessions: SessionRegistry,
     vms: BTreeMap<VmId, VmRuntime>,
-    /// VM of every `operation_id` ever accepted. It does not shrink with the
-    /// operation history: an id that left the idempotency window stays
-    /// reserved and cannot be reused for another request (32 bytes
-    /// per operation for the lifetime of the supervisor).
+    /// VM of every `operation_id` queued, forwarded or retained in a VM's
+    /// history, plus the last [`RETIRED_OPERATION_IDS`] retired ones
+    /// (`retired_ops`): an id that left the idempotency window stays
+    /// reserved for a while and cannot be reused for another request.
     op_index: BTreeMap<OperationId, VmId>,
+    /// Retired operation ids still in `op_index`, oldest first.
+    retired_ops: VecDeque<OperationId>,
     audit_seq: u64,
     audit_failures: u64,
     /// Input owner per VM; absent = the user.
@@ -406,6 +417,7 @@ where
             sessions: SessionRegistry::default(),
             vms: BTreeMap::new(),
             op_index: BTreeMap::new(),
+            retired_ops: VecDeque::new(),
             audit_seq: 0,
             audit_failures: 0,
             input_owners: BTreeMap::new(),
@@ -1111,7 +1123,11 @@ where
             self.emit_after(actor, AuditAction::VmDelete, AuditOutcome::Failed, e);
             return Err(err);
         }
-        self.vms.remove(&vm_id);
+        if let Some(rt) = self.vms.remove(&vm_id) {
+            for id in rt.history_order {
+                self.retire_op(id);
+            }
+        }
         self.vm_policies.remove(&vm_id);
         self.emit_after(actor, AuditAction::VmDelete, AuditOutcome::Succeeded, ev());
         Ok(())
@@ -1666,15 +1682,34 @@ where
         id: OperationId,
     ) -> Result<OperationRecord, PublicError> {
         let now = self.clock.now();
-        let vm = self.op_index.get(&id).copied();
+        // The session is checked without the operation's VM: an id of
+        // another VM is `not_found` like an unknown one (its existence is
+        // not revealed); an agent sees only its session's operations.
         if let Caller::Agent { session_id, token } = caller {
             self.sessions
-                .check(*session_id, token.as_ref(), vm, Capability::VmStatus, now)?;
+                .check(*session_id, token.as_ref(), None, Capability::VmStatus, now)?;
         }
-        let found = vm
-            .and_then(|v| self.vms.get(&v))
-            .and_then(|rt| rt.find(id))
-            .map(|p| p.record.clone());
+        let vm = self.op_index.get(&id).copied();
+        let found = vm.and_then(|v| {
+            let rt = self.vms.get(&v)?;
+            rt.find(id)
+                .map(|p| p.record.clone())
+                .or_else(|| {
+                    rt.storage_op
+                        .as_ref()
+                        .filter(|o| o.record.id == id)
+                        .map(|o| o.record.clone())
+                })
+                // Storage operations and operations retired from the
+                // history: the catalog record (input is not persisted).
+                .or_else(|| {
+                    self.store
+                        .get_operation(id)
+                        .ok()
+                        .flatten()
+                        .filter(|r| r.vm_id == v)
+                })
+        });
         match (found, caller) {
             (Some(r), Caller::User) => Ok(r),
             (Some(r), Caller::Agent { session_id, .. }) if r.session_id == Some(*session_id) => {
@@ -1954,6 +1989,29 @@ where
         Ok(None)
     }
 
+    /// Finished operation into the VM's idempotency history; the ones that
+    /// leave it are retired.
+    fn remember(&mut self, vm_id: VmId, p: Pending) {
+        let evicted = match self.vms.get_mut(&vm_id) {
+            Some(rt) => rt.remember(p),
+            None => return,
+        };
+        for id in evicted {
+            self.retire_op(id);
+        }
+    }
+
+    /// An operation no longer retained by its VM: its id stays reserved in
+    /// the index until [`RETIRED_OPERATION_IDS`] newer ones retire.
+    fn retire_op(&mut self, id: OperationId) {
+        self.retired_ops.push_back(id);
+        while self.retired_ops.len() > RETIRED_OPERATION_IDS {
+            if let Some(old) = self.retired_ops.pop_front() {
+                self.op_index.remove(&old);
+            }
+        }
+    }
+
     fn consume_quota(&mut self, session_id: Option<SessionId>, action: &VmAction) {
         let Some(s) = session_id.and_then(|id| self.sessions.get_mut(id)) else {
             return;
@@ -1991,9 +2049,7 @@ where
             ev,
         );
         let id = p.record.id;
-        if let Some(rt) = self.vms.get_mut(&vm_id) {
-            rt.remember(p);
-        }
+        self.remember(vm_id, p);
         id
     }
 
@@ -2299,9 +2355,7 @@ where
         let record = p.record.clone();
         let actor = p.caller.actor();
         let session_id = p.session_id();
-        if let Some(rt) = self.vms.get_mut(&vm_id) {
-            rt.remember(p);
-        }
+        self.remember(vm_id, p);
 
         if is_current {
             match (kind, &result) {
@@ -2447,9 +2501,7 @@ where
         let record = p.record.clone();
         let actor = p.caller.actor();
         let session_id = p.session_id();
-        if let Some(rt) = self.vms.get_mut(&vm_id) {
-            rt.remember(p);
-        }
+        self.remember(vm_id, p);
         if is_current {
             self.end_run(vm_id, VmState::Stopped, RunEndReason::StartFailed);
         }
@@ -2501,7 +2553,23 @@ where
                 return Err(self.deny(actor, action, ev(), err));
             };
             let now = self.clock.now();
-            if let Err(err) = self.authorize(caller, Some(vm_id), capability, now) {
+            let effective = match self.authorize(caller, Some(vm_id), capability, now) {
+                Ok(e) => e,
+                Err(err) => {
+                    let ev = Ev {
+                        session_id: Some(*session_id),
+                        capability: Some(capability),
+                        ..ev()
+                    };
+                    return Err(self.deny(actor, action, ev, err));
+                }
+            };
+            // A checkpoint or restore counts against the operation quota,
+            // like every other agent operation.
+            if self.sessions.get(*session_id).is_some_and(|s| {
+                s.usage.operations.saturating_add(1) > effective.quotas.max_operations
+            }) {
+                let err = PublicError::resource_limit("operation quota exhausted");
                 let ev = Ev {
                     session_id: Some(*session_id),
                     capability: Some(capability),
@@ -2558,6 +2626,7 @@ where
         let action = audit_action_for(kind);
         let actor = caller.actor();
         let vm = self.check_baseline_request(caller, vm_id, action)?;
+        let session_id = agent_session(caller);
         let op = self.ids.operation_id();
         let ev = |error| Ev {
             vm_id: Some(vm_id),
@@ -2573,11 +2642,16 @@ where
             }
         };
         let now = self.clock.now();
+        // Counted like a queued operation of the session (quota checked
+        // in `check_baseline_request`).
+        if let Some(s) = session_id.and_then(|id| self.sessions.get_mut(id)) {
+            s.usage.operations = s.usage.operations.saturating_add(1);
+        }
         let record = OperationRecord {
             id: op,
             vm_id,
             run_id: None,
-            session_id: None,
+            session_id,
             kind,
             status: OperationStatus::Forwarded,
             error: None,
@@ -2630,8 +2704,9 @@ where
         record.error = result.as_ref().err().map(|e| e.code);
         record.updated_at = now;
         let _ = self.store.upsert_operation(&record);
-        // Not kept in the idempotency history (not a queue request); the
-        // identifier stays reserved in the operation index.
+        // Not kept in the idempotency history (not a queue request): retired
+        // at once, its record stays readable from the catalog.
+        self.retire_op(operation_id);
         let kind = record.kind;
         let error = record.error;
         if kind == OperationKind::Restore && result.is_ok() {

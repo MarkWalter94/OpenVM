@@ -209,6 +209,9 @@ struct Inner {
     tools: Vec<ToolDef>,
     ipc: Mutex<Option<Arc<Ipc>>>,
     state: watch::Sender<State>,
+    /// A `session_request` is between its state check and the installation
+    /// of its connection (one request at a time).
+    requesting: std::sync::atomic::AtomicBool,
     bucket: Mutex<Bucket>,
     client: Mutex<Option<(String, String)>>,
     /// Display geometry of the last screenshot per VM and run.
@@ -224,6 +227,24 @@ pub struct Adapter {
 impl std::fmt::Debug for Adapter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Adapter").finish_non_exhaustive()
+    }
+}
+
+/// The `session_request` slot, released when the request returns.
+struct RequestSlot<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl<'a> RequestSlot<'a> {
+    fn take(flag: &'a std::sync::atomic::AtomicBool) -> Option<Self> {
+        use std::sync::atomic::Ordering;
+        flag.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .ok()
+            .map(|_| Self(flag))
+    }
+}
+
+impl Drop for RequestSlot<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -278,6 +299,7 @@ impl Adapter {
                 cfg,
                 ipc: Mutex::new(None),
                 state,
+                requesting: std::sync::atomic::AtomicBool::new(false),
                 bucket: Mutex::new(Bucket {
                     tokens: burst,
                     at: Instant::now(),
@@ -328,7 +350,7 @@ impl Adapter {
                     .clone()
                     .ok_or_else(|| ToolError::new("session_closed", "connection not available"))?;
                 if let Some(r) = ipc.closed() {
-                    self.close(&r);
+                    self.close_for(&ipc, &r);
                     return Err(CallError::Closed(r).into());
                 }
                 Ok((ipc, auth, grant))
@@ -356,6 +378,23 @@ impl Adapter {
         });
     }
 
+    /// Whether `ipc` is the connection of the current session request.
+    fn is_current(&self, ipc: &Ipc) -> bool {
+        lock(&self.inner.ipc)
+            .as_deref()
+            .is_some_and(|c| std::ptr::eq(c, ipc))
+    }
+
+    /// Closes the session only while it still runs on `ipc`: a failure, a
+    /// task or a lease loop of an earlier request (its own connection)
+    /// never closes a later session.
+    fn close_for(&self, ipc: &Ipc, reason: &str) {
+        let cur = lock(&self.inner.ipc);
+        if cur.as_deref().is_some_and(|c| std::ptr::eq(c, ipc)) {
+            self.close(reason);
+        }
+    }
+
     async fn agent(
         &self,
         ipc: &Ipc,
@@ -373,7 +412,7 @@ impl Adapter {
             )
             .await;
         if let Err(CallError::Closed(reason)) = &r {
-            self.close(reason);
+            self.close_for(ipc, reason);
         }
         if let Err(CallError::Operational(e)) = &r
             && matches!(
@@ -381,7 +420,10 @@ impl Adapter {
                 ErrorCode::Unauthenticated | ErrorCode::SessionExpired
             )
         {
-            self.close(&format!("session no longer valid ({})", e.code.as_str()));
+            self.close_for(
+                ipc,
+                &format!("session no longer valid ({})", e.code.as_str()),
+            );
         }
         r.map_err(ToolError::from)
     }
@@ -512,6 +554,18 @@ impl Adapter {
         if purpose.is_empty() || purpose.chars().count() > 512 {
             return Err(ToolError::invalid("purpose must be 1..=512 characters"));
         }
+        // One request at a time: a second call while the first awaits the
+        // service would replace its connection and state, and the first
+        // request's background task would then close the second session.
+        let Some(_slot) = RequestSlot::take(&self.inner.requesting) else {
+            return Err(ToolError {
+                retryable: true,
+                ..ToolError::new(
+                    "session_pending",
+                    "a session request is already being sent to LightVM; session_status reports it",
+                )
+            });
+        };
         if matches!(
             *self.inner.state.borrow(),
             State::Pending { .. } | State::Active { .. }
@@ -578,11 +632,14 @@ impl Adapter {
         let expires_at = UtcTimestamp::now()
             .checked_add_millis(i64::try_from(expires_in_s).unwrap_or(300) * 1000)
             .unwrap_or_else(UtcTimestamp::now);
-        *lock(&self.inner.ipc) = Some(ipc.clone());
-        self.inner.state.send_replace(State::Pending {
-            code: verification_code,
-            expires_at,
-        });
+        {
+            let mut cur = lock(&self.inner.ipc);
+            *cur = Some(ipc.clone());
+            self.inner.state.send_replace(State::Pending {
+                code: verification_code,
+                expires_at,
+            });
+        }
         diag(&format!(
             "session requested (request {request_id}); waiting for the approval in the app"
         ));
@@ -602,10 +659,16 @@ impl Adapter {
                     grant,
                     ..
                 }) => {
-                    me.inner.state.send_replace(State::Active {
-                        auth: SessionAuth { session_id, token },
-                        grant: Box::new(grant),
-                    });
+                    {
+                        let cur = lock(&me.inner.ipc);
+                        if !cur.as_deref().is_some_and(|c| std::ptr::eq(c, &*ipc)) {
+                            return;
+                        }
+                        me.inner.state.send_replace(State::Active {
+                            auth: SessionAuth { session_id, token },
+                            grant: Box::new(grant),
+                        });
+                    }
                     diag("session approved");
                     me.spawn_lease(ipc.clone());
                     let client = lock(&me.inner.client).clone();
@@ -621,14 +684,14 @@ impl Adapter {
                     )
                     .await;
                 }
-                Ok(_) => me.close("unexpected reply to the session request"),
+                Ok(_) => me.close_for(&ipc, "unexpected reply to the session request"),
                 Err(CallError::Operational(e)) if e.code == ErrorCode::SessionExpired => {
-                    me.close("the session request expired before an approval");
+                    me.close_for(&ipc, "the session request expired before an approval");
                 }
                 Err(CallError::Operational(e)) if e.code == ErrorCode::PermissionDenied => {
-                    me.close("the user denied the session request");
+                    me.close_for(&ipc, "the user denied the session request");
                 }
-                Err(e) => me.close(&ToolError::from(e).message),
+                Err(e) => me.close_for(&ipc, &ToolError::from(e).message),
             }
         });
         Ok(Output::Json(
@@ -641,6 +704,10 @@ impl Adapter {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(me.inner.cfg.renew_every).await;
+                // The loop serves only the session of its own connection.
+                if !me.is_current(&ipc) {
+                    return;
+                }
                 let auth = match &*me.inner.state.borrow() {
                     State::Active { auth, .. } => auth.clone(),
                     _ => return,
@@ -651,7 +718,7 @@ impl Adapter {
                     Err(e) => {
                         diag(&format!("lease not renewed ({})", e.code));
                         if !matches!(*me.inner.state.borrow(), State::Closed { .. }) {
-                            me.close(&format!("lease not renewed ({})", e.code));
+                            me.close_for(&ipc, &format!("lease not renewed ({})", e.code));
                         }
                         return;
                     }
@@ -673,11 +740,13 @@ impl Adapter {
             }
         }
         // A closed connection shows as closed.
-        if let State::Active { .. } = *self.inner.state.borrow()
-            && let Some(ipc) = lock(&self.inner.ipc).clone()
+        let active = matches!(*self.inner.state.borrow(), State::Active { .. });
+        let ipc = lock(&self.inner.ipc).clone();
+        if active
+            && let Some(ipc) = ipc
             && let Some(r) = ipc.closed()
         {
-            self.close(&r);
+            self.close_for(&ipc, &r);
         }
         Ok(Output::Json(
             serde_json::to_value(self.session_out()).unwrap_or_default(),
@@ -692,7 +761,7 @@ impl Adapter {
         let ResponseBody::SessionEnded { session_id, report } = r else {
             return Err(unexpected());
         };
-        self.close("session ended by the client");
+        self.close_for(&ipc, "session ended by the client");
         Ok(Output::Json(
             serde_json::to_value(EndOut {
                 session_id,

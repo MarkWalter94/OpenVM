@@ -70,7 +70,7 @@ pub enum Role {
 }
 
 /// Messages from the client to the service.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
     /// Mandatory first message.
@@ -97,6 +97,32 @@ pub enum ClientMessage {
         /// Requested operation.
         body: Request,
     },
+}
+
+// Written by hand (not derived): the channel credential never reaches a
+// log through `{:?}`.
+impl std::fmt::Debug for ClientMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Hello {
+                request_id,
+                protocol_versions,
+                credential,
+                client_name,
+            } => f
+                .debug_struct("Hello")
+                .field("request_id", request_id)
+                .field("protocol_versions", protocol_versions)
+                .field("credential", &credential.as_ref().map(|_| "<redacted>"))
+                .field("client_name", client_name)
+                .finish(),
+            Self::Request { request_id, body } => f
+                .debug_struct("Request")
+                .field("request_id", request_id)
+                .field("body", body)
+                .finish(),
+        }
+    }
 }
 
 /// Typed operations.
@@ -1383,7 +1409,7 @@ pub struct EmergencyStopReport {
 }
 
 /// Results of the operations.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ResponseBody {
     GuestTools {
@@ -1744,6 +1770,162 @@ pub enum ResponseBody {
         /// `true` if an import was in progress and is being cancelled.
         cancelled: bool,
     },
+}
+
+// Written by hand (not derived) so the pairing credential never
+// reaches a log through `{:?}`; every other variant prints as derived.
+impl std::fmt::Debug for ResponseBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        macro_rules! fields {
+            ($name:ident $(, $k:ident)*) => {
+                f.debug_struct(stringify!($name))$(.field(stringify!($k), $k))*.finish()
+            };
+        }
+        match self {
+            Self::GuestTools { reply } => fields!(GuestTools, reply),
+            Self::Pong => f.write_str("Pong"),
+            Self::Capabilities(v) => f.debug_tuple("Capabilities").field(v).finish(),
+            Self::VmList { vms } => fields!(VmList, vms),
+            Self::Vm { vm } => fields!(Vm, vm),
+            Self::VmCreated { vm } => fields!(VmCreated, vm),
+            Self::VmUpdated { vm } => fields!(VmUpdated, vm),
+            Self::Operation {
+                admission,
+                operation,
+            } => fields!(Operation, admission, operation),
+            Self::Subscribed => f.write_str("Subscribed"),
+            Self::Connections { connections } => fields!(Connections, connections),
+            Self::Revoked { connection_id } => fields!(Revoked, connection_id),
+            Self::PairingCredential { expires_in_s, .. } => f
+                .debug_struct("PairingCredential")
+                .field("credential", &"<redacted>")
+                .field("expires_in_s", expires_in_s)
+                .finish(),
+            Self::EmergencyStop(v) => f.debug_tuple("EmergencyStop").field(v).finish(),
+            Self::ParentLossPolicy { policy } => fields!(ParentLossPolicy, policy),
+            Self::ShuttingDown => f.write_str("ShuttingDown"),
+            Self::MediaList { media } => fields!(MediaList, media),
+            Self::MediaImported { media } => fields!(MediaImported, media),
+            Self::MediaDeleted { media_id } => fields!(MediaDeleted, media_id),
+            Self::VmDeleted { vm_id } => fields!(VmDeleted, vm_id),
+            Self::Console { ticket } => fields!(Console, ticket),
+            Self::Baselines { vm_id, baselines } => fields!(Baselines, vm_id, baselines),
+            Self::BaselineCreated { baseline } => fields!(BaselineCreated, baseline),
+            Self::BaselineRestored { vm_id, baseline_id } => {
+                fields!(BaselineRestored, vm_id, baseline_id)
+            }
+            Self::BaselineDeleted { vm_id, baseline_id } => {
+                fields!(BaselineDeleted, vm_id, baseline_id)
+            }
+            Self::Snapshots { vm_id, tree } => fields!(Snapshots, vm_id, tree),
+            Self::Snapshot { snapshot } => fields!(Snapshot, snapshot),
+            Self::SnapshotReverted {
+                vm_id,
+                snapshot_id,
+                config_revision,
+            } => fields!(SnapshotReverted, vm_id, snapshot_id, config_revision),
+            Self::SnapshotDeleted { vm_id, snapshot_id } => {
+                fields!(SnapshotDeleted, vm_id, snapshot_id)
+            }
+            Self::SnapshotThumbnail {
+                snapshot_id,
+                png_base64,
+            } => fields!(SnapshotThumbnail, snapshot_id, png_base64),
+            Self::SessionRequested {
+                request_id,
+                verification_code,
+                expires_in_s,
+            } => fields!(
+                SessionRequested,
+                request_id,
+                verification_code,
+                expires_in_s
+            ),
+            Self::SessionGranted {
+                session_id,
+                token,
+                grant,
+                lease,
+            } => fields!(SessionGranted, session_id, token, grant, lease),
+            Self::AgentAccess { enabled } => fields!(AgentAccess, enabled),
+            Self::SessionRequests { requests } => fields!(SessionRequests, requests),
+            Self::Session { session } => fields!(Session, session),
+            Self::SessionDenied { request_id } => fields!(SessionDenied, request_id),
+            Self::Sessions { sessions } => fields!(Sessions, sessions),
+            Self::SessionRevoked { session_id, report } => {
+                fields!(SessionRevoked, session_id, report)
+            }
+            Self::InputOwner { vm_id, owner } => fields!(InputOwner, vm_id, owner),
+            Self::AgentVms { vms } => fields!(AgentVms, vms),
+            Self::AgentVm { vm } => fields!(AgentVm, vm),
+            Self::AgentScreenshot {
+                operation,
+                screenshot,
+                chunk_bytes,
+                chunks,
+            } => fields!(AgentScreenshot, operation, screenshot, chunk_bytes, chunks),
+            Self::ScreenshotChunk {
+                operation_id,
+                index,
+                chunks,
+                data,
+            } => fields!(ScreenshotChunk, operation_id, index, chunks, data),
+            Self::OperationStatus { operation } => fields!(OperationStatus, operation),
+            Self::Lease { lease } => fields!(Lease, lease),
+            Self::SessionEnded { session_id, report } => fields!(SessionEnded, session_id, report),
+            Self::SessionReports { reports } => fields!(SessionReports, reports),
+            Self::SessionReport { report } => fields!(SessionReport, report),
+            Self::SessionReportEvents {
+                session_id,
+                total,
+                offset,
+                events,
+            } => fields!(SessionReportEvents, session_id, total, offset, events),
+            Self::ReportScreenshotChunk {
+                session_id,
+                shot,
+                index,
+                chunks,
+                sha256,
+                data,
+            } => fields!(
+                ReportScreenshotChunk,
+                session_id,
+                shot,
+                index,
+                chunks,
+                sha256,
+                data
+            ),
+            Self::SessionReportExported {
+                session_id,
+                format,
+                bytes,
+                sha256,
+                screenshots,
+            } => fields!(
+                SessionReportExported,
+                session_id,
+                format,
+                bytes,
+                sha256,
+                screenshots
+            ),
+            Self::SessionReportDeleted { session_id } => fields!(SessionReportDeleted, session_id),
+            Self::AgentBaselines { vm_id, baselines } => fields!(AgentBaselines, vm_id, baselines),
+            Self::AgentLogs {
+                vm_id,
+                entries,
+                last_seq,
+                qemu,
+            } => fields!(AgentLogs, vm_id, entries, last_seq, qemu),
+            Self::Recorded { seq } => fields!(Recorded, seq),
+            Self::AgentReport { report } => fields!(AgentReport, report),
+            Self::VmwareImportPreview { preview } => fields!(VmwareImportPreview, preview),
+            Self::VmwareImported { vm } => fields!(VmwareImported, vm),
+            Self::VmwareImportCancel { cancelled } => fields!(VmwareImportCancel, cancelled),
+        }
+    }
 }
 
 /// Longest text taken from a VMware file into a preview (display name,
@@ -2369,6 +2551,51 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn credentials_are_redacted_in_debug() {
+        let cred = "cd".repeat(32);
+        let hello = ClientMessage::Hello {
+            request_id: 0,
+            protocol_versions: vec![1],
+            credential: Some(cred.clone()),
+            client_name: Some("client".into()),
+        };
+        let d = format!("{hello:?}");
+        assert!(!d.contains(&cred), "{d}");
+        assert!(d.contains("redacted") && d.contains("client"), "{d}");
+        let none = ClientMessage::Hello {
+            request_id: 0,
+            protocol_versions: vec![1],
+            credential: None,
+            client_name: None,
+        };
+        assert!(format!("{none:?}").contains("credential: None"));
+        let issued = ResponseBody::PairingCredential {
+            credential: cred.clone(),
+            expires_in_s: 300,
+        };
+        let d = format!("{issued:?}");
+        assert!(!d.contains(&cred), "{d}");
+        assert!(d.contains("redacted") && d.contains("300"), "{d}");
+        let msg = format!(
+            "{:?}",
+            ServerMessage::Response {
+                request_id: 1,
+                result: issued.clone(),
+            }
+        );
+        assert!(!msg.contains(&cred), "{msg}");
+        // The wire format is unchanged.
+        let v = serde_json::to_value(&issued).unwrap();
+        assert_eq!(v["credential"], serde_json::json!(cred));
+        // Other variants print as derived.
+        assert_eq!(format!("{:?}", ResponseBody::Pong), "Pong");
+        assert_eq!(
+            format!("{:?}", ResponseBody::AgentAccess { enabled: true }),
+            "AgentAccess { enabled: true }"
+        );
     }
 
     #[test]

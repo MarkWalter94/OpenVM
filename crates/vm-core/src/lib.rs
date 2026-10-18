@@ -16,7 +16,7 @@ pub mod session;
 
 pub use crate::core::{
     Core, CoreConfig, Dispatch, DispatchOutcome, EmergencyStopPlan, IDEMPOTENCY_WINDOW,
-    MAX_QUEUE_LEN, MediaRegistration, SNAPSHOT_AGENT_SESSION, SessionTermination, StartPlan,
-    VmStatus, action_allowed_in, input_allowed_for,
+    MAX_QUEUE_LEN, MediaRegistration, RETIRED_OPERATION_IDS, SNAPSHOT_AGENT_SESSION,
+    SessionTermination, StartPlan, VmStatus, action_allowed_in, input_allowed_for,
 };
 pub use lightvm_proto as proto;
