@@ -12,7 +12,9 @@ use egui::accesskit::Role;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable as _;
 use lightvm_desktop::console::{ConsoleTarget, LiveConsole};
-use lightvm_desktop::service::{ConsoleRequest, Failure, RequestStatus, ServiceCommand};
+use lightvm_desktop::service::{
+    ConsoleRequest, Failure, InputError, RequestStatus, ServiceCommand,
+};
 use lightvm_desktop::{LightVmApp, Section};
 use lightvm_proto::{InputBatch, InputEvent, KeyAction, PointerMove, QCode, VmState};
 
@@ -224,13 +226,48 @@ fn keyboard_goes_as_batches_only_with_focus_and_is_released_on_focus_loss() {
     assert!(h.state().live_console().is_some_and(|c| !c.has_focus()));
 }
 
+fn input_error(vm: u8, run: u8) -> InputError {
+    InputError {
+        vm_id: common::vm_id(vm),
+        run_id: common::run_id(run),
+        message: "input refused: state_conflict".into(),
+    }
+}
+
+/// A refused input batch is shown only on the console it came from (VM and
+/// run), and forgotten when that console closes.
+#[test]
+fn input_refusal_is_shown_only_on_its_console() {
+    let (mut h, hs) = console_app();
+    // Another VM's refusal: not on this console.
+    hs.update(|s| s.input_error = Some(input_error(2, 2)));
+    steps(&mut h);
+    assert!(h.query_by_label("input refused: state_conflict").is_none());
+    // An older run of this VM: not shown either.
+    hs.update(|s| s.input_error = Some(input_error(1, 3)));
+    steps(&mut h);
+    assert!(h.query_by_label("input refused: state_conflict").is_none());
+    // This console's own refusal.
+    hs.update(|s| s.input_error = Some(input_error(1, 1)));
+    steps(&mut h);
+    h.get_by_label("input refused: state_conflict");
+    // The VM stops: the console closes and its refusal is forgotten.
+    hs.update(|s| {
+        s.vms[0].state = VmState::Stopped;
+        s.vms[0].run_id = None;
+    });
+    steps(&mut h);
+    assert!(h.state().live_console().is_none());
+    assert_eq!(hs.state.lock().unwrap().input_error, None);
+}
+
 /// A guest stopped on a virtual CPU error: the console says why input does
 /// not reach it, instead of the bare refusal code.
 #[test]
 fn vcpu_halt_replaces_the_input_refusal_code() {
     use lightvm_proto::ipc::{VcpuHalt, VcpuHaltReason};
     let (mut h, hs) = console_app();
-    hs.update(|s| s.input_error = Some("input refused: state_conflict".into()));
+    hs.update(|s| s.input_error = Some(input_error(1, 1)));
     steps(&mut h);
     h.get_by_label("input refused: state_conflict");
     hs.update(|s| {

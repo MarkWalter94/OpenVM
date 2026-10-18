@@ -64,6 +64,8 @@ pub struct SnapshotsEnv<'a> {
     pub available: bool,
     /// Time since the UI sent the running operation, if it did.
     pub elapsed: Option<Duration>,
+    /// Why the last revert of this VM while it ran was abandoned, if it was.
+    pub notice: Option<&'a str>,
 }
 
 /// Date and time of a timestamp, to the minute: `2026-10-11 09:12 UTC` (the
@@ -319,6 +321,10 @@ pub fn snapshots_ui(ui: &mut egui::Ui, env: &SnapshotsEnv<'_>) -> Option<Snapsho
         }
     });
 
+    if let Some(n) = env.notice {
+        theme::notice(ui, n, Tone::Danger);
+        ui.add_space(12.0);
+    }
     progress_or_outcome(ui, env);
 
     // Summary of the current position.

@@ -53,6 +53,13 @@ pub const DEFAULT_MAX_FPS: u32 = 30;
 /// rate never makes the service refuse a batch with key releases in it.
 pub const INPUT_INTERVAL: Duration = Duration::from_millis(20);
 
+/// While the Console page is hidden the display session stays open (the
+/// page reconnects at once when shown again), but its updates ask for a
+/// frame at most this often instead of one per update: the frames drain
+/// and coalesce the queued updates, so the queue stays bounded and the
+/// other pages are not repainted at the guest's frame rate.
+pub const HIDDEN_DRAIN_INTERVAL: Duration = Duration::from_millis(500);
+
 /// VM and run a console belongs to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConsoleTarget {
@@ -536,6 +543,9 @@ pub struct LiveConsole {
     /// An agent session owns the input of the VM (F4): nothing the user
     /// types or clicks is queued.
     input_blocked: bool,
+    /// The Console page is shown: the display updates ask for a frame each
+    /// (otherwise at most every [`HIDDEN_DRAIN_INTERVAL`]).
+    visible: Arc<std::sync::atomic::AtomicBool>,
     /// Counters.
     pub stats: ConsoleStats,
 }
@@ -577,6 +587,7 @@ impl LiveConsole {
             disconnected_at: None,
             popup_was_open: false,
             input_blocked: false,
+            visible: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             stats: ConsoleStats::default(),
         }
     }
@@ -790,13 +801,17 @@ impl LiveConsole {
     }
 
     /// The page is not visible: releases the keys and the pointer if it had
-    /// the capture.
-    pub fn on_hidden(&mut self) {
+    /// the capture, and drains the display updates queued meanwhile (the
+    /// session stays open; see [`HIDDEN_DRAIN_INTERVAL`]).
+    pub fn on_hidden(&mut self, ctx: &egui::Context) {
+        self.visible
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         if self.had_focus {
             self.release_all();
             self.had_focus = false;
         }
         self.ungrab();
+        self.pump_updates(ctx);
     }
 
     /// Closes the display session; returns the last batches (key releases)
@@ -840,6 +855,7 @@ impl LiveConsole {
         };
         let (tx, rx) = channel();
         let ctx2 = ctx.clone();
+        let visible = self.visible.clone();
         let session = Session::spawn(
             SessionConfig {
                 transport,
@@ -847,7 +863,11 @@ impl LiveConsole {
             },
             move |ev| {
                 let _ = tx.send(ev);
-                ctx2.request_repaint();
+                if visible.load(std::sync::atomic::Ordering::Relaxed) {
+                    ctx2.request_repaint();
+                } else {
+                    ctx2.request_repaint_after(HIDDEN_DRAIN_INTERVAL);
+                }
             },
         );
         self.fb = Some(session.framebuffer());
@@ -951,6 +971,8 @@ impl LiveConsole {
         modal_open: bool,
     ) -> Option<ConsoleAction> {
         let ctx = ui.ctx().clone();
+        self.visible
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         if let Some(frame) = self.synthetic.take() {
             self.texture =
                 Some(ctx.load_texture("console-synthetic", frame, egui::TextureOptions::LINEAR));

@@ -13,7 +13,7 @@ use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT as _, Queryable as _};
 use lightvm_desktop::LightVmApp;
 use lightvm_desktop::service::{
-    Failure, RequestStatus, ServiceCommand, ServiceState, SnapshotOp, SnapshotRequest,
+    Failure, RequestStatus, ServiceCommand, ServiceState, SnapshotOp, SnapshotRequest, StopRequest,
 };
 use lightvm_proto::ipc::StorageOperation;
 use lightvm_proto::{ErrorCode, Label, SnapshotId, UtcTimestamp, VmState};
@@ -290,10 +290,10 @@ fn revert_of_a_running_vm_shuts_down_first_and_offers_a_snapshot() {
     // Only the shutdown: the stop, then the revert once the VM is off.
     click(&mut h, "Shut down and revert");
     assert!(!h.state().dialog_open());
-    assert_eq!(hs.actions(), [ServiceCommand::Stop(vm_id(1))]);
+    assert_eq!(hs.actions(), [stop_run()]);
     // The VM still runs: the flow waits for the orderly shutdown.
     h.run_steps(4);
-    assert_eq!(hs.actions(), [ServiceCommand::Stop(vm_id(1))]);
+    assert_eq!(hs.actions(), [stop_run()]);
     hs.update(|s| {
         s.vms[0].state = VmState::Stopped;
         s.vms[0].run_id = None;
@@ -302,7 +302,7 @@ fn revert_of_a_running_vm_shuts_down_first_and_offers_a_snapshot() {
     assert_eq!(
         hs.actions(),
         [
-            ServiceCommand::Stop(vm_id(1)),
+            stop_run(),
             ServiceCommand::RevertSnapshot {
                 vm_id: vm_id(1),
                 snapshot_id: snapshot_id(1),
@@ -338,7 +338,7 @@ fn revert_of_a_running_vm_keeps_the_current_state_first() {
     // The offered snapshot completes: the orderly shutdown starts.
     set_request(&hs, SnapshotOp::Take, RequestStatus::Done(snapshot_id(3)));
     h.run_steps(4);
-    assert_eq!(hs.actions().last(), Some(&ServiceCommand::Stop(vm_id(1))));
+    assert_eq!(hs.actions().last(), Some(&stop_run()));
     // The VM is off: the revert.
     hs.update(|s| {
         s.vms[0].state = VmState::Stopped;
@@ -352,6 +352,73 @@ fn revert_of_a_running_vm_keeps_the_current_state_first() {
             snapshot_id: snapshot_id(1),
         })
     );
+}
+
+fn stop_run() -> ServiceCommand {
+    ServiceCommand::StopRun {
+        vm_id: vm_id(1),
+        run_id: common::run_id(1),
+    }
+}
+
+/// Confirms "Shut down and revert" on a running VM (shutdown only).
+fn confirm_running_revert(h: &mut Harness<'_, LightVmApp>, hs: &common::Handles) {
+    open_page(h, "lab");
+    hs.clear();
+    click(h, "Revert to snapshot \u{201c}Clean install\u{201d}");
+    let shut_down = "Shut down \u{201c}lab\u{201d} normally first (a revert needs the VM off)";
+    h.get_by_role_and_label(Role::CheckBox, shut_down).click();
+    h.run_steps(4);
+    click(h, "Shut down and revert");
+    assert_eq!(hs.actions(), [stop_run()]);
+}
+
+/// The orderly stop is refused: the flow ends with the reason on the page,
+/// and a later stop of the VM does not revert it.
+#[test]
+fn revert_of_a_running_vm_stops_when_the_shutdown_fails() {
+    let mut s = state();
+    s.vms[0].state = VmState::Running;
+    let (mut h, hs) = harness(s);
+    confirm_running_revert(&mut h, &hs);
+    hs.update(|s| {
+        s.stop = Some(StopRequest {
+            vm_id: vm_id(1),
+            run_id: common::run_id(1),
+            status: RequestStatus::Failed(Failure::new("stop: failed (state_conflict)")),
+        });
+    });
+    h.run_steps(4);
+    h.get_by_label(
+        "The revert was not done: the VM could not be shut down (stop: failed (state_conflict)).",
+    );
+    // Stopped later (by the user, hours later): no revert without a new
+    // confirmation.
+    hs.update(|s| {
+        s.vms[0].state = VmState::Stopped;
+        s.vms[0].run_id = None;
+    });
+    h.run_steps(4);
+    assert_eq!(hs.actions(), [stop_run()]);
+}
+
+/// The VM is started again (another run) before it was seen off: the flow
+/// is abandoned, the new run is not reverted when it stops.
+#[test]
+fn revert_of_a_running_vm_is_abandoned_on_a_new_run() {
+    let mut s = state();
+    s.vms[0].state = VmState::Running;
+    let (mut h, hs) = harness(s);
+    confirm_running_revert(&mut h, &hs);
+    hs.update(|s| s.vms[0].run_id = Some(common::run_id(7)));
+    h.run_steps(4);
+    h.get_by_label("The revert was not done: the VM was started again before it was off.");
+    hs.update(|s| {
+        s.vms[0].state = VmState::Stopped;
+        s.vms[0].run_id = None;
+    });
+    h.run_steps(4);
+    assert_eq!(hs.actions(), [stop_run()]);
 }
 
 #[test]

@@ -320,6 +320,32 @@ pub struct SnapshotRequest {
     pub status: RequestStatus<SnapshotId>,
 }
 
+/// Last orderly stop of a given run requested by the UI
+/// ([`ServiceCommand::StopRun`]) and its outcome: `Done` once the
+/// supervisor accepted it, `Failed` if it refused it or the operation
+/// reported an error.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StopRequest {
+    /// VM.
+    pub vm_id: VmId,
+    /// Run to stop.
+    pub run_id: RunId,
+    /// Outcome.
+    pub status: RequestStatus<()>,
+}
+
+/// Last refused console input batch, with the console (VM and run) it
+/// came from: only that console shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InputError {
+    /// VM of the batch.
+    pub vm_id: VmId,
+    /// Run of the batch.
+    pub run_id: RunId,
+    /// Readable reason.
+    pub message: String,
+}
+
 /// Control of the agent sessions requested by the UI (F4).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AgentOp {
@@ -776,8 +802,11 @@ pub struct ServiceState {
     pub delete: RequestStatus<VmId>,
     /// Last console ticket request.
     pub console: Option<ConsoleRequest>,
-    /// Last refused input batch, readable (cleared by the next accepted one).
-    pub input_error: Option<String>,
+    /// Last refused input batch, readable, with its console (cleared by the
+    /// next accepted batch of the same console, and when it closes).
+    pub input_error: Option<InputError>,
+    /// Last orderly stop of a given run (the revert of a running VM).
+    pub stop: Option<StopRequest>,
     /// Baselines per VM, as last read (F3).
     pub baselines: BTreeMap<VmId, BaselineList>,
     /// Last baseline operation (creation, restore, deletion).
@@ -820,6 +849,44 @@ impl ServiceState {
     pub fn active_vms(&self) -> impl Iterator<Item = &VmSummary> {
         self.vms.iter().filter(|v| v.state.has_process())
     }
+
+    /// Forgets the per-VM data of VMs no longer in the catalog (deleted):
+    /// the maps do not grow with every VM ever seen.
+    pub fn prune_vms(&mut self) {
+        let known: std::collections::BTreeSet<VmId> = self.vms.iter().map(|v| v.vm_id).collect();
+        self.baselines.retain(|id, _| known.contains(id));
+        self.snapshots.retain(|id, _| known.contains(id));
+        self.agents.input_owners.retain(|id, _| known.contains(id));
+    }
+
+    /// Forgets what was read about sessions and reports the supervisor no
+    /// longer lists (pruned or deleted), once both lists were read: the
+    /// maps stay bounded by the lists (and by the bounded event log).
+    pub fn prune_sessions(&mut self) {
+        if !self.reports.loaded || !self.agents.sessions_loaded {
+            return;
+        }
+        let sessions: std::collections::BTreeSet<SessionId> =
+            self.agents.sessions.iter().map(|s| s.session_id).collect();
+        let reports: std::collections::BTreeSet<SessionId> = self
+            .reports
+            .list
+            .iter()
+            .map(|r| r.session_id)
+            .chain(sessions.iter().copied())
+            .collect();
+        let r = &mut self.reports;
+        r.headers.retain(|id, _| reports.contains(id));
+        r.header_errors.retain(|id, _| reports.contains(id));
+        r.events.retain(|id, _| reports.contains(id));
+        r.events_errors.retain(|id, _| reports.contains(id));
+        r.tail.retain(|id, _| sessions.contains(id));
+        let a = &mut self.agents;
+        let logged: std::collections::BTreeSet<SessionId> =
+            a.log.iter().filter_map(|e| e.session_id).collect();
+        a.logged
+            .retain(|id, _| sessions.contains(id) || logged.contains(id));
+    }
 }
 
 /// Actions requested by the UI from the service.
@@ -840,8 +907,22 @@ pub enum ServiceCommand {
     /// Orderly stop of a VM (ACPI, then termination after the service
     /// timeout).
     Stop(VmId),
+    /// Orderly stop of the given run only (a later run is not touched);
+    /// the outcome is recorded in [`ServiceState::stop`].
+    StopRun {
+        /// VM.
+        vm_id: VmId,
+        /// Run to stop.
+        run_id: RunId,
+    },
     /// Forced stop with OS primitives.
-    ForceStop(VmId),
+    ForceStop {
+        /// VM.
+        vm_id: VmId,
+        /// Run confirmed by the user, if the VM had one: a later run is
+        /// not touched.
+        run_id: Option<RunId>,
+    },
     /// Guest reset of the given run.
     Reset {
         /// VM.
@@ -1150,6 +1231,9 @@ pub trait Supervisor: Send {
     /// Drops a console ticket received and not handed over (the console
     /// was closed or its page left): the token does not stay in memory.
     fn discard_console_ticket(&self);
+    /// Forgets the refused-input error of the console of `vm_id` (the
+    /// console was closed).
+    fn clear_input_error(&self, vm_id: VmId);
 }
 
 /// Supervisor start errors.
@@ -1428,6 +1512,17 @@ impl Supervisor for Service {
     fn discard_console_ticket(&self) {
         *lock(&self.ticket) = None;
     }
+    fn clear_input_error(&self, vm_id: VmId) {
+        clear_input_error(&mut lock(&self.state), vm_id);
+    }
+}
+
+/// Body of [`Supervisor::clear_input_error`]. Public for the test
+/// stand-ins of [`Supervisor`].
+pub fn clear_input_error(s: &mut ServiceState, vm_id: VmId) {
+    if s.input_error.as_ref().is_some_and(|e| e.vm_id == vm_id) {
+        s.input_error = None;
+    }
 }
 
 /// Body of [`Service::send`].
@@ -1438,6 +1533,9 @@ fn send_command(
     c: ServiceCommand,
 ) -> bool {
     if commands.is_closed() {
+        // Pending first, so the failure is recorded against this request
+        // (for example the `.vmx` of this preview).
+        mark_pending(&mut lock(state), ticket, &c);
         mark_failed(
             &mut lock(state),
             &c,
@@ -1485,6 +1583,13 @@ pub fn mark_pending(
         ServiceCommand::ImportMedia { .. } => s.import = RequestStatus::Pending,
         ServiceCommand::DeleteMedia(_) => s.delete_media = RequestStatus::Pending,
         ServiceCommand::Delete { .. } => s.delete = RequestStatus::Pending,
+        ServiceCommand::StopRun { vm_id, run_id } => {
+            s.stop = Some(StopRequest {
+                vm_id: *vm_id,
+                run_id: *run_id,
+                status: RequestStatus::Pending,
+            });
+        }
         ServiceCommand::OpenConsole(vm_id) => {
             *lock(ticket) = None;
             s.console = Some(ConsoleRequest {
@@ -1556,6 +1661,9 @@ fn fail_pending(s: &mut ServiceState, why: &str) {
         fail(status, why);
     }
     fail(&mut s.delete, why);
+    if let Some(r) = &mut s.stop {
+        fail(&mut r.status, why);
+    }
     if let Some(r) = &mut s.console {
         fail(&mut r.status, why);
     }
@@ -1600,7 +1708,21 @@ fn mark_failed(s: &mut ServiceState, c: &ServiceCommand, f: Failure) {
                 status: RequestStatus::Failed(f),
             });
         }
-        ServiceCommand::Input(_) => s.input_error = Some(f.message),
+        ServiceCommand::Input(b) => {
+            s.input_error = Some(InputError {
+                vm_id: b.vm_id,
+                run_id: b.run_id,
+                message: f.message,
+            });
+        }
+        ServiceCommand::StopRun { vm_id, run_id } => {
+            s.last_outcome = Some(f.message.clone());
+            s.stop = Some(StopRequest {
+                vm_id: *vm_id,
+                run_id: *run_id,
+                status: RequestStatus::Failed(f),
+            });
+        }
         ServiceCommand::ListBaselines(vm_id) => {
             s.baselines.entry(*vm_id).or_default().error = Some(f);
         }
@@ -1617,7 +1739,12 @@ fn mark_failed(s: &mut ServiceState, c: &ServiceCommand, f: Failure) {
             });
         }
         ServiceCommand::CreatePairing => s.agents.pairing = RequestStatus::Failed(f),
-        ServiceCommand::PreviewVmwareImport(_) => s.vmware.preview = RequestStatus::Failed(f),
+        ServiceCommand::PreviewVmwareImport(path) => {
+            // A newer preview (another file) supersedes this one.
+            if s.vmware.preview_path.as_ref() == Some(path) {
+                s.vmware.preview = RequestStatus::Failed(f);
+            }
+        }
         ServiceCommand::ImportVmware { .. } => {
             s.vmware.import = RequestStatus::Failed(f);
             s.vmware.progress = None;
@@ -2270,6 +2397,7 @@ async fn execute(c: &mut Client, lanes: &Lanes, command: ServiceCommand) -> Resu
                     let stale = {
                         let mut s = lock(state);
                         s.vms = vms;
+                        s.prune_vms();
                         let mut stale = Vec::new();
                         for v in s.vms.iter() {
                             let count = v.baselines.count as usize;
@@ -2394,6 +2522,7 @@ async fn execute(c: &mut Client, lanes: &Lanes, command: ServiceCommand) -> Resu
                         let mut s = lock(state);
                         let name = s.vm(vm_id).map(|v| v.name.as_str().to_owned());
                         s.vms.retain(|v| v.vm_id != vm_id);
+                        s.prune_vms();
                         s.delete = RequestStatus::Done(vm_id);
                         s.last_outcome =
                             Some(format!("deleted: {}", name.unwrap_or_else(|| "VM".into())));
@@ -2435,6 +2564,7 @@ async fn execute(c: &mut Client, lanes: &Lanes, command: ServiceCommand) -> Resu
                 if i > 0 {
                     tokio::time::sleep(INPUT_RETRY_DELAY).await;
                 }
+                let b_target = (b.vm_id, b.run_id);
                 let req = VmRequest {
                     operation_id: OperationId::new_v7(),
                     vm_id: b.vm_id,
@@ -2446,11 +2576,19 @@ async fn execute(c: &mut Client, lanes: &Lanes, command: ServiceCommand) -> Resu
                         result: ResponseBody::Operation { operation, .. },
                         ..
                     } => {
-                        let error = operation
-                            .and_then(|o| o.error)
-                            .map(|code| format!("input refused: {}", code.as_str()));
+                        let error = operation.and_then(|o| o.error).map(|code| InputError {
+                            vm_id: b_target.0,
+                            run_id: b_target.1,
+                            message: format!("input refused: {}", code.as_str()),
+                        });
                         let mut s = lock(state);
-                        if s.input_error != error {
+                        // An accepted batch clears only the error of its
+                        // own console.
+                        let same = s
+                            .input_error
+                            .as_ref()
+                            .is_some_and(|e| (e.vm_id, e.run_id) == b_target);
+                        if error.is_some() || same {
                             s.input_error = error;
                         }
                         return Ok(());
@@ -2537,7 +2675,9 @@ async fn execute(c: &mut Client, lanes: &Lanes, command: ServiceCommand) -> Resu
                 }
             }
             let start = if stopped {
-                vm_action(c, state, vm.vm_id, None, VmAction::Start, "start").await
+                vm_action(c, state, vm.vm_id, None, VmAction::Start, "start")
+                    .await
+                    .map(drop)
             } else {
                 Ok(())
             };
@@ -2547,17 +2687,35 @@ async fn execute(c: &mut Client, lanes: &Lanes, command: ServiceCommand) -> Resu
             refresh_after(c, lanes).await;
             start
         }
-        ServiceCommand::Start(vm_id) => {
-            vm_action(c, state, vm_id, None, VmAction::Start, "start").await
+        ServiceCommand::Start(vm_id) => vm_action(c, state, vm_id, None, VmAction::Start, "start")
+            .await
+            .map(drop),
+        ServiceCommand::Stop(vm_id) => vm_action(c, state, vm_id, None, VmAction::Stop, "stop")
+            .await
+            .map(drop),
+        ServiceCommand::StopRun { vm_id, run_id } => {
+            let outcome = vm_action(c, state, vm_id, Some(run_id), VmAction::Stop, "stop").await?;
+            // Accepted only if the operation itself did not fail.
+            let status = match outcome {
+                None => RequestStatus::Done(()),
+                Some(text) => RequestStatus::Failed(Failure::new(text)),
+            };
+            lock(state).stop = Some(StopRequest {
+                vm_id,
+                run_id,
+                status,
+            });
+            Ok(())
         }
-        ServiceCommand::Stop(vm_id) => {
-            vm_action(c, state, vm_id, None, VmAction::Stop, "stop").await
-        }
-        ServiceCommand::ForceStop(vm_id) => {
-            vm_action(c, state, vm_id, None, VmAction::ForceStop, "force stop").await
+        ServiceCommand::ForceStop { vm_id, run_id } => {
+            vm_action(c, state, vm_id, run_id, VmAction::ForceStop, "force stop")
+                .await
+                .map(drop)
         }
         ServiceCommand::Reset { vm_id, run_id } => {
-            vm_action(c, state, vm_id, Some(run_id), VmAction::Reset, "reset").await
+            vm_action(c, state, vm_id, Some(run_id), VmAction::Reset, "reset")
+                .await
+                .map(drop)
         }
         ServiceCommand::ListBaselines(vm_id) => {
             match request(c, Request::ListBaselines { vm_id }).await? {
@@ -2845,6 +3003,7 @@ async fn execute(c: &mut Client, lanes: &Lanes, command: ServiceCommand) -> Resu
                 let mut s = lock(state);
                 s.agents.set_sessions(sessions);
                 s.agents.error = None;
+                s.prune_sessions();
                 Ok(())
             }
             m => Err(context("agent sessions", failure(&m))),
@@ -2996,6 +3155,7 @@ async fn execute(c: &mut Client, lanes: &Lanes, command: ServiceCommand) -> Resu
                     s.reports.list = reports;
                     s.reports.loaded = true;
                     s.reports.error = None;
+                    s.prune_sessions();
                     Ok(())
                 }
                 m => Err(context("session reports", failure(&m))),
@@ -3492,7 +3652,7 @@ async fn vm_action(
     expected_run_id: Option<RunId>,
     action: VmAction,
     name: &str,
-) -> Result<(), Failure> {
+) -> Result<Option<String>, Failure> {
     let req = VmRequest {
         operation_id: OperationId::new_v7(),
         vm_id,
@@ -3504,21 +3664,29 @@ async fn vm_action(
             result: ResponseBody::Operation { operation, .. },
             ..
         } => {
-            let outcome = operation.map_or_else(
-                || format!("{name}: accepted"),
-                |o| match o.error {
-                    Some(code) => {
-                        format!(
+            // The text of a failed operation is also returned (`Some`):
+            // the reply itself is not an error.
+            let (outcome, failed) = operation.map_or_else(
+                || (format!("{name}: accepted"), false),
+                |o| {
+                    let failed = o.error.is_some()
+                        || matches!(
+                            o.status,
+                            OperationStatus::Failed | OperationStatus::Discarded
+                        );
+                    let text = match o.error {
+                        Some(code) => format!(
                             "{name}: {} ({})",
                             operation_status_label(o.status),
                             code.as_str()
-                        )
-                    }
-                    None => format!("{name}: {}", operation_status_label(o.status)),
+                        ),
+                        None => format!("{name}: {}", operation_status_label(o.status)),
+                    };
+                    (text, failed)
                 },
             );
-            lock(state).last_outcome = Some(outcome);
-            Ok(())
+            lock(state).last_outcome = Some(outcome.clone());
+            Ok(failed.then_some(outcome))
         }
         m => Err(context(name, failure(&m))),
     }
@@ -3567,6 +3735,72 @@ mod tests {
         let f = failure(&m);
         assert!(f.unsupported);
         assert!(f.message.contains("later"));
+    }
+
+    /// The failure of an older preview does not replace the preview of the
+    /// file chosen since.
+    #[test]
+    fn stale_vmware_preview_failure_is_ignored() {
+        let mut s = ServiceState::default();
+        let slot = Mutex::new(None);
+        let (a, b) = (PathBuf::from("a.vmx"), PathBuf::from("b.vmx"));
+        mark_pending(
+            &mut s,
+            &slot,
+            &ServiceCommand::PreviewVmwareImport(a.clone()),
+        );
+        mark_pending(
+            &mut s,
+            &slot,
+            &ServiceCommand::PreviewVmwareImport(b.clone()),
+        );
+        mark_failed(
+            &mut s,
+            &ServiceCommand::PreviewVmwareImport(a),
+            Failure::new("old"),
+        );
+        assert_eq!(s.vmware.preview, RequestStatus::Pending);
+        mark_failed(
+            &mut s,
+            &ServiceCommand::PreviewVmwareImport(b),
+            Failure::new("current"),
+        );
+        assert_eq!(
+            s.vmware.preview,
+            RequestStatus::Failed(Failure::new("current"))
+        );
+    }
+
+    /// The per-VM data of a deleted VM is forgotten.
+    #[test]
+    fn deleted_vm_data_is_pruned() {
+        let gone = VmId::new_v7();
+        let mut s = ServiceState::default();
+        s.baselines.insert(gone, BaselineList::default());
+        s.snapshots.insert(gone, SnapshotList::default());
+        s.agents.input_owners.insert(gone, InputOwner::User);
+        // Not in the catalog (deleted).
+        s.prune_vms();
+        assert!(s.baselines.is_empty() && s.snapshots.is_empty());
+        assert!(s.agents.input_owners.is_empty());
+    }
+
+    /// An input refusal is tied to its console: an accepted batch of
+    /// another console does not matter, closing the console clears it.
+    #[test]
+    fn input_error_is_keyed_by_console() {
+        let mut s = ServiceState::default();
+        let (vm, other) = (VmId::new_v7(), VmId::new_v7());
+        let run = RunId::new_v7();
+        s.input_error = Some(InputError {
+            vm_id: vm,
+            run_id: run,
+            message: "input refused".into(),
+        });
+        clear_input_error(&mut s, other);
+        assert!(s.input_error.is_some());
+        clear_input_error(&mut s, vm);
+        assert_eq!(s.input_error, None);
     }
 
     #[test]

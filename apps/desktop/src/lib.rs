@@ -79,6 +79,21 @@ use settings::{SupervisorAction, SupervisorUiState, UiSettings};
 
 pub use dashboard::{SupervisorQemu, dashboard_ui, dashboard_with_qemu_ui};
 
+/// Body of `LightVmApp::state`, on the fields only (callable while
+/// another field of the app is borrowed).
+fn cached_state(
+    service: &Option<Box<dyn Supervisor>>,
+    cache: &std::cell::RefCell<Option<std::sync::Arc<ServiceState>>>,
+) -> Option<std::sync::Arc<ServiceState>> {
+    let s = service.as_ref()?;
+    Some(
+        cache
+            .borrow_mut()
+            .get_or_insert_with(|| std::sync::Arc::new(s.state()))
+            .clone(),
+    )
+}
+
 /// Folder picker: receives the title, returns the chosen folder.
 pub type FolderPicker = Box<dyn FnMut(&str) -> Option<std::path::PathBuf>>;
 /// ISO picker: receives the title, returns the chosen file.
@@ -323,6 +338,9 @@ enum SnapshotConfirm {
         id: SnapshotId,
         label: String,
         vm_running: bool,
+        /// Run of the VM at the opening: the shutdown and the revert
+        /// concern that run only.
+        run_id: Option<RunId>,
         /// "Shut down first" checkbox (VM running only).
         shut_down: bool,
         /// "Take a snapshot of the current state first" checkbox.
@@ -373,9 +391,20 @@ struct SnapshotDialog {
 struct RevertFlow {
     vm_id: VmId,
     snapshot_id: SnapshotId,
+    /// Run the user confirmed the revert of: if the VM runs another one
+    /// (it was started again) the flow is abandoned.
+    run_id: RunId,
     /// What the flow is waiting for.
     waiting: RevertWaiting,
+    /// The orderly stop was sent, at this instant ([`REVERT_STOP_TIMEOUT`]).
+    stop_sent: Option<Instant>,
 }
+
+/// Longest wait for the orderly stop of a running-VM revert: the
+/// supervisor's whole shutdown escalation (powerdown 60 s, quit 5 s,
+/// termination 10 s) plus a margin. After it the flow is abandoned with a
+/// message, so a later unrelated stop never triggers the revert.
+const REVERT_STOP_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// What a [`RevertFlow`] is waiting for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -597,6 +626,12 @@ pub struct LightVmApp {
     discarded_pastes: u64,
     /// Effective rendering backend, set by the eframe loop (F1-16).
     pub rendering: RenderingInfo,
+    /// Copy of the supervisor state taken once per frame (and again after
+    /// a command, which changes it synchronously): the views share it
+    /// instead of each copying the whole state.
+    state_cache: std::cell::RefCell<Option<std::sync::Arc<ServiceState>>>,
+    /// Why the last revert of a running VM was abandoned (VM, text).
+    snapshot_revert_notice: Option<(VmId, String)>,
 }
 
 impl Default for LightVmApp {
@@ -678,6 +713,8 @@ impl LightVmApp {
             keyboard_nav: false,
             discarded_pastes: 0,
             rendering: RenderingInfo::default(),
+            state_cache: std::cell::RefCell::new(None),
+            snapshot_revert_notice: None,
         }
     }
 
@@ -725,6 +762,7 @@ impl LightVmApp {
     /// Connects a supervisor whose configuration the app does not know: the
     /// child process, or a stand-in in tests.
     pub fn set_supervisor(&mut self, s: Box<dyn Supervisor>) {
+        self.invalidate_state();
         self.service = Some(s);
         self.service_error = None;
         self.section = Section::Dashboard;
@@ -876,6 +914,7 @@ impl LightVmApp {
         };
         self.close_console();
         let old = self.service.take();
+        self.invalidate_state();
         self.vm_edit = None;
         self.wizard = None;
         self.dialog = None;
@@ -980,10 +1019,11 @@ impl LightVmApp {
         match &mut self.service {
             Some(s) => {
                 let alive = s.is_alive();
-                let st = s.state();
+                let pid = s.pid();
+                let st = self.state().unwrap_or_default();
                 let (text, tone) = connection_state(alive, &st);
                 SupervisorUiState {
-                    description: format!("{text} (PID {})", s.pid()),
+                    description: format!("{text} (PID {pid})"),
                     tone,
                     running: alive,
                     in_progress: false,
@@ -1085,6 +1125,7 @@ impl LightVmApp {
         if let Some(s) = &self.service {
             s.send(ServiceCommand::SetPolicy(self.settings.ui_loss_policy));
         }
+        self.invalidate_state();
     }
 
     /// Opens a VM by name with the given changes (command line).
@@ -1098,6 +1139,7 @@ impl LightVmApp {
                     changes,
                     create,
                 });
+                self.invalidate_state();
             }
             None => {
                 // The cause of the failed start, if known, stays visible.
@@ -1133,6 +1175,7 @@ impl LightVmApp {
         self.vm_edit = None;
         self.close_console();
         let mut s = self.service.take()?;
+        self.invalidate_state();
         Some(s.stop(service::STOP_TIMEOUT))
     }
 
@@ -1258,8 +1301,14 @@ impl LightVmApp {
         self.fb_updates
     }
 
-    fn state(&self) -> Option<ServiceState> {
-        self.service.as_ref().map(|s| s.state())
+    /// The supervisor state of this frame (see [`Self::state_cache`]).
+    fn state(&self) -> Option<std::sync::Arc<ServiceState>> {
+        cached_state(&self.service, &self.state_cache)
+    }
+
+    /// The next [`Self::state`] reads the supervisor state again.
+    fn invalidate_state(&self) {
+        self.state_cache.borrow_mut().take();
     }
 
     /// Supplies file-transfer dialogs, for integrations and headless tests.
@@ -1286,11 +1335,15 @@ impl LightVmApp {
         if let Some(s) = &self.service {
             s.send(c);
         }
+        // The command changed the state synchronously (pending requests).
+        self.invalidate_state();
     }
 
     /// Draws the whole interface in the root `Ui`.
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         self.frames += 1;
+        // A fresh copy of the supervisor state for this frame.
+        self.invalidate_state();
         let ctx = ui.ctx().clone();
         // F1-13: before any widget no `Paste`/`Copy`/`Cut` remains in the input.
         let filter = clipboard::filter_context(&ctx);
@@ -1323,11 +1376,20 @@ impl LightVmApp {
         };
         if let Some(command) = self
             .transfers
-            .poll(self.state().as_ref(), &ctx, image_active)
+            .poll(self.state().as_deref(), &ctx, image_active)
         {
             self.send(command);
         }
         let state = self.state();
+        // The advance of a running-VM revert, whatever the page (the
+        // offered snapshot, the orderly stop, then the revert), with a
+        // frame at least once a second for its timeout.
+        if let Some(st) = &state
+            && self.snapshot_revert_flow.is_some()
+        {
+            self.snapshot_revert_flow_step(st, Instant::now());
+            ctx.request_repaint_after(Duration::from_secs(1));
+        }
         let target = self
             .live
             .as_ref()
@@ -1357,7 +1419,7 @@ impl LightVmApp {
                 .is_some_and(|(_, _, status)| status.is_pending());
         if let Some(command) =
             self.clipboard_sync
-                .poll(state.as_ref(), target, active, blocked, Instant::now())
+                .poll(state.as_deref(), target, active, blocked, Instant::now())
         {
             self.send(command);
         }
@@ -1399,7 +1461,7 @@ impl LightVmApp {
 
         if self.section != Section::Console {
             if let Some(live) = &mut self.live {
-                live.on_hidden();
+                live.on_hidden(&ctx);
             }
             self.flush_console_input(&ctx);
             // A ticket that arrives after the page was left is not kept.
@@ -1508,8 +1570,7 @@ impl LightVmApp {
     /// supervisor publishes no event for the progress: the VM list is
     /// re-read every [`START_POLL`].
     fn poll_starting(&mut self, ctx: &egui::Context) {
-        let Some(s) = &self.service else { return };
-        let st = s.state();
+        let Some(st) = self.state() else { return };
         if !st.connected || !st.vms.iter().any(|v| v.state == VmState::Starting) {
             self.start_poll = None;
             return;
@@ -1520,7 +1581,7 @@ impl LightVmApp {
             .is_none_or(|t| now.duration_since(t) >= START_POLL)
         {
             self.start_poll = Some(now);
-            s.send(ServiceCommand::Refresh);
+            self.send(ServiceCommand::Refresh);
         }
         ctx.request_repaint_after(START_POLL);
     }
@@ -1560,7 +1621,7 @@ impl LightVmApp {
             return ("Supervisor not started".into(), tone);
         };
         let alive = s.is_alive();
-        let (text, tone) = connection_state(alive, &s.state());
+        let (text, tone) = connection_state(alive, &self.state().unwrap_or_default());
         (format!("Supervisor {text}"), tone)
     }
 
@@ -1569,7 +1630,7 @@ impl LightVmApp {
     fn agent_banner(&mut self, ui: &mut egui::Ui, p: &theme::Palette) {
         let Some(srv) = &mut self.service else { return };
         let alive = srv.is_alive();
-        let state = srv.state();
+        let state = self.state().unwrap_or_default();
         let live = state.agents.live().next().is_some();
         let waiting = !state.agents.requests.is_empty();
         if !live && !(waiting && self.section != Section::Agents) {
@@ -1604,8 +1665,10 @@ impl LightVmApp {
         if !self.dialog_open() && self.closing.is_none() {
             return;
         }
-        let Some(srv) = &self.service else { return };
-        if srv.state().agents.live().next().is_none() {
+        if self
+            .state()
+            .is_none_or(|s| s.agents.live().next().is_none())
+        {
             return;
         }
         let at: Option<egui::Rect> =
@@ -1652,7 +1715,7 @@ impl LightVmApp {
             return;
         };
         let alive = srv.is_alive();
-        let state = srv.state();
+        let state = self.state().unwrap_or_default();
         // A form whose request is gone (decided, expired, withdrawn) closes,
         // unless its own approval just succeeded or failed.
         if let Some(f) = &self.approve_form {
@@ -1947,7 +2010,7 @@ impl LightVmApp {
         let Some(d) = &mut self.revoke_dialog else {
             return;
         };
-        let state = self.service.as_ref().map(|s| s.state()).unwrap_or_default();
+        let state = cached_state(&self.service, &self.state_cache).unwrap_or_default();
         let session = state.agents.session(d.session_id);
         let control = state
             .agents
@@ -2010,7 +2073,7 @@ impl LightVmApp {
         let Some(d) = &mut self.report_dialog else {
             return;
         };
-        let state = self.service.as_ref().map(|s| s.state()).unwrap_or_default();
+        let state = cached_state(&self.service, &self.state_cache).unwrap_or_default();
         let op = d.op();
         let status = state
             .reports
@@ -2268,7 +2331,7 @@ impl LightVmApp {
         let Some(d) = &mut self.pairing_dialog else {
             return;
         };
-        let state = self.service.as_ref().map(|s| s.state()).unwrap_or_default();
+        let state = cached_state(&self.service, &self.state_cache).unwrap_or_default();
         let now = self.fixed_now.unwrap_or_else(UtcTimestamp::now);
         let focus = std::mem::replace(&mut d.focus, false);
         let (spec, pending, error) = match (&state.agents.pairing, d.sent) {
@@ -2347,13 +2410,8 @@ impl LightVmApp {
         };
         let alive = srv.is_alive();
         let pid = srv.pid();
-        let state = srv.state();
+        let state = self.state().unwrap_or_default();
         let active = alive && state.connected;
-
-        // The advance of a running-VM revert is not lost by leaving the
-        // Snapshots page (it keeps watching the offered snapshot, the
-        // orderly stop, then the revert).
-        self.snapshot_revert_flow_step(&state);
 
         if self.wizard.is_some() {
             self.wizard_page(ui, &state, active);
@@ -2531,14 +2589,29 @@ impl LightVmApp {
     }
 
     /// The advance of a revert of a running VM (ADR-0032): the offered
-    /// snapshot of the current state, then the orderly shutdown, then the
-    /// revert itself (it needs the VM off). Runs on every page of the
-    /// Dashboard section, so it is not lost by leaving the page.
-    fn snapshot_revert_flow_step(&mut self, state: &ServiceState) {
+    /// snapshot of the current state, then the orderly shutdown of the run
+    /// the user confirmed, then the revert itself (it needs the VM off).
+    /// Runs on every frame, whatever the page, so it is not lost by
+    /// leaving the page. It is abandoned, with a message on the Snapshots
+    /// page, if the stop is refused or fails, if the VM runs another run,
+    /// or if the VM is not off within [`REVERT_STOP_TIMEOUT`].
+    fn snapshot_revert_flow_step(&mut self, state: &ServiceState, now: Instant) {
         let Some(f) = &mut self.snapshot_revert_flow else {
             return;
         };
-        let vm_id = f.vm_id;
+        let (vm_id, run_id) = (f.vm_id, f.run_id);
+        let Some(vm) = state.vm(vm_id) else {
+            // Deleted meanwhile.
+            self.snapshot_revert_flow = None;
+            return;
+        };
+        let abandon = |why: &str| (vm_id, format!("The revert was not done: {why}."));
+        if vm.state.has_process() && vm.run_id != Some(run_id) {
+            self.snapshot_revert_flow = None;
+            self.snapshot_revert_notice =
+                Some(abandon("the VM was started again before it was off"));
+            return;
+        }
         match f.waiting {
             RevertWaiting::Take => {
                 let done = state
@@ -2548,7 +2621,8 @@ impl LightVmApp {
                 match done.map(|r| &r.status) {
                     Some(RequestStatus::Done(_)) => {
                         f.waiting = RevertWaiting::Stop;
-                        self.send(ServiceCommand::Stop(vm_id));
+                        f.stop_sent = Some(now);
+                        self.send(ServiceCommand::StopRun { vm_id, run_id });
                     }
                     // The snapshot was not taken: the failure is shown on
                     // the page; the VM still runs, the flow stops.
@@ -2557,11 +2631,36 @@ impl LightVmApp {
                 }
             }
             RevertWaiting::Stop => {
-                if state.vm(vm_id).is_some_and(|v| v.state == VmState::Stopped) {
+                let stop = state
+                    .stop
+                    .as_ref()
+                    .filter(|r| r.vm_id == vm_id && r.run_id == run_id);
+                if let Some(service::StopRequest {
+                    status: RequestStatus::Failed(e),
+                    ..
+                }) = stop
+                {
+                    self.snapshot_revert_flow = None;
+                    self.snapshot_revert_notice = Some(abandon(&format!(
+                        "the VM could not be shut down ({})",
+                        e.message
+                    )));
+                    return;
+                }
+                if vm.state == VmState::Stopped {
                     let snapshot_id = f.snapshot_id;
+                    self.snapshot_revert_flow = None;
                     self.snapshot_sent = Some((vm_id, Instant::now()));
                     self.send(ServiceCommand::RevertSnapshot { vm_id, snapshot_id });
+                    return;
+                }
+                if f.stop_sent
+                    .is_some_and(|t| now.saturating_duration_since(t) >= REVERT_STOP_TIMEOUT)
+                {
                     self.snapshot_revert_flow = None;
+                    self.snapshot_revert_notice = Some(abandon(
+                        "the VM did not shut down in time; it was left as it is",
+                    ));
                 }
             }
         }
@@ -2612,6 +2711,11 @@ impl LightVmApp {
             active,
             available: dashboard::baselines_available(state),
             elapsed,
+            notice: self
+                .snapshot_revert_notice
+                .as_ref()
+                .filter(|(id, _)| *id == vm_id)
+                .map(|(_, t)| t.as_str()),
         };
         let open = |kind| SnapshotDialog {
             vm_id,
@@ -2625,7 +2729,10 @@ impl LightVmApp {
                 .and_then(|t| t.snapshots.iter().find(|s| s.snapshot_id == id))
         };
         match snapshots::snapshots_ui(ui, &env) {
-            Some(snapshots::SnapshotAction::Back) => self.snapshots_vm = None,
+            Some(snapshots::SnapshotAction::Back) => {
+                self.snapshots_vm = None;
+                self.snapshot_revert_notice = None;
+            }
             Some(snapshots::SnapshotAction::EmergencyStop) => {
                 self.send(ServiceCommand::EmergencyStop);
             }
@@ -2649,6 +2756,7 @@ impl LightVmApp {
                         id,
                         label: s.name.as_str().to_owned(),
                         vm_running: vm.state == VmState::Running,
+                        run_id: vm.run_id,
                         shut_down: false,
                         snapshot_current: false,
                     }));
@@ -2683,7 +2791,7 @@ impl LightVmApp {
         let Some(d) = &mut self.snapshot_dialog else {
             return;
         };
-        let state = self.service.as_ref().map(|s| s.state()).unwrap_or_default();
+        let state = cached_state(&self.service, &self.state_cache).unwrap_or_default();
         let vm = state.vm(d.vm_id);
         let list = state.snapshots.get(&d.vm_id);
         // The label of the offered snapshot of the current state (the
@@ -2746,6 +2854,16 @@ impl LightVmApp {
                 | SnapshotConfirm::Delete { id, .. }
                 | SnapshotConfirm::Rename { id, .. },
             ) if exists(id).is_none() => Some("This snapshot no longer exists."),
+            (
+                Some(v),
+                SnapshotConfirm::Revert {
+                    vm_running: true,
+                    run_id,
+                    ..
+                },
+            ) if v.state.has_process() && v.run_id != *run_id => {
+                Some("The VM was restarted meanwhile: open the revert again.")
+            }
             _ => None,
         };
         if error.is_none() && !pending {
@@ -2886,6 +3004,7 @@ impl LightVmApp {
                         id,
                         label,
                         vm_running,
+                        run_id,
                         snapshot_current,
                         ..
                     } => {
@@ -2893,7 +3012,10 @@ impl LightVmApp {
                         let label = label.clone();
                         let running = *vm_running;
                         let snapshot_current = *snapshot_current;
+                        let run_id = *run_id;
                         if running {
+                            let Some(run_id) = run_id else { return };
+                            self.snapshot_revert_notice = None;
                             // The dialog closes: the flow (offered snapshot,
                             // orderly stop, then the revert) runs on the page.
                             if snapshot_current {
@@ -2910,14 +3032,18 @@ impl LightVmApp {
                                 self.snapshot_revert_flow = Some(RevertFlow {
                                     vm_id,
                                     snapshot_id: id,
+                                    run_id,
                                     waiting: RevertWaiting::Take,
+                                    stop_sent: None,
                                 });
                             } else {
-                                self.send(ServiceCommand::Stop(vm_id));
+                                self.send(ServiceCommand::StopRun { vm_id, run_id });
                                 self.snapshot_revert_flow = Some(RevertFlow {
                                     vm_id,
                                     snapshot_id: id,
+                                    run_id,
                                     waiting: RevertWaiting::Stop,
+                                    stop_sent: Some(now),
                                 });
                             }
                             self.snapshot_dialog = None;
@@ -2969,7 +3095,7 @@ impl LightVmApp {
         let Some(d) = &mut self.baseline_dialog else {
             return;
         };
-        let state = self.service.as_ref().map(|s| s.state()).unwrap_or_default();
+        let state = cached_state(&self.service, &self.state_cache).unwrap_or_default();
         let vm = state.vm(d.vm_id);
         let list = state.baselines.get(&d.vm_id);
         let request = state
@@ -3250,7 +3376,7 @@ impl LightVmApp {
 
     fn confirm_dialog_ui(&mut self, ui: &egui::Ui) {
         let Some(d) = &mut self.dialog else { return };
-        let state = self.service.as_ref().map(|s| s.state()).unwrap_or_default();
+        let state = cached_state(&self.service, &self.state_cache).unwrap_or_default();
         let vm = state.vm(d.kind.vm_id());
         let (spec, mut error, pending) = match d.kind {
             Confirm::ForceStop(_) => (
@@ -3316,7 +3442,9 @@ impl LightVmApp {
             (Confirm::Delete(_), Some(v)) => {
                 v.state == VmState::Stopped && v.baselines.operation.is_none()
             }
-            (Confirm::ForceStop(_), Some(v)) => v.state.has_process(),
+            // The run confirmed only: a VM started again meanwhile is a
+            // different run, not forced off without a new confirmation.
+            (Confirm::ForceStop(_), Some(v)) => v.state.has_process() && v.run_id == d.run_id,
             (Confirm::Reset(_), Some(v)) => v.state == VmState::Running && v.run_id == d.run_id,
             (Confirm::DetachInstall(_), Some(v)) => {
                 v.state == VmState::Stopped
@@ -3341,7 +3469,10 @@ impl LightVmApp {
             Some(dialogs::Choice::Cancel) => self.dialog = None,
             Some(dialogs::Choice::Confirm) if still_valid => {
                 let command = match d.kind {
-                    Confirm::ForceStop(id) => ServiceCommand::ForceStop(id),
+                    Confirm::ForceStop(id) => ServiceCommand::ForceStop {
+                        vm_id: id,
+                        run_id: d.run_id,
+                    },
                     Confirm::Reset(id) => match d.run_id {
                         Some(run_id) => ServiceCommand::Reset { vm_id: id, run_id },
                         None => return,
@@ -3404,7 +3535,7 @@ impl LightVmApp {
         if !s.is_alive() {
             return Vec::new();
         }
-        let st = s.state();
+        let st = self.state().unwrap_or_default();
         if !st.connected {
             return Vec::new();
         }
@@ -3424,7 +3555,7 @@ impl LightVmApp {
             return;
         };
         let reachable = self.reachable_active_vms();
-        let state = self.state().unwrap_or_default();
+        let state = cached_state(&self.service, &self.state_cache).unwrap_or_default();
         let view = match &c {
             Closing::Ask { .. } => {
                 if reachable.is_empty() {
@@ -3517,6 +3648,7 @@ impl LightVmApp {
     /// Closes the display session and sends the key releases; a console
     /// ticket received and not used is discarded.
     fn close_console(&mut self) {
+        let closed = self.live.as_ref().map(|l| l.target().vm_id);
         if let Some(mut live) = self.live.take() {
             for b in live.close() {
                 self.send(ServiceCommand::Input(b));
@@ -3524,7 +3656,11 @@ impl LightVmApp {
         }
         if let Some(s) = &self.service {
             s.discard_console_ticket();
+            if let Some(vm_id) = closed {
+                s.clear_input_error(vm_id);
+            }
         }
+        self.invalidate_state();
         self.ticket_request = None;
     }
 
@@ -3632,7 +3768,16 @@ impl LightVmApp {
             }
         }
         let state = self.state();
-        let mut input_error = state.as_ref().and_then(|s| s.input_error.clone());
+        // Only the refused input of this console (VM and run).
+        let target = self
+            .live
+            .as_ref()
+            .map(|l| (l.target().vm_id, l.target().run_id));
+        let mut input_error = state
+            .as_ref()
+            .and_then(|s| s.input_error.as_ref())
+            .filter(|e| target == Some((e.vm_id, e.run_id)))
+            .map(|e| e.message.clone());
         if let Some((name, vm_id)) = self
             .live
             .as_ref()
@@ -3687,19 +3832,19 @@ impl LightVmApp {
                 }
                 ui.add_space(4.0);
             }
-            self.tools_clipboard_ui(ui, ctx, vm_id, state.as_ref(), agent.is_none());
+            self.tools_clipboard_ui(ui, ctx, vm_id, state.as_deref(), agent.is_none());
             let tools_busy = self.tools_clipboard_pending.is_some()
                 || self.clipboard_sync.busy()
                 || state
                     .as_ref()
                     .and_then(|s| s.tools.as_ref())
                     .is_some_and(|(_, _, s)| s.is_pending());
-            self.transfers.ui(ui, state.as_ref(), vm_id, tools_busy);
+            self.transfers.ui(ui, state.as_deref(), vm_id, tools_busy);
             if !self.dialog_open() && self.closing.is_none() {
                 self.transfers.drops(
                     ctx,
                     ui.available_rect_before_wrap(),
-                    state.as_ref(),
+                    state.as_deref(),
                     vm_id,
                     tools_busy,
                 );
@@ -3738,7 +3883,7 @@ impl LightVmApp {
         }
         page(ui, "lightvm_page_console", |ui| {
             theme::page_header(ui, "Console", CONSOLE_DESCRIPTION, |_| {});
-            self.console_empty_state(ui, state.as_ref());
+            self.console_empty_state(ui, state.as_deref());
         });
     }
 
@@ -4122,7 +4267,7 @@ impl LightVmApp {
         let Some(d) = &mut self.media_dialog else {
             return;
         };
-        let state = self.service.as_ref().map(|s| s.state()).unwrap_or_default();
+        let state = cached_state(&self.service, &self.state_cache).unwrap_or_default();
         match media_library::dialog_ui(ui, d, &state) {
             media_library::DialogOutcome::Keep => {}
             media_library::DialogOutcome::Close => self.media_dialog = None,
@@ -4393,4 +4538,75 @@ pub fn status_bar_ui(ui: &mut egui::Ui, info: &RenderingInfo) {
                 .on_hover_text(info.explanation());
         }
     });
+}
+
+#[cfg(test)]
+mod revert_flow_tests {
+    use super::*;
+
+    fn running_vm(vm_id: VmId, run_id: RunId) -> lightvm_proto::ipc::VmSummary {
+        let name = lightvm_proto::VmName::parse("lab").unwrap();
+        lightvm_proto::ipc::VmSummary {
+            vm_id,
+            name: name.clone(),
+            state: VmState::Running,
+            run_id: Some(run_id),
+            config: lightvm_proto::VmConfig {
+                tools: Default::default(),
+                name,
+                guest_os: lightvm_proto::GuestOs::UbuntuLtsX86_64,
+                vcpus: 2,
+                memory_mib: 4096,
+                disk_gib: 32,
+                network: lightvm_proto::NetworkProfile::Offline,
+                endpoints: Vec::new(),
+                install_media: None,
+                data_media: None,
+                firmware: lightvm_proto::Firmware::Uefi,
+                limits: Default::default(),
+                imported: None,
+            },
+            config_revision: 1,
+            disk_used_bytes: None,
+            baselines: Default::default(),
+            snapshots: Default::default(),
+            start: Default::default(),
+            vcpu_halt: None,
+        }
+    }
+
+    /// The VM does not go off within the timeout: the flow is dropped with
+    /// a message, and a stop much later does not revert it.
+    #[test]
+    fn revert_flow_is_dropped_after_the_stop_timeout() {
+        let vm_id = VmId::new_v7();
+        let run_id = RunId::new_v7();
+        let mut app = LightVmApp::new(false);
+        let t0 = Instant::now();
+        app.snapshot_revert_flow = Some(RevertFlow {
+            vm_id,
+            snapshot_id: SnapshotId::new_v7(),
+            run_id,
+            waiting: RevertWaiting::Stop,
+            stop_sent: Some(t0),
+        });
+        let mut state = ServiceState {
+            vms: vec![running_vm(vm_id, run_id)],
+            ..ServiceState::default()
+        };
+        app.snapshot_revert_flow_step(&state, t0 + REVERT_STOP_TIMEOUT / 2);
+        assert!(app.snapshot_revert_flow.is_some(), "still waiting");
+        app.snapshot_revert_flow_step(&state, t0 + REVERT_STOP_TIMEOUT);
+        assert!(app.snapshot_revert_flow.is_none());
+        assert!(
+            app.snapshot_revert_notice
+                .as_ref()
+                .is_some_and(|(id, t)| *id == vm_id && t.contains("did not shut down in time"))
+        );
+        // Off much later: nothing happens (no flow left).
+        state.vms[0].state = VmState::Stopped;
+        state.vms[0].run_id = None;
+        app.snapshot_revert_flow_step(&state, t0 + REVERT_STOP_TIMEOUT * 100);
+        assert!(app.snapshot_revert_flow.is_none());
+    }
 }

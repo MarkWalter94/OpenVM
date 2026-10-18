@@ -110,7 +110,10 @@ fn reset_and_force_stop_ask_and_carry_the_run() {
                 vm_id: common::vm_id(2),
                 run_id: common::run_id(2)
             },
-            ServiceCommand::ForceStop(common::vm_id(2)),
+            ServiceCommand::ForceStop {
+                vm_id: common::vm_id(2),
+                run_id: Some(common::run_id(2)),
+            },
         ]
     );
     assert!(!h.state().dialog_open());
@@ -153,7 +156,10 @@ fn vcpu_halt_notice_offers_reset_and_force_stop() {
                 vm_id: common::vm_id(2),
                 run_id: common::run_id(2)
             },
-            ServiceCommand::ForceStop(common::vm_id(2)),
+            ServiceCommand::ForceStop {
+                vm_id: common::vm_id(2),
+                run_id: Some(common::run_id(2)),
+            },
         ]
     );
     // The reset cleared the halt: no notice.
@@ -179,6 +185,22 @@ fn stale_confirmation_is_refused() {
     h.run_steps(4);
     h.get_by_label("The VM state changed: the action is no longer possible.");
     h.get_by_role_and_label(Role::Button, "Delete VM").click();
+    h.run_steps(4);
+    assert!(hs.actions().is_empty());
+}
+
+/// A force stop confirmed for one run does not stop the next one: the VM
+/// was stopped and started again while the dialog was open.
+#[test]
+fn force_stop_of_a_restarted_vm_is_refused() {
+    let (mut h, hs) = harness(connected(vec![vm(2, "busy", VmState::Running)]));
+    h.run_steps(4);
+    more(&mut h, "busy", "Force stop…");
+    h.get_by_label("Force stop “busy”?");
+    hs.update(|s| s.vms[0].run_id = Some(common::run_id(9)));
+    h.run_steps(4);
+    h.get_by_label("The VM state changed: the action is no longer possible.");
+    h.get_by_role_and_label(Role::Button, "Force stop").click();
     h.run_steps(4);
     assert!(hs.actions().is_empty());
 }

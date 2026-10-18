@@ -96,6 +96,9 @@ impl Supervisor for FakeSupervisor {
     fn discard_console_ticket(&self) {
         *self.h.ticket.lock().unwrap() = None;
     }
+    fn clear_input_error(&self, vm_id: VmId) {
+        lightvm_desktop::service::clear_input_error(&mut self.h.state.lock().unwrap(), vm_id);
+    }
 }
 
 pub(crate) fn host() -> HostCapacity {
