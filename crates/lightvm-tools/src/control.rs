@@ -267,11 +267,12 @@ impl ControlServer {
                                 let mut wire =
                                     crate::wire_io::Wire::new(&mut stream, p.deadline, cancelled);
                                 protocol::write(&mut wire, &p.request)?;
-                                let response: Response = protocol::read(&mut wire)?
+                                let mut response: Response = protocol::read(&mut wire)?
                                     .ok_or_else(|| invalid("guest disconnected"))?;
                                 if response.id != p.request.id {
                                     return Err(invalid("wrong reply id"));
                                 }
+                                drop_unusable_entries(&p.request.command, &mut response.reply);
                                 response.reply.validate()?;
                                 if matches!(p.request.command, Command::Flush) {
                                     if !matches!(response.reply, Reply::Ok | Reply::Error { .. }) {
@@ -359,6 +360,28 @@ impl ControlServer {
 impl Drop for ControlServer {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+/// A guest file name the host cannot use as a path component (or a repeated
+/// one) is a per-entry problem: it is omitted from the listing instead of
+/// failing the reply and tearing down the channel. Validation of every name
+/// that remains is unchanged.
+fn drop_unusable_entries(command: &Command, reply: &mut Reply) {
+    if let (
+        Command::File {
+            request: FileRequest::List { .. },
+        },
+        Reply::File {
+            reply: protocol::FileReply::Entries { entries },
+        },
+    ) = (command, reply)
+    {
+        let mut names = std::collections::BTreeSet::new();
+        entries.retain(|e| {
+            protocol::RelativePath::new(vec![e.name.clone()]).is_ok()
+                && names.insert(e.name.clone())
+        });
     }
 }
 

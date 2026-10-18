@@ -94,7 +94,7 @@ def components(value):
         if (not isinstance(part, str) or not part or len(part.encode()) > 255
                 or part in (".", "..") or part.endswith((".", " "))
                 or part.split(".")[0].upper() in {"CON", "PRN", "AUX", "NUL", *("COM"+str(i) for i in range(1, 10)), *("LPT"+str(i) for i in range(1, 10))}
-                or any(ord(c) < 32 or c in '/\\:<>"|?*' for c in part)):
+                or any(ord(c) < 32 or 127 <= ord(c) < 160 or c in '/\\:<>"|?*' for c in part)):
             raise ValueError("invalid path")
     return value
 
@@ -199,6 +199,12 @@ class GuestFiles:
                     entries = []
                     for child in os.listdir(directory):
                         if child.startswith(".lightvm-transfer-"):
+                            continue
+                        try:
+                            # The host refuses the whole listing if one name
+                            # breaks its path rules; such files stay local.
+                            components([child])
+                        except ValueError:
                             continue
                         metadata = os.stat(child, dir_fd=directory, follow_symlinks=False)
                         if stat.S_ISLNK(metadata.st_mode):

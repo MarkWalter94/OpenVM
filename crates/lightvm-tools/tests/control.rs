@@ -280,6 +280,64 @@ fn guest_file_requests_cannot_name_host_shares_or_delete_guest_files() {
     }
 }
 
+#[test]
+fn unusable_listing_names_are_dropped_without_closing_the_channel() {
+    use lightvm_tools::protocol::{Entry, FileReply, FileRequest, RelativePath};
+    let (server, _, hello) = setup();
+    let mut stream = connect(&server, &hello);
+    let guest = std::thread::spawn(move || {
+        let request: Request = protocol::read(&mut stream).unwrap().unwrap();
+        let entries = ["notes.", "a:b", "CON.txt", "a\\b", "ok.txt", "ok.txt", ".."]
+            .into_iter()
+            .map(|name| Entry {
+                name: name.into(),
+                directory: false,
+                size: 1,
+            })
+            .collect();
+        protocol::write(
+            &mut stream,
+            &Response {
+                id: request.id,
+                reply: Reply::File {
+                    reply: FileReply::Entries { entries },
+                },
+            },
+        )
+        .unwrap();
+        let request: Request = protocol::read(&mut stream).unwrap().unwrap();
+        protocol::write(
+            &mut stream,
+            &Response {
+                id: request.id,
+                reply: Reply::Clipboard {
+                    text: "still connected".into(),
+                },
+            },
+        )
+        .unwrap();
+    });
+    let reply = server
+        .call(Command::File {
+            request: FileRequest::List {
+                share: "outbox".into(),
+                path: RelativePath::new(vec![]).unwrap(),
+            },
+        })
+        .unwrap();
+    assert!(matches!(
+        reply,
+        Reply::File { reply: FileReply::Entries { entries } }
+            if entries.len() == 1 && entries[0].name == "ok.txt"
+    ));
+    assert!(server.connected());
+    assert!(matches!(
+        server.call(Command::ClipboardRead).unwrap(),
+        Reply::Clipboard { text } if text == "still connected"
+    ));
+    guest.join().unwrap();
+}
+
 /// Executes the production Python guest against the production host RPC over
 /// real TCP. HOME is isolated; no clipboard or accessibility API is used.
 #[cfg(unix)]
@@ -374,4 +432,17 @@ fn production_python_guest_streams_verified_inbox_and_outbox() {
         }
     }
     assert_eq!(result, data);
+    // A guest-local name the host cannot use is skipped by the guest, so the
+    // rest of the listing still arrives.
+    std::fs::write(docs.join("outbox/notes."), b"local").unwrap();
+    match file(F::List {
+        share: "outbox".into(),
+        path: P::new(vec![]).unwrap(),
+    }) {
+        R::Entries { entries } => {
+            let names: Vec<_> = entries.iter().map(|e| e.name.as_str()).collect();
+            assert_eq!(names, ["verified.bin"]);
+        }
+        r => panic!("{r:?}"),
+    }
 }

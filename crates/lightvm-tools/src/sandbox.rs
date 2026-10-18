@@ -8,6 +8,37 @@ use std::path::{Component, Path};
 
 use crate::protocol::{RelativePath, invalid};
 
+/// Prefix of the host-owned staging names used by unpublished transfers.
+pub(crate) const STAGING_PREFIX: &str = ".lightvm-transfer-";
+
+/// Names reserved for host staging files. The guest learns a transfer id
+/// from `Begin`, so it must never address these names itself. NTFS compares
+/// names case-insensitively and may also expose an 8.3 alias of them.
+pub(crate) fn reserved_name(name: &str) -> bool {
+    let staging = name
+        .get(..STAGING_PREFIX.len())
+        .is_some_and(|p| p.eq_ignore_ascii_case(STAGING_PREFIX));
+    #[cfg(windows)]
+    let staging = staging || short_name_alias(name);
+    staging
+}
+
+/// An 8.3 generated alias (`BASE~N.EXT`) can name any long file on volumes
+/// with short names enabled, so it is never accepted as guest input.
+#[cfg(windows)]
+fn short_name_alias(name: &str) -> bool {
+    let (base, ext) = name.split_once('.').unwrap_or((name, ""));
+    let Some((stem, digits)) = base.rsplit_once('~') else {
+        return false;
+    };
+    base.len() <= 8
+        && !stem.is_empty()
+        && !digits.is_empty()
+        && digits.bytes().all(|b| b.is_ascii_digit())
+        && ext.len() <= 3
+        && !ext.contains('.')
+}
+
 #[derive(Debug)]
 pub struct Directory {
     file: File,
@@ -332,9 +363,7 @@ impl Directory {
             names
         };
         for name in names {
-            if RelativePath::new(vec![name.clone()]).is_err()
-                || name.starts_with(".lightvm-transfer-")
-            {
+            if RelativePath::new(vec![name.clone()]).is_err() || reserved_name(&name) {
                 continue;
             }
             let metadata = if let Ok(f) = self.read_file(&name) {

@@ -68,16 +68,12 @@ impl Journal {
                 return Err(invalid("invalid Tools recovery path"));
             }
             record.path.validate()?;
-            let root = Directory::open(&record.root)?;
-            let (parent, _) = root.parent(&record.path)?;
-            match parent.read_file(&record.staging) {
-                Ok(file) => {
-                    drop(file);
-                    parent.remove(&record.staging)?;
-                    parent.sync()?;
-                }
-                Err(e) if e.kind() == io::ErrorKind::NotFound => (),
-                Err(e) => return Err(e),
+            // The share may have been changed by the guest or the user since
+            // the record was written. Anything other than a regular staging
+            // file (a directory, a link, a moved parent) is left untouched and
+            // only this record is dropped; it must not block every later start.
+            if let Err(e) = remove_staging(&record) {
+                eprintln!("LightVM Tools: dropped journal record {id} without cleanup ({e})");
             }
             self.root.remove(&entry.name)?;
             recovered += 1;
@@ -110,6 +106,21 @@ impl Journal {
             root: self.root.clone(),
             name,
         })
+    }
+}
+/// Removes the staging file only if it is still a regular file; links are
+/// never followed. A missing staging file means there is nothing to do.
+fn remove_staging(record: &Entry) -> io::Result<()> {
+    let root = Directory::open(&record.root)?;
+    let (parent, _) = root.parent(&record.path)?;
+    match parent.read_file(&record.staging) {
+        Ok(file) => {
+            drop(file);
+            parent.remove(&record.staging)?;
+            parent.sync()
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
     }
 }
 fn valid_id(id: &str) -> bool {

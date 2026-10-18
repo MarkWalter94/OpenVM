@@ -456,3 +456,114 @@ fn replacing_a_share_path_cannot_redirect_an_open_share() {
     );
     assert!(matches!(r, FileReply::Data { data, .. } if data == protocol::encode(b"approved")));
 }
+
+#[test]
+fn guest_cannot_address_host_staging_names() {
+    let t = Temp::new();
+    let journal_dir = Temp::new();
+    let mut s = service(&t, true)
+        .with_journal(lightvm_tools::journal::Journal::open(&journal_dir.0).unwrap())
+        .unwrap();
+    let gate = Gate::new(grant(true));
+    let p = gate.permit();
+    let data = b"unverified";
+    let id = begin(&mut s, &p, "final.bin", data);
+    assert!(matches!(
+        s.dispatch(
+            &p,
+            FileRequest::Write {
+                transfer: id.clone(),
+                offset: 0,
+                data: protocol::encode(data)
+            }
+        ),
+        FileReply::Ok
+    ));
+    let staging = format!(".lightvm-transfer-{id}");
+    assert!(t.0.join(&staging).is_file());
+    for name in [staging.clone(), staging.to_ascii_uppercase()] {
+        let share = || "builds".to_string();
+        for request in [
+            FileRequest::Remove {
+                share: share(),
+                path: path(&name),
+            },
+            FileRequest::Mkdir {
+                share: share(),
+                path: path(&name),
+            },
+            FileRequest::Rename {
+                share: share(),
+                from: path(&name),
+                to: path("final.bin"),
+                replace: true,
+            },
+            FileRequest::Rename {
+                share: share(),
+                from: path("final.bin"),
+                to: path(&name),
+                replace: true,
+            },
+            FileRequest::Read {
+                share: share(),
+                path: path(&name),
+                offset: 0,
+                length: 16,
+            },
+            FileRequest::List {
+                share: share(),
+                path: path(&name),
+            },
+            FileRequest::Begin {
+                replace: false,
+                share: share(),
+                path: RelativePath::new(vec![name.clone(), "inner".into()]).unwrap(),
+                size: 0,
+                sha256: protocol::encode(&Sha256::digest([])),
+            },
+        ] {
+            denied(s.dispatch(&p, request));
+        }
+    }
+    assert!(t.0.join(&staging).is_file());
+    assert!(!t.0.join("final.bin").exists());
+    assert!(matches!(
+        s.dispatch(&p, FileRequest::Cancel { transfer: id }),
+        FileReply::Ok
+    ));
+    // Cleanup removed the staging file and its journal record.
+    assert_eq!(std::fs::read_dir(&t.0).unwrap().count(), 0);
+    assert_eq!(std::fs::read_dir(&journal_dir.0).unwrap().count(), 0);
+}
+
+#[test]
+fn large_listings_are_bounded_to_one_frame() {
+    let t = Temp::new();
+    let long = "x".repeat(246);
+    for i in 0..protocol::MAX_ENTRIES {
+        std::fs::write(t.0.join(format!("{i:04}{long}")), b"").unwrap();
+    }
+    let mut s = service(&t, false);
+    let gate = Gate::new(grant(false));
+    let reply = s.dispatch(
+        &gate.permit(),
+        FileRequest::List {
+            share: "builds".into(),
+            path: RelativePath::new(vec![]).unwrap(),
+        },
+    );
+    let FileReply::Entries { entries } = &reply else {
+        panic!("{reply:?}");
+    };
+    assert!(!entries.is_empty() && entries.len() < protocol::MAX_ENTRIES);
+    // The sorted head is kept.
+    assert!(
+        entries
+            .iter()
+            .enumerate()
+            .all(|(i, e)| e.name == format!("{i:04}{long}"))
+    );
+    let mut frame = Vec::new();
+    protocol::write(&mut frame, &reply).unwrap();
+    assert!(frame.len() - 4 <= protocol::MAX_FRAME);
+}

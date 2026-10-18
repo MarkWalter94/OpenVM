@@ -56,7 +56,7 @@ fn recovery_after_publication_never_removes_destination() {
 }
 #[cfg(unix)]
 #[test]
-fn recovery_refuses_replaced_staging_symlink() {
+fn recovery_never_follows_a_replaced_staging_symlink() {
     let journal_dir = Temp::new();
     let share = Temp::new();
     let journal = Journal::open(&journal_dir.0).unwrap();
@@ -65,7 +65,32 @@ fn recovery_refuses_replaced_staging_symlink() {
     let _cleanup = journal.prepare(&share.0, &path, &id).unwrap();
     let external = share.0.join("untouched");
     std::fs::write(&external, b"keep").unwrap();
-    std::os::unix::fs::symlink(&external, share.0.join(format!(".lightvm-transfer-{id}"))).unwrap();
-    assert!(journal.recover().is_err());
+    let link = share.0.join(format!(".lightvm-transfer-{id}"));
+    std::os::unix::fs::symlink(&external, &link).unwrap();
+    // The record is dropped; neither the link nor its target is touched.
+    assert_eq!(journal.recover().unwrap(), 1);
+    assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
     assert_eq!(std::fs::read(external).unwrap(), b"keep");
+    assert_eq!(journal.recover().unwrap(), 0);
+}
+#[test]
+fn unexpected_staging_entry_drops_the_record_without_blocking_recovery() {
+    let journal_dir = Temp::new();
+    let share = Temp::new();
+    let journal = Journal::open(&journal_dir.0).unwrap();
+    let id = Secret::generate().unwrap().export();
+    let path = RelativePath::new(vec!["final".into()]).unwrap();
+    let _cleanup = journal.prepare(&share.0, &path, &id).unwrap();
+    // The staging name was replaced by a non-empty directory.
+    let stage = share.0.join(format!(".lightvm-transfer-{id}"));
+    std::fs::create_dir(&stage).unwrap();
+    std::fs::write(stage.join("keep"), b"keep").unwrap();
+    // A second record whose parent directory no longer exists.
+    let moved = RelativePath::new(vec!["gone".into(), "final".into()]).unwrap();
+    let other = Secret::generate().unwrap().export();
+    let _moved = journal.prepare(&share.0, &moved, &other).unwrap();
+    assert_eq!(journal.recover().unwrap(), 2);
+    assert_eq!(std::fs::read(stage.join("keep")).unwrap(), b"keep");
+    assert_eq!(std::fs::read_dir(&journal_dir.0).unwrap().count(), 0);
+    assert_eq!(journal.recover().unwrap(), 0);
 }

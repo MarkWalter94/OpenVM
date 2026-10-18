@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use crate::policy::{Feature, Permit, Secret};
 use crate::protocol::{self, FileReply, FileRequest, MAX_CHUNK, RelativePath, invalid};
-use crate::sandbox::Directory;
+use crate::sandbox::{Directory, STAGING_PREFIX, reserved_name};
 
 /// Default per-file limit (4 GiB); no whole-file buffers are used.
 pub const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
@@ -209,12 +209,33 @@ impl FileService {
     }
 
     fn execute(&mut self, permit: &Permit, request: FileRequest) -> io::Result<FileReply> {
+        // Staging files belong to the host until publication: removing,
+        // replacing or renaming one would publish unverified content or
+        // block its cleanup and journal recovery.
+        let paths: &[&RelativePath] = match &request {
+            FileRequest::List { path, .. }
+            | FileRequest::Read { path, .. }
+            | FileRequest::Begin { path, .. }
+            | FileRequest::Mkdir { path, .. }
+            | FileRequest::Remove { path, .. } => &[path],
+            FileRequest::Rename { from, to, .. } => &[from, to],
+            FileRequest::Write { .. } | FileRequest::Commit { .. } | FileRequest::Cancel { .. } => {
+                &[]
+            }
+        };
+        if paths
+            .iter()
+            .any(|p| p.components().iter().any(|c| reserved_name(c)))
+        {
+            return Err(invalid("reserved path component"));
+        }
         match request {
             FileRequest::List { share, path } => {
                 let s = self.share(&share, false)?;
-                let entries = permit.with(Feature::ShareRead, Some((&share, false)), || {
+                let mut entries = permit.with(Feature::ShareRead, Some((&share, false)), || {
                     s.root.descend(&path)?.entries()
                 })?;
+                fit_frame(&mut entries)?;
                 Ok(FileReply::Entries { entries })
             }
             FileRequest::Read {
@@ -267,7 +288,7 @@ impl FileService {
                 }
                 let s = self.share(&share, true)?;
                 let id = Secret::generate()?.export();
-                let staging = format!(".lightvm-transfer-{id}");
+                let staging = format!("{STAGING_PREFIX}{id}");
                 let (parent, name, file, journal) =
                     permit.with(Feature::ShareWrite, Some((&share, true)), || {
                         let (parent, name) = s.root.parent(&path)?;
@@ -461,4 +482,27 @@ impl FileService {
             }
         }
     }
+}
+
+/// A listing of many long names can exceed one frame. The sorted tail is
+/// omitted so the reply always fits, instead of failing the write and
+/// closing the channel (which would cancel every open transfer).
+fn fit_frame(entries: &mut Vec<protocol::Entry>) -> io::Result<()> {
+    fn size<T: serde::Serialize>(value: &T) -> io::Result<usize> {
+        serde_json::to_vec(value)
+            .map(|b| b.len())
+            .map_err(|_| invalid("listing serialization failed"))
+    }
+    let mut used = size(&FileReply::Entries {
+        entries: Vec::new(),
+    })?;
+    for (i, entry) in entries.iter().enumerate() {
+        // One separating comma per entry after the first.
+        used += size(entry)? + usize::from(i > 0);
+        if used > protocol::MAX_FRAME {
+            entries.truncate(i);
+            break;
+        }
+    }
+    Ok(())
 }
