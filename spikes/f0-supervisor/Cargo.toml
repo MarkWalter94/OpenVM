@@ -15,7 +15,7 @@ name = "f0-supervisor"
 path = "src/main.rs"
 
 [dependencies]
-serde_json = "=1.0.151"
+serde_json = "=1.0.154"
 uds_windows = "=1.2.1"
 
 [target.'cfg(windows)'.dependencies.windows-sys]

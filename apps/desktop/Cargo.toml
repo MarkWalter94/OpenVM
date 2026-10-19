@@ -30,7 +30,7 @@ glow = ["eframe/glow"]
 dev-tools = []
 
 [dependencies]
-arboard = { version = "=3.6.1", default-features = false, features = ["image-data"] }
+arboard = { version = "=3.7.0", default-features = false, features = ["image-data"] }
 # `links` (automatic opening of URLs) is excluded on purpose: ROADMAP 6.0
 # forbids automatically openable links. `persistence` is not needed by the spike.
 # Note F1-13: eframe 0.36.2 always enables `egui-winit/clipboard` on native
@@ -49,13 +49,13 @@ rfb-client = { path = "../../crates/rfb-client" }
 lightvm-proto = { path = "../../crates/lightvm-proto" }
 lightvm-service = { path = "../../crates/lightvm-service", default-features = false }
 serde = { version = "=1.0.229", features = ["derive"] }
-serde_json = "=1.0.151"
-tokio = { version = "=1.53.2", features = ["rt", "sync", "time", "macros"] }
+serde_json = "=1.0.154"
+tokio = { version = "=1.53.3", features = ["rt", "sync", "time", "macros"] }
 # Session reports (F5): screenshots read on demand are checked against their
 # SHA-256 and decoded for display (same versions as the rest of the
 # workspace; the UI never writes them to disk). `png` also encodes the
 # console screenshots.
-sha2 = "=0.11.0"
+sha2 = "=0.11.1"
 png = "=0.18.1"
 
 # Native file and folder dialogs (no text field): Windows and macOS (AppKit);
