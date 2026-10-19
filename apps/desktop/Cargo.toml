@@ -68,7 +68,7 @@ rfd = { version = "=0.15.4", default-features = false }
 # OLE copy drag of a prepared Outbox file. Reuse MIT/Apache-2.0 Windows
 # bindings already in the lockfile; no GTK/third-party drag dependency.
 windows = { version = "=0.62.2", features = ["Win32_System_Com", "Win32_System_Ole", "Win32_System_SystemServices", "Win32_UI_Shell"] }
-windows-core = "=0.62.2"
+windows-core = "=0.100.0"
 
 [dev-dependencies]
 # `snapshot` + `wgpu`: graphical snapshots compared with the files in
