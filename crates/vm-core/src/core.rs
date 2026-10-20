@@ -516,6 +516,7 @@ where
             (Capability::FilesTransfer, config.files_transfer),
             (Capability::UiInspect, config.ui_inspect),
             (Capability::UiAct, config.ui_act),
+            (Capability::GuestExec, config.guest_exec),
             (Capability::Usb, !config.usb_devices.is_empty()),
         ] {
             if configured {

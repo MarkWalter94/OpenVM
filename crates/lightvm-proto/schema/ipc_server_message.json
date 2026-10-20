@@ -514,7 +514,8 @@
             "files.transfer",
             "usb",
             "ui.inspect",
-            "ui.act"
+            "ui.act",
+            "guest.exec"
           ]
         },
         {
@@ -5304,6 +5305,56 @@
         {
           "type": "object",
           "properties": {
+            "cancelled": {
+              "type": "boolean"
+            },
+            "exit_code": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32"
+            },
+            "job": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "result": {
+              "type": "string",
+              "const": "exec"
+            },
+            "running": {
+              "type": "boolean"
+            },
+            "stderr": {
+              "type": "string"
+            },
+            "stdout": {
+              "type": "string"
+            },
+            "timed_out": {
+              "type": "boolean"
+            },
+            "truncated": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "result",
+            "job",
+            "running",
+            "stdout",
+            "stderr",
+            "truncated",
+            "timed_out",
+            "cancelled"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
             "result": {
               "type": "string",
               "const": "ok"
@@ -5505,6 +5556,10 @@
           "default": false
         },
         "files_transfer": {
+          "type": "boolean",
+          "default": false
+        },
+        "guest_exec": {
           "type": "boolean",
           "default": false
         },

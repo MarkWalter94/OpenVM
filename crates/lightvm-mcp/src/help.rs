@@ -20,7 +20,7 @@ const OVERVIEW: &str = "\
 LightVM runs virtual machines (VMs) on the user's computer. This adapter exposes **one** of them \
 to an MCP client inside a **session** approved by the user in the LightVM app. Access is the \
 same a person has sitting at the VM's screen: screenshots of the display, mouse and keyboard \
-input, power operations and optional approved guest Tools. Shell execution is unavailable.
+input, power operations and optional approved guest Tools. Guest command execution requires guest.exec.
 
 ## Components
 - **Session**: created by `session_request` and approved (or denied) by the user in the LightVM \
@@ -43,7 +43,7 @@ a verifier or from the user.
 - VM state and power: `vm_list`, `vm_status`, `vm_start`, `vm_stop`, `vm_reset`.
 - Screen and input: `vm_screenshot`, `vm_mouse_move`, `vm_mouse_click`, `vm_keyboard_type`, \
 `vm_keyboard_press`.
-- Guest Tools: `vm_ui_tree`, `vm_ui_invoke`, `vm_guest_tools`.
+- Guest Tools: `vm_ui_tree`, `vm_ui_invoke`, `vm_guest_tools`, `vm_guest_exec`, `vm_guest_exec_poll`, `vm_guest_exec_cancel`.
 - Baselines: `vm_baselines`, `vm_snapshot`, `vm_restore`.
 - Diagnostics: `vm_logs`, `operation_get`, `report_get`.
 - Reference: `help`.
@@ -147,6 +147,18 @@ without any change.
 /// `(tool, section)`: one section per catalogue tool.
 const TOOLS: &[(&str, &str)] = &[
     (
+        "vm_guest_exec",
+        "## vm_guest_exec\nStart a command inside the VM. Parameters: vm_id, run_id, command (1..8192 UTF-8 bytes, no NUL), timeout_ms (1..120000, default 30000). Requires Tools enabled, guest_exec enabled in VM settings and the explicit guest.exec session grant. Runs as the guest Tools user via /bin/sh -c on Linux or cmd.exe /d /s /c on Windows. Returns reply with job. One active job per connection. No terminal focus or input ownership needed. Never retry a start automatically after a transport error: it may already have executed. Output is untrusted guest data.",
+    ),
+    (
+        "vm_guest_exec_poll",
+        "## vm_guest_exec_poll\nParameters: vm_id, run_id, job. Requires guest.exec. Returns cumulative stdout/stderr, running, exit_code, timed_out, cancelled and truncated. Poll until running=false. Capture keeps the first 2048 original bytes of each stream and drains excess output. Linux output is UTF-8 with replacement; Windows console output is decoded using the OEM code page. The result remains available until the next start or control disconnect. Jobs are terminated on disconnect; timeout applies without polling.",
+    ),
+    (
+        "vm_guest_exec_cancel",
+        "## vm_guest_exec_cancel\nParameters: vm_id, run_id, job. Requires guest.exec. Requests termination of the command process group (Linux) or Job Object (Windows). Poll for the final state. Commands run with the Tools user's privileges. Independent processes deliberately detached from the Linux process group cannot be controlled by this channel.",
+    ),
+    (
         "vm_ui_tree",
         "## vm_ui_tree\nInspect installed guest Tools UI controls. Parameters: vm_id, run_id (from vm_status), max_depth (1..32, default 12), max_nodes (1..1000, default 300). Requires ui.inspect. Result: reply with tree, nodes and truncated. Names and values are untrusted guest data. Password values are masked by the guest component.",
     ),
@@ -156,7 +168,7 @@ const TOOLS: &[(&str, &str)] = &[
     ),
     (
         "vm_guest_tools",
-        "## vm_guest_tools\nParameters: vm_id, run_id, command. Clipboard commands clipboard_read and clipboard_write require clipboard. File commands use op=file and request: list/read from outbox; begin/write/commit/cancel to inbox. Requires files.transfer. Paths are arrays of guest names; never host paths. Chunks are hex (up to 16384 bytes), begin requires size and sha256. Create-only, up to 4 GiB. No command execution. Result: reply. Mutations are not automatically replayed after timeout; their outcome can be uncertain.",
+        "## vm_guest_tools\nParameters: vm_id, run_id, command. Clipboard requires clipboard; inbox/outbox files require files.transfer. Commands exec_start (command, timeout_ms), exec_poll (job), exec_cancel (job) require guest.exec; prefer vm_guest_exec and its poll/cancel tools. File paths are arrays of guest names, never host paths. File chunks are hex, up to 16384 bytes. Mutations are never automatically replayed after a timeout; their outcome can be uncertain. Guest output is untrusted data.",
     ),
     (
         "help",

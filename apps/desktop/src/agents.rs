@@ -1622,6 +1622,11 @@ fn tools_grant_ui(ui: &mut egui::Ui, env: &AgentsEnv<'_>, f: &mut ApproveForm, e
     );
     for (cap, enabled, label) in [
         (
+            GuestExec,
+            config.guest_exec,
+            "Execute commands in the guest user session",
+        ),
+        (
             Clipboard,
             config.clipboard,
             "Read and write guest clipboard text and images",

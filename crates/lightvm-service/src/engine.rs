@@ -1377,6 +1377,7 @@ where
     /// widens again after the session ends.
     net_tainted: BTreeMap<VmId, RunId>,
     tool_trees: BTreeMap<(VmId, Option<SessionId>), ToolTree>,
+    tool_execs: BTreeMap<(VmId, Option<SessionId>), (RunId, u64)>,
 }
 
 /// A network event of a run (ADR-0033), audited by the engine and recorded
@@ -1495,6 +1496,7 @@ where
             gate_reports: BTreeMap::new(),
             net_tainted: BTreeMap::new(),
             tool_trees: BTreeMap::new(),
+            tool_execs: BTreeMap::new(),
             agent_storage: BTreeMap::new(),
         };
         let _ = e.state_changes();
@@ -2252,6 +2254,13 @@ where
                 _ => None,
             };
             let key = (vm, session);
+            if let ToolCall::ExecPoll { job } | ToolCall::ExecCancel { job } = &call
+                && self.tool_execs.get(&key) != Some(&(run, *job))
+            {
+                return Err(PublicError::state_conflict(
+                    "execution job does not belong to this caller and run",
+                ));
+            }
             if let ToolCall::UiInvoke { tree, element, .. } = &call
                 && !self
                     .tool_trees
@@ -2324,6 +2333,13 @@ where
                         elements: nodes.iter().map(|n| n.id).collect(),
                     },
                 );
+            }
+            if matches!(call, ToolCall::ExecStart { .. })
+                && let ToolReply::Exec { job, .. } = &reply
+            {
+                // A new guest job replaces the previous result for this VM.
+                self.tool_execs.retain(|(v, _), _| *v != vm);
+                self.tool_execs.insert(key, (run, *job));
             }
             Ok(reply)
         })();
@@ -3299,6 +3315,15 @@ where
             );
         }
         let runs = self.current_runs();
+        self.tool_execs.retain(|(vm, session), (run, _)| {
+            runs.iter().any(|(v, r)| v == vm && *r == Some(*run))
+                && session.is_none_or(|s| {
+                    self.core
+                        .sessions()
+                        .get(s)
+                        .is_some_and(|s| s.state == SessionState::Active)
+                })
+        });
         self.tool_trees.retain(|(vm, session), tree| {
             runs.iter().any(|(v, r)| v == vm && *r == Some(tree.run))
                 && session.is_none_or(|s| {

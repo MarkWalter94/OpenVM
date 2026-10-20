@@ -86,7 +86,8 @@ pub fn host_layer(host: &HostCapacity) -> PolicyLayer {
             | Capability::FilesTransfer
             | Capability::Usb
             | Capability::UiInspect
-            | Capability::UiAct => true,
+            | Capability::UiAct
+            | Capability::GuestExec => true,
         })
         .collect();
     PolicyLayer {

@@ -10,6 +10,7 @@ import http.server
 import json
 import os
 import pathlib
+import signal
 import socket
 import struct
 import subprocess
@@ -424,10 +425,110 @@ class Desktop:
             raise ValueError("unknown action")
 
 
+class GuestExec:
+    """One bounded job per authenticated control connection, never replayed."""
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.job = None
+
+    def start(self, ident, command, timeout_ms):
+        if (not isinstance(command, str) or not command or "\0" in command
+                or len(command.encode()) > 8192 or not 1 <= timeout_ms <= 120000):
+            raise ValueError("execution bounds")
+        with self.lock:
+            if self.job and self.job["running"]:
+                raise ValueError("execution busy")
+            process = subprocess.Popen(["/bin/sh", "-c", command], stdin=subprocess.DEVNULL,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                       start_new_session=True, close_fds=True)
+            self.process = process
+            self.stopped = threading.Event()
+            self.job = dict(result="exec", job=ident, running=True, exit_code=None,
+                            stdout=bytearray(), stderr=bytearray(), truncated=False,
+                            timed_out=False, cancelled=False)
+        readers = [threading.Thread(target=self._read, args=(name, pipe), daemon=True)
+                   for name, pipe in (("stdout", process.stdout), ("stderr", process.stderr))]
+        for reader in readers:
+            reader.start()
+        threading.Thread(target=self._wait, args=(process, timeout_ms, readers), daemon=True).start()
+        return self.poll(ident)
+
+    def _read(self, name, pipe):
+        try:
+            os.set_blocking(pipe.fileno(), False)
+            while True:
+                try:
+                    chunk = os.read(pipe.fileno(), 4096)
+                except BlockingIOError:
+                    if self.stopped.is_set():
+                        break
+                    self.stopped.wait(0.01)
+                    continue
+                if not chunk:
+                    break
+                with self.lock:
+                    remaining = 2048 - len(self.job[name])
+                    self.job[name].extend(chunk[:remaining])
+                    self.job["truncated"] |= len(chunk) > remaining
+                if self.stopped.is_set():
+                    break
+        finally:
+            pipe.close()
+
+    def _kill(self):
+        try:
+            os.killpg(self.process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+    def _wait(self, process, timeout_ms, readers):
+        try:
+            process.wait(timeout=timeout_ms / 1000)
+        except subprocess.TimeoutExpired:
+            with self.lock:
+                self.job["timed_out"] = True
+            self._kill()
+            process.wait()
+        # Reap descendants even if the shell exited with background children.
+        self._kill()
+        self.stopped.set()
+        for reader in readers:
+            reader.join()
+        with self.lock:
+            self.job["exit_code"] = process.returncode
+            self.job["running"] = False
+
+    def poll(self, ident, cancel=False):
+        with self.lock:
+            if not self.job or ident != self.job["job"]:
+                raise ValueError("unknown execution job")
+            if cancel and self.job["running"]:
+                self.job["cancelled"] = True
+                self._kill()
+            reply = dict(self.job)
+            # Terminal flags are exposed only when all output has been drained.
+            if reply["running"]:
+                reply["timed_out"] = reply["cancelled"] = False
+            for name in ("stdout", "stderr"):
+                reply[name] = bytes(reply[name]).decode("utf-8", errors="replace")
+            return reply
+
+    def close(self):
+        with self.lock:
+            if self.job and self.job["running"]:
+                self.job["cancelled"] = True
+                self._kill()
+        # Wait for the previous job before allowing a new connection to start one.
+        if self.job:
+            while self.poll(self.job["job"])["running"]:
+                time.sleep(0.01)
+
+
 def control_loop(bootstrap):
     channel, desktop = Channel(bootstrap, True), Desktop()
     images = ClipboardImages(desktop)
     files = GuestFiles(pathlib.Path.home() / "Documents" / "LightVM Tools")
+    execution = GuestExec()
     while True:
         try:
             channel.connect()
@@ -437,7 +538,11 @@ def control_loop(bootstrap):
                 command, ident = request["command"], request["id"]
                 try:
                     op = command["op"]
-                    if op == "clipboard_read":
+                    if op == "exec_start":
+                        reply = execution.start(ident, command["command"], command["timeout_ms"])
+                    elif op in ("exec_poll", "exec_cancel"):
+                        reply = execution.poll(command["job"], op == "exec_cancel")
+                    elif op == "clipboard_read":
                         reply = dict(result="clipboard", text=desktop.clipboard())
                     elif op == "clipboard_write":
                         desktop.clipboard(command["text"])
@@ -463,6 +568,8 @@ def control_loop(bootstrap):
                 send(channel.stream, dict(id=ident, reply=reply))
         except (OSError, EOFError, ValueError, KeyError):
             channel.close()
+            execution.close()
+            execution = GuestExec()
             files.clear()
             images.clear()
             desktop.tree, desktop.nodes = None, {}

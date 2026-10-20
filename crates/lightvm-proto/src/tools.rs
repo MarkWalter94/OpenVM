@@ -12,6 +12,18 @@ use crate::{Capability, CapabilitySet, PublicError};
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ToolCall {
+    /// Start one command in the guest user session. Poll without replaying it.
+    ExecStart {
+        command: String,
+        timeout_ms: u32,
+    },
+    ExecPoll {
+        job: u64,
+    },
+    ExecCancel {
+        job: u64,
+    },
+
     ClipboardRead,
     ClipboardWrite {
         text: String,
@@ -40,6 +52,9 @@ impl ToolCall {
         match self {
             Self::ClipboardRead | Self::ClipboardWrite { .. } | Self::ClipboardImage { .. } => {
                 Capability::Clipboard
+            }
+            Self::ExecStart { .. } | Self::ExecPoll { .. } | Self::ExecCancel { .. } => {
+                Capability::GuestExec
             }
             Self::UiTree { .. } => Capability::UiInspect,
             Self::UiInvoke { .. } => Capability::UiAct,
@@ -73,6 +88,16 @@ pub struct ToolUiNode {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ToolReply {
+    Exec {
+        job: u64,
+        running: bool,
+        exit_code: Option<i32>,
+        stdout: String,
+        stderr: String,
+        truncated: bool,
+        timed_out: bool,
+        cancelled: bool,
+    },
     Ok,
     Clipboard {
         text: String,
@@ -108,6 +133,8 @@ pub struct ToolsConfig {
     pub ui_inspect: bool,
     #[serde(default)]
     pub ui_act: bool,
+    #[serde(default)]
+    pub guest_exec: bool,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub usb_devices: BTreeSet<String>,
 }
@@ -214,6 +241,7 @@ impl ToolsConfig {
             (Capability::FilesTransfer, self.files_transfer),
             (Capability::UiInspect, self.ui_inspect),
             (Capability::UiAct, self.ui_act),
+            (Capability::GuestExec, self.guest_exec),
         ] {
             if capabilities.contains(&cap) && !configured {
                 return Err(denied("integration is not enabled for this VM"));
@@ -238,6 +266,23 @@ impl ToolsConfig {
 impl ToolReply {
     pub fn validate(&self) -> io::Result<()> {
         match self {
+            Self::Exec {
+                job,
+                running,
+                exit_code,
+                stdout,
+                stderr,
+                timed_out,
+                cancelled,
+                ..
+            } if *job == 0
+                || stdout.len() > 6144
+                || stderr.len() > 6144
+                || (!*running && exit_code.is_none())
+                || (*running && (exit_code.is_some() || *timed_out || *cancelled)) =>
+            {
+                Err(invalid_reply("invalid execution reply"))
+            }
             Self::Clipboard { text } if text.len() > 64 * 1024 || text.contains('\0') => {
                 Err(invalid_reply("clipboard text out of bounds"))
             }
@@ -289,6 +334,11 @@ impl ToolReply {
         self.validate()?;
         let valid = match (call, self) {
             (_, Self::Error { .. }) => true,
+            (ToolCall::ExecStart { .. }, Self::Exec { .. }) => true,
+            (
+                ToolCall::ExecPoll { job } | ToolCall::ExecCancel { job },
+                Self::Exec { job: got, .. },
+            ) => job == got,
             (ToolCall::ClipboardRead, Self::Clipboard { .. }) => true,
             (ToolCall::ClipboardWrite { .. } | ToolCall::UiInvoke { .. }, Self::Ok) => true,
             (
@@ -353,6 +403,11 @@ impl std::fmt::Debug for ToolCall {
 impl std::fmt::Debug for ToolReply {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Exec { job, running, .. } => f
+                .debug_struct("Exec")
+                .field("job", job)
+                .field("running", running)
+                .finish_non_exhaustive(),
             Self::Ok => f.write_str("Ok"),
             Self::Clipboard { text } => f
                 .debug_struct("Clipboard")

@@ -607,6 +607,10 @@ fn tools_ui(ui: &mut egui::Ui, tools: &mut lightvm_proto::ToolsConfig) {
     ui.checkbox(&mut tools.enabled, "Enable LightVM Tools for this VM");
     ui.label("Install the guest component from the LIGHTVM_TOOLS CD. Agent access requires a separate session approval.");
     ui.add_enabled_ui(tools.enabled, |ui| {
+        ui.checkbox(
+            &mut tools.guest_exec,
+            "Allow commands in the guest user session",
+        );
         ui.checkbox(&mut tools.clipboard, "Allow clipboard text and images");
         ui.checkbox(
             &mut tools.files_transfer,

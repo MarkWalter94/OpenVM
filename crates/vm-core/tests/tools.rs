@@ -10,6 +10,7 @@ fn configured(h: &mut Harness) -> VmId {
         files_transfer: true,
         ui_inspect: true,
         ui_act: true,
+        guest_exec: true,
         shares: vec![ToolShare {
             name: "Builds".into(),
             root: std::env::temp_dir().to_string_lossy().into_owned(),
@@ -147,4 +148,50 @@ fn manual_scope_disappears_during_a_session_and_does_not_override_pausing() {
     assert!(h.core.tools_permissions(vm, true).0.is_empty());
     h.core.pause_session(grant.session_id).unwrap();
     assert!(h.core.tools_permissions(vm, true).0.is_empty());
+}
+
+#[test]
+fn guest_execution_does_not_need_input_but_obeys_pause_and_operation_quota() {
+    let mut h = Harness::new();
+    let vm = configured(&mut h);
+    let run = h.start(vm);
+    let spec = request(&h, vm, &[Capability::GuestExec]);
+    let (grant, _) = h
+        .core
+        .create_session(spec, SessionToken::from_bytes([1; 32]))
+        .unwrap();
+    let caller = Caller::Agent {
+        session_id: grant.session_id,
+        token: Some(SessionToken::from_bytes([1; 32])),
+    };
+    h.core
+        .admit_tools(&caller, vm, run, Capability::GuestExec)
+        .unwrap();
+    assert!(
+        h.core
+            .authorize_tools(&caller, vm, run, Capability::VmInput)
+            .is_err()
+    );
+    h.core
+        .admit_tools(&caller, vm, run, Capability::GuestExec)
+        .unwrap();
+    assert_eq!(
+        h.core
+            .admit_tools(&caller, vm, run, Capability::GuestExec)
+            .unwrap_err()
+            .code,
+        ErrorCode::ResourceLimit
+    );
+    h.core.pause_session(grant.session_id).unwrap();
+    assert!(
+        !h.core
+            .tools_permissions(vm, true)
+            .0
+            .contains(&Capability::GuestExec)
+    );
+    assert!(
+        h.core
+            .authorize_tools(&caller, vm, run, Capability::GuestExec)
+            .is_err()
+    );
 }

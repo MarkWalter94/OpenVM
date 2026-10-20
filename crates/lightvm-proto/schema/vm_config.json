@@ -389,6 +389,10 @@
           "type": "boolean",
           "default": false
         },
+        "guest_exec": {
+          "type": "boolean",
+          "default": false
+        },
         "shares": {
           "type": "array",
           "items": {

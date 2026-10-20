@@ -20,6 +20,18 @@ pub const MAX_TREE_DEPTH: u32 = 32;
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Command {
+    /// Start one command in the guest user session. Poll without replaying it.
+    ExecStart {
+        command: String,
+        timeout_ms: u32,
+    },
+    ExecPoll {
+        job: u64,
+    },
+    ExecCancel {
+        job: u64,
+    },
+
     ClipboardRead,
     ClipboardWrite {
         text: String,
@@ -62,6 +74,9 @@ impl Command {
             Self::ClipboardRead | Self::ClipboardWrite { .. } | Self::ClipboardImage { .. } => {
                 Feature::Clipboard
             }
+            Self::ExecStart { .. } | Self::ExecPoll { .. } | Self::ExecCancel { .. } => {
+                Feature::GuestExec
+            }
             Self::UiTree { .. } => Feature::UiInspect,
             Self::UiInvoke { .. } => Feature::UiAct,
             Self::File { .. } => Feature::FilesTransfer,
@@ -70,6 +85,19 @@ impl Command {
     }
     pub fn validate(&self) -> io::Result<()> {
         match self {
+            Self::ExecStart {
+                command,
+                timeout_ms,
+            } if command.is_empty()
+                || command.len() > 8192
+                || command.contains('\0')
+                || !(1..=120_000).contains(timeout_ms) =>
+            {
+                Err(invalid("execution command or timeout out of bounds"))
+            }
+            Self::ExecPoll { job: 0 } | Self::ExecCancel { job: 0 } => {
+                Err(invalid("invalid execution job"))
+            }
             Self::ClipboardWrite { text } if text.len() > 64 * 1024 || text.contains('\0') => {
                 Err(invalid("clipboard text out of bounds"))
             }
@@ -102,6 +130,15 @@ impl Command {
 impl From<lightvm_proto::ToolCall> for Command {
     fn from(call: lightvm_proto::ToolCall) -> Self {
         match call {
+            lightvm_proto::ToolCall::ExecStart {
+                command,
+                timeout_ms,
+            } => Self::ExecStart {
+                command,
+                timeout_ms,
+            },
+            lightvm_proto::ToolCall::ExecPoll { job } => Self::ExecPoll { job },
+            lightvm_proto::ToolCall::ExecCancel { job } => Self::ExecCancel { job },
             lightvm_proto::ToolCall::ClipboardRead => Self::ClipboardRead,
             lightvm_proto::ToolCall::ClipboardWrite { text } => Self::ClipboardWrite { text },
             lightvm_proto::ToolCall::ClipboardImage { request } => Self::ClipboardImage { request },
@@ -397,6 +434,9 @@ impl std::fmt::Debug for Command {
                 Self::ClipboardWrite { .. } => "ClipboardWrite(<redacted>)",
                 Self::UiTree { .. } => "UiTree",
                 Self::UiInvoke { .. } => "UiInvoke(<redacted>)",
+                Self::ExecStart { .. } => "ExecStart(<redacted>)",
+                Self::ExecPoll { .. } => "ExecPoll",
+                Self::ExecCancel { .. } => "ExecCancel",
                 Self::Flush => "Flush",
                 Self::File { .. } => unreachable!(),
                 Self::ClipboardImage { .. } => unreachable!(),
@@ -408,6 +448,15 @@ impl Command {
     fn as_call(&self) -> Option<lightvm_proto::ToolCall> {
         use lightvm_proto::ToolCall as T;
         Some(match self.clone() {
+            Command::ExecStart {
+                command,
+                timeout_ms,
+            } => T::ExecStart {
+                command,
+                timeout_ms,
+            },
+            Command::ExecPoll { job } => T::ExecPoll { job },
+            Command::ExecCancel { job } => T::ExecCancel { job },
             Command::ClipboardRead => T::ClipboardRead,
             Command::ClipboardWrite { text } => T::ClipboardWrite { text },
             Command::ClipboardImage { request } => T::ClipboardImage { request },

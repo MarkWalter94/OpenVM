@@ -28,7 +28,14 @@ is not implemented; no host USB driver is installed by this bundle.
 
 Agent sessions require separate approval for every integration. UI Automation
 must be installed in Windows; older systems can return unsupported. Password
-values are masked. No shell or host path is exposed to agents.
+values are masked. Host paths are not exposed to agents. Guest command
+execution is separately opt-in: enable it in VM settings and approve the
+guest.exec session permission. MCP vm_guest_exec starts a command inside
+the VM as the Tools user; vm_guest_exec_poll returns output and exit status,
+and vm_guest_exec_cancel stops it. Commands use /bin/sh on Linux and cmd.exe
+on Windows, with a deadline up to 120 seconds (default 30) and capture limited
+to the first 2048 bytes per stream. No graphical terminal is required.
+Update the installed guest component to use this channel.
 
 Files are streamed with exact size/SHA-256 validation and create-only guest
 inbox publication; host share writes can explicitly replace a file. Interrupted

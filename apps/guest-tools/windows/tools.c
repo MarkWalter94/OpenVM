@@ -1,5 +1,5 @@
 /* LightVM Tools guest component (XP SP3 and later). MIT.
- * Direct Win32 entry point, no C/Rust runtime DLLs, no remote shell.
+ * Direct Win32 entry point, no C/Rust runtime DLLs.
  * All wire buffers and UI trees have fixed upper bounds.
  */
 #define WIN32_LEAN_AND_MEAN
@@ -331,6 +331,7 @@ done:release(path,PATH_CAP*sizeof(WCHAR));release(bytes,CHUNK);release(hex,CHUNK
 }
 
 #include "clipboard_image.h"
+#include "exec.h"
 
 static void flush_guest(JOut *out){
     DWORD drives=GetLogicalDrives();unsigned i,flushed=0;
@@ -350,6 +351,7 @@ static void flush_guest(JOut *out){
 
 static DWORD WINAPI control_thread(void *unused){
     Channel c;unsigned i;(void)unused;if(!channel_init(&c))return 1;
+    InitializeCriticalSection(&execution.lock);
     CoInitializeEx(NULL,COINIT_MULTITHREADED);
     if(SUCCEEDED(CoCreateInstance(&CLSID_CUIAutomation,NULL,CLSCTX_INPROC_SERVER,&IID_IUIAutomation,(void **)&automation))&&automation)IUIAutomation_get_ControlViewWalker(automation,&walker);
     while(InterlockedCompareExchange(&running,1,1)){
@@ -357,7 +359,10 @@ static DWORD WINAPI control_thread(void *unused){
         while(frame_receive(&c)){
             JOut out;int command=jget(&c.doc,0,"command"),op=jget(&c.doc,command,"op");uint64_t id=jnumber(&c.doc,jget(&c.doc,0,"id"),0);size_t reply_start;
             jout(&out,c.output,FRAME);jtext(&out,"{\"id\":");juint(&out,id);jtext(&out,",\"reply\":");reply_start=out.length;
-            if(jequal(&c.doc,op,"clipboard_read"))clipboard_read(&out);
+            if(jequal(&c.doc,op,"exec_start"))guest_exec(&out,&c.doc,command,id,1,0);
+            else if(jequal(&c.doc,op,"exec_poll"))guest_exec(&out,&c.doc,command,id,0,0);
+            else if(jequal(&c.doc,op,"exec_cancel"))guest_exec(&out,&c.doc,command,id,0,1);
+            else if(jequal(&c.doc,op,"clipboard_read"))clipboard_read(&out);
             else if(jequal(&c.doc,op,"clipboard_write"))clipboard_write(&out,&c.doc,command);
             else if(jequal(&c.doc,op,"clipboard_image")){jtext(&out,"{\"result\":\"clipboard_image\",\"reply\":");clipboard_image(&out,&c.doc,jget(&c.doc,command,"request"));jtext(&out,"}");}
             else if(jequal(&c.doc,op,"ui_tree"))ui_tree(&out,&c.doc,command,id);
@@ -368,7 +373,7 @@ static DWORD WINAPI control_thread(void *unused){
             if(!out.ok){out.length=reply_start;out.ok=1;error_reply(&out,"reply_limit");tree_clear();}
             jtext(&out,"}");if(!frame_send(&c,&out))break;
         }
-        channel_close(&c);tree_clear();image_clear(&image_capture);image_clear(&image_upload);for(i=0;i<8;++i)if(transfers[i].file)transfer_cancel(&transfers[i]);Sleep(500);
+        channel_close(&c);exec_clear();tree_clear();image_clear(&image_capture);image_clear(&image_upload);for(i=0;i<8;++i)if(transfers[i].file)transfer_cancel(&transfers[i]);Sleep(500);
     }
     return 0;
 }

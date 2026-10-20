@@ -1509,6 +1509,31 @@ impl Adapter {
             "vm_baselines" => self.baselines(parse(args)?).await,
             "vm_logs" => self.logs(parse(args)?).await,
             "vm_guest_tools" => self.guest_tools(parse(args)?).await,
+            "vm_guest_exec" => {
+                let p: tools::GuestExecParams = parse(args)?;
+                self.guest_tools(GuestToolsParams {
+                    vm_id: p.vm_id,
+                    run_id: p.run_id,
+                    command: lightvm_proto::ToolCall::ExecStart {
+                        command: p.command,
+                        timeout_ms: p.timeout_ms,
+                    },
+                })
+                .await
+            }
+            "vm_guest_exec_poll" | "vm_guest_exec_cancel" => {
+                let p: tools::GuestExecJobParams = parse(args)?;
+                self.guest_tools(GuestToolsParams {
+                    vm_id: p.vm_id,
+                    run_id: p.run_id,
+                    command: if name == "vm_guest_exec_cancel" {
+                        lightvm_proto::ToolCall::ExecCancel { job: p.job }
+                    } else {
+                        lightvm_proto::ToolCall::ExecPoll { job: p.job }
+                    },
+                })
+                .await
+            }
             "vm_ui_tree" => {
                 let p: UiTreeParams = parse(args)?;
                 self.guest_tools(GuestToolsParams {
@@ -1752,6 +1777,9 @@ mod tests {
             "vm_logs",
             "operation_get",
             "report_get",
+            "vm_guest_exec",
+            "vm_guest_exec_poll",
+            "vm_guest_exec_cancel",
         ] {
             assert!(names.contains(&n), "{n}");
         }
@@ -1769,11 +1797,12 @@ mod tests {
             // Host paths and QMP remain unavailable. The guest file API accepts
             // validated component arrays and typed commands, not host paths.
             let s = serde_json::to_string(&d.tool.input_schema).unwrap();
-            let forbidden: &[&str] = if d.tool.name == "vm_guest_tools" {
-                &["host_path", "qmp", "shell", "executable"]
-            } else {
-                &["path", "qmp", "command", "file"]
-            };
+            let forbidden: &[&str] =
+                if d.tool.name == "vm_guest_tools" || d.tool.name.starts_with("vm_guest_exec") {
+                    &["host_path", "qmp", "shell", "executable"]
+                } else {
+                    &["path", "qmp", "command", "file"]
+                };
             for bad in forbidden {
                 assert!(
                     !s.contains(&format!("\"{bad}")),

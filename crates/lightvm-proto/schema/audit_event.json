@@ -462,7 +462,8 @@
             "files.transfer",
             "usb",
             "ui.inspect",
-            "ui.act"
+            "ui.act",
+            "guest.exec"
           ]
         },
         {

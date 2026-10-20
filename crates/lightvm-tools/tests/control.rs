@@ -46,6 +46,100 @@ fn connect(server: &ControlServer, hello: &Hello) -> TcpStream {
 }
 
 #[test]
+fn guest_execution_needs_its_own_grant_and_preserves_structured_result() {
+    let (server, gate, hello) = setup();
+    let mut stream = connect(&server, &hello);
+    let command = Command::ExecStart {
+        command: "secret-command".into(),
+        timeout_ms: 30000,
+    };
+    assert!(!format!("{command:?}").contains("secret-command"));
+    assert_eq!(
+        server.call(command.clone()).unwrap_err().kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+    gate.replace(Grant {
+        features: [Feature::GuestExec].into(),
+        ..Default::default()
+    });
+    let guest = std::thread::spawn(move || {
+        let request: Request = protocol::read(&mut stream).unwrap().unwrap();
+        assert!(matches!(
+            request.command,
+            Command::ExecStart {
+                timeout_ms: 30000,
+                ..
+            }
+        ));
+        protocol::write(
+            &mut stream,
+            &Response {
+                id: request.id,
+                reply: Reply::Exec {
+                    job: request.id,
+                    running: false,
+                    exit_code: Some(7),
+                    stdout: "hello".into(),
+                    stderr: "problem".into(),
+                    truncated: false,
+                    timed_out: false,
+                    cancelled: false,
+                },
+            },
+        )
+        .unwrap();
+    });
+    let result = server.call(command).unwrap();
+    assert!(matches!(
+        result,
+        Reply::Exec {
+            exit_code: Some(7),
+            ..
+        }
+    ));
+    assert!(!format!("{result:?}").contains("problem"));
+    guest.join().unwrap();
+}
+
+#[test]
+fn guest_execution_validates_bounds_before_sending() {
+    for command in [
+        Command::ExecStart {
+            command: "".into(),
+            timeout_ms: 1,
+        },
+        Command::ExecStart {
+            command: "x\0y".into(),
+            timeout_ms: 1,
+        },
+        Command::ExecStart {
+            command: "x".repeat(8193),
+            timeout_ms: 1,
+        },
+        Command::ExecStart {
+            command: "true".into(),
+            timeout_ms: 0,
+        },
+        Command::ExecStart {
+            command: "true".into(),
+            timeout_ms: 120001,
+        },
+        Command::ExecPoll { job: 0 },
+        Command::ExecCancel { job: 0 },
+    ] {
+        assert!(command.validate().is_err());
+    }
+    assert!(
+        Command::ExecStart {
+            command: "echo hello".into(),
+            timeout_ms: 120000
+        }
+        .validate()
+        .is_ok()
+    );
+}
+
+#[test]
 fn clipboard_images_require_clipboard_permission_not_file_permission() {
     use lightvm_tools::protocol::{FileReply, FileRequest, RelativePath};
     let (server, gate, hello) = setup();

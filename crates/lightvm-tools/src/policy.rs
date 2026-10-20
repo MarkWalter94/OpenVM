@@ -21,6 +21,7 @@ pub enum Feature {
     Usb,
     UiInspect,
     UiAct,
+    GuestExec,
 }
 
 /// No implicit permissions. A write share does not grant clipboard or USB.

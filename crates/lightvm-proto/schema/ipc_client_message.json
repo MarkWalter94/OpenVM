@@ -465,7 +465,8 @@
             "files.transfer",
             "usb",
             "ui.inspect",
-            "ui.act"
+            "ui.act",
+            "guest.exec"
           ]
         },
         {
@@ -2485,6 +2486,68 @@
     "ToolCall": {
       "oneOf": [
         {
+          "description": "Start one command in the guest user session. Poll without replaying it.",
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string"
+            },
+            "op": {
+              "type": "string",
+              "const": "exec_start"
+            },
+            "timeout_ms": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "command",
+            "timeout_ms"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "job": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "op": {
+              "type": "string",
+              "const": "exec_poll"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "job"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "job": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "op": {
+              "type": "string",
+              "const": "exec_cancel"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "job"
+          ]
+        },
+        {
           "type": "object",
           "properties": {
             "op": {
@@ -2905,6 +2968,10 @@
           "default": false
         },
         "files_transfer": {
+          "type": "boolean",
+          "default": false
+        },
+        "guest_exec": {
           "type": "boolean",
           "default": false
         },

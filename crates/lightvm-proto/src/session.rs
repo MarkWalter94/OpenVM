@@ -64,6 +64,8 @@ pub enum Capability {
     UiInspect,
     #[serde(rename = "ui.act")]
     UiAct,
+    #[serde(rename = "guest.exec")]
+    GuestExec,
 }
 
 impl Capability {
@@ -82,7 +84,7 @@ impl Capability {
         Self::NetworkEndpoints,
     ];
     /// All capabilities.
-    pub const ALL: [Capability; 18] = [
+    pub const ALL: [Capability; 19] = [
         Capability::ShareRead,
         Capability::ShareWrite,
         Capability::Clipboard,
@@ -90,6 +92,7 @@ impl Capability {
         Capability::Usb,
         Capability::UiInspect,
         Capability::UiAct,
+        Capability::GuestExec,
         Capability::VmList,
         Capability::VmStatus,
         Capability::VmStart,
@@ -125,6 +128,7 @@ impl Capability {
             Capability::Usb => "usb",
             Capability::UiInspect => "ui.inspect",
             Capability::UiAct => "ui.act",
+            Capability::GuestExec => "guest.exec",
         }
     }
 
@@ -144,6 +148,7 @@ impl Capability {
                 | Capability::FilesTransfer
                 | Capability::Usb
                 | Capability::UiAct
+                | Capability::GuestExec
         )
     }
 
@@ -157,6 +162,7 @@ impl Capability {
                 | Self::Usb
                 | Self::UiInspect
                 | Self::UiAct
+                | Self::GuestExec
         )
     }
 }
