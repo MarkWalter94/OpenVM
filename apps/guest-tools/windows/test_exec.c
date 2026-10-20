@@ -11,7 +11,11 @@ static int wide(const char *s,WCHAR *out,int capacity){return MultiByteToWideCha
 static size_t wlength(const WCHAR *s){size_t n=0;while(s[n])++n;return n;}
 static int wappend(WCHAR *dst,size_t capacity,const WCHAR *src){size_t n=wlength(dst),m=wlength(src);if(n+m>=capacity)return 0;memcpy(dst+n,src,(m+1)*sizeof(WCHAR));return 1;}
 static void error_reply(JOut *out,const char *code){jtext(out,"{\"result\":\"error\",\"code\":");jquote(out,code);jtext(out,"}");}
+static DWORD simulated_version;
+static DWORD exec_test_version(void){return simulated_version?simulated_version:GetVersion();}
+#define GetVersion exec_test_version
 #include "exec.h"
+#undef GetVersion
 
 static void start(const char *command,DWORD timeout,uint64_t id){
     char request[16000],reply[32000];JOut out;JDoc doc;JToken tokens[32];
@@ -37,5 +41,22 @@ int main(void){
     start("for /L %i in (1,1,3000) do @echo abcdefghijklmnopqrstuvwxyz",3000,4);finish();
     assert(execution.code==0);assert(execution.truncated);assert(execution.stdout_size==EXEC_OUTPUT);exec_clear();
     start("for /L %i in (1,1,2147483647) do @rem",30000,5);exec_clear();assert(!execution.active);
+    {
+        HANDLE parent=CreateJobObjectW(NULL,NULL);BOOL member;
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits;
+        memset(&limits,0,sizeof(limits));
+        assert(parent&&SetInformationJobObject(parent,JobObjectExtendedLimitInformation,&limits,sizeof(limits)));
+        assert(AssignProcessToJobObject(parent,GetCurrentProcess()));
+        /* Modern Windows must work when the parent forbids breakaway. */
+        start("for /L %i in (1,1,2147483647) do @rem",50,6);
+        assert(IsProcessInJob(execution.process,parent,&member)&&member);
+        finish();assert(execution.timed_out);exec_clear();
+        limits.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+        assert(SetInformationJobObject(parent,JobObjectExtendedLimitInformation,&limits,sizeof(limits)));
+        simulated_version=0x00000106; /* Windows 7: major 6, minor 1. */
+        start("for /L %i in (1,1,2147483647) do @rem",50,7);
+        assert(IsProcessInJob(execution.process,parent,&member)&&!member);
+        finish();assert(execution.timed_out);exec_clear();CloseHandle(parent);
+    }
     DeleteCriticalSection(&execution.lock);puts("Guest execution lifecycle: PASS");return 0;
 }

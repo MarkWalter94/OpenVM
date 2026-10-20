@@ -557,7 +557,15 @@ static void install(void){
     if(!source||!folder||!target||!command)goto done;
     if(FAILED(SHGetFolderPathW(NULL,CSIDL_LOCAL_APPDATA,NULL,SHGFP_TYPE_CURRENT,folder))||!wappend(folder,PATH_CAP,L"\\LightVM Tools"))goto done;
     CreateDirectoryW(folder,NULL);lstrcpyW(target,folder);if(!wappend(target,PATH_CAP,L"\\TOOLS.EXE")||!GetModuleFileNameW(NULL,source,PATH_CAP))goto done;
-    if(lstrcmpiW(source,target)!=0&&!CopyFileW(source,target,FALSE))goto done;
+    /* Optical media mark copied files read-only. Clear that attribute on
+       our per-user target so a later Tools update can replace it. */
+    if(lstrcmpiW(source,target)!=0){
+        DWORD attributes=GetFileAttributesW(target);
+        if(attributes!=INVALID_FILE_ATTRIBUTES&&(attributes&FILE_ATTRIBUTE_READONLY))SetFileAttributesW(target,attributes&~FILE_ATTRIBUTE_READONLY);
+        if(!CopyFileW(source,target,FALSE))goto done;
+        attributes=GetFileAttributesW(target);
+        if(attributes!=INVALID_FILE_ATTRIBUTES&&(attributes&FILE_ATTRIBUTE_READONLY))SetFileAttributesW(target,attributes&~FILE_ATTRIBUTE_READONLY);
+    }
     lstrcpyW(command,L"\"");wappend(command,PATH_CAP*2,target);wappend(command,PATH_CAP*2,L"\" --run");
     if(RegCreateKeyExW(HKEY_CURRENT_USER,L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",0,NULL,0,KEY_SET_VALUE,NULL,&key,NULL)==ERROR_SUCCESS){RegSetValueExW(key,L"LightVM Tools",0,REG_SZ,(const BYTE *)command,(DWORD)((wlength(command)+1)*sizeof(WCHAR)));RegCloseKey(key);}
     /* Explicit installer operation, inside the guest. No authentication

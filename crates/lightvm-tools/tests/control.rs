@@ -46,6 +46,39 @@ fn connect(server: &ControlServer, hello: &Hello) -> TcpStream {
 }
 
 #[test]
+fn idle_guest_disconnect_allows_reauthentication_without_a_failed_rpc() {
+    let (server, _gate, hello) = setup();
+    let first = connect(&server, &hello);
+    drop(first);
+    let until = Instant::now() + Duration::from_secs(2);
+    while server.connected() {
+        assert!(
+            Instant::now() < until,
+            "stale idle connection was not noticed"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let mut second = connect(&server, &hello);
+    let guest = std::thread::spawn(move || {
+        let request: Request = protocol::read(&mut second).unwrap().unwrap();
+        protocol::write(
+            &mut second,
+            &Response {
+                id: request.id,
+                reply: Reply::Clipboard {
+                    text: "reconnected".into(),
+                },
+            },
+        )
+        .unwrap();
+    });
+    assert!(
+        matches!(server.call(Command::ClipboardRead).unwrap(), Reply::Clipboard { text } if text == "reconnected")
+    );
+    guest.join().unwrap();
+}
+
+#[test]
 fn guest_execution_needs_its_own_grant_and_preserves_structured_result() {
     let (server, gate, hello) = setup();
     let mut stream = connect(&server, &hello);

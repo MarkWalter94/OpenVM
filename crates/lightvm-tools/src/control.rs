@@ -294,7 +294,24 @@ impl ControlServer {
                         while !cancelled() && state.connected.load(Ordering::SeqCst) {
                             let p = match rx.recv_timeout(Duration::from_millis(50)) {
                                 Ok(p) => p,
-                                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                                Err(mpsc::RecvTimeoutError::Timeout) => {
+                                    // A guest can restart independently of the host policy.
+                                    // Detect idle EOF so its replacement can authenticate
+                                    // without first sacrificing an RPC to the stale socket.
+                                    let mut byte = [0];
+                                    match stream.peek(&mut byte) {
+                                        Err(e)
+                                            if matches!(
+                                                e.kind(),
+                                                io::ErrorKind::WouldBlock
+                                                    | io::ErrorKind::Interrupted
+                                            ) =>
+                                        {
+                                            continue;
+                                        }
+                                        _ => break,
+                                    }
+                                }
                                 Err(_) => break,
                             };
                             let result = p.request.command.admitted(&p.permit, || {

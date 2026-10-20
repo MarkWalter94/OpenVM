@@ -90,6 +90,7 @@ static void guest_exec(JOut *out,const JDoc *doc,int command,uint64_t id,int sta
         uint64_t timeout=jnumber(doc,jget(doc,command,"timeout_ms"),0);
         SECURITY_ATTRIBUTES sa={sizeof(sa),NULL,TRUE};
         STARTUPINFOW si;PROCESS_INFORMATION pi;JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits;
+        DWORD flags=CREATE_SUSPENDED|CREATE_NO_WINDOW,version=GetVersion();BOOL in_job=FALSE;
         EnterCriticalSection(&execution.lock);
         if(execution.active){LeaveCriticalSection(&execution.lock);error_reply(out,"execution_busy");return;}
         LeaveCriticalSection(&execution.lock);
@@ -107,7 +108,14 @@ static void guest_exec(JOut *out,const JDoc *doc,int command,uint64_t id,int sta
         memcpy(line,L"cmd.exe /d /s /c \"",18*sizeof(WCHAR));
         if(!wide(text,line+18,8193)||!wappend(line,8256,L"\""))goto failed;
         si.cb=sizeof(si);si.dwFlags=STARTF_USESTDHANDLES;si.hStdInput=input;si.hStdOutput=output_write;si.hStdError=error_write;
-        if(!CreateProcessW(shell,line,NULL,NULL,TRUE,CREATE_SUSPENDED|CREATE_NO_WINDOW,NULL,NULL,&si,&pi))goto failed;
+        /* Vista/7's compatibility assistant may put Tools in a job. Before
+           Windows 8 jobs cannot nest: break away before assigning our own
+           kill-on-close job. A parent that forbids breakaway fails closed. */
+        if(LOBYTE(LOWORD(version))<6 || (LOBYTE(LOWORD(version))==6 && HIBYTE(LOWORD(version))<2)){
+            if(!IsProcessInJob(GetCurrentProcess(),NULL,&in_job))goto failed;
+            if(in_job)flags|=CREATE_BREAKAWAY_FROM_JOB;
+        }
+        if(!CreateProcessW(shell,line,NULL,NULL,TRUE,flags,NULL,NULL,&si,&pi))goto failed;
         if(!AssignProcessToJobObject(execution.group,pi.hProcess)){TerminateProcess(pi.hProcess,1);CloseHandle(pi.hProcess);CloseHandle(pi.hThread);goto failed;}
         execution.process=pi.hProcess;execution.id=id;execution.timeout=(DWORD)timeout;execution.started=GetTickCount();
         execution.stdout_size=execution.stderr_size=0;execution.timed_out=execution.cancelled=execution.truncated=0;execution.active=1;
