@@ -100,7 +100,7 @@ Started on 2026-10-11 at the owner's request; like F1 and F2, **not usable for t
 
 Deviations recorded in `F4-01` (D-1…D-6): service-side gate in addition to the core checks; **credential-less local emergency endpoint** (only verb Emergency Stop, same-user ACL; see ADR-0009); revocation keeps the pairing credential; lease expiry, client loss and UI loss stop the session's VM; screenshots in 32 KiB chunks; input ownership defaults to the user, one live session.
 
-Open: the service does not report the last run id of a stopped VM (`VmSummary.run_id` is `None`), unlike its doc comment; the UI relies on disk usage for the install-media hint.
+Resolved on 2026-10-21: `VmSummary.run_id` is the current run only (present while a process exists, as the UI, MCP and transfers use it); the new additive `VmSummary.last_run_id` reports the most recent run from the catalog, also for a stopped VM and after a service restart (`f2` `a_stopped_vm_reports_its_last_run_across_restarts`). The install-media hint keeps using disk usage, because an imported VM holds a system without ever having run.
 
 ## F5 and F6 work started in parallel
 

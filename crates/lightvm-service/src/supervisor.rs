@@ -2104,7 +2104,7 @@ impl SupervisorThread {
             SupervisorRequest::VmStatus(vm_id) => self
                 .engine
                 .vm_status(who()?, vm_id)
-                .map(|vm| ResponseBody::Vm { vm }),
+                .map(|vm| ResponseBody::Vm { vm: Box::new(vm) }),
             SupervisorRequest::GuestTools {
                 vm_id,
                 run_id,

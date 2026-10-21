@@ -636,6 +636,11 @@ impl CatalogStore for SqliteStore {
         }
         Some(total)
     }
+
+    fn last_run(&self, id: VmId) -> Option<RunId> {
+        let sid = self.ids.get(&id).copied()?;
+        self.read(|tx| tx.last_run_of_vm(&sid)).ok().flatten()
+    }
 }
 
 /// Free space that must remain on the catalog volume after a baseline (the
