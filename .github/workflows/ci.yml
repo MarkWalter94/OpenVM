@@ -83,7 +83,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends $APT_BUILD $APT_RUNTIME
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: lint
       - name: cargo fmt --check
@@ -133,7 +133,7 @@ jobs:
           Write-Output "link.exe: $link"
           if ($link -notmatch '\\VC\\Tools\\MSVC\\') { throw "link.exe is not the MSVC one: $link" }
           Write-Output "LIB=$env:LIB"
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: windows
       - name: cargo clippy (Windows-specific code)
@@ -179,7 +179,7 @@ jobs:
           foreach ($line in $vars) {
             if ($line -match $keep) { Add-Content -Path $env:GITHUB_ENV -Value $line -Encoding utf8 }
           }
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: processes-windows
       - name: Job Object, quoting, share mode (qemu-backend)
@@ -208,7 +208,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends $APT_BUILD $APT_RUNTIME $APT_SOFTWARE_RENDER
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: linux
       - name: cargo build --locked
@@ -242,7 +242,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends $APT_BUILD
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: processes-linux
       - name: Environment (kernel, cgroup, systemd)
@@ -380,7 +380,7 @@ jobs:
           foreach ($line in $vars) {
             if ($line -match $keep) { Add-Content -Path $env:GITHUB_ENV -Value $line -Encoding utf8 }
           }
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: smoke-${{ runner.os }}
       # `--smoke` exists only with the `dev-tools` feature (F6: test and
@@ -461,7 +461,7 @@ jobs:
           foreach ($line in $vars) {
             if ($line -match $keep) { Add-Content -Path $env:GITHUB_ENV -Value $line -Encoding utf8 }
           }
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: accel-${{ runner.os }}
       # On hosted Ubuntu runners /dev/kvm may exist: the state is only
@@ -505,7 +505,7 @@ jobs:
         run: |
           channel="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
           rustup toolchain install "$channel" --profile minimal --no-self-update
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: schema
       - name: Schema snapshot
@@ -527,7 +527,7 @@ jobs:
         run: |
           channel="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
           rustup toolchain install "$channel" --profile minimal --no-self-update
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: cargo-deny
       # Same version used locally; installation from crates.io with lockfile,
@@ -562,7 +562,7 @@ jobs:
           channel="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
           rustup toolchain install "$channel" --profile minimal --component clippy --no-self-update
           rustc -Vv
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: macos-14
       - name: cargo check --workspace --all-targets --locked
