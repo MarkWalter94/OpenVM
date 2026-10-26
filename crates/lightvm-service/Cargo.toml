@@ -48,12 +48,12 @@ png = { version = "=0.18.1", optional = true }
 # Composition root (ROADMAP 6.1): real core, SQLite catalog and QEMU backend.
 qemu-backend = { path = "../qemu-backend", optional = true }
 serde = { version = "=1.0.229", features = ["derive"] }
-serde_json = "=1.0.151"
+serde_json = "=1.0.154"
 # SHA-256 of agent screenshots, checked against the backend metadata (F4).
-sha2 = { version = "=0.11.0", optional = true }
+sha2 = { version = "=0.11.1", optional = true }
 # AF_UNIX display proxy (ADR-0013), same crate and version as qemu-backend.
 socket2 = { version = "=0.6.5", features = ["all"], optional = true }
-tokio = { version = "=1.53.2", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "=1.54.1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 vm-core = { path = "../vm-core", optional = true }
 vm-storage = { path = "../vm-storage", optional = true }
 # Import of VMware VMs (ADR-0030): bounded readers of the .vmx and VMDK
@@ -64,7 +64,7 @@ vmware-import = { path = "../vmware-import", optional = true }
 # crate): `interprocess` wraps CreateNamedPipeW and the SDDL conversion;
 # `sysinfo` reads the user SID of a process (our own and the peer's).
 [target.'cfg(windows)'.dependencies]
-interprocess = { version = "=2.4.4", features = ["tokio"] }
+interprocess = { version = "=2.4.6", features = ["tokio"] }
 sysinfo = { version = "=0.39.6", default-features = false, features = ["system"] }
 widestring = "=1.2.1"
 
@@ -79,7 +79,7 @@ rustix = { version = "=1.1.5", features = ["event", "process"] }
 guest-detect = { path = "../guest-detect", features = ["test-images"] }
 # End-to-end console test through the display ticket (tests only).
 rfb-client = { path = "../rfb-client" }
-tokio = { version = "=1.53.2", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "=1.54.1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 
 [lints]
 workspace = true
