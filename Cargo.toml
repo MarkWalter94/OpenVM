@@ -29,7 +29,7 @@ publish = false
 # docs/verification/F0-01-toolchain-eframe.md. No git dependencies.
 [workspace.dependencies]
 eframe = { version = "=0.36.2", default-features = false }
-egui = { version = "=0.36.2", default-features = false }
+egui = { version = "=0.37.0", default-features = false }
 egui_extras = { version = "=0.36.2", default-features = false }
 egui_kittest = { version = "=0.36.2", default-features = false }
 
