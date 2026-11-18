@@ -1,6 +1,6 @@
 # ADR-0039 — Standing grant: unattended agent access to one VM (owner decision; declared exception to ROADMAP §4 and §7.3 and to ADR-0006)
 
-- Status: Accepted (2026-11-18): implemented and verified in test; hardware cycle partial (`docs/verification/R6-10-standing-grant.md` §3)
+- Status: Accepted (2026-11-18): implemented, verified in test and on hardware (`docs/verification/R6-10-standing-grant.md`)
 - Date: 2026-11-18
 - Owner: project owner (decisions D1–D3 below); implementation recorded below
 

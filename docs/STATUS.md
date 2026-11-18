@@ -352,7 +352,7 @@ Started on 2026-11-18 at the owner's request (declared exception to ROADMAP sect
 | Service through the real IPC (§5 items 1–11 of the specification) | `lightvm-service` `tests/standing_grant.rs` (11 tests), role matrix in `tests/f4.rs` | verified in simulation/test |
 | MCP adapter: automatic renewal, reconnection after a restart, `help` | `lightvm-mcp` `tests/standing.rs` (5 tests) | verified in simulation/test |
 | App: Agents page, creation form, indicator, notice at start, pairing file kept and rewritten | `lightvm-desktop` `tests/standing_ui.rs` (10 tests), `src/service.rs` unit tests | verified in simulation/test |
-| Real QEMU cycle: three renewals, LightVM restart in the middle, VM still running, revocation | `tests/standing_grant_real.rs`, R6-10 §3 | partial: two renewals with the VM running (same run) and the grant across a LightVM restart verified on hardware; renewal after the restart and revocation not executed (WHPX did not initialise under host load) |
+| Real QEMU cycle: three renewals, LightVM restart in the middle, VM still running, revocation | `tests/standing_grant_real.rs`, R6-10 §3 | verified on hardware (Windows, WHPX): three renewals without a click, LightVM restart in the middle, VM running between sessions, revocation in 0.88 s with the VM running |
 
 ## R2c work: Windows guests
 

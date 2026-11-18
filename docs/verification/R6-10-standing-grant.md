@@ -69,10 +69,12 @@ Test `crates/lightvm-service/tests/standing_grant_real.rs` (`--ignored`), real Q
 | Session 1 approved without a click (`standing: true`), real screenshot (7503 B); ended by **lease loss**: VM `running`, **same run** | verified on hardware (two runs) |
 | Session 2 approved without a click, real screenshot (16717 B); ended by **client loss**: VM `running`, same run | verified on hardware (two runs) |
 | Restart of LightVM (service and supervisor; the VMs stop in an orderly way, QMP `quit`, ~15 s): grant still live after the restart, switch off | verified on hardware (two runs) |
-| Session 3 after the restart (VM started again, explicit end, VM running), session 4, revocation (session `revoked`, credential refused, VM running) | **not executed**: in both runs WHPX did not initialise after the restart (`accelerator not available: WHPX did not initialise`; an earlier attempt failed at the very first start with `WHPX: Failed to setup partition, hr=800705aa`, insufficient system resources) while the host was loaded by parallel builds and the owner's work. Not a failure of the grant; the host must be idle to complete it |
+| Session 3 after the restart (no click): VM started again by the user, real screenshot (33292 B), explicit `session_end`, VM `running` | verified on hardware (third run, host idle, 376 s in total) |
+| Session 4 (no click), then revocation of the grant: session `revoked` 0.88 s after the request, credential refused at the handshake, VM `running` on the same run | verified on hardware (third run) |
+| Earlier runs: after the restart WHPX did not initialise (`accelerator not available: WHPX did not initialise`; once at the very first start `WHPX: Failed to setup partition, hr=800705aa`, insufficient system resources) while the host was loaded by parallel builds and the owner's work | host condition, not a failure of the grant; the third run on an idle host passed |
 | An earlier run failed at session 3 because the test client could not renew a 1 s lease while waiting for the deferred reply of a start: the service closed the session as designed; the test now lets the user start the VM | test defect, fixed |
 
-The steps after the restart are covered in simulation by §1 (items 1, 5) and §2; on hardware they remain **not executed**.
+Complete cycle verified on hardware: three renewals of the session without a click (lease loss, client loss, explicit end), a LightVM restart in the middle, the VM running between the sessions of the grant, revocation.
 
 ## 4. Summary
 
@@ -81,12 +83,10 @@ The steps after the restart are covered in simulation by §1 (items 1, 5) and §
 | Catalog, core, service, role matrix, schemas (§5 items 1–11) | verified in simulation/test |
 | MCP adapter renewal and reconnection | verified in simulation/test |
 | App (form, indicator, notice, Security, pairing file) | verified in simulation/test |
-| Hardware: renewals 1–2 with the VM running, grant across a LightVM restart | verified on hardware |
-| Hardware: renewal 3 after the restart, revocation with the VM running | not executed (WHPX did not initialise under host load) |
+| Hardware: three renewals with the VM running, grant across a LightVM restart, revocation with the VM running | verified on hardware |
 
 ## 5. Not demonstrated
 
-- The hardware steps after the restart (§3).
 - A real MCP client (LLM) working for days under a grant: only the in-process adapter tests (§2).
 - Revoking **one session** of a grant from the session bar does not stop the agent: the adapter sees the same `closing` as for an expiry and asks for a new session at once. To stop the agent the user revokes the grant (stated in `USER_GUIDE.md` §12 step 10). A distinct closing reason would let the adapter tell them apart; not implemented.
 - The VM stopping when LightVM closes is unchanged (UI close keeps stopping); "the VM stays running" holds between the sessions of a grant, not across a restart of LightVM.
