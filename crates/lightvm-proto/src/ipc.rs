@@ -1056,9 +1056,14 @@ pub struct VmSummary {
     pub name: VmName,
     /// Current state as seen by the core (derived from the process and QMP).
     pub state: VmState,
-    /// Current run, if a process exists, or the last finished one.
+    /// Current run: present only while a process exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<RunId>,
+    /// Most recent run recorded in the catalog, current or finished; absent
+    /// for a VM that never started. Survives a service restart. Additive
+    /// field: older clients ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run_id: Option<RunId>,
     /// Current configuration (resources and limits), for the VM settings.
     pub config: VmConfig,
     /// Configuration revision, to be given in `update_vm`.
@@ -1455,8 +1460,8 @@ pub enum ResponseBody {
     },
     /// Response to `vm_status`.
     Vm {
-        /// Status of the VM.
-        vm: VmSummary,
+        /// Status of the VM (boxed: it is the largest response).
+        vm: Box<VmSummary>,
     },
     /// Response to `create_vm`.
     VmCreated {

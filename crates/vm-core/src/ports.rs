@@ -142,6 +142,10 @@ pub trait CatalogStore {
     fn vm_disk_usage(&self, _id: VmId) -> Option<u64> {
         None
     }
+    /// Most recent run of the VM (current or finished), if any.
+    fn last_run(&self, _id: VmId) -> Option<RunId> {
+        None
+    }
     /// The live standing grant (active or suspended), if any (ADR-0039).
     fn live_standing_grant(&self) -> Result<Option<StoredStandingGrant>, PublicError> {
         Ok(None)

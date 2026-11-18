@@ -1217,6 +1217,18 @@ impl Tx<'_> {
         rows.collect::<rusqlite::Result<Vec<RunId>>>().db()
     }
 
+    /// Most recent run of a VM (run ids are time-ordered).
+    pub fn last_run_of_vm(&self, vm: &VmId) -> Result<Option<RunId>> {
+        self.inner
+            .query_row(
+                "SELECT run_id FROM runs WHERE vm_id = ?1 ORDER BY run_id DESC LIMIT 1",
+                params![vm.sql()],
+                |r| idc(r, 0),
+            )
+            .optional()
+            .db()
+    }
+
     /// Unfinished runs of a VM (`ended_at` absent).
     pub fn open_runs(&self, vm: &VmId) -> Result<Vec<RunId>> {
         let mut st = self

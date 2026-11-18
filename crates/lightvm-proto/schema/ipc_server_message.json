@@ -2556,7 +2556,7 @@
               "const": "vm"
             },
             "vm": {
-              "description": "Status of the VM.",
+              "description": "Status of the VM (boxed: it is the largest response).",
               "$ref": "#/$defs/VmSummary"
             }
           },
@@ -6409,12 +6409,23 @@
           "format": "uint64",
           "minimum": 0
         },
+        "last_run_id": {
+          "description": "Most recent run recorded in the catalog, current or finished; absent\nfor a VM that never started. Survives a service restart. Additive\nfield: older clients ignore it.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RunId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "name": {
           "description": "Displayed name.",
           "$ref": "#/$defs/VmName"
         },
         "run_id": {
-          "description": "Current run, if a process exists, or the last finished one.",
+          "description": "Current run: present only while a process exists.",
           "anyOf": [
             {
               "$ref": "#/$defs/RunId"

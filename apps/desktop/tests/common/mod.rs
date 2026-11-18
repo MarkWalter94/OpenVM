@@ -134,6 +134,7 @@ pub(crate) fn vm(n: u8, name: &str, state: VmState) -> VmSummary {
         name: VmName::parse(name).unwrap(),
         state,
         run_id: state.has_process().then(|| run_id(n)),
+        last_run_id: state.has_process().then(|| run_id(n)),
         config: lightvm_proto::VmConfig {
             tools: Default::default(),
             name: VmName::parse(name).unwrap(),

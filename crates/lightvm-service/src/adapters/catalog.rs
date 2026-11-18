@@ -637,6 +637,10 @@ impl CatalogStore for SqliteStore {
         Some(total)
     }
 
+    fn last_run(&self, id: VmId) -> Option<RunId> {
+        let sid = self.ids.get(&id).copied()?;
+        self.read(|tx| tx.last_run_of_vm(&sid)).ok().flatten()
+    }
     fn live_standing_grant(&self) -> Result<Option<StoredStandingGrant>, PublicError> {
         let Some(row) = self.read(|tx| tx.live_standing_grant())? else {
             return Ok(None);

@@ -4756,6 +4756,7 @@ mod revert_flow_tests {
             name: name.clone(),
             state: VmState::Running,
             run_id: Some(run_id),
+            last_run_id: Some(run_id),
             config: lightvm_proto::VmConfig {
                 tools: Default::default(),
                 name,

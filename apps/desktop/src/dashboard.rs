@@ -221,12 +221,12 @@ pub const INSTALLED_DISK_BYTES: u64 = 1 << 30;
 
 /// The VM is stopped, still has the installation media attached and its
 /// disk already holds data (an installed system): it would boot the
-/// installer again. The service does not report the last run of a stopped
-/// VM, so the disk usage is the signal.
+/// installer again. The disk usage is the signal, not a past run: a run may
+/// end before installing, and an imported VM holds a system without one.
 pub fn install_media_pending(v: &VmSummary) -> bool {
     v.state == VmState::Stopped
         && v.config.install_media.is_some()
-        && (v.run_id.is_some() || v.disk_used_bytes.is_some_and(|b| b >= INSTALLED_DISK_BYTES))
+        && v.disk_used_bytes.is_some_and(|b| b >= INSTALLED_DISK_BYTES)
 }
 
 /// Width of the actions column of a row.

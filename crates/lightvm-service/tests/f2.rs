@@ -310,7 +310,7 @@ async fn status(c: &mut Client, vm_id: VmId) -> lightvm_proto::ipc::VmSummary {
         ServerMessage::Response {
             result: ResponseBody::Vm { vm },
             ..
-        } => vm,
+        } => *vm,
         other => panic!("{other:?}"),
     }
 }
@@ -921,6 +921,59 @@ async fn import_list_create_and_delete_with_the_sqlite_catalog() {
             result: ResponseBody::MediaList { media: list },
             ..
         } => assert_eq!(list.len(), 1),
+        other => panic!("{other:?}"),
+    }
+    svc.handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stopped_vm_reports_its_last_run_across_restarts() {
+    let dir = temp_dir("f2-last-run");
+    let svc = start_sqlite(&dir).await;
+    let (mut ui, _) = connect_ui(&svc).await;
+    let vm = match req(
+        &mut ui,
+        Request::CreateVm {
+            config: sample_config("f2-last-run"),
+        },
+    )
+    .await
+    {
+        ServerMessage::Response {
+            result: ResponseBody::VmCreated { vm },
+            ..
+        } => vm,
+        other => panic!("{other:?}"),
+    };
+    let s = status(&mut ui, vm.id).await;
+    assert_eq!((s.run_id, s.last_run_id), (None, None), "never started");
+
+    let first = start_vm(&mut ui, vm.id).await;
+    assert_eq!(status(&mut ui, vm.id).await.last_run_id, Some(first));
+    succeeded(&submit(&mut ui, vm.id, None, VmAction::Stop).await);
+    let s = status(&mut ui, vm.id).await;
+    assert_eq!(s.state, VmState::Stopped);
+    assert_eq!((s.run_id, s.last_run_id), (None, Some(first)));
+
+    let second = start_vm(&mut ui, vm.id).await;
+    assert_ne!(second, first);
+    succeeded(&submit(&mut ui, vm.id, None, VmAction::Stop).await);
+    assert_eq!(status(&mut ui, vm.id).await.last_run_id, Some(second));
+    svc.handle.shutdown().await;
+
+    // The catalog keeps it: a new service reports the same last run.
+    let svc = start_sqlite(&dir).await;
+    let (mut ui, _) = connect_ui(&svc).await;
+    let s = status(&mut ui, vm.id).await;
+    assert_eq!((s.run_id, s.last_run_id), (None, Some(second)));
+    match req(&mut ui, Request::ListVms).await {
+        ServerMessage::Response {
+            result: ResponseBody::VmList { vms },
+            ..
+        } => assert_eq!(
+            vms.iter().find(|v| v.vm_id == vm.id).unwrap().last_run_id,
+            Some(second)
+        ),
         other => panic!("{other:?}"),
     }
     svc.handle.shutdown().await;

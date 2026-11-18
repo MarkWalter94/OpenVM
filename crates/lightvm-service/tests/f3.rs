@@ -169,7 +169,7 @@ async fn status(c: &mut Client, vm_id: VmId) -> VmSummary {
         ServerMessage::Response {
             result: ResponseBody::Vm { vm },
             ..
-        } => vm,
+        } => *vm,
         other => panic!("{other:?}"),
     }
 }

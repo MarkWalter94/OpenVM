@@ -1338,6 +1338,7 @@ fn summary(s: VmStatus, disk_used_bytes: Option<u64>, mut baselines: VmBaselines
         name: s.name,
         state: s.state,
         run_id: s.run_id,
+        last_run_id: s.run_id,
         config: s.config,
         config_revision: s.config_revision,
         disk_used_bytes,
@@ -1690,8 +1691,10 @@ where
             _ => None,
         };
         let snapshots = self.core.store().snapshot_facts(s.vm_id);
+        let last_run = s.run_id.or_else(|| self.core.store().last_run(s.vm_id));
         let mut out = summary(s, used, baselines);
         out.snapshots = snapshots;
+        out.last_run_id = last_run;
         out.start = start;
         out.vcpu_halt = vcpu_halt;
         out

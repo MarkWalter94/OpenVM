@@ -230,6 +230,14 @@ impl CatalogStore for MemoryStore {
     fn vm_disk_usage(&self, id: VmId) -> Option<u64> {
         self.0.vms.contains_key(&id).then_some(0)
     }
+    fn last_run(&self, id: VmId) -> Option<RunId> {
+        self.0
+            .runs
+            .values()
+            .filter(|r| r.vm_id == id)
+            .map(|r| r.id)
+            .max()
+    }
     fn live_standing_grant(&self) -> Result<Option<StoredStandingGrant>, PublicError> {
         Ok(self
             .0
