@@ -12,7 +12,9 @@
 use crate::keys;
 
 /// Topics accepted by `help` besides the tool names.
-pub const TOPICS: [&str; 6] = ["overview", "session", "tools", "keys", "errors", "limits"];
+pub const TOPICS: [&str; 7] = [
+    "overview", "session", "standing", "tools", "keys", "errors", "limits",
+];
 
 const OVERVIEW: &str = "\
 # LightVM MCP adapter: overview
@@ -49,7 +51,8 @@ a verifier or from the user.
 - Reference: `help`.
 
 ## Topics of `help`
-`overview` (this page), `session` (life cycle of a session), `tools` (every tool), a tool name \
+`overview` (this page), `session` (life cycle of a session), `standing` (unattended access \
+under a standing grant), `tools` (every tool), a tool name \
 (one tool), `keys` (key names and typeable characters), `errors` (error codes), `limits` (what \
 the adapter and the VM lack).
 ";
@@ -63,7 +66,8 @@ States reported by `session_status` (`state`):
 | --- | --- |
 | `none` | No session has been requested by this adapter. |
 | `pending` | A request is waiting for the user's decision in the LightVM app. It expires after 5 minutes. |
-| `active` | Approved. The result lists the VM (`vm_ids`), the granted `capabilities` and `expires_at`. |
+| `active` | Approved. The result lists the VM (`vm_ids`), the granted `capabilities` and `expires_at`; `standing: true` marks a session of a standing grant. |
+| `renewing` | Standing grant only: the session ended by itself and the adapter is requesting a new one; `renewal` gives the attempts so far, the next attempt and the last error (topic `standing`). |
 | `closed` | Denied, expired, revoked, ended or lost; `reason` says which. A new session requires a new request and a new approval. |
 
 ## Request and approval
@@ -81,7 +85,8 @@ need to be restarted after a new pairing.
 
 ## While active
 - The adapter renews the session's lease automatically every few seconds. If the adapter stops \
-running, the lease lapses, the session ends and LightVM stops the VM.
+running, the lease lapses, the session ends and LightVM stops the VM (under a standing grant \
+the VM keeps running: topic `standing`).
 - The user can **pause** the session (observation tools keep working, every other call is refused \
 with `permission_denied`), **take back** keyboard and mouse, **revoke** the session, or press \
 **Emergency Stop** (all VMs stop, all sessions end).
@@ -92,7 +97,47 @@ runs out, calls are refused with `resource_limit` or the session closes.
 - `session_declare` records the outcome the client claims (`passed`, `failed`, `inconclusive`, \
 `cancelled`, `timed_out`, `infrastructure_error`) with a summary, in the report.
 - `session_end` ends the session; the VM keeps its current power state.
-- A session never survives a restart of LightVM.
+- A session never survives a restart of LightVM. Under a standing grant the adapter obtains a \
+new session after the restart by itself (topic `standing`).
+";
+
+const STANDING: &str = "\
+# Standing grant (unattended access)
+
+The user can create, in the LightVM app, a **standing grant**: a permission for this client on \
+one VM, with its capabilities, that lasts at most 7 days. The app then writes the pairing file \
+with the grant's credential. While the grant lives, a `session_request` is decided by the grant \
+at once: no verification code is compared and nobody clicks in the app. The result shows \
+`state: active` and `standing: true`. The capabilities are those of the grant.
+
+## What renews by itself
+- The **sessions** within the grant. A session lasts at most 24 hours and never beyond the \
+grant. When it ends by itself (its expiry, the lease lapsing, the connection lost, a restart of \
+LightVM), the adapter requests a new session with the purpose of the last `session_request`: \
+`session_status` shows `state: renewing`, then `active` with a new `session_id`.
+- Between attempts the pause grows (1 s, doubled each time, up to 60 s) when LightVM refuses or \
+is not reachable. A request refused because the previous session is still being closed, or \
+because the grant waits for the user's confirmation, is retried the same way.
+- After a restart of LightVM the adapter reads the pairing file again (the app rewrites it with \
+the new address of the service) and reconnects.
+- While `renewing`, VM tools return `session_renewing` (`retryable: true`).
+
+## What does not renew by itself
+- The **grant**. Only the user creates it, confirms it again after a change of the VM's \
+configuration (until then it is suspended and requests are refused), and revokes it, in the \
+LightVM app. It lasts at most 7 days. No tool of this adapter creates, extends or changes a \
+grant.
+- When the grant is revoked or expires, or after an Emergency Stop, the credential is refused: \
+the adapter stops renewing and `session_status` shows `closed` with the reason.
+- An explicit `session_end` ends the session and stops the renewal; a later `session_request` \
+under a live grant obtains a new session.
+
+## The VM between sessions
+- When a session of a standing grant ends (expiry, lease, connection lost), the VM keeps \
+running; it is not stopped. It also keeps running while no client is connected.
+- The VM's `run_id` can change between sessions (the VM may have been stopped and started in \
+the meantime): `vm_status` gives the current one.
+- Revocation of the grant does not stop the VM; an Emergency Stop does.
 ";
 
 const LIMITS: &str = "\
@@ -133,6 +178,7 @@ without any change.
 | --- | --- |
 | `permission_denied` | Capability not granted, session paused, or input control held by the user |
 | `session_expired` / `session_closed` | The session ended (duration, revocation, Emergency Stop, agent access off, LightVM restart, lease lost) |
+| `session_renewing` | Standing grant only: the session ended by itself and a new one is being requested (`retryable: true`; topic `standing`) |
 | `unauthenticated` | Pairing missing, expired or refused |
 | `state_conflict` | The VM is not in the required state (e.g. screenshot of a stopped VM, snapshot of a running VM) |
 | `vm_busy` | Another operation is running on the VM |
@@ -173,7 +219,7 @@ const TOOLS: &[(&str, &str)] = &[
     (
         "help",
         "## help\nThis reference. Parameters: `topic` (optional): `overview` (default), \
-`session`, `tools`, `keys`, `errors`, `limits` or a tool name. Works without a session. The \
+`session`, `standing`, `tools`, `keys`, `errors`, `limits` or a tool name. Works without a session. The \
 result also reports the current session state.",
     ),
     (
@@ -183,14 +229,17 @@ result also reports the current session state.",
 of the VM's network endpoints the client would like, for example `[\"sql.lan\"]`; the user \
 decides). Result: `state: pending`, \
 `verification_code` (the same code the LightVM app shows next to the request), \
-`request_expires_at`. Requires a pairing written by the app (see topic `session`).",
+`request_expires_at`. Requires a pairing written by the app (see topic `session`). Under a \
+standing grant created by the user in the app: `state: active` and `standing: true` at once, \
+capabilities of the grant (topic `standing`).",
     ),
     (
         "session_status",
         "## session_status\nState of the session. Parameters: `wait_s` (0-50, default 30): \
-while pending, how long the call waits for the user's decision. Result: `state` (`none`, \
-`pending`, `active`, `closed`), `message`, and when active `session_id`, `vm_ids`, \
-`capabilities`, `expires_at`; when closed, `reason`.",
+while pending or renewing, how long the call waits for a change. Result: `state` (`none`, \
+`pending`, `active`, `renewing`, `closed`), `message`, and when active `session_id`, `vm_ids`, \
+`capabilities`, `expires_at`, `standing`; when renewing, `reason` (end of the previous session) \
+and `renewal` (`attempt`, `next_attempt_at`, `last_error`); when closed, `reason`.",
     ),
     (
         "session_declare",
@@ -203,7 +252,8 @@ verifier or by the user.",
         "session_end",
         "## session_end\nEnds the session. No parameters. The VM keeps its power state. Result: \
 number of queued operations discarded and of operations already forwarded (these may still \
-take effect).",
+take effect). Under a standing grant it also stops the automatic renewal; while `renewing` it \
+only stops the renewal (error `session_closed`, no live session).",
     ),
     (
         "vm_list",
@@ -361,6 +411,7 @@ pub fn guide(topic: &str) -> Result<String, String> {
     Ok(match t.as_str() {
         "" | "overview" | "start" | "help" | "info" => OVERVIEW.to_owned(),
         "session" => SESSION.to_owned(),
+        "standing" => STANDING.to_owned(),
         "tools" => tools_text(),
         "keys" => keys_text(),
         "errors" => ERRORS.to_owned(),
@@ -421,7 +472,7 @@ mod tests {
     /// agent that could compete with the user's prompt.
     #[test]
     fn the_reference_gives_no_instructions() {
-        let mut all = [OVERVIEW, SESSION, LIMITS, ERRORS].join("\n");
+        let mut all = [OVERVIEW, SESSION, STANDING, LIMITS, ERRORS].join("\n");
         all.push_str(&tools_text());
         all.push_str(&keys_text());
         let lower = all.to_ascii_lowercase();

@@ -43,21 +43,24 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio::sync::watch;
 
-use lightvm_proto::ipc::{AgentCall, Request, ResponseBody, SessionAuth, base64_decode};
+use lightvm_proto::ipc::{
+    AgentCall, Request, ResponseBody, SessionAuth, SessionRequestId, base64_decode,
+};
 use lightvm_proto::{
     Capability, CapabilitySet, DisplayGeometry, ErrorCode, Grant, InputBatch, InputEvent,
     MouseButton, OperationId, OperationRecord, PointerButton, PointerMove, PublicError, RunId,
     SessionId, Sha256Digest, UtcTimestamp, VmAction, VmId, VmRequest,
 };
+use lightvm_service::credential::Credential;
 
 use crate::ipc::{CallError, Ipc};
 use crate::tools::{
     BaselinesOut, Button, DeclareOut, DeclareParams, EndOut, EndpointOut, GuestToolsOut,
     GuestToolsParams, HelpOut, HelpParams, InputOut, LogsOut, LogsParams, MouseClickParams,
-    MouseMoveParams, NoParams, OperationOut, OperationParams, Phase, PressParams, ReportOut,
-    ReportParams, RestoreOut, RestoreParams, Scale, ScreenshotOut, ScreenshotParams, SessionOut,
-    SessionRequestParams, SessionStatusParams, SnapshotOut, SnapshotParams, ToolDef, TypeOut,
-    TypeParams, UiInvokeParams, UiTreeParams, VmListOut, VmOut, VmParams, VmStopParams,
+    MouseMoveParams, NoParams, OperationOut, OperationParams, Phase, PressParams, RenewalOut,
+    ReportOut, ReportParams, RestoreOut, RestoreParams, Scale, ScreenshotOut, ScreenshotParams,
+    SessionOut, SessionRequestParams, SessionStatusParams, SnapshotOut, SnapshotParams, ToolDef,
+    TypeOut, TypeParams, UiInvokeParams, UiTreeParams, VmListOut, VmOut, VmParams, VmStopParams,
 };
 
 /// Only accepted MCP revision (ROADMAP 9; ADR-0021).
@@ -89,6 +92,11 @@ pub struct AdapterConfig {
     pub type_delay: Duration,
     /// Lease renewal interval (below the 10 s lease).
     pub renew_every: Duration,
+    /// First pause before a new session of a standing grant is requested
+    /// (doubled after each failed attempt; ADR-0039).
+    pub standing_backoff_min: Duration,
+    /// Longest pause between two attempts.
+    pub standing_backoff_max: Duration,
 }
 
 impl Default for AdapterConfig {
@@ -99,6 +107,8 @@ impl Default for AdapterConfig {
             rate_per_second: 10.0,
             type_delay: Duration::from_millis(30),
             renew_every: Duration::from_secs(3),
+            standing_backoff_min: Duration::from_secs(1),
+            standing_backoff_max: Duration::from_secs(60),
         }
     }
 }
@@ -193,9 +203,96 @@ enum State {
         auth: SessionAuth,
         grant: Box<Grant>,
     },
+    /// The session of a standing grant ended by itself: a new one is
+    /// being requested (ADR-0039). No connection is current meanwhile.
+    Renewing {
+        /// Why the previous session ended.
+        ended: String,
+        /// Attempts made so far.
+        attempt: u32,
+        /// Next attempt.
+        next_at: UtcTimestamp,
+        /// Error code of the last failed attempt.
+        last_error: Option<String>,
+    },
     Closed {
         reason: String,
     },
+}
+
+/// What a session of a standing grant is requested again with (the last
+/// explicit `session_request`).
+#[derive(Debug, Clone)]
+struct StandingCtx {
+    purpose: String,
+    endpoints: Vec<String>,
+}
+
+/// Last pairing file read: used by the renewal when the file is momentarily
+/// unreadable (the service still decides whether the credential is valid).
+struct LastPairing {
+    endpoint: String,
+    credential: Credential,
+    expires_at: UtcTimestamp,
+}
+
+/// A connection with its session request sent.
+struct Opened {
+    ipc: Arc<Ipc>,
+    request_id: SessionRequestId,
+    verification_code: String,
+    expires_in_s: u64,
+    standing: bool,
+}
+
+/// Failure of a session request: the error and whether it is final for the
+/// renewal of a standing grant (credential refused or expired, grant ended,
+/// request outside the grant).
+struct OpenError {
+    error: ToolError,
+    terminal: bool,
+}
+
+impl OpenError {
+    fn retry(error: ToolError) -> Self {
+        Self {
+            error,
+            terminal: false,
+        }
+    }
+
+    fn terminal(error: ToolError) -> Self {
+        Self {
+            error,
+            terminal: true,
+        }
+    }
+
+    /// Classifies a failed call of the session request.
+    fn from_call(e: CallError) -> Self {
+        let terminal = match &e {
+            CallError::Operational(p) => match p.code {
+                ErrorCode::Unauthenticated => true,
+                ErrorCode::PermissionDenied => {
+                    let reason = p
+                        .details
+                        .as_ref()
+                        .and_then(|d| d.get("reason"))
+                        .map_or("", String::as_str);
+                    // Another session not yet reaped, or a grant waiting
+                    // for the user's confirmation: both can change.
+                    !matches!(reason, "session_live" | "standing_grant_suspended")
+                }
+                _ => false,
+            },
+            CallError::Protocol(_) => true,
+            CallError::Closed(_) | CallError::Timeout => false,
+        };
+        Self {
+            error: e.into(),
+            terminal,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -212,6 +309,13 @@ struct Inner {
     /// A `session_request` is between its state check and the installation
     /// of its connection (one request at a time).
     requesting: std::sync::atomic::AtomicBool,
+    /// Set while the adapter works under a standing grant (ADR-0039): a
+    /// session that ends by itself is requested again. Cleared by an
+    /// explicit `session_end` and by a final refusal.
+    standing: Mutex<Option<StandingCtx>>,
+    /// Generation of the renewal: bumped to cancel a running renewal task.
+    renew_epoch: std::sync::atomic::AtomicU64,
+    last_pairing: Mutex<Option<LastPairing>>,
     bucket: Mutex<Bucket>,
     client: Mutex<Option<(String, String)>>,
     /// Display geometry of the last screenshot per VM and run.
@@ -300,6 +404,9 @@ impl Adapter {
                 ipc: Mutex::new(None),
                 state,
                 requesting: std::sync::atomic::AtomicBool::new(false),
+                standing: Mutex::new(None),
+                renew_epoch: std::sync::atomic::AtomicU64::new(0),
+                last_pairing: Mutex::new(None),
                 bucket: Mutex::new(Bucket {
                     tokens: burst,
                     at: Instant::now(),
@@ -361,6 +468,7 @@ impl Adapter {
                     "waiting for the user's approval in the LightVM app (verification code {code}); session_status reports the decision"
                 ),
             )),
+            State::Renewing { .. } => Err(self.renewing_error()),
             State::Idle => Err(ToolError::new(
                 "no_session",
                 "no session: VM tools work only in a session approved through session_request",
@@ -372,10 +480,37 @@ impl Adapter {
         }
     }
 
+    /// Error of a call made while the session of a standing grant is being
+    /// requested again.
+    fn renewing_error(&self) -> ToolError {
+        let next = match &*self.inner.state.borrow() {
+            State::Renewing { next_at, .. } => format!(" (next attempt at {next_at})"),
+            _ => String::new(),
+        };
+        ToolError {
+            retryable: true,
+            ..ToolError::new(
+                "session_renewing",
+                format!(
+                    "the session of the standing grant ended by itself and a new one is being requested automatically{next}; session_status reports the renewal"
+                ),
+            )
+        }
+    }
+
     fn close(&self, reason: &str) {
         self.inner.state.send_replace(State::Closed {
             reason: reason.to_owned(),
         });
+    }
+
+    fn renewal_wanted(&self, epoch: u64) -> bool {
+        self.inner
+            .renew_epoch
+            .load(std::sync::atomic::Ordering::SeqCst)
+            == epoch
+            && matches!(*self.inner.state.borrow(), State::Renewing { .. })
+            && lock(&self.inner.standing).is_some()
     }
 
     /// Whether `ipc` is the connection of the current session request.
@@ -388,11 +523,306 @@ impl Adapter {
     /// Closes the session only while it still runs on `ipc`: a failure, a
     /// task or a lease loop of an earlier request (its own connection)
     /// never closes a later session.
+    ///
+    /// Under a standing grant (ADR-0039) an active session that ends this
+    /// way (expiry, lease, revocation of the session, lost connection,
+    /// LightVM restart) is requested again in the background instead.
     fn close_for(&self, ipc: &Ipc, reason: &str) {
-        let cur = lock(&self.inner.ipc);
-        if cur.as_deref().is_some_and(|c| std::ptr::eq(c, ipc)) {
+        let mut cur = lock(&self.inner.ipc);
+        if !cur.as_deref().is_some_and(|c| std::ptr::eq(c, ipc)) {
+            return;
+        }
+        let renew = matches!(*self.inner.state.borrow(), State::Active { .. })
+            && lock(&self.inner.standing).is_some();
+        if !renew {
+            self.close(reason);
+            return;
+        }
+        // The old connection is no longer current: its tasks stop and it
+        // closes once they are done.
+        *cur = None;
+        let epoch = self
+            .inner
+            .renew_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        let next_at = UtcTimestamp::now()
+            .checked_add_millis(i64::try_from(self.backoff_min().as_millis()).unwrap_or(i64::MAX))
+            .unwrap_or_else(UtcTimestamp::now);
+        self.inner.state.send_replace(State::Renewing {
+            ended: reason.to_owned(),
+            attempt: 0,
+            next_at,
+            last_error: None,
+        });
+        drop(cur);
+        diag(&format!(
+            "standing grant: session ended ({reason}); requesting a new one"
+        ));
+        let me = self.clone();
+        tokio::spawn(async move { me.renew(epoch).await });
+    }
+
+    fn backoff_min(&self) -> Duration {
+        self.inner
+            .cfg
+            .standing_backoff_min
+            .max(Duration::from_millis(10))
+    }
+
+    /// Stops the renewal of a standing grant (explicit end or final
+    /// refusal) and closes the state.
+    fn stop_standing(&self, reason: &str) {
+        let _cur = lock(&self.inner.ipc);
+        lock(&self.inner.standing).take();
+        self.inner
+            .renew_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if matches!(*self.inner.state.borrow(), State::Renewing { .. }) {
             self.close(reason);
         }
+    }
+
+    /// Background renewal of a standing grant's session: new request with
+    /// the last purpose, increasing pause between attempts, never a tight
+    /// loop; ends on success, on a final refusal or when cancelled.
+    async fn renew(&self, epoch: u64) {
+        let min = self.backoff_min();
+        let max = self.inner.cfg.standing_backoff_max.max(min);
+        let mut delay = min;
+        let mut attempt: u32 = 0;
+        loop {
+            tokio::time::sleep(delay).await;
+            if !self.renewal_wanted(epoch) {
+                return;
+            }
+            let Some(ctx) = lock(&self.inner.standing).clone() else {
+                return;
+            };
+            // One request at a time (an explicit session_request returns
+            // at once while renewing).
+            let slot = loop {
+                if let Some(s) = RequestSlot::take(&self.inner.requesting) {
+                    break s;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                if !self.renewal_wanted(epoch) {
+                    return;
+                }
+            };
+            attempt = attempt.saturating_add(1);
+            match self.renew_once(&ctx).await {
+                Ok((ipc, auth, grant)) => {
+                    {
+                        let mut cur = lock(&self.inner.ipc);
+                        if !self.renewal_wanted(epoch) {
+                            // Cancelled meanwhile: the connection is dropped
+                            // and the new session ends with it.
+                            return;
+                        }
+                        *cur = Some(ipc.clone());
+                        self.inner.state.send_replace(State::Active {
+                            auth,
+                            grant: Box::new(grant),
+                        });
+                    }
+                    drop(slot);
+                    diag(&format!(
+                        "standing grant: new session obtained (attempt {attempt})"
+                    ));
+                    self.spawn_lease(ipc);
+                    self.note_session_start(true).await;
+                    return;
+                }
+                Err(e) if e.terminal => {
+                    let _cur = lock(&self.inner.ipc);
+                    if self.renewal_wanted(epoch) {
+                        lock(&self.inner.standing).take();
+                        diag(&format!(
+                            "standing grant: renewal stopped ({})",
+                            e.error.code
+                        ));
+                        self.close(&format!(
+                            "the standing grant no longer gives a session ({}: {})",
+                            e.error.code, e.error.message
+                        ));
+                    }
+                    return;
+                }
+                Err(e) => {
+                    delay = delay.saturating_mul(2).min(max);
+                    let next_at = UtcTimestamp::now()
+                        .checked_add_millis(i64::try_from(delay.as_millis()).unwrap_or(i64::MAX))
+                        .unwrap_or_else(UtcTimestamp::now);
+                    let _cur = lock(&self.inner.ipc);
+                    if !self.renewal_wanted(epoch) {
+                        return;
+                    }
+                    let ended = match &*self.inner.state.borrow() {
+                        State::Renewing { ended, .. } => ended.clone(),
+                        _ => String::new(),
+                    };
+                    self.inner.state.send_replace(State::Renewing {
+                        ended,
+                        attempt,
+                        next_at,
+                        last_error: Some(e.error.code.clone()),
+                    });
+                }
+            }
+        }
+    }
+
+    /// One renewal attempt: connect (pairing file read again), request,
+    /// take the decision already made by the standing grant.
+    async fn renew_once(
+        &self,
+        ctx: &StandingCtx,
+    ) -> Result<(Arc<Ipc>, SessionAuth, Grant), OpenError> {
+        let o = self.open(&ctx.purpose, ctx.endpoints.clone(), true).await?;
+        if !o.standing {
+            // The pairing file now holds an ordinary credential: its
+            // request (dropped with the connection) needs the user.
+            return Err(OpenError::terminal(ToolError::new(
+                "pairing_unavailable",
+                "the pairing credential no longer carries a standing grant",
+            )));
+        }
+        match o
+            .ipc
+            .call(
+                Request::AwaitSession {
+                    request_id: o.request_id,
+                },
+                T_SHORT,
+            )
+            .await
+        {
+            Ok(ResponseBody::SessionGranted {
+                session_id,
+                token,
+                grant,
+                ..
+            }) => Ok((o.ipc, SessionAuth { session_id, token }, grant)),
+            Ok(_) => Err(OpenError::retry(unexpected())),
+            Err(e) => Err(OpenError::from_call(e)),
+        }
+    }
+
+    /// Reads the pairing file, connects and sends the session request.
+    /// `renewal`: an unreadable file falls back on the last one read.
+    async fn open(
+        &self,
+        purpose: &str,
+        endpoints: Vec<String>,
+        renewal: bool,
+    ) -> Result<Opened, OpenError> {
+        let path = self.inner.cfg.pairing_file.clone().ok_or_else(|| {
+            OpenError::terminal(ToolError::new(
+                "pairing_unavailable",
+                "no pairing file location: Pair a client in LightVM -> Agents first",
+            ))
+        })?;
+        let (endpoint, credential) = match pairing::read(&path) {
+            Ok(p) => {
+                let out = (p.endpoint.clone(), p.credential.clone());
+                *lock(&self.inner.last_pairing) = Some(LastPairing {
+                    endpoint: p.endpoint,
+                    credential: p.credential,
+                    expires_at: p.expires_at,
+                });
+                out
+            }
+            Err(e) => {
+                let expired = e == pairing::PairingError::Expired;
+                let last = if renewal && !expired {
+                    lock(&self.inner.last_pairing)
+                        .as_ref()
+                        .filter(|l| UtcTimestamp::now() < l.expires_at)
+                        .map(|l| (l.endpoint.clone(), l.credential.clone()))
+                } else {
+                    None
+                };
+                match last {
+                    Some(l) => l,
+                    None => {
+                        let err = ToolError::new(
+                            "pairing_unavailable",
+                            format!("{e}: Pair a client in LightVM -> Agents first"),
+                        );
+                        // An expired credential is final; a missing file
+                        // may come back (the app rewrites it).
+                        return Err(if expired || !renewal {
+                            OpenError::terminal(err)
+                        } else {
+                            OpenError::retry(err)
+                        });
+                    }
+                }
+            }
+        };
+        let ipc = Arc::new(
+            Ipc::connect(&endpoint, &credential, &self.client_label())
+                .await
+                .map_err(|e| match e {
+                    CallError::Operational(e) if e.code == ErrorCode::Unauthenticated => {
+                        OpenError::terminal(ToolError::new(
+                            "pairing_unavailable",
+                            "the pairing credential was refused (expired, revoked or the service restarted): Pair a client in LightVM -> Agents first",
+                        ))
+                    }
+                    other => OpenError::retry(other.into()),
+                })?,
+        );
+        drop(credential);
+        let all: CapabilitySet = Capability::ALL.into_iter().collect();
+        let reply = ipc
+            .call(
+                Request::RequestSession {
+                    client_name: self.client_label(),
+                    purpose: purpose.to_owned(),
+                    requested_vms: Vec::new(),
+                    requested_capabilities: all,
+                    requested_endpoints: endpoints,
+                },
+                T_SHORT,
+            )
+            .await
+            .map_err(OpenError::from_call)?;
+        let ResponseBody::SessionRequested {
+            request_id,
+            verification_code,
+            expires_in_s,
+            standing,
+        } = reply
+        else {
+            return Err(OpenError::retry(unexpected()));
+        };
+        Ok(Opened {
+            ipc,
+            request_id,
+            verification_code,
+            expires_in_s,
+            standing,
+        })
+    }
+
+    /// Note of the session start for the report (client and versions).
+    async fn note_session_start(&self, renewed: bool) {
+        let client = lock(&self.inner.client).clone();
+        self.note(
+            "session_request",
+            true,
+            None,
+            json!({
+                "mcp_protocol": PROTOCOL_VERSION.as_str(),
+                "adapter": format!("lightvm-mcp {}", env!("CARGO_PKG_VERSION")),
+                "client": client.map(|(n, v)| format!("{n} {v}")),
+                "standing": lock(&self.inner.standing).is_some(),
+                "renewed": renewed,
+            }),
+        )
+        .await;
     }
 
     async fn agent(
@@ -424,6 +854,19 @@ impl Adapter {
                 ipc,
                 &format!("session no longer valid ({})", e.code.as_str()),
             );
+        }
+        // Under a standing grant the end of the session starts a renewal:
+        // the call can be repeated once a new session is active.
+        let ended = match &r {
+            Err(CallError::Closed(_)) => true,
+            Err(CallError::Operational(e)) => matches!(
+                e.code,
+                ErrorCode::Unauthenticated | ErrorCode::SessionExpired
+            ),
+            _ => false,
+        };
+        if ended && matches!(*self.inner.state.borrow(), State::Renewing { .. }) {
+            return Err(self.renewing_error());
         }
         r.map_err(ToolError::from)
     }
@@ -512,7 +955,10 @@ impl Adapter {
             capabilities: Vec::new(),
             expires_at: None,
             reason: None,
+            standing: false,
+            renewal: None,
         };
+        let standing = lock(&self.inner.standing).is_some();
         match st {
             State::Idle => {
                 out.message = "no session requested".into();
@@ -527,7 +973,12 @@ impl Adapter {
             }
             State::Active { auth, grant } => {
                 out.state = Phase::Active;
-                out.message = "session active: vm_list lists the VM of the session".into();
+                out.standing = standing;
+                out.message = if standing {
+                    "session active under the standing grant the user created in the LightVM app: vm_list lists the VM of the session; when the session ends by itself a new one is requested automatically".into()
+                } else {
+                    "session active: vm_list lists the VM of the session".into()
+                };
                 out.session_id = Some(auth.session_id);
                 out.vm_ids = grant.vm_allowlist.iter().copied().collect();
                 out.capabilities = grant
@@ -536,6 +987,24 @@ impl Adapter {
                     .map(|c| c.as_str().to_owned())
                     .collect();
                 out.expires_at = Some(grant.expires_at);
+            }
+            State::Renewing {
+                ended,
+                attempt,
+                next_at,
+                last_error,
+            } => {
+                out.state = Phase::Renewing;
+                out.standing = true;
+                out.message = format!(
+                    "the session of the standing grant ended by itself; a new one is being requested automatically (attempts so far: {attempt}, next at {next_at}); the VM keeps its power state and its run_id can change"
+                );
+                out.reason = Some(ended);
+                out.renewal = Some(RenewalOut {
+                    attempt,
+                    next_attempt_at: next_at,
+                    last_error,
+                });
             }
             State::Closed { reason } => {
                 out.state = Phase::Closed;
@@ -568,39 +1037,12 @@ impl Adapter {
         };
         if matches!(
             *self.inner.state.borrow(),
-            State::Pending { .. } | State::Active { .. }
+            State::Pending { .. } | State::Active { .. } | State::Renewing { .. }
         ) {
             return Ok(Output::Json(
                 serde_json::to_value(self.session_out()).unwrap_or_default(),
             ));
         }
-        let path = self.inner.cfg.pairing_file.clone().ok_or_else(|| {
-            ToolError::new(
-                "pairing_unavailable",
-                "no pairing file location: Pair a client in LightVM -> Agents first",
-            )
-        })?;
-        let pairing = pairing::read(&path).map_err(|e| {
-            ToolError::new(
-                "pairing_unavailable",
-                format!("{e}: Pair a client in LightVM -> Agents first"),
-            )
-        })?;
-        let ipc = Arc::new(
-            Ipc::connect(&pairing.endpoint, &pairing.credential, &self.client_label())
-                .await
-                .map_err(|e| match e {
-                    CallError::Operational(e) if e.code == ErrorCode::Unauthenticated => {
-                        ToolError::new(
-                            "pairing_unavailable",
-                            "the pairing credential was refused (expired, revoked or the service restarted): Pair a client in LightVM -> Agents first",
-                        )
-                    }
-                    other => other.into(),
-                })?,
-        );
-        drop(pairing);
-        let all: CapabilitySet = Capability::ALL.into_iter().collect();
         let endpoints: Vec<String> = p
             .network_endpoints
             .unwrap_or_default()
@@ -609,27 +1051,51 @@ impl Adapter {
             .filter(|n| !n.is_empty() && n.len() <= 253)
             .take(32)
             .collect();
-        let reply = ipc
-            .call(
-                Request::RequestSession {
-                    client_name: self.client_label(),
-                    purpose: purpose.to_owned(),
-                    requested_vms: Vec::new(),
-                    requested_capabilities: all,
-                    requested_endpoints: endpoints,
-                },
-                T_SHORT,
-            )
-            .await?;
-        let ResponseBody::SessionRequested {
+        let Opened {
+            ipc,
             request_id,
             verification_code,
             expires_in_s,
-            ..
-        } = reply
-        else {
-            return Err(unexpected());
-        };
+            standing,
+        } = self
+            .open(purpose, endpoints.clone(), false)
+            .await
+            .map_err(|e| e.error)?;
+        if standing {
+            // ADR-0039: decided by the standing grant the user created in
+            // the app; nobody compares a code, the decision is there.
+            let r = ipc
+                .call(Request::AwaitSession { request_id }, T_SHORT)
+                .await?;
+            let ResponseBody::SessionGranted {
+                session_id,
+                token,
+                grant,
+                ..
+            } = r
+            else {
+                return Err(unexpected());
+            };
+            {
+                let mut cur = lock(&self.inner.ipc);
+                *lock(&self.inner.standing) = Some(StandingCtx {
+                    purpose: purpose.to_owned(),
+                    endpoints,
+                });
+                *cur = Some(ipc.clone());
+                self.inner.state.send_replace(State::Active {
+                    auth: SessionAuth { session_id, token },
+                    grant: Box::new(grant),
+                });
+            }
+            diag("session granted by the standing grant");
+            self.spawn_lease(ipc);
+            self.note_session_start(false).await;
+            return Ok(Output::Json(
+                serde_json::to_value(self.session_out()).unwrap_or_default(),
+            ));
+        }
+        lock(&self.inner.standing).take();
         let expires_at = UtcTimestamp::now()
             .checked_add_millis(i64::try_from(expires_in_s).unwrap_or(300) * 1000)
             .unwrap_or_else(UtcTimestamp::now);
@@ -672,18 +1138,7 @@ impl Adapter {
                     }
                     diag("session approved");
                     me.spawn_lease(ipc.clone());
-                    let client = lock(&me.inner.client).clone();
-                    me.note(
-                        "session_request",
-                        true,
-                        None,
-                        json!({
-                            "mcp_protocol": PROTOCOL_VERSION.as_str(),
-                            "adapter": format!("lightvm-mcp {}", env!("CARGO_PKG_VERSION")),
-                            "client": client.map(|(n, v)| format!("{n} {v}")),
-                        }),
-                    )
-                    .await;
+                    me.note_session_start(false).await;
                 }
                 Ok(_) => me.close_for(&ipc, "unexpected reply to the session request"),
                 Err(CallError::Operational(e)) if e.code == ErrorCode::SessionExpired => {
@@ -703,8 +1158,13 @@ impl Adapter {
     fn spawn_lease(&self, ipc: Arc<Ipc>) {
         let me = self.clone();
         tokio::spawn(async move {
+            // First renewal at once: its reply gives the lease the session
+            // was granted, and the period becomes a third of it (never more
+            // than `renew_every`), so a short lease chosen by the user is
+            // kept alive too.
+            let mut every = Duration::ZERO;
             loop {
-                tokio::time::sleep(me.inner.cfg.renew_every).await;
+                tokio::time::sleep(every).await;
                 // The loop serves only the session of its own connection.
                 if !me.is_current(&ipc) {
                     return;
@@ -714,8 +1174,13 @@ impl Adapter {
                     _ => return,
                 };
                 match me.agent(&ipc, &auth, AgentCall::RenewLease, T_SHORT).await {
-                    Ok(_) => {}
-                    Err(e) if e.code == "resource_limit" => {}
+                    Ok(ResponseBody::Lease { lease }) => {
+                        let ms = lease.expires_at.millis_since(lease.renewed_at).max(0) / 3;
+                        every = Duration::from_millis(u64::try_from(ms).unwrap_or(0))
+                            .clamp(Duration::from_millis(200), me.inner.cfg.renew_every);
+                    }
+                    Ok(_) => every = me.inner.cfg.renew_every,
+                    Err(e) if e.code == "resource_limit" => every = me.inner.cfg.renew_every,
                     Err(e) => {
                         diag(&format!("lease not renewed ({})", e.code));
                         if !matches!(*me.inner.state.borrow(), State::Closed { .. }) {
@@ -732,7 +1197,10 @@ impl Adapter {
         let wait = Duration::from_secs(u64::from(p.wait_s.unwrap_or(30).min(50)));
         let mut rx = self.inner.state.subscribe();
         let deadline = tokio::time::Instant::now() + wait;
-        while matches!(*rx.borrow_and_update(), State::Pending { .. }) {
+        while matches!(
+            *rx.borrow_and_update(),
+            State::Pending { .. } | State::Renewing { .. }
+        ) {
             if tokio::time::timeout_at(deadline, rx.changed())
                 .await
                 .is_err()
@@ -755,10 +1223,35 @@ impl Adapter {
     }
 
     async fn session_end(&self) -> Result<Output, ToolError> {
+        // An explicit end stops the renewal of a standing grant.
+        if matches!(*self.inner.state.borrow(), State::Renewing { .. }) {
+            self.stop_standing("session ended by the client; automatic renewal stopped");
+            return Err(ToolError::new(
+                "session_closed",
+                "no live session to end: the automatic renewal of the standing grant is stopped",
+            ));
+        }
         let (ipc, auth, _) = self.active()?;
-        let r = self
+        // Taken before the call: a closure seen meanwhile (by this call or
+        // by the lease loop) closes the state instead of renewing it.
+        let saved = lock(&self.inner.standing).take();
+        let r = match self
             .agent(&ipc, &auth, AgentCall::EndSession, T_SHORT)
-            .await?;
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                // Still active on the same connection: the end did not
+                // happen, the standing grant mode stays.
+                let cur = lock(&self.inner.ipc);
+                if cur.as_deref().is_some_and(|c| std::ptr::eq(c, &*ipc))
+                    && matches!(*self.inner.state.borrow(), State::Active { .. })
+                {
+                    *lock(&self.inner.standing) = saved;
+                }
+                return Err(e);
+            }
+        };
         let ResponseBody::SessionEnded { session_id, report } = r else {
             return Err(unexpected());
         };

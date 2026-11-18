@@ -354,6 +354,10 @@ pub enum Phase {
     Pending,
     /// Approved: VM tools available within the grant.
     Active,
+    /// The session of a standing grant ended by itself (expiry, lease,
+    /// LightVM restart): the adapter is requesting a new one automatically
+    /// (ADR-0039).
+    Renewing,
     /// Denied, expired, revoked or ended: request a new session.
     Closed,
 }
@@ -381,9 +385,29 @@ pub struct SessionOut {
     /// Grant expiry.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<UtcTimestamp>,
-    /// Reason of the closure.
+    /// Reason of the closure (while renewing: of the end of the previous
+    /// session).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// `true` when the session comes from a standing grant the user created
+    /// in the app (ADR-0039): no per-session approval, automatic renewal.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub standing: bool,
+    /// Automatic renewal in progress (state `renewing`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub renewal: Option<RenewalOut>,
+}
+
+/// Automatic renewal of a standing grant's session.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct RenewalOut {
+    /// Attempts made so far (0 before the first one).
+    pub attempt: u32,
+    /// The next attempt starts at this instant.
+    pub next_attempt_at: UtcTimestamp,
+    /// Error code of the last failed attempt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
 }
 
 /// A VM of the grant.
@@ -640,21 +664,21 @@ pub fn catalogue() -> Vec<ToolDef> {
         def::<SessionRequestParams, SessionOut>(
             "session_request",
             "session.request",
-            "Request a session from the LightVM user. Nothing is accessible before the user approves it in the LightVM app. The result carries a verification code that the app also shows next to the request; the user compares the two before approving. session_status reports the decision. The purpose is shown to the user as the session objective.",
+            "Request a session from the LightVM user. Nothing is accessible before the user approves it in the LightVM app. The result carries a verification code that the app also shows next to the request; the user compares the two before approving. session_status reports the decision. The purpose is shown to the user as the session objective. Under a standing grant the user created in the app, the session is active at once (standing: true) and renewed automatically when it ends by itself.",
             false,
             false,
         ),
         def::<SessionStatusParams, SessionOut>(
             "session_status",
             "session.status",
-            "State of the session request (waits up to wait_s seconds while pending). When active, lists the VM and the capabilities the user granted.",
+            "State of the session request (waits up to wait_s seconds while pending or renewing). When active, lists the VM and the capabilities the user granted. State renewing: the session of a standing grant ended by itself and the adapter is requesting a new one.",
             true,
             false,
         ),
         def::<NoParams, EndOut>(
             "session_end",
             "session.end",
-            "End the session (the VM is not stopped). A new session needs a new approval.",
+            "End the session (the VM is not stopped). A new session needs a new approval. Under a standing grant it also stops the automatic renewal.",
             false,
             false,
         ),
