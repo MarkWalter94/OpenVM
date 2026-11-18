@@ -173,3 +173,7 @@ define_id!(
     /// Identifier of a grant issued by the supervisor (ROADMAP 9).
     GrantId
 );
+define_id!(
+    /// Identifier of a standing grant created by the user (ADR-0039).
+    StandingGrantId
+);

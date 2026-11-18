@@ -42,6 +42,12 @@ pub enum Actor {
     },
     /// Supervisor (expiries, reconciliation, observations).
     System,
+    /// Automatic approval under a standing grant (ADR-0039): never a click
+    /// of the user, always distinguishable from one in the audit.
+    StandingGrant {
+        /// Standing grant.
+        grant_id: crate::StandingGrantId,
+    },
 }
 
 impl Caller {

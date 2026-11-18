@@ -57,6 +57,7 @@ mod qcow2;
 mod records;
 mod recover;
 mod snapshot;
+mod standing;
 mod time;
 mod tpm;
 mod vm_delete;
@@ -111,6 +112,9 @@ pub use recover::{IntegrityIssue, IntentRecovery, RecoveryOutcome, RecoveryRepor
 pub use snapshot::{
     MAX_THUMBNAIL_BYTES, RESTORE_WITH_SNAPSHOTS, RevertSnapshot, SNAPSHOT_NO_DISK,
     SNAPSHOT_ON_OVERLAY, Settled, SnapshotList, SnapshotOp, SnapshotRecord, TakeSnapshot,
+};
+pub use standing::{
+    CAUSE_VM_DELETED, STATE_ACTIVE, STATE_EXPIRED, STATE_REVOKED, STATE_SUSPENDED, StandingGrantRow,
 };
 pub use time::{UtcMillis, now_rfc3339};
 pub use vm_delete::VmDeletionReport;

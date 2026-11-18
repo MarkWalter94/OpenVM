@@ -32,8 +32,8 @@ use lightvm_proto::{
     MediaRecord, NetworkAudit, NetworkProfile, OperationId, OperationKind, OperationRecord,
     OperationStatus, PolicyLayer, PolicyRevision, PublicError, ResourceLimits, RevocationReport,
     RunEndReason, RunId, RunRecord, Screenshot, SessionId, SessionState, SessionToken,
-    Sha256Digest, TerminationCause, UtcTimestamp, VmAction, VmConfig, VmId, VmName, VmRecord,
-    VmRequest, VmState,
+    Sha256Digest, StandingGrantId, TerminationCause, UtcTimestamp, VmAction, VmConfig, VmId,
+    VmName, VmRecord, VmRequest, VmState,
 };
 
 use crate::media::{check_media_kind, verify_media};
@@ -432,6 +432,58 @@ where
     /// Catalog.
     pub fn store(&self) -> &S {
         &self.store
+    }
+
+    // ----- standing grant persistence (ADR-0039) ----------------------------
+
+    /// The live standing grant stored in the catalog, if any.
+    pub fn live_standing_grant(
+        &self,
+    ) -> Result<Option<crate::ports::StoredStandingGrant>, PublicError> {
+        self.store.live_standing_grant()
+    }
+
+    /// Records a new standing grant: its VM must exist; refused while
+    /// another grant is live.
+    pub fn insert_standing_grant(
+        &mut self,
+        g: &crate::ports::StoredStandingGrant,
+    ) -> Result<(), PublicError> {
+        if !self.vms.contains_key(&g.grant.vm_id) {
+            return Err(PublicError::not_found("VM does not exist"));
+        }
+        self.store.insert_standing_grant(g)
+    }
+
+    /// Updates a stored standing grant (state, policy, counters).
+    pub fn update_standing_grant(
+        &mut self,
+        g: &lightvm_proto::StandingGrant,
+    ) -> Result<(), PublicError> {
+        self.store.update_standing_grant(g)
+    }
+
+    /// Baselines created by sessions of a standing grant.
+    pub fn standing_grant_baselines(
+        &self,
+        id: StandingGrantId,
+    ) -> Result<std::collections::BTreeSet<lightvm_proto::BaselineId>, PublicError> {
+        self.store.standing_grant_baselines(id)
+    }
+
+    /// Records a baseline created by a session of a standing grant.
+    pub fn add_standing_grant_baseline(
+        &mut self,
+        id: StandingGrantId,
+        baseline: lightvm_proto::BaselineId,
+    ) -> Result<(), PublicError> {
+        self.store.add_standing_grant_baseline(id, baseline)
+    }
+
+    /// Configuration revision of a VM, if it exists.
+    #[must_use]
+    pub fn vm_config_revision(&self, vm_id: VmId) -> Option<u64> {
+        self.vms.get(&vm_id).map(|rt| rt.record.config_revision)
     }
     /// Audit destination.
     pub fn audit_sink(&self) -> &A {
@@ -3143,6 +3195,31 @@ where
         spec: SessionSpec,
         token: SessionToken,
     ) -> Result<(Grant, Lease), PublicError> {
+        self.create_session_from(spec, token, None)
+    }
+
+    /// Session approved automatically under a standing grant (ADR-0039):
+    /// same checks as [`Self::create_session`]; the audit names the grant as
+    /// the actor, and the session keeps its VM running when it ends by
+    /// expiry, lease expiry or client loss ([`Session::stops_vm_on`]).
+    ///
+    /// [`Session::stops_vm_on`]: crate::session::Session::stops_vm_on
+    pub fn create_session_from_standing_grant(
+        &mut self,
+        spec: SessionSpec,
+        token: SessionToken,
+        grant_id: StandingGrantId,
+    ) -> Result<(Grant, Lease), PublicError> {
+        self.create_session_from(spec, token, Some(grant_id))
+    }
+
+    fn create_session_from(
+        &mut self,
+        spec: SessionSpec,
+        token: SessionToken,
+        standing: Option<StandingGrantId>,
+    ) -> Result<(Grant, Lease), PublicError> {
+        let actor = standing.map_or(Actor::User, |grant_id| Actor::StandingGrant { grant_id });
         let now = self.clock.now();
         let limits = self.effective_limits();
         let live = u32::try_from(self.sessions.live().count()).unwrap_or(u32::MAX);
@@ -3179,7 +3256,7 @@ where
             Ok(())
         })();
         if let Err(err) = result {
-            return Err(self.deny(Actor::User, AuditAction::SessionCreate, Ev::default(), err));
+            return Err(self.deny(actor, AuditAction::SessionCreate, Ev::default(), err));
         }
         let session_id = self.ids.session_id();
         let lease = Lease::new(session_id, now, spec.lease_millis)?;
@@ -3201,9 +3278,9 @@ where
             network_endpoints: spec.network_endpoints,
         };
         self.sessions
-            .insert(session_id, token, grant.clone(), lease, now);
+            .insert(session_id, token, grant.clone(), lease, now, standing);
         self.emit_after(
-            Actor::User,
+            actor,
             AuditAction::SessionCreate,
             AuditOutcome::Succeeded,
             Ev {
@@ -3567,16 +3644,22 @@ where
         session_id: SessionId,
         cause: TerminationCause,
     ) -> Result<SessionTermination, PublicError> {
-        let (allow, live) = self
+        let (allow, live, stops) = self
             .sessions
             .get(session_id)
             .map(|s| {
                 (
                     s.grant.vm_allowlist.clone(),
                     s.state != SessionState::Terminated,
+                    s.stops_vm_on(cause),
                 )
             })
             .ok_or_else(|| PublicError::not_found("session does not exist"))?;
+        // ADR-0039 (D1): a session of a standing grant ending by expiry,
+        // lease expiry or client loss leaves its VM running.
+        if live && !stops {
+            return self.revoke_session(session_id, cause);
+        }
         // An already terminated session (revoked meanwhile, for example) does
         // not stop its VMs a second time.
         if !live {
@@ -3609,7 +3692,32 @@ where
         cause: TerminationCause,
         stop: bool,
     ) -> Vec<SessionTermination> {
-        let live: Vec<SessionId> = self.sessions.live().map(|s| s.id).collect();
+        self.terminate_sessions_where(cause, stop, |_| true)
+    }
+
+    /// As [`Self::terminate_all_sessions`] for the sessions approved by the
+    /// user only: those of a standing grant are left alone (the agent access
+    /// switch, ADR-0039).
+    pub fn terminate_user_approved_sessions(
+        &mut self,
+        cause: TerminationCause,
+        stop: bool,
+    ) -> Vec<SessionTermination> {
+        self.terminate_sessions_where(cause, stop, |s| s.standing.is_none())
+    }
+
+    fn terminate_sessions_where(
+        &mut self,
+        cause: TerminationCause,
+        stop: bool,
+        keep: impl Fn(&crate::session::Session) -> bool,
+    ) -> Vec<SessionTermination> {
+        let live: Vec<SessionId> = self
+            .sessions
+            .live()
+            .filter(|s| keep(s))
+            .map(|s| s.id)
+            .collect();
         live.into_iter()
             .filter_map(|id| {
                 if stop {

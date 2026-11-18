@@ -1907,6 +1907,73 @@
           ]
         },
         {
+          "description": "Creates the standing grant (UI only, ADR-0039). Refused while another\ngrant is live. The reply carries its pairing credential, once.",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "create_standing_grant"
+            },
+            "spec": {
+              "description": "What the user grants.",
+              "$ref": "#/$defs/StandingGrantSpec"
+            }
+          },
+          "required": [
+            "op",
+            "spec"
+          ]
+        },
+        {
+          "description": "The live standing grant, if any (UI only).",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "get_standing_grant"
+            }
+          },
+          "required": [
+            "op"
+          ]
+        },
+        {
+          "description": "Revokes the standing grant (UI only): its credential stops working\nat once, also on open connections; its live session ends, the VM is\nnot stopped.",
+          "type": "object",
+          "properties": {
+            "grant_id": {
+              "description": "Grant.",
+              "$ref": "#/$defs/StandingGrantId"
+            },
+            "op": {
+              "type": "string",
+              "const": "revoke_standing_grant"
+            }
+          },
+          "required": [
+            "op",
+            "grant_id"
+          ]
+        },
+        {
+          "description": "Confirms a suspended standing grant again with the current\nconfiguration of its VM (UI only).",
+          "type": "object",
+          "properties": {
+            "grant_id": {
+              "description": "Grant.",
+              "$ref": "#/$defs/StandingGrantId"
+            },
+            "op": {
+              "type": "string",
+              "const": "confirm_standing_grant"
+            }
+          },
+          "required": [
+            "op",
+            "grant_id"
+          ]
+        },
+        {
           "description": "Pending session requests (UI only).",
           "type": "object",
           "properties": {
@@ -2447,6 +2514,86 @@
       "type": "string",
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "StandingGrantId": {
+      "description": "StandingGrantId: version 7 UUID, lowercase with hyphens.",
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "StandingGrantSpec": {
+      "description": "What the user grants when creating a standing grant.",
+      "type": "object",
+      "properties": {
+        "capabilities": {
+          "description": "Capabilities a session may receive (not empty).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Capability"
+          },
+          "uniqueItems": true
+        },
+        "client_name": {
+          "description": "Client name the requests must declare, if set (plain text, compared\nexactly; it is declared by the client, not a proof of identity).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "duration_s": {
+          "description": "Lifetime in seconds\n([`MIN_STANDING_GRANT_S`]..=[`MAX_STANDING_GRANT_S`]).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "give_input": {
+          "description": "Hand input control of the VM to each session at once.",
+          "type": "boolean",
+          "default": false
+        },
+        "lease_ms": {
+          "description": "Lease of each session in milliseconds; `None` = 10000.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "network_endpoints": {
+          "description": "Network endpoints of the VM a session may receive with\n`network.endpoints` (ADR-0033).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "quotas": {
+          "description": "Quotas of each session; `None` = the default agent quotas.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Quotas"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "tools": {
+          "description": "Named Tools resources a session may receive.",
+          "$ref": "#/$defs/ToolGrant"
+        },
+        "vm_id": {
+          "description": "The single VM of the grant.",
+          "$ref": "#/$defs/VmId"
+        }
+      },
+      "required": [
+        "vm_id",
+        "capabilities",
+        "duration_s"
+      ]
     },
     "TestOutcome": {
       "description": "Outcome of a test (ROADMAP 9). Completing the conversation does not\nautomatically produce `passed`.",

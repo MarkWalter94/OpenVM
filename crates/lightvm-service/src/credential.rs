@@ -2,7 +2,11 @@
 //! generator, constant-time comparison, roles, expiry and revocation.
 //!
 //! Credentials live only in memory: a service restart invalidates them all
-//! (ROADMAP 7.4, "Sessions" row: token reused after restart).
+//! (ROADMAP 7.4, "Sessions" row: token reused after restart). The one
+//! exception is the pairing credential of a standing grant (ADR-0039): the
+//! catalog keeps its SHA-256 only, and the service registers that hash again
+//! at start ([`CredentialStore::register_hashed`]); the secret itself never
+//! reaches the service again.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -59,12 +63,32 @@ impl Credential {
 
     /// Comparison in constant time with respect to the content.
     pub fn ct_eq(&self, other: &Self) -> bool {
-        let mut diff = 0u8;
-        for (a, b) in self.0.iter().zip(other.0.iter()) {
-            diff |= a ^ b;
-        }
-        std::hint::black_box(diff) == 0
+        ct_eq32(&self.0, &other.0)
     }
+
+    /// SHA-256 of the secret (what the catalog keeps of a standing grant's
+    /// credential, ADR-0039).
+    pub fn sha256(&self) -> [u8; 32] {
+        use sha2::Digest as _;
+        sha2::Sha256::digest(self.0).into()
+    }
+}
+
+fn ct_eq32(a: &[u8; 32], b: &[u8; 32]) -> bool {
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    std::hint::black_box(diff) == 0
+}
+
+/// What the store keeps of a credential.
+#[derive(Debug)]
+enum Secret {
+    /// The secret (issued by this service).
+    Plain(Credential),
+    /// Its SHA-256 only (standing grant registered again at start).
+    Hash([u8; 32]),
 }
 
 pub(crate) fn hex_encode(b: &[u8]) -> String {
@@ -91,7 +115,7 @@ pub type CredentialId = u64;
 
 #[derive(Debug)]
 struct Entry {
-    secret: Credential,
+    secret: Secret,
     role: Role,
     expires_at: Option<Instant>,
     revoked: bool,
@@ -127,7 +151,7 @@ impl CredentialStore {
         self.entries.insert(
             id,
             Entry {
-                secret: secret.clone(),
+                secret: Secret::Plain(secret.clone()),
                 role,
                 expires_at: ttl.map(|t| Instant::now() + t),
                 revoked: false,
@@ -141,9 +165,14 @@ impl CredentialStore {
     /// and not revoked. No distinction towards the client between rejection cases.
     pub fn verify(&self, presented: &Credential) -> Option<(CredentialId, Role)> {
         let now = Instant::now();
+        let presented_sha = presented.sha256();
         let mut found = None;
         for (id, e) in &self.entries {
-            if e.secret.ct_eq(presented) {
+            let matches = match &e.secret {
+                Secret::Plain(s) => s.ct_eq(presented),
+                Secret::Hash(h) => ct_eq32(h, &presented_sha),
+            };
+            if matches {
                 found = Some((*id, e));
             }
         }
@@ -152,6 +181,37 @@ impl CredentialStore {
             return None;
         }
         Some((id, e.role))
+    }
+
+    /// Registers a credential known only by its SHA-256 (the pairing
+    /// credential of a standing grant, loaded from the catalog at start,
+    /// ADR-0039), with the lifetime left.
+    pub fn register_hashed(
+        &mut self,
+        role: Role,
+        sha256: [u8; 32],
+        ttl: Option<Duration>,
+    ) -> CredentialId {
+        self.next_id += 1;
+        let id = self.next_id;
+        self.entries.insert(
+            id,
+            Entry {
+                secret: Secret::Hash(sha256),
+                role,
+                expires_at: ttl.map(|t| Instant::now() + t),
+                revoked: false,
+            },
+        );
+        id
+    }
+
+    /// `true` if the credential exists, is not revoked and not expired.
+    pub fn is_valid(&self, id: CredentialId) -> bool {
+        let now = Instant::now();
+        self.entries
+            .get(&id)
+            .is_some_and(|e| !e.revoked && e.expires_at.is_none_or(|t| now < t))
     }
 
     /// Revokes a credential. Returns true if it existed.
@@ -219,5 +279,26 @@ mod tests {
         assert_eq!(s.verify(&other), None);
         assert!(s.revoke(ui));
         assert_eq!(s.verify(&ui_c), None);
+    }
+
+    /// ADR-0039: a credential known only by its hash verifies like the
+    /// original, expires and is revoked like any other.
+    #[test]
+    fn hashed_credentials_verify_expire_and_revoke() {
+        let mut s = CredentialStore::new();
+        let c = Credential::generate().unwrap();
+        let id = s.register_hashed(Role::Pairing, c.sha256(), Some(Duration::from_secs(60)));
+        assert_eq!(s.verify(&c), Some((id, Role::Pairing)));
+        assert!(s.is_valid(id));
+        assert_eq!(s.verify(&Credential::generate().unwrap()), None);
+        // Issuing others does not purge it.
+        let _ = s.issue(Role::Pairing, None).unwrap();
+        assert_eq!(s.verify(&c), Some((id, Role::Pairing)));
+        assert_eq!(s.revoke_all_except(Role::Ui), 2);
+        assert_eq!(s.verify(&c), None);
+        assert!(!s.is_valid(id));
+        let gone = s.register_hashed(Role::Pairing, c.sha256(), Some(Duration::ZERO));
+        assert_eq!(s.verify(&c), None, "expired");
+        assert!(!s.is_valid(gone));
     }
 }

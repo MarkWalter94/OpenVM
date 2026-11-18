@@ -210,10 +210,6 @@ pub(crate) enum SupervisorRequest {
         cause: TerminationCause,
         stop: bool,
     },
-    EndAllSessions {
-        cause: TerminationCause,
-        stop: bool,
-    },
     SetInputOwner {
         vm_id: VmId,
         owner: InputOwner,
@@ -491,12 +487,42 @@ pub(crate) enum Command {
     /// the connection right before the reply, so it is recorded before any
     /// later request of the same agent.
     AgentCallDone(Box<CallRecord>),
+    /// Catalog step of the standing grant (ADR-0039), decided by the
+    /// service: load, record, update, configuration revision of its VM.
+    Standing {
+        op: StandingOp,
+        reply: oneshot::Sender<Result<StandingReply, PublicError>>,
+    },
+    /// Sessions approved by the user end (agent access turned off); those
+    /// of a standing grant stay (ADR-0039).
+    EndUserApprovedSessions {
+        cause: TerminationCause,
+        stop: bool,
+        done: oneshot::Sender<()>,
+    },
     /// Examination of a VMware VM to import finished on its worker
     /// (ADR-0030): checks, storage intent, then the conversion.
     VmwareAnalyzed(Box<VmwareStep<Result<crate::vmware::Analysis, PublicError>>>),
     /// Conversion of a VMware import finished on its worker: publication
     /// or rollback.
     VmwareConverted(Box<VmwareStep<Converted>>),
+}
+
+/// Catalog step of the standing grant ([`Command::Standing`]).
+#[derive(Debug)]
+pub(crate) enum StandingOp {
+    Load,
+    Insert(Box<vm_core::ports::StoredStandingGrant>),
+    Update(Box<lightvm_proto::StandingGrant>),
+    VmRevision(VmId),
+}
+
+/// Reply of a [`StandingOp`].
+#[derive(Debug)]
+pub(crate) enum StandingReply {
+    Loaded(Option<Box<vm_core::ports::StoredStandingGrant>>),
+    Done,
+    Revision(Option<u64>),
 }
 
 /// Outcome of the conversion of a VMware import: the catalog slot, the
@@ -525,6 +551,10 @@ impl std::fmt::Debug for Command {
             Self::FinishImport { .. } => write!(f, "FinishImport"),
             Self::FinishStorage { done, .. } => write!(f, "FinishStorage({done:?})"),
             Self::FinishStart { done, .. } => write!(f, "FinishStart({done:?})"),
+            Self::Standing { op, .. } => write!(f, "Standing({op:?})"),
+            Self::EndUserApprovedSessions { cause, .. } => {
+                write!(f, "EndUserApprovedSessions({cause:?})")
+            }
             Self::ConsolesRevoked { runs, cause, .. } => {
                 write!(f, "ConsolesRevoked({}, {cause:?})", runs.len())
             }
@@ -982,6 +1012,14 @@ impl SupervisorThread {
                 }
             }
             Command::AgentCallDone(rec) => self.record_call(&rec),
+            Command::Standing { op, reply } => {
+                let _ = reply.send(self.standing_op(op));
+            }
+            Command::EndUserApprovedSessions { cause, stop, done } => {
+                self.engine.end_user_approved_sessions(cause, stop);
+                self.publish_state_changes();
+                let _ = done.send(());
+            }
             Command::VmwareAnalyzed(step) => {
                 self.storage_jobs = self.storage_jobs.saturating_sub(1);
                 self.vmware_analyzed(*step);
@@ -1112,6 +1150,17 @@ impl SupervisorThread {
                     }
                 }
                 Command::AgentCallDone(rec) => self.record_call(&rec),
+                Command::Standing { op, reply } => {
+                    // Reads still answer while stopping; writes are refused.
+                    let r = match op {
+                        StandingOp::Load | StandingOp::VmRevision(_) => self.standing_op(op),
+                        _ => Err(PublicError::state_conflict("service shutting down")),
+                    };
+                    let _ = reply.send(r);
+                }
+                Command::EndUserApprovedSessions { done, .. } => {
+                    let _ = done.send(());
+                }
                 Command::VmwareAnalyzed(step) => {
                     // Nothing was recorded yet: the import just ends.
                     self.storage_jobs = self.storage_jobs.saturating_sub(1);
@@ -1409,6 +1458,26 @@ impl SupervisorThread {
             res.map(|vm| ResponseBody::VmwareImported { vm })
                 .map_err(ReplyError::Operational),
         );
+    }
+
+    /// Catalog step of the standing grant (ADR-0039).
+    fn standing_op(&mut self, op: StandingOp) -> Result<StandingReply, PublicError> {
+        match op {
+            StandingOp::Load => Ok(StandingReply::Loaded(
+                self.engine.standing_load()?.map(Box::new),
+            )),
+            StandingOp::Insert(g) => self
+                .engine
+                .standing_insert(&g)
+                .map(|()| StandingReply::Done),
+            StandingOp::Update(g) => self
+                .engine
+                .standing_update(&g)
+                .map(|()| StandingReply::Done),
+            StandingOp::VmRevision(vm) => {
+                Ok(StandingReply::Revision(self.engine.vm_config_revision(vm)))
+            }
+        }
     }
 
     /// Records an agent call in its session report; a successful screenshot
@@ -2254,10 +2323,6 @@ impl SupervisorThread {
                 .engine
                 .end_session(session_id, cause, stop)
                 .map(|report| ResponseBody::SessionRevoked { session_id, report }),
-            SupervisorRequest::EndAllSessions { cause, stop } => {
-                self.engine.end_all_sessions(cause, stop);
-                Ok(ResponseBody::Pong)
-            }
             SupervisorRequest::SetInputOwner { vm_id, owner } => {
                 who()?;
                 self.engine

@@ -241,6 +241,8 @@ fn registered_files(tx: &Tx<'_>, vm: &VmId) -> Result<Vec<ManagedPath>> {
 pub(crate) fn delete_vm_rows(tx: &Tx<'_>, vm: &VmId) -> Result<()> {
     // User snapshots (ADR-0032): their files are under `vms/<vm_id>/`.
     Catalog::snapshot_rows_cleared(tx, vm)?;
+    // ADR-0039: its live standing grant is revoked with it.
+    tx.revoke_standing_grants_of_vm(vm)?;
     let id = vm.sql();
     let c = tx.conn();
     let steps = [

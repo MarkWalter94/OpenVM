@@ -924,6 +924,86 @@ fn client_loss_and_ui_close_terminate_with_stop() {
     }
 }
 
+/// ADR-0039 (D1): a session of a standing grant ends without stopping its
+/// VM on expiry, lease expiry and client loss; UI close and host resume
+/// still stop it; the audit names the grant as the creator.
+#[test]
+fn standing_grant_sessions_keep_the_vm_running_on_expiry_and_client_loss() {
+    let grant_id = StandingGrantId::from_unix_millis(T0 as u64, [7; 10]);
+    let standing = |h: &mut Harness, vm: VmId, expires_in: i64| {
+        let spec = vm_core::session::SessionSpec {
+            tools: Default::default(),
+            vm_allowlist: [vm].into_iter().collect(),
+            capabilities: ALL_CAPS.into_iter().collect(),
+            quotas: Quotas::UNBOUNDED,
+            expires_at: UtcTimestamp::from_unix_millis(h.clock.0.get() + expires_in).unwrap(),
+            lease_millis: 10_000,
+            network_endpoints: Default::default(),
+        };
+        h.core
+            .create_session_from_standing_grant(spec, SessionToken::from_bytes([3; 32]), grant_id)
+            .unwrap()
+            .0
+            .session_id
+    };
+    {
+        let mut h = Harness::new();
+        let vm = h.create_vm("a");
+        h.start(vm);
+        let sid = standing(&mut h, vm, 3_600_000);
+        assert_eq!(h.core.sessions().get(sid).unwrap().standing, Some(grant_id));
+        let t = h
+            .core
+            .terminate_session_with_stop(sid, TerminationCause::ClientLost)
+            .unwrap();
+        assert!(t.emergency_stops.is_empty());
+        assert_eq!(
+            h.core.vm_status(&Caller::User, vm).unwrap().state,
+            VmState::Running
+        );
+    }
+    // Lease and grant expiry through the tick.
+    for (advance, cause) in [
+        (10_001, TerminationCause::LeaseExpired),
+        (5_000, TerminationCause::GrantExpired),
+    ] {
+        let mut h = Harness::new();
+        let vm = h.create_vm("a");
+        h.start(vm);
+        let _ = standing(&mut h, vm, 4_000);
+        h.clock.advance(advance);
+        let t = h.core.tick().unwrap();
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].cause, cause);
+        assert!(t[0].emergency_stops.is_empty(), "{cause:?}");
+        assert_eq!(
+            h.core.vm_status(&Caller::User, vm).unwrap().state,
+            VmState::Running
+        );
+    }
+    for cause in [TerminationCause::UiClosed, TerminationCause::HostResumed] {
+        let mut h = Harness::new();
+        let vm = h.create_vm("a");
+        h.start(vm);
+        let sid = standing(&mut h, vm, 3_600_000);
+        let t = h.core.terminate_session_with_stop(sid, cause).unwrap();
+        assert_eq!(t.emergency_stops.len(), 1, "{cause:?}");
+    }
+    // The agent access switch ends only the sessions approved by the user.
+    let mut h = Harness::new();
+    let vm = h.create_vm("a");
+    let sid = standing(&mut h, vm, 3_600_000);
+    assert!(
+        h.core
+            .terminate_user_approved_sessions(TerminationCause::Revoked, false)
+            .is_empty()
+    );
+    assert_eq!(
+        h.core.sessions().get(sid).unwrap().state,
+        SessionState::Active
+    );
+}
+
 #[test]
 fn session_creation_limits() {
     let mut h = Harness::new();

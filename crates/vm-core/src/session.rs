@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 
 use lightvm_proto::{
     Capability, Grant, LEASE_MAX_MILLIS, Lease, PublicError, Quotas, SessionId, SessionState,
-    SessionToken, TerminationCause, UtcTimestamp, VmId,
+    SessionToken, StandingGrantId, TerminationCause, UtcTimestamp, VmId,
 };
 
 /// Single message for every `unauthenticated` denial of an agent session.
@@ -64,9 +64,27 @@ pub struct Session {
     pub created_at: UtcTimestamp,
     /// Quota consumption.
     pub usage: SessionUsage,
+    /// Standing grant that approved the session automatically (ADR-0039);
+    /// `None` for a session approved by the user.
+    pub standing: Option<StandingGrantId>,
 }
 
 impl Session {
+    /// `true` if ending the session with `cause` stops its VMs. A session
+    /// of a standing grant keeps its VM running on expiry, lease expiry and
+    /// client loss (ADR-0039, decision D1); every other cause, and every
+    /// cause of a session approved by the user, keeps ROADMAP 7.3.
+    #[must_use]
+    pub fn stops_vm_on(&self, cause: TerminationCause) -> bool {
+        !(self.standing.is_some()
+            && matches!(
+                cause,
+                TerminationCause::GrantExpired
+                    | TerminationCause::LeaseExpired
+                    | TerminationCause::ClientLost
+            ))
+    }
+
     /// `true` if the presented token matches (constant-time comparison).
     #[must_use]
     pub fn token_matches(&self, presented: &SessionToken) -> bool {
@@ -141,6 +159,7 @@ impl SessionRegistry {
         grant: Grant,
         lease: Lease,
         now: UtcTimestamp,
+        standing: Option<StandingGrantId>,
     ) {
         self.sessions.insert(
             id,
@@ -153,6 +172,7 @@ impl SessionRegistry {
                 termination: None,
                 created_at: now,
                 usage: SessionUsage::default(),
+                standing,
             },
         );
     }

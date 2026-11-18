@@ -14,8 +14,11 @@
 use lightvm_proto::{
     AuditEvent, BaselineId, DisplayGeometry, GrantId, InputEvent, Label, MediaEntry, MediaId,
     MediaKind, MediaRecord, OperationId, OperationRecord, PublicError, RunEndReason, RunId,
-    RunRecord, Screenshot, SessionId, UtcTimestamp, VmId, VmRecord, VmState,
+    RunRecord, Screenshot, SessionId, StandingGrant, StandingGrantId, UtcTimestamp, VmId, VmRecord,
+    VmState,
 };
+
+use std::collections::BTreeSet;
 
 use crate::media::{ObservedMediaFacts, VerifiedMedia};
 
@@ -139,6 +142,46 @@ pub trait CatalogStore {
     fn vm_disk_usage(&self, _id: VmId) -> Option<u64> {
         None
     }
+    /// The live standing grant (active or suspended), if any (ADR-0039).
+    fn live_standing_grant(&self) -> Result<Option<StoredStandingGrant>, PublicError> {
+        Ok(None)
+    }
+    /// Records a new standing grant; refused with `state_conflict` while
+    /// another one is live.
+    fn insert_standing_grant(&mut self, _g: &StoredStandingGrant) -> Result<(), PublicError> {
+        Err(PublicError::unsupported("standing grants not available"))
+    }
+    /// Updates the state, policy and counters of a standing grant. A grant
+    /// no longer live never becomes live again.
+    fn update_standing_grant(&mut self, _g: &StandingGrant) -> Result<(), PublicError> {
+        Err(PublicError::unsupported("standing grants not available"))
+    }
+    /// Baselines created by sessions of a standing grant (ADR-0039 §4.6).
+    fn standing_grant_baselines(
+        &self,
+        _id: StandingGrantId,
+    ) -> Result<BTreeSet<BaselineId>, PublicError> {
+        Ok(BTreeSet::new())
+    }
+    /// Records a baseline created by a session of a standing grant.
+    fn add_standing_grant_baseline(
+        &mut self,
+        _id: StandingGrantId,
+        _baseline: BaselineId,
+    ) -> Result<(), PublicError> {
+        Err(PublicError::unsupported("standing grants not available"))
+    }
+}
+
+/// A standing grant as stored in the catalog (ADR-0039): the grant (policy,
+/// state, counters) and the SHA-256 of its pairing credential, never the
+/// credential itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredStandingGrant {
+    /// The grant.
+    pub grant: StandingGrant,
+    /// SHA-256 of the pairing credential (32 bytes).
+    pub credential_sha256: [u8; 32],
 }
 
 /// Destination of audit events, in `seq` order.

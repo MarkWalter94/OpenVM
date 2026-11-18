@@ -403,6 +403,27 @@ pub enum Request {
         /// New state.
         enabled: bool,
     },
+    /// Creates the standing grant (UI only, ADR-0039). Refused while another
+    /// grant is live. The reply carries its pairing credential, once.
+    CreateStandingGrant {
+        /// What the user grants.
+        spec: crate::StandingGrantSpec,
+    },
+    /// The live standing grant, if any (UI only).
+    GetStandingGrant,
+    /// Revokes the standing grant (UI only): its credential stops working
+    /// at once, also on open connections; its live session ends, the VM is
+    /// not stopped.
+    RevokeStandingGrant {
+        /// Grant.
+        grant_id: crate::StandingGrantId,
+    },
+    /// Confirms a suspended standing grant again with the current
+    /// configuration of its VM (UI only).
+    ConfirmStandingGrant {
+        /// Grant.
+        grant_id: crate::StandingGrantId,
+    },
     /// Pending session requests (UI only).
     ListSessionRequests,
     /// Approval of a session request (UI only).
@@ -582,6 +603,10 @@ impl Request {
             Self::Agent { .. } => "agent",
             Self::GetAgentAccess => "get_agent_access",
             Self::SetAgentAccess { .. } => "set_agent_access",
+            Self::CreateStandingGrant { .. } => "create_standing_grant",
+            Self::GetStandingGrant => "get_standing_grant",
+            Self::RevokeStandingGrant { .. } => "revoke_standing_grant",
+            Self::ConfirmStandingGrant { .. } => "confirm_standing_grant",
             Self::ListSessionRequests => "list_session_requests",
             Self::ApproveSession { .. } => "approve_session",
             Self::DenySession { .. } => "deny_session",
@@ -951,6 +976,10 @@ pub struct SessionInfo {
     pub lease_expires_at: UtcTimestamp,
     /// `true` if the session owns the input of its VM.
     pub input_owner: bool,
+    /// Standing grant that approved the session automatically (ADR-0039);
+    /// absent for a session approved by the user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub standing_grant_id: Option<crate::StandingGrantId>,
 }
 
 /// A VM as seen by an agent session (no host details).
@@ -1590,6 +1619,30 @@ pub enum ResponseBody {
         /// State.
         enabled: bool,
     },
+    /// Standing grant created (ADR-0039): its pairing credential, returned
+    /// here once and never again.
+    StandingGrantCreated {
+        /// The grant.
+        grant: crate::StandingGrant,
+        /// Pairing credential in hexadecimal (written to the pairing file,
+        /// never shown or logged).
+        #[schemars(extend("writeOnly" = true))]
+        credential: String,
+    },
+    /// Response to `get_standing_grant` and `confirm_standing_grant`.
+    StandingGrant {
+        /// The live grant, if any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        grant: Option<crate::StandingGrant>,
+        /// Its live session, if any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        live_session: Option<SessionId>,
+    },
+    /// Standing grant revoked.
+    StandingGrantRevoked {
+        /// Grant.
+        grant_id: crate::StandingGrantId,
+    },
     /// Response to `list_session_requests`.
     SessionRequests {
         /// Pending requests, oldest first.
@@ -1801,6 +1854,16 @@ impl std::fmt::Debug for ResponseBody {
                 .field("credential", &"<redacted>")
                 .field("expires_in_s", expires_in_s)
                 .finish(),
+            Self::StandingGrantCreated { grant, .. } => f
+                .debug_struct("StandingGrantCreated")
+                .field("grant", grant)
+                .field("credential", &"<redacted>")
+                .finish(),
+            Self::StandingGrant {
+                grant,
+                live_session,
+            } => fields!(StandingGrant, grant, live_session),
+            Self::StandingGrantRevoked { grant_id } => fields!(StandingGrantRevoked, grant_id),
             Self::EmergencyStop(v) => f.debug_tuple("EmergencyStop").field(v).finish(),
             Self::ParentLossPolicy { policy } => fields!(ParentLossPolicy, policy),
             Self::ShuttingDown => f.write_str("ShuttingDown"),
@@ -2171,6 +2234,14 @@ pub enum ServiceEvent {
     ConnectionRevoked {
         /// Revoked connection.
         connection_id: ConnectionId,
+    },
+    /// A standing grant changed (ADR-0039): created, confirmed, suspended,
+    /// revoked, expired, a session approved or a request denied.
+    StandingGrant {
+        /// The grant after the change.
+        grant: crate::StandingGrant,
+        /// What changed.
+        change: crate::StandingGrantChange,
     },
     /// The agent sessions were stopped.
     AgentSessionsStopped {

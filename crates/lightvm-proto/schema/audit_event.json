@@ -179,6 +179,24 @@
           "required": [
             "kind"
           ]
+        },
+        {
+          "description": "Automatic approval under a standing grant (ADR-0039): never a click\nof the user, always distinguishable from one in the audit.",
+          "type": "object",
+          "properties": {
+            "grant_id": {
+              "description": "Standing grant.",
+              "$ref": "#/$defs/StandingGrantId"
+            },
+            "kind": {
+              "type": "string",
+              "const": "standing_grant"
+            }
+          },
+          "required": [
+            "kind",
+            "grant_id"
+          ]
         }
       ]
     },
@@ -412,6 +430,31 @@
           "description": "The endpoints allowed on a running VM changed (session started or\nended, revocation, expiry, Emergency Stop): connections to endpoints\nno longer allowed were reset.",
           "type": "string",
           "const": "network_policy"
+        },
+        {
+          "description": "Standing grant created by the user (ADR-0039).",
+          "type": "string",
+          "const": "standing_grant_create"
+        },
+        {
+          "description": "Standing grant revoked (user, Emergency Stop, VM deleted).",
+          "type": "string",
+          "const": "standing_grant_revoke"
+        },
+        {
+          "description": "Standing grant expired.",
+          "type": "string",
+          "const": "standing_grant_expire"
+        },
+        {
+          "description": "Standing grant suspended: the configuration of its VM changed.",
+          "type": "string",
+          "const": "standing_grant_suspend"
+        },
+        {
+          "description": "Standing grant confirmed again by the user after a suspension.",
+          "type": "string",
+          "const": "standing_grant_confirm"
         }
       ]
     },
@@ -651,6 +694,12 @@
     },
     "SessionId": {
       "description": "SessionId: version 7 UUID, lowercase with hyphens.",
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "StandingGrantId": {
+      "description": "StandingGrantId: version 7 UUID, lowercase with hyphens.",
       "type": "string",
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"

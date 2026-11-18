@@ -4,19 +4,19 @@
 //! fake. They are not part of the product: the binary always uses the real
 //! adapters ([`crate::adapters`]).
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 use lightvm_proto::ipc::StopReason;
 use lightvm_proto::{
-    AuditEvent, BackendObservation, Caller, DisplayGeometry, GuestOs, HostCapacity, ImageFormat,
-    InputEvent, Label, MediaEntry, MediaId, MediaKind, MediaLocation, MediaRecord, NetworkProfile,
-    OperationId, OperationRecord, PublicError, RunEndReason, RunId, RunRecord, Screenshot,
-    Sha256Digest, UtcTimestamp, VmConfig, VmId, VmName, VmRecord, VmState,
+    AuditEvent, BackendObservation, BaselineId, Caller, DisplayGeometry, GuestOs, HostCapacity,
+    ImageFormat, InputEvent, Label, MediaEntry, MediaId, MediaKind, MediaLocation, MediaRecord,
+    NetworkProfile, OperationId, OperationRecord, PublicError, RunEndReason, RunId, RunRecord,
+    Screenshot, Sha256Digest, UtcTimestamp, VmConfig, VmId, VmName, VmRecord, VmState,
 };
 use vm_core::media::{ObservedMediaFacts, VerifiedMedia};
-use vm_core::ports::{AuditSink, CatalogStore, MediaInspector, VmBackend};
+use vm_core::ports::{AuditSink, CatalogStore, MediaInspector, StoredStandingGrant, VmBackend};
 
 use crate::engine::{
     BackendPort, BaselinePort, CoreEngine, GuardedMedia, ImageTool, ImportCopied, ImportJob,
@@ -137,6 +137,8 @@ struct MemoryInner {
     media: BTreeMap<MediaId, MediaEntry>,
     ops: BTreeMap<OperationId, OperationRecord>,
     runs: BTreeMap<RunId, RunRecord>,
+    standing: Vec<StoredStandingGrant>,
+    standing_baselines: BTreeMap<lightvm_proto::StandingGrantId, BTreeSet<BaselineId>>,
 }
 
 /// In-memory catalog.
@@ -214,10 +216,77 @@ impl CatalogStore for MemoryStore {
         self.0.vms.remove(&id);
         self.0.runs.retain(|_, r| r.vm_id != id);
         self.0.ops.retain(|_, o| o.vm_id != id);
+        // ADR-0039: its live standing grant is revoked with it.
+        for g in &mut self.0.standing {
+            if g.grant.vm_id == id && g.grant.state.is_live() {
+                g.grant.state = lightvm_proto::StandingGrantState::Revoked {
+                    cause: lightvm_proto::StandingRevokeCause::VmDeleted,
+                    at: UtcTimestamp::now(),
+                };
+            }
+        }
         Ok(())
     }
     fn vm_disk_usage(&self, id: VmId) -> Option<u64> {
         self.0.vms.contains_key(&id).then_some(0)
+    }
+    fn live_standing_grant(&self) -> Result<Option<StoredStandingGrant>, PublicError> {
+        Ok(self
+            .0
+            .standing
+            .iter()
+            .find(|g| g.grant.state.is_live())
+            .cloned())
+    }
+    fn insert_standing_grant(&mut self, g: &StoredStandingGrant) -> Result<(), PublicError> {
+        if g.grant.state.is_live() && self.live_standing_grant()?.is_some() {
+            return Err(PublicError::state_conflict(
+                "a standing grant is already live",
+            ));
+        }
+        self.0.standing.push(g.clone());
+        Ok(())
+    }
+    fn update_standing_grant(
+        &mut self,
+        g: &lightvm_proto::StandingGrant,
+    ) -> Result<(), PublicError> {
+        let Some(s) = self
+            .0
+            .standing
+            .iter_mut()
+            .find(|s| s.grant.grant_id == g.grant_id)
+        else {
+            return Err(PublicError::not_found("standing grant not found"));
+        };
+        if !s.grant.state.is_live() && g.state.is_live() {
+            return Err(PublicError::not_found("standing grant not found"));
+        }
+        s.grant = g.clone();
+        Ok(())
+    }
+    fn standing_grant_baselines(
+        &self,
+        id: lightvm_proto::StandingGrantId,
+    ) -> Result<BTreeSet<BaselineId>, PublicError> {
+        Ok(self
+            .0
+            .standing_baselines
+            .get(&id)
+            .cloned()
+            .unwrap_or_default())
+    }
+    fn add_standing_grant_baseline(
+        &mut self,
+        id: lightvm_proto::StandingGrantId,
+        baseline: BaselineId,
+    ) -> Result<(), PublicError> {
+        self.0
+            .standing_baselines
+            .entry(id)
+            .or_default()
+            .insert(baseline);
+        Ok(())
     }
 }
 
@@ -833,7 +902,7 @@ pub struct FakeVmBackend {
     /// VMs whose process the test declares terminated by the priority path
     /// (Emergency Stop): as with QEMU, their stop outcome and exit are not
     /// reported, they are left to `after_emergency_stop` (`force_stop`).
-    pub emergency_killed: Arc<Mutex<std::collections::BTreeSet<VmId>>>,
+    pub emergency_killed: Arc<Mutex<BTreeSet<VmId>>>,
     /// Image tool for baselines (F3); `None` = baselines unsupported.
     pub image_tool: Option<Arc<FakeImageTool>>,
     /// Ends of runs to report (`true` = clean guest shutdown): a graceful
@@ -869,8 +938,7 @@ pub struct FakeVmBackend {
 }
 
 /// Allowed endpoints applied per VM by [`FakeVmBackend`].
-pub type NetAllowed =
-    Arc<Mutex<BTreeMap<VmId, (RunId, Option<std::collections::BTreeSet<String>>)>>>;
+pub type NetAllowed = Arc<Mutex<BTreeMap<VmId, (RunId, Option<BTreeSet<String>>)>>>;
 
 /// Outcomes of background graceful stops injected by a test.
 pub type StopResults = Arc<Mutex<Vec<(VmId, Result<(), PublicError>)>>>;
@@ -1002,7 +1070,7 @@ impl BackendPort for FakeVmBackend {
         &mut self,
         vm_id: VmId,
         run_id: RunId,
-        allowed: &std::collections::BTreeSet<String>,
+        allowed: &BTreeSet<String>,
     ) -> bool {
         let mut m = self.net_allowed.lock().unwrap();
         match m.get_mut(&vm_id) {

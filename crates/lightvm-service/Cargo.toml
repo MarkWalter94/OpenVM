@@ -28,7 +28,7 @@ path = "src/bin/lightvm-ipc-probe.rs"
 # `qemu-backend` stays in the supervisor only (ADR-0024).
 [features]
 default = ["supervisor"]
-supervisor = ["dep:guest-detect", "dep:guest-net", "dep:lightvm-fixture", "dep:lightvm-tools", "dep:png", "dep:qemu-backend", "dep:sha2", "dep:socket2", "dep:vm-core", "dep:vm-storage", "dep:vmware-import"]
+supervisor = ["dep:guest-detect", "dep:guest-net", "dep:lightvm-fixture", "dep:lightvm-tools", "dep:png", "dep:qemu-backend", "dep:socket2", "dep:vm-core", "dep:vm-storage", "dep:vmware-import"]
 
 # Exact versions and lockfile (ROADMAP 6.3); no git dependencies.
 [dependencies]
@@ -50,7 +50,7 @@ qemu-backend = { path = "../qemu-backend", optional = true }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 # SHA-256 of agent screenshots, checked against the backend metadata (F4).
-sha2 = { version = "=0.11.0", optional = true }
+sha2 = "=0.11.0"
 # AF_UNIX display proxy (ADR-0013), same crate and version as qemu-backend.
 socket2 = { version = "=0.6.5", features = ["all"], optional = true }
 tokio = { version = "=1.53.2", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
@@ -119,6 +119,10 @@ required-features = ["supervisor"]
 
 [[test]]
 name = "f5_reports"
+required-features = ["supervisor"]
+
+[[test]]
+name = "standing_grant"
 required-features = ["supervisor"]
 
 [[test]]

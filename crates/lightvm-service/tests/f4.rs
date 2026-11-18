@@ -1503,6 +1503,10 @@ async fn request_role_matrix() {
             | Request::PreviewVmwareImport { .. }
             | Request::ImportVmware { .. }
             | Request::CancelVmwareImport
+            | Request::CreateStandingGrant { .. }
+            | Request::GetStandingGrant
+            | Request::RevokeStandingGrant { .. }
+            | Request::ConfirmStandingGrant { .. }
             | Request::GuestTools { .. } => Who::Ui,
         }
     }
@@ -1678,6 +1682,28 @@ async fn request_role_matrix() {
             display: lightvm_proto::DisplayAdapter::Standard,
         },
         Request::CancelVmwareImport,
+        // ADR-0039: an agent never creates, reads, revokes or confirms a
+        // standing grant (it cannot grant itself anything).
+        Request::CreateStandingGrant {
+            spec: lightvm_proto::StandingGrantSpec {
+                vm_id: vm,
+                capabilities: [Capability::VmList].into_iter().collect(),
+                tools: Default::default(),
+                network_endpoints: Vec::new(),
+                quotas: None,
+                lease_ms: None,
+                give_input: false,
+                duration_s: 3600,
+                client_name: None,
+            },
+        },
+        Request::GetStandingGrant,
+        Request::RevokeStandingGrant {
+            grant_id: lightvm_proto::StandingGrantId::from_unix_millis(1_760_000_000_000, [5; 10]),
+        },
+        Request::ConfirmStandingGrant {
+            grant_id: lightvm_proto::StandingGrantId::from_unix_millis(1_760_000_000_000, [5; 10]),
+        },
     ];
     let mut a = agent_client(&svc, &mut u).await;
     let mut checked = 0;
@@ -1700,7 +1726,7 @@ async fn request_role_matrix() {
             checked += 1;
         }
     }
-    assert!(checked >= 33, "{checked}");
+    assert!(checked >= 37, "{checked}");
     assert_eq!(count_calls(&svc, "vm_start"), 0, "no effect");
     assert_eq!(count_calls(&svc, "emergency_stop_all"), 0, "no effect");
     svc.handle.shutdown().await;

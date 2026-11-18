@@ -53,10 +53,10 @@ use lightvm_proto::{
     Capability, DisplayGeometry, ErrorCode, Grant, HostCapacity, InputEvent, Label, Lease,
     MediaEntry, MediaId, MediaKind, MediaRecord, OperationId, OperationKind, OperationRecord,
     OperationStatus, PolicyLayer, PublicError, ResourceLimits, RevocationReport, RunId, Screenshot,
-    SessionId, SessionState, SessionToken, SnapshotId, TerminationCause, VmAction, VmConfig, VmId,
-    VmRecord, VmRequest, VmState,
+    SessionId, SessionState, SessionToken, SnapshotId, StandingGrant, StandingGrantId,
+    TerminationCause, VmAction, VmConfig, VmId, VmRecord, VmRequest, VmState,
 };
-use vm_core::ports::{AuditSink, CatalogStore, IdGenerator, VmBackend};
+use vm_core::ports::{AuditSink, CatalogStore, IdGenerator, StoredStandingGrant, VmBackend};
 use vm_core::{Core, CoreConfig, DispatchOutcome, VmStatus};
 
 use crate::adapters::{SystemClock, SystemIds};
@@ -293,6 +293,27 @@ pub trait VmEngine: Send + 'static {
     }
     /// Terminates every live session.
     fn end_all_sessions(&mut self, _cause: TerminationCause, _stop: bool) {}
+    /// Terminates every live session approved by the user; those of a
+    /// standing grant stay (agent access switch, ADR-0039).
+    fn end_user_approved_sessions(&mut self, cause: TerminationCause, stop: bool) {
+        self.end_all_sessions(cause, stop);
+    }
+    /// The live standing grant stored in the catalog (ADR-0039).
+    fn standing_load(&mut self) -> Result<Option<StoredStandingGrant>, PublicError> {
+        Ok(None)
+    }
+    /// Records a new standing grant (refused while another is live).
+    fn standing_insert(&mut self, _g: &StoredStandingGrant) -> Result<(), PublicError> {
+        Err(PublicError::unsupported("standing grants not available"))
+    }
+    /// Updates a stored standing grant.
+    fn standing_update(&mut self, _g: &StandingGrant) -> Result<(), PublicError> {
+        Err(PublicError::unsupported("standing grants not available"))
+    }
+    /// Configuration revision of a VM, if it exists.
+    fn vm_config_revision(&mut self, _vm_id: VmId) -> Option<u64> {
+        None
+    }
     /// Grant and lease expiries: expired sessions end and their VMs are
     /// Emergency-Stopped.
     fn tick_sessions(&mut self) {}
@@ -471,6 +492,11 @@ pub struct NewSession {
     pub purpose: String,
     /// Network endpoints granted with `network.endpoints` (ADR-0033).
     pub network_endpoints: BTreeSet<String>,
+    /// Standing grant approving the session automatically (ADR-0039) and
+    /// the configuration revision of the VM it was created or confirmed
+    /// with: a different current revision refuses the session
+    /// (`vm_config_changed`); `None` for a session approved by the user.
+    pub standing: Option<(StandingGrantId, u64)>,
 }
 
 /// Facts of a VM for a session report, see [`VmEngine::report_context`].
@@ -1408,8 +1434,12 @@ struct SessionMeta {
     /// Baseline the VM's current state was an overlay of at approval: the
     /// session's protected initial baseline (F5), restorable by the agent.
     initial_baseline: Option<BaselineId>,
-    /// Baselines created by the session (`vm.snapshot`), restorable too.
+    /// Baselines created by the session (`vm.snapshot`), restorable too;
+    /// for a session of a standing grant, also those created by the earlier
+    /// sessions of the same grant (ADR-0039).
     created: BTreeSet<BaselineId>,
+    /// Standing grant of the session, if approved automatically.
+    standing: Option<StandingGrantId>,
 }
 
 /// Screenshot of an agent session kept for its chunked read.
@@ -1922,6 +1952,7 @@ where
             expires_at: s.grant.expires_at,
             lease_expires_at: s.lease.expires_at,
             input_owner: self.core.input_owner(vm_id) == InputOwner::Agent { session_id: id },
+            standing_grant_id: s.standing,
         })
     }
 
@@ -2723,6 +2754,14 @@ where
             && let Some(m) = self.session_meta.get_mut(&s)
         {
             m.created.insert(b.baseline_id);
+            if let Some(g) = m.standing
+                && let Err(e) = self.core.add_standing_grant_baseline(g, b.baseline_id)
+            {
+                crate::diag!(
+                    "lightvm-service: baseline not recorded for the standing grant: {}",
+                    e.message
+                );
+            }
         }
         r
     }
@@ -2861,7 +2900,22 @@ where
             lease_millis: new.lease_ms,
             network_endpoints: new.network_endpoints,
         };
-        let (grant, lease) = self.core.create_session(spec, new.token)?;
+        let (grant, lease) = match new.standing {
+            None => self.core.create_session(spec, new.token)?,
+            Some((grant_id, revision)) => {
+                // ADR-0039: the grant holds only while the VM keeps the
+                // configuration it was created or confirmed with; checked
+                // here, on the supervisor thread, together with the session.
+                if self.core.vm_config_revision(new.vm_id) != Some(revision) {
+                    return Err(PublicError::state_conflict(
+                        "the configuration of the VM changed after the standing grant",
+                    )
+                    .with_detail("reason", "vm_config_changed"));
+                }
+                self.core
+                    .create_session_from_standing_grant(spec, new.token, grant_id)?
+            }
+        };
         if let Some(run) = self.core.current_run(new.vm_id) {
             self.net_tainted.insert(new.vm_id, run);
             let (capabilities, grant, expires) = self.core.tools_permissions(new.vm_id, false);
@@ -2877,6 +2931,19 @@ where
         }
         let id = grant.session_id;
         let initial_baseline = self.core.store().baseline_facts(new.vm_id).current;
+        let standing = new.standing.map(|(g, _)| g);
+        // ADR-0039 §4.6: the baselines created by earlier sessions of the
+        // same standing grant stay restorable by this one.
+        let created = match standing {
+            Some(g) => self.core.standing_grant_baselines(g).unwrap_or_else(|e| {
+                crate::diag!(
+                    "lightvm-service: baselines of the standing grant: {}",
+                    e.message
+                );
+                BTreeSet::new()
+            }),
+            None => BTreeSet::new(),
+        };
         self.session_meta.insert(
             id,
             SessionMeta {
@@ -2886,7 +2953,8 @@ where
                 purpose: new.purpose,
                 lease_ms: new.lease_ms,
                 initial_baseline,
-                created: BTreeSet::new(),
+                created,
+                standing,
             },
         );
         if new.give_input
@@ -2977,6 +3045,33 @@ where
         self.execute_stops(&t);
         self.shots.clear();
         self.flush_input_releases();
+    }
+
+    fn end_user_approved_sessions(&mut self, cause: TerminationCause, stop: bool) {
+        self.apply_observations();
+        let t = self.core.terminate_user_approved_sessions(cause, stop);
+        self.execute_stops(&t);
+        for x in &t {
+            self.shots.remove(&x.session_id);
+        }
+        self.flush_input_releases();
+    }
+
+    fn standing_load(&mut self) -> Result<Option<StoredStandingGrant>, PublicError> {
+        self.core.live_standing_grant()
+    }
+
+    fn standing_insert(&mut self, g: &StoredStandingGrant) -> Result<(), PublicError> {
+        self.core.insert_standing_grant(g)
+    }
+
+    fn standing_update(&mut self, g: &StandingGrant) -> Result<(), PublicError> {
+        self.core.update_standing_grant(g)
+    }
+
+    fn vm_config_revision(&mut self, vm_id: VmId) -> Option<u64> {
+        self.apply_observations();
+        self.core.vm_config_revision(vm_id)
     }
 
     fn tick_sessions(&mut self) {

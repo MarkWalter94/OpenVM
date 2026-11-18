@@ -3141,6 +3141,83 @@
           ]
         },
         {
+          "description": "Standing grant created (ADR-0039): its pairing credential, returned\nhere once and never again.",
+          "type": "object",
+          "properties": {
+            "credential": {
+              "description": "Pairing credential in hexadecimal (written to the pairing file,\nnever shown or logged).",
+              "type": "string",
+              "writeOnly": true
+            },
+            "grant": {
+              "description": "The grant.",
+              "$ref": "#/$defs/StandingGrant"
+            },
+            "kind": {
+              "type": "string",
+              "const": "standing_grant_created"
+            }
+          },
+          "required": [
+            "kind",
+            "grant",
+            "credential"
+          ]
+        },
+        {
+          "description": "Response to `get_standing_grant` and `confirm_standing_grant`.",
+          "type": "object",
+          "properties": {
+            "grant": {
+              "description": "The live grant, if any.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/StandingGrant"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "standing_grant"
+            },
+            "live_session": {
+              "description": "Its live session, if any.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SessionId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "Standing grant revoked.",
+          "type": "object",
+          "properties": {
+            "grant_id": {
+              "description": "Grant.",
+              "$ref": "#/$defs/StandingGrantId"
+            },
+            "kind": {
+              "type": "string",
+              "const": "standing_grant_revoked"
+            }
+          },
+          "required": [
+            "kind",
+            "grant_id"
+          ]
+        },
+        {
           "description": "Response to `list_session_requests`.",
           "type": "object",
           "properties": {
@@ -3942,6 +4019,29 @@
           ]
         },
         {
+          "description": "A standing grant changed (ADR-0039): created, confirmed, suspended,\nrevoked, expired, a session approved or a request denied.",
+          "type": "object",
+          "properties": {
+            "change": {
+              "description": "What changed.",
+              "$ref": "#/$defs/StandingGrantChange"
+            },
+            "grant": {
+              "description": "The grant after the change.",
+              "$ref": "#/$defs/StandingGrant"
+            },
+            "kind": {
+              "type": "string",
+              "const": "standing_grant"
+            }
+          },
+          "required": [
+            "kind",
+            "grant",
+            "change"
+          ]
+        },
+        {
           "description": "The agent sessions were stopped.",
           "type": "object",
           "properties": {
@@ -4259,6 +4359,17 @@
         "session_id": {
           "description": "Session.",
           "$ref": "#/$defs/SessionId"
+        },
+        "standing_grant_id": {
+          "description": "Standing grant that approved the session automatically (ADR-0039);\nabsent for a session approved by the user.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StandingGrantId"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "state": {
           "description": "State.",
@@ -4928,6 +5039,312 @@
       },
       "required": [
         "available"
+      ]
+    },
+    "StandingGrant": {
+      "description": "A standing grant (no secret).",
+      "type": "object",
+      "properties": {
+        "capabilities": {
+          "description": "Capabilities a session may receive.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Capability"
+          },
+          "uniqueItems": true
+        },
+        "client_name": {
+          "description": "Client name the requests must declare, if set.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "created_at": {
+          "description": "Creation instant.",
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "expires_at": {
+          "description": "Expiry (at most `created_at` + [`MAX_STANDING_GRANT_S`]).",
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "give_input": {
+          "description": "Input control handed to each session.",
+          "type": "boolean",
+          "default": false
+        },
+        "grant_id": {
+          "description": "Identifier.",
+          "$ref": "#/$defs/StandingGrantId"
+        },
+        "last_session_at": {
+          "description": "Last automatic approval.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcTimestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lease_ms": {
+          "description": "Lease of each session in milliseconds.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "network_endpoints": {
+          "description": "Network endpoints a session may receive.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "quotas": {
+          "description": "Quotas of each session.",
+          "$ref": "#/$defs/Quotas"
+        },
+        "sessions_approved": {
+          "description": "Sessions approved automatically so far.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
+        "state": {
+          "description": "State.",
+          "$ref": "#/$defs/StandingGrantState"
+        },
+        "tools": {
+          "description": "Named Tools resources a session may receive.",
+          "$ref": "#/$defs/ToolGrant"
+        },
+        "vm_config_revision": {
+          "description": "Configuration revision of the VM at creation or at the last\nconfirmation: a different revision suspends the grant.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "vm_id": {
+          "description": "The single VM of the grant.",
+          "$ref": "#/$defs/VmId"
+        }
+      },
+      "required": [
+        "grant_id",
+        "vm_id",
+        "capabilities",
+        "quotas",
+        "lease_ms",
+        "created_at",
+        "expires_at",
+        "vm_config_revision",
+        "state"
+      ]
+    },
+    "StandingGrantChange": {
+      "description": "What changed in a standing grant ([`crate::ipc::ServiceEvent::StandingGrant`]).",
+      "oneOf": [
+        {
+          "description": "Created by the user.",
+          "type": "object",
+          "properties": {
+            "change": {
+              "type": "string",
+              "const": "created"
+            }
+          },
+          "required": [
+            "change"
+          ]
+        },
+        {
+          "description": "Confirmed again by the user after a suspension.",
+          "type": "object",
+          "properties": {
+            "change": {
+              "type": "string",
+              "const": "confirmed"
+            }
+          },
+          "required": [
+            "change"
+          ]
+        },
+        {
+          "description": "Suspended (the configuration of its VM changed).",
+          "type": "object",
+          "properties": {
+            "change": {
+              "type": "string",
+              "const": "suspended"
+            }
+          },
+          "required": [
+            "change"
+          ]
+        },
+        {
+          "description": "Revoked.",
+          "type": "object",
+          "properties": {
+            "change": {
+              "type": "string",
+              "const": "revoked"
+            }
+          },
+          "required": [
+            "change"
+          ]
+        },
+        {
+          "description": "Expired.",
+          "type": "object",
+          "properties": {
+            "change": {
+              "type": "string",
+              "const": "expired"
+            }
+          },
+          "required": [
+            "change"
+          ]
+        },
+        {
+          "description": "A session was approved automatically.",
+          "type": "object",
+          "properties": {
+            "change": {
+              "type": "string",
+              "const": "session_approved"
+            },
+            "session_id": {
+              "description": "The new session.",
+              "$ref": "#/$defs/SessionId"
+            }
+          },
+          "required": [
+            "change",
+            "session_id"
+          ]
+        },
+        {
+          "description": "A request presented with its credential was denied.",
+          "type": "object",
+          "properties": {
+            "change": {
+              "type": "string",
+              "const": "request_denied"
+            },
+            "reason": {
+              "description": "Stable reason (`detail.reason` of the denial).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "change",
+            "reason"
+          ]
+        }
+      ]
+    },
+    "StandingGrantId": {
+      "description": "StandingGrantId: version 7 UUID, lowercase with hyphens.",
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "StandingGrantState": {
+      "description": "State of a standing grant.",
+      "oneOf": [
+        {
+          "description": "Requests presented with its credential are approved when they conform.",
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "const": "active"
+            }
+          },
+          "required": [
+            "state"
+          ]
+        },
+        {
+          "description": "The configuration of its VM changed after the grant was created or\nconfirmed: requests are denied until the user confirms it again.",
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "const": "suspended"
+            }
+          },
+          "required": [
+            "state"
+          ]
+        },
+        {
+          "description": "Revoked: its credential no longer works.",
+          "type": "object",
+          "properties": {
+            "at": {
+              "description": "Instant.",
+              "$ref": "#/$defs/UtcTimestamp"
+            },
+            "cause": {
+              "description": "Cause.",
+              "$ref": "#/$defs/StandingRevokeCause"
+            },
+            "state": {
+              "type": "string",
+              "const": "revoked"
+            }
+          },
+          "required": [
+            "state",
+            "cause",
+            "at"
+          ]
+        },
+        {
+          "description": "Expired: its credential no longer works.",
+          "type": "object",
+          "properties": {
+            "at": {
+              "description": "Instant (its expiry).",
+              "$ref": "#/$defs/UtcTimestamp"
+            },
+            "state": {
+              "type": "string",
+              "const": "expired"
+            }
+          },
+          "required": [
+            "state",
+            "at"
+          ]
+        }
+      ]
+    },
+    "StandingRevokeCause": {
+      "description": "Why a standing grant was revoked.",
+      "oneOf": [
+        {
+          "description": "Revoked by the user in the app.",
+          "type": "string",
+          "const": "user"
+        },
+        {
+          "description": "Emergency Stop.",
+          "type": "string",
+          "const": "emergency_stop"
+        },
+        {
+          "description": "Its VM was deleted.",
+          "type": "string",
+          "const": "vm_deleted"
+        }
       ]
     },
     "StartPhase": {

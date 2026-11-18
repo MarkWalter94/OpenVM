@@ -55,11 +55,11 @@ use lightvm_proto::ipc::{
 use lightvm_proto::{
     BaselineId, DetectedGuest, ErrorCode, Label, ManagedRelPath, MediaEntry, MediaId, MediaKind,
     MediaLocation, MediaRecord, OperationId, OperationKind, OperationRecord, OperationStatus,
-    PublicError, RunEndReason, RunId, RunRecord, Sha256Digest, SnapshotId, UtcTimestamp, VmConfig,
-    VmId, VmRecord, VmState,
+    PublicError, RunEndReason, RunId, RunRecord, Sha256Digest, SnapshotId, StandingGrant,
+    StandingGrantId, StandingGrantState, UtcTimestamp, VmConfig, VmId, VmRecord, VmState,
 };
 use serde::{Deserialize, Serialize};
-use vm_core::ports::CatalogStore;
+use vm_core::ports::{CatalogStore, StoredStandingGrant};
 use vm_storage as st;
 
 use crate::engine::{
@@ -636,6 +636,108 @@ impl CatalogStore for SqliteStore {
         }
         Some(total)
     }
+
+    fn live_standing_grant(&self) -> Result<Option<StoredStandingGrant>, PublicError> {
+        let Some(row) = self.read(|tx| tx.live_standing_grant())? else {
+            return Ok(None);
+        };
+        standing_from_row(&row).map(Some)
+    }
+
+    fn insert_standing_grant(&mut self, g: &StoredStandingGrant) -> Result<(), PublicError> {
+        let row = standing_row(self.sid(g.grant.vm_id)?, &g.grant, &g.credential_sha256)?;
+        self.write(|tx| tx.insert_standing_grant(&row))
+    }
+
+    fn update_standing_grant(&mut self, g: &StandingGrant) -> Result<(), PublicError> {
+        let id = g.grant_id.to_string();
+        let Some(old) = self.read(|tx| tx.standing_grant(&id))? else {
+            return Err(PublicError::not_found("standing grant not found"));
+        };
+        let mut row = standing_row(old.vm_id, g, &[0; 32])?;
+        row.credential_sha256 = old.credential_sha256;
+        self.write(|tx| tx.update_standing_grant(&row))
+    }
+
+    fn standing_grant_baselines(
+        &self,
+        id: StandingGrantId,
+    ) -> Result<std::collections::BTreeSet<BaselineId>, PublicError> {
+        let ids = self.read(|tx| tx.standing_grant_baselines(&id.to_string()))?;
+        Ok(ids.iter().filter_map(|s| s.parse().ok()).collect())
+    }
+
+    fn add_standing_grant_baseline(
+        &mut self,
+        id: StandingGrantId,
+        baseline: BaselineId,
+    ) -> Result<(), PublicError> {
+        self.write(|tx| tx.add_standing_grant_baseline(&id.to_string(), &baseline.to_string()))
+    }
+}
+
+/// Catalog row of a standing grant (ADR-0039): the grant serialized as the
+/// policy, its state in the columns (the catalog revokes it there when the
+/// VM is deleted), the hash of the credential.
+fn standing_row(
+    sid: VmId,
+    g: &StandingGrant,
+    sha: &[u8; 32],
+) -> Result<st::StandingGrantRow, PublicError> {
+    let (state, cause, at) = match g.state {
+        StandingGrantState::Active => (st::STATE_ACTIVE, None, None),
+        StandingGrantState::Suspended => (st::STATE_SUSPENDED, None, None),
+        StandingGrantState::Revoked { cause, at } => (
+            st::STATE_REVOKED,
+            Some(cause.as_str().to_owned()),
+            Some(at.to_string()),
+        ),
+        StandingGrantState::Expired { at } => (st::STATE_EXPIRED, None, Some(at.to_string())),
+    };
+    Ok(st::StandingGrantRow {
+        grant_id: g.grant_id.to_string(),
+        vm_id: sid,
+        credential_sha256: crate::credential::hex_encode(sha),
+        state: state.to_owned(),
+        state_cause: cause,
+        state_at: at,
+        policy_json: serde_json::to_string(g).map_err(|_| infra("standing grant"))?,
+        created_at: g.created_at.to_string(),
+    })
+}
+
+fn standing_from_row(row: &st::StandingGrantRow) -> Result<StoredStandingGrant, PublicError> {
+    let mut grant: StandingGrant =
+        serde_json::from_str(&row.policy_json).map_err(|_| infra("standing grant policy"))?;
+    let at = || {
+        row.state_at
+            .as_deref()
+            .and_then(|s| s.parse::<UtcTimestamp>().ok())
+            .unwrap_or_else(UtcTimestamp::now)
+    };
+    grant.state = match row.state.as_str() {
+        st::STATE_ACTIVE => StandingGrantState::Active,
+        st::STATE_SUSPENDED => StandingGrantState::Suspended,
+        st::STATE_EXPIRED => StandingGrantState::Expired { at: at() },
+        _ => StandingGrantState::Revoked {
+            cause: row
+                .state_cause
+                .as_deref()
+                .and_then(lightvm_proto::StandingRevokeCause::parse)
+                .unwrap_or(lightvm_proto::StandingRevokeCause::User),
+            at: at(),
+        },
+    };
+    let mut sha = [0u8; 32];
+    let hex = row.credential_sha256.as_bytes();
+    for (i, pair) in hex.chunks(2).enumerate().take(32) {
+        let s = std::str::from_utf8(pair).map_err(|_| infra("standing grant hash"))?;
+        sha[i] = u8::from_str_radix(s, 16).map_err(|_| infra("standing grant hash"))?;
+    }
+    Ok(StoredStandingGrant {
+        grant,
+        credential_sha256: sha,
+    })
 }
 
 /// Free space that must remain on the catalog volume after a baseline (the

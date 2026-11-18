@@ -32,7 +32,8 @@ use lightvm_proto::ipc::{
 use lightvm_proto::{
     Actor, AuditAction, AuditOutcome, Caller, Capability, ErrorCode, LEASE_MAX_MILLIS,
     ProtocolError, ProtocolErrorCode, PublicError, ReplyError, SessionId, SessionState,
-    SessionToken, TerminationCause, UtcTimestamp,
+    SessionToken, StandingGrant, StandingGrantChange, StandingGrantId, StandingGrantSpec,
+    StandingGrantState, StandingRevokeCause, TerminationCause, UtcTimestamp,
 };
 
 use crate::agents::{AgentRegistry, AwaitDecision, Closed};
@@ -44,8 +45,8 @@ use crate::lock::{InstanceLock, LockError};
 use crate::ratelimit::{RateLimit, TokenBucket};
 use crate::reports::CallRecord;
 use crate::supervisor::{
-    Backend, Command, EmergencyStop, ParentLossPolicy, ReportRequest, SupervisorRequest,
-    SupervisorThread, unauthenticated,
+    Backend, Command, EmergencyStop, ParentLossPolicy, ReportRequest, StandingOp, StandingReply,
+    SupervisorRequest, SupervisorThread, unauthenticated,
 };
 use crate::transport::{Accepted, BoxedStream, EndpointOptions, Listener, PeerInfo};
 
@@ -89,6 +90,9 @@ pub struct ServiceConfig {
     /// clock jump): the agent sessions end with `host_resumed` and their
     /// VMs are stopped.
     pub resume_gap: Duration,
+    /// Shortest standing grant the UI may create (ADR-0039); the protocol
+    /// minimum outside tests.
+    pub standing_min_duration: Duration,
 }
 
 impl ServiceConfig {
@@ -113,6 +117,9 @@ impl ServiceConfig {
             display_dir: None,
             wall_clock: crate::resume::WallClock::default(),
             resume_gap: crate::resume::DEFAULT_RESUME_GAP,
+            standing_min_duration: Duration::from_secs(u64::from(
+                lightvm_proto::MIN_STANDING_GRANT_S,
+            )),
         }
     }
 }
@@ -174,6 +181,15 @@ struct Shared {
     agents: Arc<AgentRegistry>,
     /// File publishing the emergency endpoint, removed at shutdown.
     emergency_file: Option<PathBuf>,
+    /// The live standing grant and its pairing credential (ADR-0039).
+    standing: Mutex<Option<LiveStanding>>,
+}
+
+/// The live standing grant as held by the service.
+#[derive(Debug, Clone)]
+struct LiveStanding {
+    grant: StandingGrant,
+    credential_id: CredentialId,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -359,6 +375,29 @@ impl Shared {
         // handler, outside the queue and outside the supervisor thread.
         // The Emergency Stop kills every VM itself: no stop per session.
         self.close_all_agent_sessions("emergency_stop", TerminationCause::EmergencyStop, false);
+        // ADR-0039: the Emergency Stop revokes the standing grant too (the
+        // catalog write is not awaited on the priority path).
+        if let Some(grant) = self.standing_end_local(
+            None,
+            StandingGrantState::Revoked {
+                cause: StandingRevokeCause::EmergencyStop,
+                at: UtcTimestamp::now(),
+            },
+        ) {
+            let (reply, _rx) = oneshot::channel();
+            self.send_cmd(Command::Standing {
+                op: StandingOp::Update(Box::new(grant.clone())),
+                reply,
+            });
+            self.audit(
+                actor,
+                AuditAction::StandingGrantRevoke,
+                AuditOutcome::Succeeded,
+                None,
+                None,
+            );
+            self.standing_event(&grant, StandingGrantChange::Revoked);
+        }
         let revoked = self.revoke_non_ui();
         // Console tickets: no new display connection, live ones closed.
         let consoles = self.display.revoke_all();
@@ -626,7 +665,11 @@ pub async fn start(
         display,
         agents,
         emergency_file,
+        standing: Mutex::new(None),
     });
+    // ADR-0039: the live standing grant and its credential (hash) before
+    // the first connection is accepted.
+    standing_load(&shared).await;
 
     // Accept loop.
     let accept_shared = shared.clone();
@@ -1411,6 +1454,13 @@ async fn dispatch(
             format!("operation {} not allowed for the role", req.name()),
         )));
     }
+    // ADR-0039: a deleted VM revokes its standing grant (the catalog did,
+    // in the same transaction); a changed configuration suspends it.
+    let standing_vm = match &req {
+        Request::DeleteVm { vm_id, .. } => Some((*vm_id, true)),
+        Request::UpdateVm { vm_id, .. } => Some((*vm_id, false)),
+        _ => None,
+    };
     let mut caller = caller_for(ctx.role);
     let mut agent_gate = None;
     let sup_req = match req {
@@ -1582,6 +1632,23 @@ async fn dispatch(
             requested_capabilities,
             requested_endpoints,
         } => {
+            // ADR-0039: the standing grant credential is decided by the
+            // service (approved or denied), never queued for the user.
+            if shared.is_standing_connection(ctx.connection_id) {
+                return Dispatch::Reply(
+                    standing_request(
+                        shared,
+                        ctx.connection_id,
+                        ctx.peer_pid,
+                        &client_name,
+                        &purpose,
+                        requested_vms,
+                        requested_capabilities,
+                        requested_endpoints,
+                    )
+                    .await,
+                );
+            }
             return Dispatch::Reply(request_session(
                 shared,
                 ctx.connection_id,
@@ -1592,6 +1659,31 @@ async fn dispatch(
                 requested_capabilities,
                 requested_endpoints,
             ));
+        }
+        Request::CreateStandingGrant { spec } => {
+            return Dispatch::Reply(create_standing_grant(shared, spec).await);
+        }
+        Request::GetStandingGrant => {
+            return Dispatch::Reply(Ok(get_standing_grant(shared)));
+        }
+        Request::RevokeStandingGrant { grant_id } => {
+            return Dispatch::Reply(
+                match standing_revoke(
+                    shared,
+                    Some(grant_id),
+                    StandingRevokeCause::User,
+                    Actor::User,
+                    true,
+                )
+                .await
+                {
+                    Some(_) => Ok(ResponseBody::StandingGrantRevoked { grant_id }),
+                    None => Err(op_error(ErrorCode::NotFound, "standing grant not found")),
+                },
+            );
+        }
+        Request::ConfirmStandingGrant { grant_id } => {
+            return Dispatch::Reply(confirm_standing_grant(shared, grant_id).await);
         }
         Request::AwaitSession { request_id } => {
             return Dispatch::Reply(await_session(shared, ctx.connection_id, request_id).await);
@@ -1770,14 +1862,24 @@ async fn dispatch(
         Ok(rx) => rx,
         Err(e) => return Dispatch::Reply(Err(e)),
     };
-    tokio::select! {
+    let r = tokio::select! {
         biased;
-        _ = flag_set(ctx.revoke_rx) => Dispatch::Interrupted(CloseReason::Revoked),
-        r = reply_rx => Dispatch::Reply(r.unwrap_or_else(|_| Err(op_error(
+        _ = flag_set(ctx.revoke_rx) => return Dispatch::Interrupted(CloseReason::Revoked),
+        r = reply_rx => r.unwrap_or_else(|_| Err(op_error(
             ErrorCode::StateConflict,
             "service shutting down",
-        )))),
+        ))),
+    };
+    if r.is_ok()
+        && let Some((vm_id, deleted)) = standing_vm
+    {
+        if deleted {
+            standing_vm_deleted(shared, vm_id);
+        } else {
+            standing_check_revision(shared, vm_id).await;
+        }
     }
+    Dispatch::Reply(r)
 }
 
 type ReplyRx = oneshot::Receiver<Result<ResponseBody, ReplyError>>;
@@ -1958,19 +2060,68 @@ async fn approve_session(
         .begin_approval(request_id)
         .map_err(ReplyError::Operational)?;
     shared.report_closed(closed);
-    let mut b = [0u8; 32];
-    if getrandom::fill(&mut b).is_err() {
-        shared.agents.abort_approval(request_id);
-        return Err(op_error(
-            ErrorCode::ResourceLimit,
-            "random generator not available",
-        ));
-    }
     let now = UtcTimestamp::now();
     let Some(expires_at) = now.checked_add_millis(i64::from(approval.duration_s) * 1000) else {
         shared.agents.abort_approval(request_id);
         return Err(op_error(ErrorCode::InvalidArgument, "expiry out of range"));
     };
+    let session = grant_session(
+        shared,
+        connection_id,
+        request_id,
+        &info,
+        approval,
+        quotas,
+        lease_ms,
+        expires_at,
+        None,
+    )
+    .await?;
+    shared.audit(
+        Actor::User,
+        AuditAction::SessionRequest,
+        AuditOutcome::Succeeded,
+        Some(session.session_id),
+        None,
+    );
+    let _ = shared.events.send(ServiceEvent::SessionRequestClosed {
+        request_id,
+        outcome: SessionRequestOutcome::Approved,
+    });
+    Ok(ResponseBody::Session { session })
+}
+
+/// Creates the session of a request taken for approval and binds it to the
+/// agent connection (user approval, or standing grant with its grant id
+/// and the configuration revision of its VM). On failure the request goes
+/// back to pending (user) or is dropped (standing grant).
+#[allow(clippy::too_many_arguments)]
+async fn grant_session(
+    shared: &Arc<Shared>,
+    connection_id: u64,
+    request_id: SessionRequestId,
+    info: &lightvm_proto::ipc::SessionRequestInfo,
+    approval: SessionApproval,
+    quotas: lightvm_proto::Quotas,
+    lease_ms: i64,
+    expires_at: UtcTimestamp,
+    standing: Option<(StandingGrantId, u64)>,
+) -> Result<SessionInfo, ReplyError> {
+    let fail = |shared: &Arc<Shared>| {
+        if standing.is_some() {
+            shared.agents.drop_standing_request(request_id);
+        } else {
+            shared.agents.abort_approval(request_id);
+        }
+    };
+    let mut b = [0u8; 32];
+    if getrandom::fill(&mut b).is_err() {
+        fail(shared);
+        return Err(op_error(
+            ErrorCode::ResourceLimit,
+            "random generator not available",
+        ));
+    }
     // ADR-0033: `network.endpoints` without any endpoint grants nothing
     // (the VM runs without network for the session): the capability is
     // dropped rather than recorded empty.
@@ -1995,6 +2146,7 @@ async fn approve_session(
             .iter()
             .map(|n| n.trim_end_matches('.').to_ascii_lowercase())
             .collect(),
+        standing,
     };
     b.fill(0);
     let r = supervisor_call(
@@ -2006,11 +2158,11 @@ async fn approve_session(
     let granted = match r {
         Ok(g @ ResponseBody::SessionGranted { .. }) => g,
         Ok(_) => {
-            shared.agents.abort_approval(request_id);
+            fail(shared);
             return Err(op_error(ErrorCode::InfrastructureError, "unexpected reply"));
         }
         Err(e) => {
-            shared.agents.abort_approval(request_id);
+            fail(shared);
             return Err(e);
         }
     };
@@ -2040,6 +2192,7 @@ async fn approve_session(
         expires_at: grant.expires_at,
         lease_expires_at: lease.expires_at,
         input_owner: approval.give_input && grant.capabilities.contains(&Capability::VmInput),
+        standing_grant_id: standing.map(|(g, _)| g),
     };
     if !shared
         .agents
@@ -2056,25 +2209,16 @@ async fn approve_session(
             "the agent connection closed before the approval",
         ));
     }
-    shared.audit(
-        Actor::User,
-        AuditAction::SessionRequest,
-        AuditOutcome::Succeeded,
-        Some(session_id),
-        None,
-    );
-    let _ = shared.events.send(ServiceEvent::SessionRequestClosed {
-        request_id,
-        outcome: SessionRequestOutcome::Approved,
-    });
-    Ok(ResponseBody::Session { session })
+    Ok(session)
 }
 
 /// `set_agent_access` (UI). Turning it off denies the pending requests and
-/// revokes every live session (their connections close; VMs keep running).
+/// revokes every live session approved by the user (their connections
+/// close; VMs keep running). The session of a standing grant is not
+/// affected: the grant is revoked on its own (ADR-0039).
 async fn set_agent_access(
     shared: &Arc<Shared>,
-    connection_id: u64,
+    _connection_id: u64,
     enabled: bool,
 ) -> Result<ResponseBody, ReplyError> {
     let was = shared.agents.set_enabled(enabled);
@@ -2093,18 +2237,605 @@ async fn set_agent_access(
         let _ = shared.events.send(ServiceEvent::AgentAccess { enabled });
     }
     if !enabled {
-        shared.close_all_agent_sessions("agent_access_disabled", TerminationCause::Revoked, false);
-        supervisor_call(
-            shared,
-            connection_id,
-            SupervisorRequest::EndAllSessions {
-                cause: TerminationCause::Revoked,
-                stop: false,
-            },
-        )
-        .await?;
+        shared.emergency.suspend_tools(None);
+        for conn in shared
+            .agents
+            .terminate_user_approved(TerminationCause::Revoked, false)
+        {
+            shared.close_agent_connection(conn);
+        }
+        let mut closed = Vec::new();
+        for id in shared.agents.pending_ids() {
+            if shared.agents.deny(id, "agent_access_disabled") {
+                closed.push((id, SessionRequestOutcome::Denied));
+            }
+        }
+        shared.report_closed(closed);
+        let (done, rx) = oneshot::channel();
+        if !shared.send_cmd(Command::EndUserApprovedSessions {
+            cause: TerminationCause::Revoked,
+            stop: false,
+            done,
+        }) {
+            return Err(op_error(ErrorCode::StateConflict, "service shutting down"));
+        }
+        let _ = rx.await;
     }
     Ok(ResponseBody::AgentAccess { enabled })
+}
+
+// ----- standing grant (ADR-0039) --------------------------------------------
+
+/// Catalog step of the standing grant on the supervisor thread.
+async fn standing_op(shared: &Shared, op: StandingOp) -> Result<StandingReply, PublicError> {
+    let (reply, rx) = oneshot::channel();
+    if !shared.send_cmd(Command::Standing { op, reply }) {
+        return Err(PublicError::state_conflict("service shutting down"));
+    }
+    rx.await
+        .unwrap_or_else(|_| Err(PublicError::state_conflict("service shutting down")))
+}
+
+impl Shared {
+    /// `true` if the connection was opened with the standing grant
+    /// credential.
+    fn is_standing_connection(&self, connection_id: u64) -> bool {
+        let Some(cred) = lock(&self.standing).as_ref().map(|l| l.credential_id) else {
+            return false;
+        };
+        lock(&self.conns)
+            .get(&connection_id)
+            .is_some_and(|e| e.credential_id == cred)
+    }
+
+    /// The live grant (copy).
+    fn standing_grant(&self) -> Option<StandingGrant> {
+        lock(&self.standing).as_ref().map(|l| l.grant.clone())
+    }
+
+    fn standing_event(&self, grant: &StandingGrant, change: StandingGrantChange) {
+        let _ = self.events.send(ServiceEvent::StandingGrant {
+            grant: grant.clone(),
+            change,
+        });
+    }
+
+    /// Ends the live grant `grant_id` in memory (revocation or expiry):
+    /// the credential stops working at once, its live session ends without
+    /// stopping the VM, the connections opened with the credential close.
+    /// Returns the ended grant, for the catalog, the audit and the event.
+    fn standing_end_local(
+        &self,
+        grant_id: Option<StandingGrantId>,
+        state: StandingGrantState,
+    ) -> Option<StandingGrant> {
+        let live = {
+            let mut s = lock(&self.standing);
+            match s.as_ref() {
+                Some(l) if grant_id.is_none_or(|g| g == l.grant.grant_id) => s.take(),
+                _ => None,
+            }
+        }?;
+        lock(&self.creds).revoke(live.credential_id);
+        // The session first, with its own cause: the connection closing
+        // afterwards finds it terminated (no `client_lost`).
+        if let Some((session_id, conn)) = self.agents.live_standing_session() {
+            let cause = match state {
+                StandingGrantState::Expired { .. } => TerminationCause::GrantExpired,
+                _ => TerminationCause::Revoked,
+            };
+            if let Some(vm) = self.agents.session_vm(session_id) {
+                self.emergency.suspend_tools(Some(vm));
+            }
+            if self
+                .agents
+                .terminate(
+                    session_id,
+                    false,
+                    Some(crate::engine::GateChange::Terminate {
+                        cause,
+                        stop: false,
+                        awaited: false,
+                    }),
+                )
+                .is_some()
+            {
+                self.close_agent_connection(conn);
+            }
+        }
+        let ids: Vec<u64> = lock(&self.conns)
+            .iter()
+            .filter(|(_, e)| e.credential_id == live.credential_id)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in ids {
+            self.revoke_connection(id, Actor::System);
+        }
+        let mut grant = live.grant;
+        grant.state = state;
+        Some(grant)
+    }
+}
+
+/// Loads the live standing grant from the catalog at start (before any
+/// connection is accepted): an expired one is marked so, a live one gets
+/// its credential (hash) registered again with the lifetime left.
+async fn standing_load(shared: &Arc<Shared>) {
+    let loaded = match standing_op(shared, StandingOp::Load).await {
+        Ok(StandingReply::Loaded(g)) => g,
+        Ok(_) => None,
+        Err(e) => {
+            crate::diag!("lightvm-service: standing grant not loaded: {}", e.message);
+            None
+        }
+    };
+    let Some(stored) = loaded else {
+        return;
+    };
+    let mut grant = stored.grant;
+    let now = UtcTimestamp::now();
+    let left = grant.expires_at.millis_since(now);
+    if left <= 0 {
+        grant.state = StandingGrantState::Expired {
+            at: grant.expires_at,
+        };
+        if let Err(e) = standing_op(shared, StandingOp::Update(Box::new(grant))).await {
+            crate::diag!(
+                "lightvm-service: standing grant expiry not recorded: {}",
+                e.message
+            );
+        }
+        shared.audit(
+            Actor::System,
+            AuditAction::StandingGrantExpire,
+            AuditOutcome::Succeeded,
+            None,
+            None,
+        );
+        return;
+    }
+    let ttl = Duration::from_millis(u64::try_from(left).unwrap_or(0));
+    let credential_id =
+        lock(&shared.creds).register_hashed(Role::Pairing, stored.credential_sha256, Some(ttl));
+    let grant_id = grant.grant_id;
+    *lock(&shared.standing) = Some(LiveStanding {
+        grant,
+        credential_id,
+    });
+    standing_schedule_expiry(shared, grant_id, ttl);
+}
+
+/// Expires the grant at its expiry, also with connections open.
+fn standing_schedule_expiry(shared: &Arc<Shared>, grant_id: StandingGrantId, after: Duration) {
+    let weak = Arc::downgrade(shared);
+    tokio::spawn(async move {
+        tokio::time::sleep(after).await;
+        if let Some(shared) = weak.upgrade() {
+            standing_expire(&shared, grant_id).await;
+        }
+    });
+}
+
+async fn standing_expire(shared: &Arc<Shared>, grant_id: StandingGrantId) {
+    let at = match shared.standing_grant() {
+        Some(g) if g.grant_id == grant_id => g.expires_at,
+        _ => return,
+    };
+    let Some(grant) = shared.standing_end_local(Some(grant_id), StandingGrantState::Expired { at })
+    else {
+        return;
+    };
+    if let Err(e) = standing_op(shared, StandingOp::Update(Box::new(grant.clone()))).await {
+        crate::diag!(
+            "lightvm-service: standing grant expiry not recorded: {}",
+            e.message
+        );
+    }
+    shared.audit(
+        Actor::System,
+        AuditAction::StandingGrantExpire,
+        AuditOutcome::Succeeded,
+        None,
+        None,
+    );
+    shared.standing_event(&grant, StandingGrantChange::Expired);
+}
+
+/// Revocation of the live grant (user, Emergency Stop). The catalog write
+/// is awaited unless `wait` is false (priority path of the Emergency Stop).
+async fn standing_revoke(
+    shared: &Arc<Shared>,
+    grant_id: Option<StandingGrantId>,
+    cause: StandingRevokeCause,
+    actor: Actor,
+    wait: bool,
+) -> Option<StandingGrant> {
+    let grant = shared.standing_end_local(
+        grant_id,
+        StandingGrantState::Revoked {
+            cause,
+            at: UtcTimestamp::now(),
+        },
+    )?;
+    let op = StandingOp::Update(Box::new(grant.clone()));
+    if wait {
+        if let Err(e) = standing_op(shared, op).await {
+            crate::diag!(
+                "lightvm-service: standing grant revocation not recorded: {}",
+                e.message
+            );
+        }
+    } else {
+        let (reply, _rx) = oneshot::channel();
+        shared.send_cmd(Command::Standing { op, reply });
+    }
+    shared.audit(
+        actor,
+        AuditAction::StandingGrantRevoke,
+        AuditOutcome::Succeeded,
+        None,
+        None,
+    );
+    shared.standing_event(&grant, StandingGrantChange::Revoked);
+    Some(grant)
+}
+
+/// The VM of the grant was deleted: the catalog revoked the grant in the
+/// same transaction; the service follows in memory.
+fn standing_vm_deleted(shared: &Arc<Shared>, vm_id: lightvm_proto::VmId) {
+    let Some(g) = shared.standing_grant() else {
+        return;
+    };
+    if g.vm_id != vm_id {
+        return;
+    }
+    if let Some(grant) = shared.standing_end_local(
+        Some(g.grant_id),
+        StandingGrantState::Revoked {
+            cause: StandingRevokeCause::VmDeleted,
+            at: UtcTimestamp::now(),
+        },
+    ) {
+        shared.audit(
+            Actor::User,
+            AuditAction::StandingGrantRevoke,
+            AuditOutcome::Succeeded,
+            None,
+            None,
+        );
+        shared.standing_event(&grant, StandingGrantChange::Revoked);
+    }
+}
+
+/// Suspends the live grant (the configuration of its VM changed).
+async fn standing_suspend(shared: &Arc<Shared>, grant_id: StandingGrantId) {
+    let grant = {
+        let mut s = lock(&shared.standing);
+        match s.as_mut() {
+            Some(l)
+                if l.grant.grant_id == grant_id && l.grant.state == StandingGrantState::Active =>
+            {
+                l.grant.state = StandingGrantState::Suspended;
+                l.grant.clone()
+            }
+            _ => return,
+        }
+    };
+    if let Err(e) = standing_op(shared, StandingOp::Update(Box::new(grant.clone()))).await {
+        crate::diag!(
+            "lightvm-service: standing grant suspension not recorded: {}",
+            e.message
+        );
+    }
+    shared.audit(
+        Actor::System,
+        AuditAction::StandingGrantSuspend,
+        AuditOutcome::Succeeded,
+        None,
+        None,
+    );
+    shared.standing_event(&grant, StandingGrantChange::Suspended);
+}
+
+/// After a change of a VM's configuration (update, restore, revert): the
+/// grant of that VM is suspended if its revision differs.
+async fn standing_check_revision(shared: &Arc<Shared>, vm_id: lightvm_proto::VmId) {
+    let Some(g) = shared.standing_grant() else {
+        return;
+    };
+    if g.vm_id != vm_id || g.state != StandingGrantState::Active {
+        return;
+    }
+    if let Ok(StandingReply::Revision(r)) = standing_op(shared, StandingOp::VmRevision(vm_id)).await
+        && r != Some(g.vm_config_revision)
+    {
+        standing_suspend(shared, g.grant_id).await;
+    }
+}
+
+/// `create_standing_grant` (UI).
+async fn create_standing_grant(
+    shared: &Arc<Shared>,
+    spec: StandingGrantSpec,
+) -> Result<ResponseBody, ReplyError> {
+    let op = |e: PublicError| ReplyError::Operational(e);
+    if shared.standing_grant().is_some() {
+        return Err(op(PublicError::state_conflict(
+            "a standing grant is already live: revoke it first",
+        )));
+    }
+    let vm_id = spec.vm_id;
+    let revision = match standing_op(shared, StandingOp::VmRevision(vm_id))
+        .await
+        .map_err(op)?
+    {
+        StandingReply::Revision(Some(r)) => r,
+        _ => return Err(op(PublicError::not_found("VM does not exist"))),
+    };
+    let grant = crate::standing::build(
+        spec,
+        StandingGrantId::new_v7(),
+        UtcTimestamp::now(),
+        revision,
+        shared.cfg.standing_min_duration,
+    )
+    .map_err(op)?;
+    let credential = Credential::generate().map_err(|_| {
+        op(PublicError::resource_limit(
+            "random generator not available",
+        ))
+    })?;
+    let stored = vm_core::ports::StoredStandingGrant {
+        grant: grant.clone(),
+        credential_sha256: credential.sha256(),
+    };
+    standing_op(shared, StandingOp::Insert(Box::new(stored)))
+        .await
+        .map_err(op)?;
+    let left = grant.expires_at.millis_since(UtcTimestamp::now()).max(0);
+    let ttl = Duration::from_millis(u64::try_from(left).unwrap_or(0));
+    {
+        let mut s = lock(&shared.standing);
+        let credential_id =
+            lock(&shared.creds).register_hashed(Role::Pairing, credential.sha256(), Some(ttl));
+        *s = Some(LiveStanding {
+            grant: grant.clone(),
+            credential_id,
+        });
+    }
+    standing_schedule_expiry(shared, grant.grant_id, ttl);
+    shared.audit(
+        Actor::User,
+        AuditAction::StandingGrantCreate,
+        AuditOutcome::Succeeded,
+        None,
+        None,
+    );
+    shared.standing_event(&grant, StandingGrantChange::Created);
+    Ok(ResponseBody::StandingGrantCreated {
+        grant,
+        credential: credential.to_hex(),
+    })
+}
+
+/// `get_standing_grant` (UI).
+fn get_standing_grant(shared: &Shared) -> ResponseBody {
+    ResponseBody::StandingGrant {
+        grant: shared.standing_grant(),
+        live_session: shared.agents.live_standing_session().map(|(s, _)| s),
+    }
+}
+
+/// `confirm_standing_grant` (UI): a suspended grant takes the current
+/// configuration revision of its VM and is active again.
+async fn confirm_standing_grant(
+    shared: &Arc<Shared>,
+    grant_id: StandingGrantId,
+) -> Result<ResponseBody, ReplyError> {
+    let op = |e: PublicError| ReplyError::Operational(e);
+    let Some(g) = shared.standing_grant().filter(|g| g.grant_id == grant_id) else {
+        return Err(op(PublicError::not_found("standing grant not found")));
+    };
+    if g.state != StandingGrantState::Suspended {
+        return Ok(get_standing_grant(shared));
+    }
+    let revision = match standing_op(shared, StandingOp::VmRevision(g.vm_id))
+        .await
+        .map_err(op)?
+    {
+        StandingReply::Revision(Some(r)) => r,
+        _ => return Err(op(PublicError::not_found("VM does not exist"))),
+    };
+    let grant = {
+        let mut s = lock(&shared.standing);
+        match s.as_mut() {
+            Some(l) if l.grant.grant_id == grant_id => {
+                l.grant.state = StandingGrantState::Active;
+                l.grant.vm_config_revision = revision;
+                l.grant.clone()
+            }
+            _ => return Err(op(PublicError::not_found("standing grant not found"))),
+        }
+    };
+    standing_op(shared, StandingOp::Update(Box::new(grant.clone())))
+        .await
+        .map_err(op)?;
+    shared.audit(
+        Actor::User,
+        AuditAction::StandingGrantConfirm,
+        AuditOutcome::Succeeded,
+        None,
+        None,
+    );
+    shared.standing_event(&grant, StandingGrantChange::Confirmed);
+    Ok(get_standing_grant(shared))
+}
+
+/// `request_session` presented with the standing grant credential: approved
+/// at once when it conforms, denied otherwise (never queued for the user).
+#[allow(clippy::too_many_arguments)]
+async fn standing_request(
+    shared: &Arc<Shared>,
+    connection_id: u64,
+    peer_pid: Option<u32>,
+    client_name: &str,
+    purpose: &str,
+    requested_vms: Vec<lightvm_proto::VmId>,
+    requested_capabilities: lightvm_proto::CapabilitySet,
+    requested_endpoints: Vec<String>,
+) -> Result<ResponseBody, ReplyError> {
+    let deny = |shared: &Arc<Shared>, grant: Option<&StandingGrant>, e: PublicError| {
+        shared.audit(
+            grant.map_or(Actor::System, |g| Actor::StandingGrant {
+                grant_id: g.grant_id,
+            }),
+            AuditAction::SessionRequest,
+            AuditOutcome::Denied,
+            None,
+            Some(e.code),
+        );
+        if let Some(g) = grant {
+            let reason = e
+                .details
+                .as_ref()
+                .and_then(|d| d.get("reason").cloned())
+                .unwrap_or_else(|| format!("{:?}", e.code));
+            shared.standing_event(g, StandingGrantChange::RequestDenied { reason });
+        }
+        ReplyError::Operational(e)
+    };
+    let Some(grant) = shared.standing_grant() else {
+        return Err(deny(
+            shared,
+            None,
+            crate::standing::denied("standing_grant_ended", "the standing grant ended"),
+        ));
+    };
+    let truncated: String = client_name
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(lightvm_proto::ipc::MAX_CLIENT_NAME_CHARS)
+        .collect();
+    let now = UtcTimestamp::now();
+    let c = crate::standing::conform(
+        &grant,
+        now,
+        &truncated,
+        &requested_vms,
+        &requested_capabilities,
+        &requested_endpoints,
+    )
+    .map_err(|e| deny(shared, Some(&grant), e))?;
+    if shared.agents.any_live_session() {
+        return Err(deny(
+            shared,
+            Some(&grant),
+            crate::standing::denied("session_live", "another agent session is live"),
+        ));
+    }
+    let (info, closed) = shared
+        .agents
+        .open_standing_request(
+            connection_id,
+            peer_pid,
+            client_name,
+            purpose,
+            vec![grant.vm_id],
+            c.capabilities.clone(),
+            c.network_endpoints.clone(),
+        )
+        .map_err(|e| deny(shared, Some(&grant), e))?;
+    shared.report_closed(closed);
+    let Some(expires_at) = now.checked_add_millis(c.duration_ms) else {
+        shared.agents.drop_standing_request(info.request_id);
+        return Err(op_error(ErrorCode::InvalidArgument, "expiry out of range"));
+    };
+    let approval = SessionApproval {
+        tools: grant.tools.clone(),
+        vm_id: grant.vm_id,
+        capabilities: c.capabilities,
+        duration_s: 0,
+        quotas: Some(grant.quotas),
+        lease_ms: Some(grant.lease_ms),
+        give_input: grant.give_input,
+        network_endpoints: c.network_endpoints,
+    };
+    let session = match grant_session(
+        shared,
+        connection_id,
+        info.request_id,
+        &info,
+        approval,
+        grant.quotas,
+        i64::from(grant.lease_ms),
+        expires_at,
+        Some((grant.grant_id, grant.vm_config_revision)),
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(ReplyError::Operational(e)) => {
+            let changed = e
+                .details
+                .as_ref()
+                .is_some_and(|d| d.get("reason").is_some_and(|r| r == "vm_config_changed"));
+            if changed {
+                standing_suspend(shared, grant.grant_id).await;
+                let g = shared.standing_grant().unwrap_or(grant);
+                return Err(deny(
+                    shared,
+                    Some(&g),
+                    crate::standing::denied(
+                        "standing_grant_suspended",
+                        "the standing grant is suspended: the configuration of its VM changed; confirm it again in the app",
+                    ),
+                ));
+            }
+            return Err(deny(shared, Some(&grant), e));
+        }
+        Err(e) => return Err(e),
+    };
+    // Counters of the grant (memory, then catalog).
+    let updated = {
+        let mut s = lock(&shared.standing);
+        s.as_mut()
+            .filter(|l| l.grant.grant_id == grant.grant_id)
+            .map(|l| {
+                l.grant.sessions_approved = l.grant.sessions_approved.saturating_add(1);
+                l.grant.last_session_at = Some(now);
+                l.grant.clone()
+            })
+    };
+    if let Some(g) = &updated {
+        if let Err(e) = standing_op(shared, StandingOp::Update(Box::new(g.clone()))).await {
+            crate::diag!(
+                "lightvm-service: standing grant counters not recorded: {}",
+                e.message
+            );
+        }
+        shared.standing_event(
+            g,
+            StandingGrantChange::SessionApproved {
+                session_id: session.session_id,
+            },
+        );
+    }
+    shared.audit(
+        Actor::StandingGrant {
+            grant_id: grant.grant_id,
+        },
+        AuditAction::SessionRequest,
+        AuditOutcome::Succeeded,
+        Some(session.session_id),
+        None,
+    );
+    // Same reply as a request awaiting the user: the decision is already
+    // there, `await_session` returns it at once.
+    Ok(ResponseBody::SessionRequested {
+        request_id: info.request_id,
+        verification_code: info.verification_code,
+        expires_in_s: shared.cfg.session_request_ttl.as_secs(),
+    })
 }
 
 /// Queues a request for the supervisor thread (queue slot, revocation and

@@ -28,6 +28,7 @@ pub mod report;
 mod request;
 pub mod schema;
 mod session;
+pub mod standing;
 mod state;
 mod text;
 mod time;
@@ -43,7 +44,8 @@ pub use tools_wire::{ToolFileEntry, ToolFileReply, ToolFileRequest, ToolRelative
 pub use audit::{AuditAction, AuditEvent, AuditOutcome, NetworkAudit, ToolAudit};
 pub use error::{ErrorCode, ProtocolError, ProtocolErrorCode, PublicError, ReplyError};
 pub use ids::{
-    BaselineId, GrantId, IdParseError, MediaId, OperationId, RunId, SessionId, SnapshotId, VmId,
+    BaselineId, GrantId, IdParseError, MediaId, OperationId, RunId, SessionId, SnapshotId,
+    StandingGrantId, VmId,
 };
 pub use input::{
     ABS_AXIS_MAX, InputBatch, InputEvent, KeyAction, MAX_INPUT_EVENTS_PER_REQUEST, MouseButton,
@@ -64,6 +66,10 @@ pub use session::{
     Capability, CapabilitySet, EffectivePolicy, Grant, LEASE_MAX_MILLIS, Lease, PolicyLayer,
     PolicyRevision, Quotas, RevocationReport, SessionState, SessionToken, TerminationCause,
     TestOutcome,
+};
+pub use standing::{
+    MAX_STANDING_GRANT_S, MIN_STANDING_GRANT_S, StandingGrant, StandingGrantChange,
+    StandingGrantSpec, StandingGrantState, StandingRevokeCause,
 };
 pub use state::{BackendObservation, ObservationSource, ObservedState, VmState};
 pub use text::{Label, ManagedRelPath, QCode, Sha256Digest, TextError, VmName};

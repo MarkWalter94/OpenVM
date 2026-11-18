@@ -55,6 +55,8 @@ pub mod resume;
 #[cfg(feature = "supervisor")]
 pub mod server;
 #[cfg(feature = "supervisor")]
+pub(crate) mod standing;
+#[cfg(feature = "supervisor")]
 pub mod start;
 #[cfg(feature = "supervisor")]
 pub mod supervisor;

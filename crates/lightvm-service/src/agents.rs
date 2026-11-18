@@ -59,6 +59,9 @@ struct Pending {
     decision: Option<Decision>,
     /// Agent waiting with `await_session`.
     waiter: Option<oneshot::Sender<Decision>>,
+    /// Request presented with the standing grant credential (ADR-0039):
+    /// approved by the service, never listed for the user.
+    standing: bool,
 }
 
 #[derive(Debug)]
@@ -66,6 +69,8 @@ struct Bound {
     vm_id: Option<VmId>,
     connection_id: ConnectionId,
     gate: Gate,
+    /// Approved automatically under the standing grant (ADR-0039).
+    standing: bool,
 }
 
 #[derive(Debug)]
@@ -215,7 +220,62 @@ impl AgentRegistry {
                     .with_detail("reason", "agent_access_disabled"),
             );
         }
-        let code = verification_code()?;
+        self.open(
+            connection_id,
+            peer_pid,
+            client_name,
+            purpose,
+            requested_vms,
+            requested_capabilities,
+            requested_endpoints,
+            false,
+        )
+    }
+
+    /// Request presented with the standing grant credential (ADR-0039):
+    /// it does not need the agent access switch, is never listed for the
+    /// user and is decided by the service at once (approved or denied).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn open_standing_request(
+        &self,
+        connection_id: ConnectionId,
+        peer_pid: Option<u32>,
+        client_name: &str,
+        purpose: &str,
+        requested_vms: Vec<VmId>,
+        requested_capabilities: CapabilitySet,
+        requested_endpoints: Vec<String>,
+    ) -> Result<(SessionRequestInfo, Closed), PublicError> {
+        self.open(
+            connection_id,
+            peer_pid,
+            client_name,
+            purpose,
+            requested_vms,
+            requested_capabilities,
+            requested_endpoints,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn open(
+        &self,
+        connection_id: ConnectionId,
+        peer_pid: Option<u32>,
+        client_name: &str,
+        purpose: &str,
+        requested_vms: Vec<VmId>,
+        requested_capabilities: CapabilitySet,
+        requested_endpoints: Vec<String>,
+        standing: bool,
+    ) -> Result<(SessionRequestInfo, Closed), PublicError> {
+        let code = if standing {
+            // Nobody compares it: the request is decided by the service.
+            "standing".to_owned()
+        } else {
+            verification_code()?
+        };
         let mut inner = lock(&self.inner);
         let closed = Self::purge(&mut inner);
         let busy = inner
@@ -260,9 +320,12 @@ impl AgentRegistry {
             Pending {
                 info: info.clone(),
                 expires: Instant::now() + self.ttl,
-                approving: false,
+                // A standing request is taken for approval at once: never
+                // listed for the user, never approvable with a click.
+                approving: standing,
                 decision: None,
                 waiter: None,
+                standing,
             },
         );
         if let Some(c) = inner.conns.get_mut(&connection_id) {
@@ -332,6 +395,65 @@ impl AgentRegistry {
         Ok((p.info.clone(), closed))
     }
 
+    /// A standing request that did not obtain its session (ADR-0039): it is
+    /// removed at once, never left pending for the user.
+    pub(crate) fn drop_standing_request(&self, request_id: SessionRequestId) {
+        let mut inner = lock(&self.inner);
+        if let Some(p) = inner.pending.get(&request_id)
+            && p.standing
+        {
+            let conn = p.info.connection_id;
+            inner.pending.remove(&request_id);
+            if let Some(c) = inner.conns.get_mut(&conn)
+                && c.request == Some(request_id)
+            {
+                c.request = None;
+            }
+        }
+    }
+
+    /// `true` while any session is live (approved by the user or not).
+    pub(crate) fn any_live_session(&self) -> bool {
+        lock(&self.inner)
+            .sessions
+            .values()
+            .any(|b| b.gate != Gate::Terminated)
+    }
+
+    /// The live session approved under the standing grant, if any.
+    pub(crate) fn live_standing_session(&self) -> Option<(SessionId, ConnectionId)> {
+        lock(&self.inner)
+            .sessions
+            .iter()
+            .find(|(_, b)| b.standing && b.gate != Gate::Terminated)
+            .map(|(id, b)| (*id, b.connection_id))
+    }
+
+    /// Terminates the live sessions approved by the user (agent access
+    /// switch turned off): those of the standing grant stay (ADR-0039).
+    pub(crate) fn terminate_user_approved(
+        &self,
+        cause: TerminationCause,
+        stop: bool,
+    ) -> Vec<ConnectionId> {
+        let ids: Vec<SessionId> = lock(&self.inner)
+            .sessions
+            .iter()
+            .filter(|(_, b)| b.gate != Gate::Terminated && !b.standing)
+            .map(|(id, _)| *id)
+            .collect();
+        ids.into_iter()
+            .filter_map(|id| {
+                let change = GateChange::Terminate {
+                    cause,
+                    stop,
+                    awaited: false,
+                };
+                self.terminate(id, false, Some(change))
+            })
+            .collect()
+    }
+
     /// Approval failed in the supervisor: the request is pending again.
     pub(crate) fn abort_approval(&self, request_id: SessionRequestId) {
         if let Some(p) = lock(&self.inner).pending.get_mut(&request_id) {
@@ -368,6 +490,7 @@ impl AgentRegistry {
                 },
                 connection_id: conn,
                 gate: Gate::Active,
+                standing: p.standing,
             },
         );
         match p.waiter.take() {

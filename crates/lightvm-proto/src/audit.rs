@@ -132,6 +132,16 @@ pub enum AuditAction {
     /// ended, revocation, expiry, Emergency Stop): connections to endpoints
     /// no longer allowed were reset.
     NetworkPolicy,
+    /// Standing grant created by the user (ADR-0039).
+    StandingGrantCreate,
+    /// Standing grant revoked (user, Emergency Stop, VM deleted).
+    StandingGrantRevoke,
+    /// Standing grant expired.
+    StandingGrantExpire,
+    /// Standing grant suspended: the configuration of its VM changed.
+    StandingGrantSuspend,
+    /// Standing grant confirmed again by the user after a suspension.
+    StandingGrantConfirm,
 }
 
 /// Network details of a `network_*` audit event (ADR-0033). Addresses and
