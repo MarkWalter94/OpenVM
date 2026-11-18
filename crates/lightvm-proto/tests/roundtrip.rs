@@ -406,6 +406,7 @@ fn session_types_roundtrip() {
             "usb",
             "ui.inspect",
             "ui.act",
+            "guest.exec",
             "vm.list",
             "vm.status",
             "vm.start",

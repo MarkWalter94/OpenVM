@@ -154,6 +154,10 @@ name = "network"
 required-features = ["supervisor"]
 
 [[test]]
+name = "tools"
+required-features = ["supervisor"]
+
+[[test]]
 name = "tools_real"
 required-features = ["supervisor"]
 
