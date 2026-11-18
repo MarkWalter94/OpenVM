@@ -625,6 +625,7 @@ impl Adapter {
             request_id,
             verification_code,
             expires_in_s,
+            ..
         } = reply
         else {
             return Err(unexpected());

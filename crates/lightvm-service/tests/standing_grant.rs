@@ -258,7 +258,11 @@ fn all_caps() -> CapabilitySet {
 /// (no UI involved).
 async fn auto_session(agent: &mut Client) -> (SessionAuth, lightvm_proto::Grant) {
     let request_id = match ok(agent, request(Vec::new(), all_caps(), Vec::new())).await {
-        ResponseBody::SessionRequested { request_id, .. } => request_id,
+        ResponseBody::SessionRequested {
+            request_id,
+            standing: true,
+            ..
+        } => request_id,
         other => panic!("{other:?}"),
     };
     match ok(agent, Request::AwaitSession { request_id }).await {

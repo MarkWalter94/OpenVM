@@ -3077,6 +3077,10 @@
               "format": "uint64",
               "minimum": 0
             },
+            "standing": {
+              "description": "`true` when the request was decided by the standing grant of the\ncredential (ADR-0039): nobody compares the code, the decision is\nalready there for `await_session`.",
+              "type": "boolean"
+            },
             "verification_code": {
               "description": "Code the user compares in the app.",
               "type": "string"

@@ -491,7 +491,9 @@ async fn agent_access_is_off_at_start_and_gates_session_requests() {
             request_id,
             verification_code,
             expires_in_s,
+            standing,
         } => {
+            assert!(!standing);
             assert_eq!(expires_in_s, 300);
             assert!(verification_code.len() == 7 && verification_code.as_bytes()[3] == b'-');
             request_id

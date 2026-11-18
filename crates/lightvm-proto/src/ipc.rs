@@ -1601,6 +1601,11 @@ pub enum ResponseBody {
         verification_code: String,
         /// Lifetime of the request.
         expires_in_s: u64,
+        /// `true` when the request was decided by the standing grant of the
+        /// credential (ADR-0039): nobody compares the code, the decision is
+        /// already there for `await_session`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        standing: bool,
     },
     /// Response to `await_session`: session approved and bound to this
     /// connection.
@@ -1898,11 +1903,13 @@ impl std::fmt::Debug for ResponseBody {
                 request_id,
                 verification_code,
                 expires_in_s,
+                standing,
             } => fields!(
                 SessionRequested,
                 request_id,
                 verification_code,
-                expires_in_s
+                expires_in_s,
+                standing
             ),
             Self::SessionGranted {
                 session_id,

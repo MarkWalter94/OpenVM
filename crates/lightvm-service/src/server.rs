@@ -1980,6 +1980,7 @@ fn request_session(
                 request_id: info.request_id,
                 verification_code: info.verification_code.clone(),
                 expires_in_s: shared.cfg.session_request_ttl.as_secs(),
+                standing: false,
             };
             let _ = shared
                 .events
@@ -2835,6 +2836,7 @@ async fn standing_request(
         request_id: info.request_id,
         verification_code: info.verification_code,
         expires_in_s: shared.cfg.session_request_ttl.as_secs(),
+        standing: true,
     })
 }
 
