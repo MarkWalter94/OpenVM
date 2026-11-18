@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 name = "guest-net"
 description = "LightVM: supervisor-owned guest network stack for the endpoint allowlist (ADR-0033)"
 version.workspace = true
@@ -16,7 +16,7 @@ smoltcp = { version = "=0.14.0", default-features = false, features = ["std", "m
 # AF_UNIX stream to QEMU's `-netdev stream` (same crate and version as
 # qemu-backend and lightvm-service).
 socket2 = { version = "=0.6.5", features = ["all"] }
-tokio = { version = "=1.53.2", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "=1.54.1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
 
 [target.'cfg(windows)'.dependencies.windows-sys]
 version = "=0.61.2"
