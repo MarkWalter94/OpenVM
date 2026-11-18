@@ -724,7 +724,7 @@ pub fn host_ui(ui: &mut egui::Ui, host: Option<lightvm_proto::HostCapacity>, con
 
 /// Features of this version, stated plainly. Read only: none of them can be
 /// enabled from the UI.
-pub const SECURITY_FACTS: [(&str, &str); 5] = [
+pub const SECURITY_FACTS: [(&str, &str); 3] = [
     ("Network", "Offline only: VMs have no network adapter."),
     (
         "Clipboard",
@@ -734,15 +734,24 @@ pub const SECURITY_FACTS: [(&str, &str); 5] = [
         "Shared folders",
         "Not available: files reach the guest only as read-only data ISOs.",
     ),
-    ("MCP server for AI agents", "Not available in this version."),
-    (
-        "Agent sessions",
-        "Disabled: only you control the VMs, from this window.",
-    ),
 ];
 
-/// Content of the Security card.
-pub fn security_ui(ui: &mut egui::Ui) {
+/// What agents can do, stated plainly (managed on the AI Workspace page).
+pub const AGENT_SESSIONS_FACT: &str = "Only after you approve a request on the AI Workspace page, for one VM and a limited time. Agent access is off every time LightVM starts.";
+
+/// Unattended access as the Security card states it: the live grant's VM
+/// name and the grant, or none.
+#[derive(Clone, Copy, Debug)]
+pub struct UnattendedSummary<'a> {
+    /// Name of the grant's VM.
+    pub vm_name: &'a str,
+    /// The live grant.
+    pub grant: &'a lightvm_proto::StandingGrant,
+}
+
+/// Content of the Security card. `unattended`: the live unattended access
+/// (standing grant, ADR-0039), if any.
+pub fn security_ui(ui: &mut egui::Ui, unattended: Option<UnattendedSummary<'_>>) {
     let colours = theme::Palette::of(ui);
     ui.label(
         egui::RichText::new("Fixed in this version: these features cannot be turned on.")
@@ -760,6 +769,47 @@ pub fn security_ui(ui: &mut egui::Ui) {
             });
         });
     }
+    theme::divider(ui);
+    theme::row(ui, "Agent sessions", None, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            theme::pill(ui, "Your approval", Tone::Neutral);
+            ui.add(
+                egui::Label::new(egui::RichText::new(AGENT_SESSIONS_FACT).color(colours.text))
+                    .wrap(),
+            );
+        });
+    });
+    theme::divider(ui);
+    theme::row(ui, "Unattended agent access", None, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            let text = match unattended {
+                Some(u) => {
+                    let suspended =
+                        u.grant.state == lightvm_proto::StandingGrantState::Suspended;
+                    if suspended {
+                        theme::pill(ui, "Suspended", Tone::Warning);
+                    } else {
+                        theme::pill(ui, "Active", Tone::Warning);
+                    }
+                    format!(
+                        "On {} until {}: its agent's sessions are approved without asking you{}. Review or revoke it on the AI Workspace page, Unattended access; the Emergency Stop revokes it too.",
+                        u.vm_name,
+                        crate::baselines::format_time(u.grant.expires_at),
+                        if suspended {
+                            " (suspended: the VM configuration changed, confirm it again to resume)"
+                        } else {
+                            ""
+                        }
+                    )
+                }
+                None => {
+                    theme::pill(ui, "Off", Tone::Neutral);
+                    "Off: every agent session needs your approval. It can be created for one VM, for at most 7 days, on the AI Workspace page, Unattended access.".to_owned()
+                }
+            };
+            ui.add(egui::Label::new(egui::RichText::new(text).color(colours.text)).wrap());
+        });
+    });
 }
 
 /// Content of the Console card: declared guest keyboard layout. Returns

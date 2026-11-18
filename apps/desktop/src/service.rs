@@ -46,8 +46,9 @@ use lightvm_proto::report::{
 use lightvm_proto::{
     BaselineId, ErrorCode, HostCapacity, InputBatch, InputEvent, KeyAction, Label, MediaId,
     MediaKind, MediaRecord, MouseButton, OperationId, OperationStatus, PointerButton, ReplyError,
-    RunId, SessionId, SessionState, Sha256Digest, SnapshotId, TerminationCause, TestOutcome,
-    UtcTimestamp, VmAction, VmConfig, VmId, VmName, VmRecord, VmRequest,
+    RunId, SessionId, SessionState, Sha256Digest, SnapshotId, StandingGrant, StandingGrantChange,
+    StandingGrantId, StandingGrantSpec, StandingGrantState, StandingRevokeCause, TerminationCause,
+    TestOutcome, UtcTimestamp, VmAction, VmConfig, VmId, VmName, VmRecord, VmRequest,
 };
 use lightvm_service::client::Client;
 use lightvm_service::credential::Credential;
@@ -425,6 +426,97 @@ pub struct AgentState {
     /// Last state of each session recorded in [`Self::log`] (events and
     /// replies can arrive in either order: each change is recorded once).
     pub logged: BTreeMap<SessionId, SessionState>,
+    /// Unattended access (standing grant, ADR-0039).
+    pub standing: StandingState,
+}
+
+/// Control of the standing grant requested by the UI (ADR-0039).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StandingOp {
+    /// Creation.
+    Create,
+    /// Revocation.
+    Revoke(StandingGrantId),
+    /// Confirmation after a suspension.
+    Confirm(StandingGrantId),
+}
+
+/// Last standing grant control and its outcome.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StandingControl {
+    /// Operation.
+    pub op: StandingOp,
+    /// Outcome.
+    pub status: RequestStatus<()>,
+}
+
+/// Pairing file of the live standing grant, as last checked by the app.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StandingFile {
+    /// Present, with the endpoint of the running supervisor.
+    Ready(PathBuf),
+    /// Missing or unusable (reason, never the content): the agent cannot
+    /// connect until the grant is revoked and created again.
+    Unusable(String),
+}
+
+/// Unattended access as known to the UI (ADR-0039). Never holds the
+/// credential: it goes from the reply straight to the pairing file.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StandingState {
+    /// The live grant was read at least once from this supervisor.
+    pub loaded: bool,
+    /// The live grant (active or suspended), if any.
+    pub grant: Option<StandingGrant>,
+    /// Its live session, if any.
+    pub live_session: Option<SessionId>,
+    /// Pairing file of the live grant, once checked.
+    pub file: Option<StandingFile>,
+    /// Last grant that ended (revoked or expired) while the app was open.
+    pub ended: Option<StandingGrant>,
+    /// Last request the grant denied: instant and stable reason.
+    pub last_denied: Option<(UtcTimestamp, String)>,
+    /// Last control (create, revoke, confirm).
+    pub control: Option<StandingControl>,
+    /// Last read error.
+    pub error: Option<Failure>,
+}
+
+impl StandingState {
+    /// The live grant (active or suspended), if any.
+    pub fn live(&self) -> Option<&StandingGrant> {
+        self.grant.as_ref().filter(|g| g.state.is_live())
+    }
+
+    /// A control of this kind is waiting for the supervisor.
+    pub fn pending(&self, f: impl Fn(StandingOp) -> bool) -> bool {
+        self.control
+            .as_ref()
+            .is_some_and(|c| c.status.is_pending() && f(c.op))
+    }
+
+    /// The grant ended (revoked or expired): forgotten, kept as the last
+    /// ended one.
+    fn end(&mut self, ended: StandingGrant) {
+        self.grant = None;
+        self.live_session = None;
+        self.file = None;
+        self.ended = Some(ended);
+    }
+}
+
+/// The pairing file may be removed (agent access off, supervisor stopped):
+/// no standing grant is live, and the app knows it (the grant was read) or
+/// the file holds an ordinary pairing credential of this run. While a grant
+/// is live, or before the app knows, the file is kept.
+pub fn pairing_file_disposable(s: &ServiceState) -> bool {
+    let st = &s.agents.standing;
+    st.live().is_none()
+        && (st.loaded
+            || matches!(
+                s.agents.pairing,
+                RequestStatus::Done(_) | RequestStatus::Pending
+            ))
 }
 
 impl AgentState {
@@ -1074,6 +1166,17 @@ pub enum ServiceCommand {
     },
     /// Issues a pairing credential and writes it to the pairing file.
     CreatePairing,
+    /// Re-reads the live standing grant (ADR-0039); on the first read from
+    /// a supervisor, also rewrites its pairing file with the new endpoint
+    /// (or removes a leftover file when no grant is live).
+    GetStandingGrant,
+    /// Creates the standing grant and writes its credential to the pairing
+    /// file.
+    CreateStandingGrant(Box<StandingGrantSpec>),
+    /// Revokes the standing grant (its pairing file is removed).
+    RevokeStandingGrant(StandingGrantId),
+    /// Confirms a suspended standing grant again.
+    ConfirmStandingGrant(StandingGrantId),
     /// Re-reads the session reports (F5).
     ListSessionReports,
     /// Reads the header of a report.
@@ -1145,6 +1248,16 @@ pub enum ServiceCommand {
 }
 
 impl ServiceCommand {
+    /// Standing grant control of the command, if it is one.
+    pub fn standing_op(&self) -> Option<StandingOp> {
+        Some(match self {
+            Self::CreateStandingGrant(_) => StandingOp::Create,
+            Self::RevokeStandingGrant(id) => StandingOp::Revoke(*id),
+            Self::ConfirmStandingGrant(id) => StandingOp::Confirm(*id),
+            _ => return None,
+        })
+    }
+
     /// Agent control of the command, if it is one.
     pub fn agent_op(&self) -> Option<AgentOp> {
         Some(match self {
@@ -1393,12 +1506,10 @@ impl Service {
             endpoint,
             credential,
         } = ready;
+        // A pairing file of a previous run is removed, or rewritten with the
+        // new endpoint when it belongs to a live standing grant, once the
+        // grant is read (`GetStandingGrant`, first command after connecting).
         let pairing_dir = cfg.pairing_dir.clone().or_else(crate::pairing::default_dir);
-        // A pairing file of a previous run holds a credential that did not
-        // survive it.
-        if let Some(d) = &pairing_dir {
-            crate::pairing::remove(d);
-        }
         // The IPC tasks keep only a weak sender: when the `Service` is
         // dropped the command channel closes and the IPC thread ends.
         let lanes = Lanes {
@@ -1463,9 +1574,7 @@ impl Service {
     /// pipe; once `timeout` has expired, forced termination. Returns the exit
     /// code and whether forcing was necessary.
     pub fn stop(&mut self, timeout: Duration) -> (Option<i32>, bool) {
-        if let Some(d) = &self.pairing_dir {
-            crate::pairing::remove(d);
-        }
+        self.remove_pairing_file();
         if let Some(mut s) = self.stdin.take() {
             let _ = s.write_all(b"shutdown\n").and_then(|()| s.flush());
         }
@@ -1555,11 +1664,20 @@ fn send_command(
     ok
 }
 
-impl Drop for Service {
-    fn drop(&mut self) {
-        if let Some(d) = &self.pairing_dir {
+impl Service {
+    /// Removes the pairing file at stop, unless it belongs to a live
+    /// standing grant (or the app does not know yet: [`pairing_file_disposable`]).
+    fn remove_pairing_file(&self) {
+        let disposable = pairing_file_disposable(&lock(&self.state));
+        if disposable && let Some(d) = &self.pairing_dir {
             crate::pairing::remove(d);
         }
+    }
+}
+
+impl Drop for Service {
+    fn drop(&mut self) {
+        self.remove_pairing_file();
         if self.is_alive() {
             let _ = self.stop(STOP_TIMEOUT);
         } else {
@@ -1641,6 +1759,11 @@ pub fn mark_pending(
                     op,
                     status: RequestStatus::Pending,
                 });
+            } else if let Some(op) = c.standing_op() {
+                s.agents.standing.control = Some(StandingControl {
+                    op,
+                    status: RequestStatus::Pending,
+                });
             }
         }
     }
@@ -1677,6 +1800,9 @@ fn fail_pending(s: &mut ServiceState, why: &str) {
         fail(&mut r.status, why);
     }
     if let Some(r) = &mut s.agents.control {
+        fail(&mut r.status, why);
+    }
+    if let Some(r) = &mut s.agents.standing.control {
         fail(&mut r.status, why);
     }
     fail(&mut s.agents.pairing, why);
@@ -1739,6 +1865,17 @@ fn mark_failed(s: &mut ServiceState, c: &ServiceCommand, f: Failure) {
             });
         }
         ServiceCommand::CreatePairing => s.agents.pairing = RequestStatus::Failed(f),
+        ServiceCommand::GetStandingGrant => s.agents.standing.error = Some(f),
+        ServiceCommand::CreateStandingGrant(_)
+        | ServiceCommand::RevokeStandingGrant(_)
+        | ServiceCommand::ConfirmStandingGrant(_) => {
+            if let Some(op) = c.standing_op() {
+                s.agents.standing.control = Some(StandingControl {
+                    op,
+                    status: RequestStatus::Failed(f),
+                });
+            }
+        }
         ServiceCommand::PreviewVmwareImport(path) => {
             // A newer preview (another file) supersedes this one.
             if s.vmware.preview_path.as_ref() == Some(path) {
@@ -1981,6 +2118,9 @@ async fn ipc_loop(
         s.connection = "connected".into();
         s.connected = true;
     });
+    // The standing grant first: its pairing file gets the new endpoint (or a
+    // leftover file is removed) as soon as possible.
+    lanes.queue(ServiceCommand::GetStandingGrant);
     lanes.queue(ServiceCommand::Refresh);
     lanes.queue(ServiceCommand::ListMedia);
     lanes.queue(ServiceCommand::GetAgentAccess);
@@ -2063,6 +2203,7 @@ async fn ipc_loop(
                 | ServiceCommand::RevokeSession(_)
                 | ServiceCommand::SetInputOwner { .. }
                 | ServiceCommand::SetAgentAccess(_)
+                | ServiceCommand::RevokeStandingGrant(_)
                 // The cancellation of a VMware import never waits behind it.
                 | ServiceCommand::CancelVmwareImport => fast_in.push(c),
                 // Imports read whole ISOs (hash), exports copy files (an export can write
@@ -2152,12 +2293,33 @@ fn agent_event(lanes: &Lanes, ev: ServiceEvent) {
                 };
                 s.agents.record(now, None, text.into());
             });
-            if !enabled && let Some(d) = &lanes.pairing_dir {
+            // The switch concerns ordinary pairing only: the pairing file of
+            // a live standing grant stays.
+            let disposable = pairing_file_disposable(&lock(&lanes.state));
+            if !enabled
+                && disposable
+                && let Some(d) = &lanes.pairing_dir
+            {
                 crate::pairing::remove(d);
                 lanes.update(|s| s.agents.pairing = RequestStatus::Idle);
             }
             lanes.queue(ServiceCommand::ListSessionRequests);
             lanes.queue(ServiceCommand::ListSessions);
+        }
+        ServiceEvent::StandingGrant { grant, change } => {
+            let ended = matches!(
+                change,
+                StandingGrantChange::Revoked | StandingGrantChange::Expired
+            );
+            // Revoked or expired: its credential no longer works, the file
+            // is removed.
+            if ended && let Some(d) = &lanes.pairing_dir {
+                crate::pairing::remove(d);
+            }
+            lanes.update(|s| standing_changed(s, grant, &change, now));
+            if matches!(change, StandingGrantChange::SessionApproved { .. }) || ended {
+                lanes.queue(ServiceCommand::ListSessions);
+            }
         }
         ServiceEvent::SessionRequest { request } => lanes.update(|s| {
             let text = format!(
@@ -2218,6 +2380,7 @@ fn agent_event(lanes: &Lanes, ev: ServiceEvent) {
         }
         ServiceEvent::EventsLost { .. } => {
             lanes.queue(ServiceCommand::Refresh);
+            lanes.queue(ServiceCommand::GetStandingGrant);
             lanes.queue(ServiceCommand::GetAgentAccess);
             lanes.queue(ServiceCommand::ListSessionRequests);
             lanes.queue(ServiceCommand::ListSessions);
@@ -2283,6 +2446,122 @@ fn session_changed(
         x.termination = termination.or(x.termination);
     }
     s.agents.record(now, Some(session_id), text);
+}
+
+/// Readable reason of a request denied by the standing grant (stable
+/// `detail.reason` of the denial; an unknown one is shown as is).
+pub fn standing_denial_text(reason: &str) -> String {
+    let text = match reason {
+        "standing_grant_suspended" => {
+            "the unattended access is suspended (VM configuration changed)"
+        }
+        "standing_grant_expired" => "the unattended access has expired",
+        "standing_grant_ended" => "the unattended access has ended",
+        "standing_vm_mismatch" => "it asked for another VM",
+        "standing_no_capability" => "it asked for nothing the unattended access allows",
+        "standing_endpoint_not_granted" => {
+            "it asked for a network endpoint the unattended access does not allow"
+        }
+        "standing_client_mismatch" => "the client name is not the expected one",
+        "session_live" => "another agent session is live",
+        r => return format!("reason \u{201c}{r}\u{201d}"),
+    };
+    text.to_owned()
+}
+
+/// Pairing file of the live standing grant expiring at `expires_at`, with
+/// the endpoint of the running supervisor: read back and rewritten with
+/// `endpoint` when it names another one (a previous supervisor), keeping
+/// its credential and expiry. Missing, unreadable or of another credential
+/// (another expiry): unusable.
+pub fn refresh_standing_file(
+    dir: &std::path::Path,
+    endpoint: &str,
+    expires_at: UtcTimestamp,
+) -> StandingFile {
+    let mut stored = match crate::pairing::read(dir) {
+        Ok(p) => p,
+        Err(e) => return StandingFile::Unusable(e),
+    };
+    if stored.expires_at != expires_at {
+        return StandingFile::Unusable(
+            "the pairing file holds another credential (its expiry differs)".into(),
+        );
+    }
+    if stored.endpoint == endpoint {
+        return StandingFile::Ready(dir.join(crate::pairing::FILE_NAME));
+    }
+    let credential = stored.take_credential();
+    match crate::pairing::write(dir, endpoint, credential, stored.expires_at) {
+        Ok(p) => StandingFile::Ready(p),
+        Err(e) => StandingFile::Unusable(e),
+    }
+}
+
+/// Applies a `standing_grant` event and records it in the session log.
+fn standing_changed(
+    s: &mut ServiceState,
+    grant: StandingGrant,
+    change: &StandingGrantChange,
+    now: UtcTimestamp,
+) {
+    let st = &mut s.agents.standing;
+    st.loaded = true;
+    let text = match change {
+        StandingGrantChange::Created => "Unattended access created".to_owned(),
+        StandingGrantChange::Confirmed => "Unattended access confirmed again".to_owned(),
+        StandingGrantChange::Suspended => {
+            "Unattended access suspended: the VM configuration changed".to_owned()
+        }
+        StandingGrantChange::Revoked => match grant.state {
+            StandingGrantState::Revoked {
+                cause: StandingRevokeCause::EmergencyStop,
+                ..
+            } => "Unattended access revoked by the Emergency Stop".to_owned(),
+            StandingGrantState::Revoked {
+                cause: StandingRevokeCause::VmDeleted,
+                ..
+            } => "Unattended access revoked: its VM was deleted".to_owned(),
+            _ => "Unattended access revoked".to_owned(),
+        },
+        StandingGrantChange::Expired => "Unattended access expired".to_owned(),
+        StandingGrantChange::SessionApproved { .. } => {
+            "Session approved automatically by the unattended access".to_owned()
+        }
+        StandingGrantChange::RequestDenied { reason } => {
+            st.last_denied = Some((now, reason.clone()));
+            format!(
+                "Request denied by the unattended access: {}",
+                standing_denial_text(reason)
+            )
+        }
+    };
+    let session = match change {
+        StandingGrantChange::SessionApproved { session_id } => {
+            st.live_session = Some(*session_id);
+            Some(*session_id)
+        }
+        _ => None,
+    };
+    if grant.state.is_live() {
+        // A newer state of the same grant, or a new grant.
+        if st
+            .grant
+            .as_ref()
+            .is_none_or(|g| g.grant_id != grant.grant_id)
+        {
+            st.live_session = session;
+            st.file = None;
+        }
+        st.grant = Some(grant);
+    } else if st
+        .grant
+        .as_ref()
+        .is_none_or(|g| g.grant_id == grant.grant_id)
+    {
+        st.end(grant);
+    }
+    s.agents.record(now, session, text);
 }
 
 /// Records a new input owner of a VM (event or reply), once.
@@ -2965,13 +3244,16 @@ async fn execute(c: &mut Client, lanes: &Lanes, command: ServiceCommand) -> Resu
                     result: ResponseBody::AgentAccess { enabled },
                     ..
                 } => {
-                    if !enabled && let Some(d) = &lanes.pairing_dir {
+                    // Ordinary pairing only: the file of a live standing
+                    // grant stays.
+                    let remove = !enabled && pairing_file_disposable(&lock(state));
+                    if remove && let Some(d) = &lanes.pairing_dir {
                         crate::pairing::remove(d);
                     }
                     {
                         let mut s = lock(state);
                         s.agents.access = Some(enabled);
-                        if !enabled {
+                        if remove {
                             s.agents.pairing = RequestStatus::Idle;
                         }
                         control_done(&mut s, AgentOp::SetAccess(on));
@@ -3143,6 +3425,168 @@ async fn execute(c: &mut Client, lanes: &Lanes, command: ServiceCommand) -> Resu
                     Ok(())
                 }
                 m => Err(context("pairing", failure(&m))),
+            }
+        }
+        ServiceCommand::GetStandingGrant => match request(c, Request::GetStandingGrant).await? {
+            ServerMessage::Response {
+                result:
+                    ResponseBody::StandingGrant {
+                        grant,
+                        live_session,
+                    },
+                ..
+            } => {
+                let grant = grant.filter(|g| g.state.is_live());
+                let first = !lock(state).agents.standing.loaded;
+                let file = match (&lanes.pairing_dir, &grant) {
+                    // Every supervisor start has a new endpoint: the file of
+                    // the live grant is rewritten with it.
+                    (Some(dir), Some(g)) => {
+                        let (dir, endpoint, expires_at) =
+                            (dir.clone(), lanes.endpoint.clone(), g.expires_at);
+                        Some(
+                            tokio::task::spawn_blocking(move || {
+                                refresh_standing_file(&dir, &endpoint, expires_at)
+                            })
+                            .await
+                            .unwrap_or_else(|e| StandingFile::Unusable(e.to_string())),
+                        )
+                    }
+                    (None, Some(_)) => Some(StandingFile::Unusable(
+                        "no folder for the pairing file".into(),
+                    )),
+                    // No live grant on the first read: a leftover file of a
+                    // previous run holds a credential that did not survive.
+                    (Some(dir), None) if first => {
+                        crate::pairing::remove(dir);
+                        None
+                    }
+                    _ => None,
+                };
+                let mut s = lock(state);
+                let st = &mut s.agents.standing;
+                st.loaded = true;
+                st.error = None;
+                match grant {
+                    Some(g) => {
+                        st.grant = Some(g);
+                        st.live_session = live_session;
+                        st.file = file;
+                    }
+                    None => {
+                        if let Some(g) = st.grant.take() {
+                            st.ended = Some(g);
+                        }
+                        st.live_session = None;
+                        st.file = None;
+                    }
+                }
+                Ok(())
+            }
+            m => Err(context("unattended access", failure(&m))),
+        },
+        ServiceCommand::CreateStandingGrant(spec) => {
+            let dir = lanes
+                .pairing_dir
+                .clone()
+                .ok_or_else(|| Failure::new("no folder for the pairing file"))?;
+            match request(c, Request::CreateStandingGrant { spec: *spec }).await? {
+                ServerMessage::Response {
+                    result: ResponseBody::StandingGrantCreated { grant, credential },
+                    ..
+                } => {
+                    let (endpoint, expires_at) = (lanes.endpoint.clone(), grant.expires_at);
+                    // File system and `icacls`: off the IPC task. The
+                    // credential is consumed and overwritten by `write`.
+                    let written = tokio::task::spawn_blocking(move || {
+                        crate::pairing::write(&dir, &endpoint, credential, expires_at)
+                    })
+                    .await
+                    .map_err(|e| e.to_string())
+                    .and_then(|r| r);
+                    let mut s = lock(state);
+                    // The ordinary pairing file, if any, was replaced.
+                    s.agents.pairing = RequestStatus::Idle;
+                    let st = &mut s.agents.standing;
+                    st.loaded = true;
+                    st.grant = Some(grant);
+                    st.live_session = None;
+                    st.ended = None;
+                    st.last_denied = None;
+                    let status = match &written {
+                        Ok(_) => RequestStatus::Done(()),
+                        Err(e) => RequestStatus::Failed(Failure::new(format!(
+                            "The unattended access was created, but its pairing file was not written ({e}): revoke it and create it again."
+                        ))),
+                    };
+                    st.file = Some(match written {
+                        Ok(p) => StandingFile::Ready(p),
+                        Err(e) => StandingFile::Unusable(e),
+                    });
+                    st.control = Some(StandingControl {
+                        op: StandingOp::Create,
+                        status,
+                    });
+                    Ok(())
+                }
+                m => Err(context("unattended access not created", failure(&m))),
+            }
+        }
+        ServiceCommand::RevokeStandingGrant(grant_id) => {
+            match request(c, Request::RevokeStandingGrant { grant_id }).await? {
+                ServerMessage::Response {
+                    result: ResponseBody::StandingGrantRevoked { .. },
+                    ..
+                } => {
+                    if let Some(d) = &lanes.pairing_dir {
+                        crate::pairing::remove(d);
+                    }
+                    {
+                        let mut s = lock(state);
+                        let st = &mut s.agents.standing;
+                        if let Some(g) = st.grant.clone().filter(|g| g.grant_id == grant_id) {
+                            st.end(StandingGrant {
+                                state: StandingGrantState::Revoked {
+                                    cause: StandingRevokeCause::User,
+                                    at: UtcTimestamp::now(),
+                                },
+                                ..g
+                            });
+                        }
+                        st.control = Some(StandingControl {
+                            op: StandingOp::Revoke(grant_id),
+                            status: RequestStatus::Done(()),
+                        });
+                    }
+                    lanes.queue(ServiceCommand::ListSessions);
+                    Ok(())
+                }
+                m => Err(context("unattended access not revoked", failure(&m))),
+            }
+        }
+        ServiceCommand::ConfirmStandingGrant(grant_id) => {
+            match request(c, Request::ConfirmStandingGrant { grant_id }).await? {
+                ServerMessage::Response {
+                    result:
+                        ResponseBody::StandingGrant {
+                            grant,
+                            live_session,
+                        },
+                    ..
+                } => {
+                    let mut s = lock(state);
+                    let st = &mut s.agents.standing;
+                    if let Some(g) = grant.filter(|g| g.state.is_live()) {
+                        st.grant = Some(g);
+                        st.live_session = live_session;
+                    }
+                    st.control = Some(StandingControl {
+                        op: StandingOp::Confirm(grant_id),
+                        status: RequestStatus::Done(()),
+                    });
+                    Ok(())
+                }
+                m => Err(context("unattended access not confirmed", failure(&m))),
             }
         }
         ServiceCommand::ListSessionReports => {
@@ -3387,13 +3831,23 @@ async fn execute(c: &mut Client, lanes: &Lanes, command: ServiceCommand) -> Resu
                 result: ResponseBody::EmergencyStop(r),
                 ..
             } => {
-                // The Emergency Stop revokes every non-UI credential: the
-                // pairing file is useless.
+                // The Emergency Stop revokes every non-UI credential and the
+                // standing grant: the pairing file is useless.
                 if let Some(d) = &lanes.pairing_dir {
                     crate::pairing::remove(d);
                 }
                 let mut s = lock(state);
                 s.agents.pairing = RequestStatus::Idle;
+                if let Some(g) = s.agents.standing.live().cloned() {
+                    s.agents.standing.end(StandingGrant {
+                        state: StandingGrantState::Revoked {
+                            cause: StandingRevokeCause::EmergencyStop,
+                            at: UtcTimestamp::now(),
+                        },
+                        ..g
+                    });
+                }
+                lanes.queue(ServiceCommand::GetStandingGrant);
                 s.last_outcome = Some(format!(
                     "Emergency Stop: {} processes terminated, completed: {}",
                     r.processes_terminated,
@@ -4014,17 +4468,17 @@ mod tests {
 
     impl Loop {
         fn start(endpoint: String) -> Self {
+            Self::start_in(endpoint, temp_pairing_dir())
+        }
+
+        /// As [`Self::start`], with the pairing file in `pairing_dir`.
+        fn start_in(endpoint: String, pairing_dir: PathBuf) -> Self {
             let state = Arc::new(Mutex::new(ServiceState {
                 connection: CONNECTING.into(),
                 ..ServiceState::default()
             }));
             let ticket: TicketSlot = Arc::new(Mutex::new(None));
             let (commands, rx) = mpsc::unbounded_channel();
-            let pairing_dir = std::env::temp_dir().join(format!(
-                "lightvm-fake-pairing-{}-{}",
-                std::process::id(),
-                OperationId::new_v7()
-            ));
             let lanes = Lanes {
                 state: state.clone(),
                 ticket: ticket.clone(),
@@ -4087,6 +4541,15 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
+    }
+
+    /// A new, not yet created pairing folder in the temporary folder.
+    fn temp_pairing_dir() -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "lightvm-fake-pairing-{}-{}",
+            std::process::id(),
+            OperationId::new_v7()
+        ))
     }
 
     fn base_reply(r: &Request) -> Result<ResponseBody, ReplyError> {
@@ -4616,6 +5079,7 @@ mod tests {
             expires_at: UtcTimestamp::from_unix_millis(1_791_713_520_000).unwrap(),
             lease_expires_at: UtcTimestamp::from_unix_millis(1_791_709_930_000).unwrap(),
             input_owner: input,
+            standing_grant_id: None,
         }
     }
 
@@ -4774,6 +5238,297 @@ mod tests {
         l.wait("access off", |s| s.agents.access == Some(false));
         assert!(!f.path.exists());
         let _ = std::fs::remove_dir_all(&l.pairing_dir);
+    }
+
+    fn standing_grant(expires_at: UtcTimestamp, state: StandingGrantState) -> StandingGrant {
+        StandingGrant {
+            grant_id: StandingGrantId::new_v7(),
+            vm_id: VmId::new_v7(),
+            capabilities: [lightvm_proto::Capability::VmScreenshot].into(),
+            tools: Default::default(),
+            network_endpoints: Vec::new(),
+            quotas: lightvm_proto::ipc::AGENT_DEFAULT_QUOTAS,
+            lease_ms: 10_000,
+            give_input: false,
+            client_name: None,
+            created_at: UtcTimestamp::now(),
+            expires_at,
+            vm_config_revision: 3,
+            state,
+            sessions_approved: 0,
+            last_session_at: None,
+        }
+    }
+
+    fn pairing_json(dir: &std::path::Path) -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(dir.join(crate::pairing::FILE_NAME)).unwrap())
+            .unwrap()
+    }
+
+    /// Script of a supervisor whose live standing grant is `grant`; every
+    /// other read answers as an idle supervisor.
+    fn standing_script(grant: Arc<Mutex<Option<StandingGrant>>>) -> fake::Script {
+        Arc::new(move |r: &Request| match r {
+            Request::GetStandingGrant => Ok(ResponseBody::StandingGrant {
+                grant: lock(&grant).clone(),
+                live_session: None,
+            }),
+            Request::GetAgentAccess => Ok(ResponseBody::AgentAccess { enabled: true }),
+            Request::SetAgentAccess { enabled } => {
+                Ok(ResponseBody::AgentAccess { enabled: *enabled })
+            }
+            Request::ListSessionRequests => Ok(ResponseBody::SessionRequests {
+                requests: Vec::new(),
+            }),
+            Request::ListSessions => Ok(ResponseBody::Sessions {
+                sessions: Vec::new(),
+            }),
+            Request::RevokeStandingGrant { grant_id } => {
+                *lock(&grant) = None;
+                Ok(ResponseBody::StandingGrantRevoked {
+                    grant_id: *grant_id,
+                })
+            }
+            Request::EmergencyStop => {
+                // The Emergency Stop revokes the grant.
+                *lock(&grant) = None;
+                Ok(ResponseBody::EmergencyStop(
+                    lightvm_proto::ipc::EmergencyStopReport {
+                        revoked_connections: 1,
+                        processes_terminated: 0,
+                        completed: true,
+                    },
+                ))
+            }
+            r => base_reply(r),
+        })
+    }
+
+    /// ADR-0039: at the start of a supervisor with a live standing grant the
+    /// pairing file is rewritten with the new endpoint, keeping credential
+    /// and expiry; turning agent access off (reply and event) keeps it; the
+    /// grant's expiry event removes it.
+    #[test]
+    fn standing_grant_pairing_file_follows_the_new_endpoint() {
+        let expires_at = UtcTimestamp::now().checked_add_millis(86_400_000).unwrap();
+        let g = standing_grant(expires_at, StandingGrantState::Active);
+        let live = Arc::new(Mutex::new(Some(g.clone())));
+        let server = fake::start(standing_script(live.clone()));
+        let dir = temp_pairing_dir();
+        let cred = "7c".repeat(32);
+        // The file as the previous supervisor left it.
+        crate::pairing::write(&dir, r"\\.\pipe\lightvm-previous", cred.clone(), expires_at)
+            .unwrap();
+        let l = Loop::start_in(server.endpoint.clone(), dir.clone());
+        l.wait("grant read", |s| s.agents.standing.loaded);
+        let st = l.state();
+        assert_eq!(st.agents.standing.live(), Some(&g));
+        assert_eq!(
+            st.agents.standing.file,
+            Some(StandingFile::Ready(dir.join(crate::pairing::FILE_NAME)))
+        );
+        let v = pairing_json(&dir);
+        assert_eq!(v["endpoint"], server.endpoint.as_str());
+        assert_eq!(v["credential"], cred.as_str());
+        assert_eq!(v["expires_at"], expires_at.to_string());
+        assert_eq!(v["format"], crate::pairing::FORMAT);
+        assert!(!format!("{st:?}").contains(&cred));
+        assert!(!pairing_file_disposable(&st));
+
+        // Agent access off: the switch is for ordinary pairing only.
+        assert!(l.send(ServiceCommand::SetAgentAccess(false)));
+        l.wait("access off", |s| s.agents.access == Some(false));
+        lock(&server.events).push(ServiceEvent::AgentAccess { enabled: false });
+        l.wait("event seen", |s| {
+            s.agents
+                .log
+                .iter()
+                .any(|e| e.text == "Agent access turned off")
+        });
+        assert_eq!(pairing_json(&dir)["credential"], cred.as_str());
+
+        // Expired: the file goes, the grant is the last ended one.
+        let expired = StandingGrant {
+            state: StandingGrantState::Expired { at: expires_at },
+            ..g.clone()
+        };
+        lock(&server.events).push(ServiceEvent::StandingGrant {
+            grant: expired.clone(),
+            change: StandingGrantChange::Expired,
+        });
+        l.wait("expired", |s| s.agents.standing.grant.is_none());
+        assert!(!dir.join(crate::pairing::FILE_NAME).exists());
+        let st = l.state();
+        assert_eq!(st.agents.standing.ended, Some(expired));
+        assert!(
+            st.agents
+                .log
+                .iter()
+                .any(|e| e.text == "Unattended access expired")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Without a live grant at start a leftover pairing file is removed;
+    /// with a live grant and no file, the grant is reported unusable.
+    #[test]
+    fn standing_grant_file_at_start_without_grant_or_without_file() {
+        let none = Arc::new(Mutex::new(None));
+        let server = fake::start(standing_script(none));
+        let dir = temp_pairing_dir();
+        crate::pairing::write(&dir, "old", "ab".repeat(32), UtcTimestamp::now()).unwrap();
+        let l = Loop::start_in(server.endpoint.clone(), dir.clone());
+        l.wait("grant read", |s| s.agents.standing.loaded);
+        assert!(!dir.join(crate::pairing::FILE_NAME).exists());
+        assert!(pairing_file_disposable(&l.state()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let expires_at = UtcTimestamp::now().checked_add_millis(86_400_000).unwrap();
+        let g = standing_grant(expires_at, StandingGrantState::Suspended);
+        let server = fake::start(standing_script(Arc::new(Mutex::new(Some(g)))));
+        let dir = temp_pairing_dir();
+        let l = Loop::start_in(server.endpoint.clone(), dir.clone());
+        l.wait("grant read", |s| s.agents.standing.loaded);
+        assert!(matches!(
+            l.state().agents.standing.file,
+            Some(StandingFile::Unusable(_))
+        ));
+
+        // A file of another credential (another expiry) is not rewritten.
+        crate::pairing::write(&dir, "old", "cd".repeat(32), UtcTimestamp::now()).unwrap();
+        assert!(l.send(ServiceCommand::GetStandingGrant));
+        l.wait("re-read", |s| {
+            matches!(&s.agents.standing.file, Some(StandingFile::Unusable(w)) if w.contains("expiry"))
+        });
+        assert_eq!(pairing_json(&dir)["endpoint"], "old");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Creation writes the credential to the pairing file only (never to
+    /// the state); revocation removes it. The Emergency Stop removes the
+    /// file of a live grant.
+    #[test]
+    fn standing_grant_created_and_revoked_over_ipc() {
+        let cred = "e1".repeat(32);
+        let cred2 = cred.clone();
+        let expires_at = UtcTimestamp::now()
+            .checked_add_millis(3 * 86_400_000)
+            .unwrap();
+        let g = standing_grant(expires_at, StandingGrantState::Active);
+        let live = Arc::new(Mutex::new(None));
+        let (live2, g2) = (live.clone(), g.clone());
+        let base = standing_script(live.clone());
+        let server = fake::start(Arc::new(move |r: &Request| match r {
+            Request::CreateStandingGrant { spec } => {
+                assert_eq!(spec.duration_s, 3 * 86_400);
+                *lock(&live2) = Some(g2.clone());
+                Ok(ResponseBody::StandingGrantCreated {
+                    grant: g2.clone(),
+                    credential: cred2.clone(),
+                })
+            }
+            r => base(r),
+        }));
+        let dir = temp_pairing_dir();
+        let l = Loop::start_in(server.endpoint.clone(), dir.clone());
+        l.wait("grant read", |s| s.agents.standing.loaded);
+        let spec = StandingGrantSpec {
+            vm_id: g.vm_id,
+            capabilities: g.capabilities.clone(),
+            tools: Default::default(),
+            network_endpoints: Vec::new(),
+            quotas: None,
+            lease_ms: None,
+            give_input: false,
+            duration_s: 3 * 86_400,
+            client_name: None,
+        };
+        assert!(l.send(ServiceCommand::CreateStandingGrant(Box::new(spec))));
+        l.wait("created", |s| {
+            matches!(&s.agents.standing.control, Some(c) if c.op == StandingOp::Create && c.status == RequestStatus::Done(()))
+        });
+        let st = l.state();
+        assert_eq!(st.agents.standing.live(), Some(&g));
+        let v = pairing_json(&dir);
+        assert_eq!(v["credential"], cred.as_str());
+        assert_eq!(v["endpoint"], server.endpoint.as_str());
+        assert_eq!(v["expires_at"], expires_at.to_string());
+        assert!(!format!("{st:?}").contains(&cred));
+
+        assert!(l.send(ServiceCommand::RevokeStandingGrant(g.grant_id)));
+        l.wait("revoked", |s| {
+            matches!(&s.agents.standing.control, Some(c) if c.op == StandingOp::Revoke(g.grant_id) && c.status == RequestStatus::Done(()))
+        });
+        assert!(!dir.join(crate::pairing::FILE_NAME).exists());
+        let st = l.state();
+        assert!(st.agents.standing.live().is_none());
+        assert!(matches!(
+            st.agents.standing.ended.as_ref().map(|g| g.state),
+            Some(StandingGrantState::Revoked {
+                cause: StandingRevokeCause::User,
+                ..
+            })
+        ));
+        assert!(
+            lock(&server.requests).contains(&Request::RevokeStandingGrant {
+                grant_id: g.grant_id
+            })
+        );
+
+        // Created again, then the Emergency Stop: file removed.
+        *lock(&live) = Some(g.clone());
+        crate::pairing::write(&dir, &server.endpoint, cred.clone(), expires_at).unwrap();
+        assert!(l.send(ServiceCommand::GetStandingGrant));
+        l.wait("live again", |s| s.agents.standing.live().is_some());
+        assert!(l.send(ServiceCommand::EmergencyStop));
+        l.wait("stopped", |s| s.agents.standing.live().is_none());
+        assert!(!dir.join(crate::pairing::FILE_NAME).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Stopping the supervisor keeps the pairing file of a live standing
+    /// grant (and while the grant is unknown); without a grant it goes.
+    #[test]
+    fn service_stop_keeps_the_pairing_file_of_a_live_grant() {
+        let service = |dir: &std::path::Path, state: ServiceState| {
+            let child = Command::new(std::env::current_exe().unwrap())
+                .arg("--list")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let (commands, _rx) = mpsc::unbounded_channel();
+            Service {
+                child,
+                stdin: None,
+                pid: 1,
+                commands,
+                state: Arc::new(Mutex::new(state)),
+                pairing_dir: Some(dir.to_owned()),
+                ticket: Arc::new(Mutex::new(None)),
+            }
+        };
+        let dir = temp_pairing_dir();
+        let file = dir.join(crate::pairing::FILE_NAME);
+        let expires_at = UtcTimestamp::now().checked_add_millis(86_400_000).unwrap();
+        crate::pairing::write(&dir, "e", "ab".repeat(32), expires_at).unwrap();
+        let mut live = ServiceState::default();
+        live.agents.standing.loaded = true;
+        live.agents.standing.grant = Some(standing_grant(expires_at, StandingGrantState::Active));
+        let mut s = service(&dir, live);
+        let _ = s.stop(Duration::from_secs(10));
+        drop(s);
+        assert!(file.exists(), "kept at stop with a live grant");
+        // Not read yet (connection failed early): kept.
+        drop(service(&dir, ServiceState::default()));
+        assert!(file.exists(), "kept while the grant is unknown");
+        // Read, none live: removed.
+        let mut none = ServiceState::default();
+        none.agents.standing.loaded = true;
+        drop(service(&dir, none));
+        assert!(!file.exists(), "removed without a live grant");
+        let _ = std::fs::remove_dir_all(&dir);
     }
     fn test_report(id: SessionId, outcome: TestOutcome) -> SessionReport {
         use lightvm_proto::report::{OutcomeSource, ReportVersions};

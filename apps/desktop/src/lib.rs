@@ -425,6 +425,28 @@ struct RevokeDialog {
     focus: bool,
 }
 
+/// Revocation of the unattended access to confirm (ADR-0039).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StandingRevokeDialog {
+    grant_id: lightvm_proto::StandingGrantId,
+    vm_name: String,
+    sent: bool,
+    focus: bool,
+}
+
+/// Notice shown once per app run when the supervisor reports a live
+/// unattended access at start.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum StandingNotice {
+    /// The unattended access was not read yet.
+    #[default]
+    Unchecked,
+    /// Shown, waiting for the user's acknowledgement.
+    Open,
+    /// Acknowledged, or nothing to show.
+    Done,
+}
+
 /// Action on a session report to confirm (F5).
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ReportDialogKind {
@@ -606,6 +628,10 @@ pub struct LightVmApp {
     approve_form: Option<agents::ApproveForm>,
     revoke_dialog: Option<RevokeDialog>,
     pairing_dialog: Option<PairingDialog>,
+    /// Creation form of the unattended access (ADR-0039).
+    standing_form: Option<agents::StandingForm>,
+    standing_revoke: Option<StandingRevokeDialog>,
+    standing_notice: StandingNotice,
     /// Report screenshot shown on the session page (F5).
     shown_shot: Option<(SessionId, u32)>,
     /// Live session whose latest screenshot the AI Workspace shows.
@@ -701,6 +727,9 @@ impl LightVmApp {
             approve_form: None,
             revoke_dialog: None,
             pairing_dialog: None,
+            standing_form: None,
+            standing_revoke: None,
+            standing_notice: StandingNotice::Unchecked,
             shown_shot: None,
             watch_screen: None,
             shot_textures: Vec::new(),
@@ -928,6 +957,8 @@ impl LightVmApp {
         self.approve_form = None;
         self.revoke_dialog = None;
         self.pairing_dialog = None;
+        self.standing_form = None;
+        self.standing_revoke = None;
         self.service_error = None;
         let (tx, rx) = std::sync::mpsc::channel();
         let ctx = ctx.clone();
@@ -1225,6 +1256,8 @@ impl LightVmApp {
             || self.snapshot_dialog.is_some()
             || self.media_dialog.is_some()
             || self.revoke_dialog.is_some()
+            || self.standing_revoke.is_some()
+            || self.standing_notice == StandingNotice::Open
             || self.pairing_dialog.is_some()
             || self.report_dialog.is_some()
             || self.catalog_move.is_some()
@@ -1360,6 +1393,7 @@ impl LightVmApp {
         }
         self.track_keyboard_navigation(&ctx);
         self.collect_restart();
+        self.check_standing_notice();
         self.poll_starting(&ctx);
         self.sync_fullscreen(&ctx);
         self.handle_close_request(&ctx);
@@ -1508,6 +1542,8 @@ impl LightVmApp {
         self.snapshot_dialog_ui(ui);
         self.media_dialog_ui(ui);
         self.revoke_dialog_ui(ui);
+        self.standing_notice_ui(ui);
+        self.standing_revoke_ui(ui);
         self.pairing_dialog_ui(ui);
         self.report_dialog_ui(ui);
         self.close_dialog_ui(ui, &ctx);
@@ -1631,6 +1667,26 @@ impl LightVmApp {
         let Some(srv) = &mut self.service else { return };
         let alive = srv.is_alive();
         let state = self.state().unwrap_or_default();
+        if state.agents.standing.live().is_some() {
+            // Unattended access: its own bar, in the accent colour, above
+            // the orange bar of a live session.
+            let env = agents::AgentsEnv::new(&state, alive && state.connected, self.now());
+            let mut action = None;
+            egui::Panel::top("lightvm_standing_banner")
+                .resizable(false)
+                .frame(
+                    egui::Frame::new()
+                        .fill(p.accent.linear_multiply(0.22))
+                        .stroke(egui::Stroke::new(2.0, p.accent))
+                        .inner_margin(egui::Margin::symmetric(14, 6)),
+                )
+                .show(ui, |ui| {
+                    action = agents::standing_banner_ui(ui, &env);
+                });
+            if let Some(a) = action {
+                self.run_agent_action(a, &state);
+            }
+        }
         let live = state.agents.live().next().is_some();
         let waiting = !state.agents.requests.is_empty();
         if !live && !(waiting && self.section != Section::Agents) {
@@ -1659,15 +1715,15 @@ impl LightVmApp {
     }
 
     /// A dialog blocks the window, the indicator included: while an agent
-    /// session is live the Emergency Stop stays reachable above it, where
-    /// the indicator shows it.
+    /// session or the unattended access is live the Emergency Stop stays
+    /// reachable above it, where the indicator shows it.
     fn emergency_stop_over_dialogs(&mut self, ctx: &egui::Context) {
         if !self.dialog_open() && self.closing.is_none() {
             return;
         }
         if self
             .state()
-            .is_none_or(|s| s.agents.live().next().is_none())
+            .is_none_or(|s| s.agents.live().next().is_none() && s.agents.standing.live().is_none())
         {
             return;
         }
@@ -1732,6 +1788,19 @@ impl LightVmApp {
                 self.approve_form = None;
             }
         }
+        // The unattended access form closes once its creation succeeded (or
+        // a live grant appeared meanwhile).
+        if let Some(f) = &self.standing_form {
+            let st = &state.agents.standing;
+            let created = f.sent
+                && st.control.as_ref().is_some_and(|c| {
+                    c.op == service::StandingOp::Create
+                        && matches!(c.status, RequestStatus::Done(()))
+                });
+            if created || st.live().is_some() {
+                self.standing_form = None;
+            }
+        }
         let active = alive && state.connected;
         if active {
             self.poll_reports(&state);
@@ -1757,7 +1826,7 @@ impl LightVmApp {
         };
         let action = match self.agent_session {
             Some(id) => agents::session_page_ui(ui, &env, id),
-            None => agents::agents_ui(ui, &env, &mut self.approve_form),
+            None => agents::agents_ui(ui, &env, &mut self.approve_form, &mut self.standing_form),
         };
         if let Some(a) = action {
             self.run_agent_action(a, &state);
@@ -2002,6 +2071,132 @@ impl LightVmApp {
                 },
             ),
             A::DeleteReport(id) => self.open_report_dialog(state, id, ReportDialogKind::Delete),
+            A::CreateStanding => {
+                self.standing_form = Some(agents::StandingForm::new(&state.vms));
+            }
+            A::CancelStanding => self.standing_form = None,
+            A::SubmitStanding(spec) => {
+                if let Some(f) = &mut self.standing_form {
+                    f.sent = true;
+                }
+                self.send(ServiceCommand::CreateStandingGrant(spec));
+            }
+            A::RevokeStanding(grant_id) => {
+                let vm_name = state
+                    .agents
+                    .standing
+                    .live()
+                    .and_then(|g| state.vm(g.vm_id))
+                    .map_or_else(|| "its VM".into(), |v| v.name.as_str().to_owned());
+                self.standing_revoke = Some(StandingRevokeDialog {
+                    grant_id,
+                    vm_name,
+                    sent: false,
+                    focus: true,
+                });
+            }
+            A::ConfirmStanding(grant_id) => {
+                self.send(ServiceCommand::ConfirmStandingGrant(grant_id));
+            }
+        }
+    }
+
+    /// Once per app run, when the unattended access is first read: if one
+    /// is live, the notice opens and waits for the user.
+    fn check_standing_notice(&mut self) {
+        if self.standing_notice != StandingNotice::Unchecked {
+            return;
+        }
+        let Some(st) = self.state() else { return };
+        if !st.agents.standing.loaded {
+            return;
+        }
+        self.standing_notice = if st.agents.standing.live().is_some() {
+            StandingNotice::Open
+        } else {
+            StandingNotice::Done
+        };
+    }
+
+    /// Notice of a live unattended access at start (acknowledged with a
+    /// button only).
+    fn standing_notice_ui(&mut self, ui: &egui::Ui) {
+        if self.standing_notice != StandingNotice::Open {
+            return;
+        }
+        let state = cached_state(&self.service, &self.state_cache).unwrap_or_default();
+        let Some(g) = state.agents.standing.live().cloned() else {
+            // Revoked or expired meanwhile: nothing to acknowledge.
+            self.standing_notice = StandingNotice::Done;
+            return;
+        };
+        let env = agents::AgentsEnv::new(&state, state.connected, self.now());
+        match agents::standing_notice_ui(ui, &env) {
+            Some(agents::StandingNoticeChoice::Keep) => {
+                self.standing_notice = StandingNotice::Done;
+            }
+            Some(agents::StandingNoticeChoice::Revoke) => {
+                self.standing_notice = StandingNotice::Done;
+                self.run_agent_action(agents::AgentAction::RevokeStanding(g.grant_id), &state);
+            }
+            None => {}
+        }
+    }
+
+    /// Confirmation of the revocation of the unattended access.
+    fn standing_revoke_ui(&mut self, ui: &egui::Ui) {
+        let Some(d) = &mut self.standing_revoke else {
+            return;
+        };
+        let state = cached_state(&self.service, &self.state_cache).unwrap_or_default();
+        let st = &state.agents.standing;
+        let control = st
+            .control
+            .as_ref()
+            .filter(|c| c.op == service::StandingOp::Revoke(d.grant_id));
+        let mut error = None;
+        let mut pending = false;
+        if d.sent {
+            match control.map(|c| &c.status) {
+                Some(RequestStatus::Pending) => pending = true,
+                Some(RequestStatus::Done(())) => {
+                    self.standing_revoke = None;
+                    return;
+                }
+                Some(RequestStatus::Failed(f)) => error = Some(f.message.clone()),
+                _ => {}
+            }
+        }
+        let gone = st.live().is_none_or(|g| g.grant_id != d.grant_id);
+        if gone && !pending && error.is_none() {
+            if d.sent {
+                self.standing_revoke = None;
+                return;
+            }
+            error = Some("The unattended access has already ended.".into());
+        }
+        let spec = dialogs::ConfirmSpec {
+            title: format!("Revoke the unattended access to {}?", d.vm_name),
+            body: "Its pairing credential stops working at once, also on an open connection, and its pairing file is removed. Its current session, if any, ends. The VM keeps running. To allow unattended access again you create a new one.".into(),
+            confirm: "Revoke unattended access".into(),
+            destructive: true,
+        };
+        let focus = std::mem::replace(&mut d.focus, false);
+        match dialogs::confirm(
+            ui,
+            "lightvm_standing_revoke_dialog",
+            &spec,
+            pending,
+            error.as_deref(),
+            focus,
+        ) {
+            Some(dialogs::Choice::Cancel) => self.standing_revoke = None,
+            Some(dialogs::Choice::Confirm) if !gone => {
+                d.sent = true;
+                let id = d.grant_id;
+                self.send(ServiceCommand::RevokeStandingGrant(id));
+            }
+            _ => {}
         }
     }
 
@@ -4218,7 +4413,17 @@ impl LightVmApp {
 
         ui.add_space(14.0);
         theme::group_title(ui, "Security");
-        theme::card(ui, settings::security_ui);
+        let st = self.state();
+        let grant = st.as_ref().and_then(|s| s.agents.standing.live());
+        let vm_name = grant
+            .and_then(|g| st.as_ref().and_then(|s| s.vm(g.vm_id)))
+            .map_or("a deleted VM", |v| v.name.as_str());
+        theme::card(ui, |ui| {
+            settings::security_ui(
+                ui,
+                grant.map(|grant| settings::UnattendedSummary { vm_name, grant }),
+            );
+        });
 
         ui.add_space(14.0);
         theme::group_title(ui, "Rendering");

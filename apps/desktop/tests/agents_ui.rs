@@ -217,8 +217,8 @@ fn request_is_approved_with_the_code_one_vm_and_the_chosen_limits() {
     assert!(!checked(&h, "Stop or force-stop the VM"));
     assert_eq!(
         h.query_all_by_label("Can lose unsaved work").count(),
-        2,
-        "stop and reset marked"
+        3,
+        "stop, reset and baseline restore marked"
     );
     assert_eq!(common::text_fields(&h), 0);
 

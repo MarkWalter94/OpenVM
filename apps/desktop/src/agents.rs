@@ -19,6 +19,13 @@
 //! - [`banner_ui`]: indicator on every page (full screen console included)
 //!   while a session is live, with Pause, Revoke, Take control and the
 //!   Emergency Stop always reachable.
+//! - Unattended access (standing grant, ADR-0039): the live grant (VM,
+//!   expected client, expiry, sessions approved automatically, last
+//!   activity, suspension) with Revoke and Confirm, or the creation form
+//!   ([`StandingForm`]: every capability offered, none that can lose work
+//!   preselected, 1/3/7 days) with the summary of what changes and its
+//!   confirmation; [`standing_banner_ui`], its own indicator on every page,
+//!   and [`standing_notice_ui`], the notice at start.
 //!
 //! The views execute nothing: they return an [`AgentAction`]. Nothing the
 //! agent sends is interpreted: client name and purpose are labels, never
@@ -31,9 +38,14 @@ use lightvm_proto::ipc::{
     AGENT_DEFAULT_QUOTAS, SessionApproval, SessionInfo, SessionRequestId, SessionRequestInfo,
     VmSummary,
 };
-use lightvm_proto::{Capability, Quotas, SessionId, SessionState, UtcTimestamp, VmId};
+use lightvm_proto::{
+    Capability, Quotas, SessionId, SessionState, StandingGrant, StandingGrantId,
+    StandingGrantState, StandingRevokeCause, UtcTimestamp, VmId,
+};
 
-use crate::service::{AgentOp, RequestStatus, ServiceState, termination_text};
+use crate::service::{
+    AgentOp, RequestStatus, ServiceState, StandingFile, StandingOp, termination_text,
+};
 use crate::theme::{self, Tone};
 
 /// Title of the Agents page.
@@ -46,9 +58,11 @@ pub const DESCRIPTION: &str =
 /// What turning agent access on allows (shown next to the switch).
 pub const ACCESS_HELP: &str = "Off every time LightVM starts. When on, agent clients paired with this app can ask for a session; nothing is granted until you approve a request here, choosing one VM, what the agent may do and for how long. Turning it off denies waiting requests and revokes active sessions; the VMs keep running.";
 
-/// Capabilities offered in the approval form: capability, plain
-/// explanation, the action can lose unsaved work in the guest.
-pub const OFFERED: [(Capability, &str, bool); 7] = [
+/// Capabilities offered in the approval form and in the unattended access
+/// form: capability, plain explanation, the action can lose unsaved work
+/// in the guest. Network endpoints and the guest Tools capabilities follow
+/// the VM's settings ([`INTEGRATIONS`]).
+pub const OFFERED: [(Capability, &str, bool); 10] = [
     (Capability::VmList, "See the VM in its list", false),
     (Capability::VmStatus, "Read the VM's state", false),
     (
@@ -64,21 +78,62 @@ pub const OFFERED: [(Capability, &str, bool); 7] = [
     (Capability::VmStart, "Start the VM", false),
     (Capability::VmStop, "Stop or force-stop the VM", true),
     (Capability::VmReset, "Reset the VM", true),
+    (
+        Capability::VmSnapshot,
+        "Create a baseline with the VM off",
+        false,
+    ),
+    (
+        Capability::VmRestore,
+        "Restore a baseline with the VM off (discards the changes made since)",
+        true,
+    ),
+    (
+        Capability::VmLogs,
+        "Read LightVM events and QEMU logs",
+        false,
+    ),
+];
+
+/// Guest Tools capabilities, offered when the VM's settings allow them
+/// (shared folders are offered one by one): capability and plain
+/// explanation.
+pub const INTEGRATIONS: [(Capability, &str); 5] = [
+    (
+        Capability::GuestExec,
+        "Execute commands in the guest user session",
+    ),
+    (
+        Capability::Clipboard,
+        "Read and write guest clipboard text and images",
+    ),
+    (
+        Capability::FilesTransfer,
+        "Transfer guest inbox/outbox files",
+    ),
+    (Capability::UiInspect, "Inspect guest application controls"),
+    (
+        Capability::UiAct,
+        "Act on guest controls (requires input ownership)",
+    ),
 ];
 
 /// Plain explanation of a capability.
 pub fn capability_text(c: Capability) -> &'static str {
-    match OFFERED.iter().find(|(x, _, _)| *x == c) {
-        Some((_, t, _)) => t,
-        None => match c {
-            Capability::VmSnapshot => "Create a baseline with the VM off",
-            Capability::VmRestore => "Restore a baseline with the VM off",
-            Capability::VmLogs => "Read LightVM events and QEMU logs",
-            Capability::NetworkEndpoints => {
-                "Reach the network endpoints listed below from inside the guest"
-            }
-            _ => c.as_str(),
-        },
+    if let Some((_, t, _)) = OFFERED.iter().find(|(x, _, _)| *x == c) {
+        return t;
+    }
+    if let Some((_, t)) = INTEGRATIONS.iter().find(|(x, _)| *x == c) {
+        return t;
+    }
+    match c {
+        Capability::NetworkEndpoints => {
+            "Reach the network endpoints listed below from inside the guest"
+        }
+        Capability::ShareRead => "Read the shared folders listed",
+        Capability::ShareWrite => "Write the shared folders marked for writing",
+        Capability::Usb => "Use USB devices",
+        _ => c.as_str(),
     }
 }
 
@@ -97,6 +152,114 @@ pub const DURATIONS: [(u32, &str); 4] = [
 
 /// Lease lengths offered: milliseconds and label.
 pub const LEASES: [(u32, &str); 3] = [(10_000, "10 s"), (5_000, "5 s"), (3_000, "3 s")];
+
+/// Lifetimes of an unattended access offered: seconds and label (at most
+/// [`lightvm_proto::MAX_STANDING_GRANT_S`]).
+pub const STANDING_DURATIONS: [(u32, &str); 3] = [
+    (86_400, "1 day"),
+    (3 * 86_400, "3 days"),
+    (lightvm_proto::MAX_STANDING_GRANT_S, "7 days"),
+];
+
+/// What an unattended access changes compared with a session approved by
+/// hand: shown before it is created.
+pub const STANDING_CHANGES: [&str; 5] = [
+    "No approval click per session: a request presented with this access's pairing credential is approved at once when it asks only for what is ticked here; any other request is denied, never queued for you.",
+    "Survives LightVM restarts: the access and its pairing file stay until they expire, at most 7 days.",
+    "The VM stays running between sessions and without an agent; it has no network except the granted endpoints.",
+    "Revoked by Revoke, by the Emergency Stop and by deleting the VM; suspended when the VM's settings change, until you confirm it again.",
+    "The pairing file can be read by any program running under your user account for the whole time.",
+];
+
+/// Creation form of the unattended access (standing grant, ADR-0039).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StandingForm {
+    /// The single VM.
+    pub vm: Option<VmId>,
+    /// Capabilities a session may receive.
+    pub caps: BTreeSet<Capability>,
+    /// Network endpoints of the VM a session may receive.
+    pub endpoints: BTreeSet<String>,
+    /// Named Tools shares.
+    pub tools: lightvm_proto::ToolGrant,
+    /// Limits of each session.
+    pub quotas: QuotaPreset,
+    /// Lease of each session in milliseconds.
+    pub lease_ms: u32,
+    /// Hand keyboard and mouse to each session at once.
+    pub give_input: bool,
+    /// Lifetime in seconds.
+    pub duration_s: u32,
+    /// Expected client name (empty: any).
+    pub client_name: String,
+    /// Second step: the summary with the confirmation.
+    pub reviewing: bool,
+    /// The user confirmed the summary.
+    pub understood: bool,
+    /// The creation was sent.
+    pub sent: bool,
+}
+
+impl StandingForm {
+    /// Form with the VM preselected only if the catalog has exactly one,
+    /// and only list, status and screenshots ticked: nothing that can lose
+    /// work, no guest Tools capability, no endpoint.
+    pub fn new(vms: &[VmSummary]) -> Self {
+        Self {
+            vm: (vms.len() == 1).then(|| vms[0].vm_id),
+            caps: [
+                Capability::VmList,
+                Capability::VmStatus,
+                Capability::VmScreenshot,
+            ]
+            .into(),
+            endpoints: BTreeSet::new(),
+            tools: Default::default(),
+            quotas: QuotaPreset::Standard,
+            lease_ms: LEASES[0].0,
+            give_input: false,
+            duration_s: STANDING_DURATIONS[0].0,
+            client_name: String::new(),
+            reviewing: false,
+            understood: false,
+            sent: false,
+        }
+    }
+
+    /// Expected client name, if one was given.
+    pub fn client(&self) -> Option<String> {
+        let c = self.client_name.trim();
+        (!c.is_empty()).then(|| c.to_owned())
+    }
+
+    /// What is granted, once the form is complete (the confirmation is not
+    /// part of it).
+    pub fn spec(&self) -> Option<lightvm_proto::StandingGrantSpec> {
+        let vm_id = self.vm?;
+        let mut caps: lightvm_proto::CapabilitySet = self.caps.iter().copied().collect();
+        caps.remove(&Capability::NetworkEndpoints);
+        if !self.endpoints.is_empty() {
+            caps.insert(Capability::NetworkEndpoints);
+        }
+        if caps.is_empty() {
+            return None;
+        }
+        Some(lightvm_proto::StandingGrantSpec {
+            vm_id,
+            capabilities: caps,
+            tools: self.tools.clone(),
+            network_endpoints: self.endpoints.iter().cloned().collect(),
+            quotas: match self.quotas {
+                QuotaPreset::Standard => None,
+                q => Some(q.quotas()),
+            },
+            lease_ms: (self.lease_ms != LEASES[0].0).then_some(self.lease_ms),
+            give_input: self.give_input && self.caps.contains(&Capability::VmInput),
+            duration_s: self.duration_s,
+            client_name: self.client(),
+        })
+    }
+}
 
 /// Quota level of a session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -319,6 +482,16 @@ pub enum AgentAction {
     Export(SessionId),
     /// Open the report deletion dialog.
     DeleteReport(SessionId),
+    /// Open the creation form of the unattended access.
+    CreateStanding,
+    /// Close the creation form of the unattended access.
+    CancelStanding,
+    /// Create the unattended access.
+    SubmitStanding(Box<lightvm_proto::StandingGrantSpec>),
+    /// Ask to revoke the unattended access (confirmation dialog).
+    RevokeStanding(StandingGrantId),
+    /// Confirm a suspended unattended access again.
+    ConfirmStanding(StandingGrantId),
 }
 
 /// A screenshot of a report the user asked to see, and its texture once
@@ -452,6 +625,7 @@ pub fn agents_ui(
     ui: &mut egui::Ui,
     env: &AgentsEnv<'_>,
     form: &mut Option<ApproveForm>,
+    standing_form: &mut Option<StandingForm>,
 ) -> Option<AgentAction> {
     let mut choice = None;
     let st = &env.state.agents;
@@ -536,6 +710,10 @@ pub fn agents_ui(
     theme::card(ui, |ui| access_ui(ui, env, &mut choice));
 
     ui.add_space(14.0);
+    theme::group_title(ui, "Unattended access");
+    theme::card(ui, |ui| standing_ui(ui, env, standing_form, &mut choice));
+
+    ui.add_space(14.0);
     theme::group_title(ui, "Session history");
     theme::card(ui, |ui| crate::reports::history_ui(ui, env, &mut choice));
     choice
@@ -576,6 +754,12 @@ fn access_ui(ui: &mut egui::Ui, env: &AgentsEnv<'_>, choice: &mut Option<AgentAc
             Some(false) => ("Off: agents cannot ask for sessions", Tone::Neutral),
         };
         theme::status(ui, text, tone);
+        if st.standing.live().is_some() {
+            small(
+                ui,
+                "The switch concerns paired clients only: the unattended access below works whether it is on or off.",
+            );
+        }
         small(
             ui,
             "LightVM limits what an agent can do through LightVM only; it does not limit what the agent's own app can already do on this computer.",
@@ -590,14 +774,25 @@ fn access_ui(ui: &mut egui::Ui, env: &AgentsEnv<'_>, choice: &mut Option<AgentAc
         ),
         |ui| {
             let on = st.access == Some(true);
-            let hover = if on {
+            // The pairing file holds the unattended access credential: a
+            // new pairing would replace it.
+            let standing = st.standing.live().is_some();
+            let hover = if standing {
+                "The pairing file holds the unattended access credential: revoke the unattended access first"
+            } else if on {
                 "Create the pairing file for an agent client"
             } else {
                 "Turn agent access on first"
             };
+            if standing {
+                small(
+                    ui,
+                    "Not available while the unattended access is active: its pairing file would be replaced.",
+                );
+            }
             if button(
                 ui,
-                env.active && on && !st.pairing.is_pending(),
+                env.active && on && !standing && !st.pairing.is_pending(),
                 egui::Button::new("Pair a client…"),
                 "Pair a client",
                 hover,
@@ -637,13 +832,17 @@ fn access_ui(ui: &mut egui::Ui, env: &AgentsEnv<'_>, choice: &mut Option<AgentAc
 
 /// Network endpoints the session may reach (ADR-0033): those of the chosen
 /// VM, none ticked unless the user ticks them.
-fn network_grant_ui(ui: &mut egui::Ui, env: &AgentsEnv<'_>, f: &mut ApproveForm, editable: bool) {
+fn network_grant_ui(
+    ui: &mut egui::Ui,
+    env: &AgentsEnv<'_>,
+    vm: Option<VmId>,
+    granted: &mut BTreeSet<String>,
+    editable: bool,
+) {
     use lightvm_proto::{NetworkEndpoint, NetworkProfile, VmState};
-    let vm =
-        f.vm.and_then(|id| env.state.vms.iter().find(|v| v.vm_id == id));
+    let vm = vm.and_then(|id| env.state.vms.iter().find(|v| v.vm_id == id));
     let endpoints: &[NetworkEndpoint] = vm.map_or(&[], |v| v.config.endpoints.as_slice());
-    f.endpoints
-        .retain(|n| endpoints.iter().any(|e| e.key() == *n));
+    granted.retain(|n| endpoints.iter().any(|e| e.key() == *n));
     theme::row(
         ui,
         "Network",
@@ -671,7 +870,7 @@ fn network_grant_ui(ui: &mut egui::Ui, env: &AgentsEnv<'_>, f: &mut ApproveForm,
             }
             for e in endpoints {
                 let key = e.key();
-                let mut on = f.endpoints.contains(&key);
+                let mut on = granted.contains(&key);
                 let text = format!(
                     "{} \u{2192} {}:{} (inside the guest {}:{})",
                     e.name, e.host, e.port, e.virtual_ip, e.port
@@ -681,13 +880,13 @@ fn network_grant_ui(ui: &mut egui::Ui, env: &AgentsEnv<'_>, f: &mut ApproveForm,
                     .changed()
                 {
                     if on {
-                        f.endpoints.insert(key);
+                        granted.insert(key);
                     } else {
-                        f.endpoints.remove(&key);
+                        granted.remove(&key);
                     }
                 }
             }
-            if !f.endpoints.is_empty() {
+            if !granted.is_empty() {
                 theme::notice(
                     ui,
                     "An allowed endpoint receives whatever the guest sends to it.",
@@ -850,30 +1049,11 @@ fn approve_form_ui(
         ui,
         "What it may do",
         Some("Anything not ticked is refused by the supervisor."),
-        |ui| {
-            for (c, text, dangerous) in OFFERED {
-                ui.horizontal(|ui| {
-                    let mut on = f.caps.contains(&c);
-                    if ui
-                        .add_enabled(editable, egui::Checkbox::new(&mut on, text))
-                        .changed()
-                    {
-                        if on {
-                            f.caps.insert(c);
-                        } else {
-                            f.caps.remove(&c);
-                        }
-                    }
-                    if dangerous {
-                        theme::pill(ui, "Can lose unsaved work", Tone::Danger);
-                    }
-                });
-            }
-        },
+        |ui| capabilities_ui(ui, &mut f.caps, editable),
     );
     theme::divider(ui);
-    network_grant_ui(ui, env, f, editable);
-    tools_grant_ui(ui, env, f, editable);
+    network_grant_ui(ui, env, f.vm, &mut f.endpoints, editable);
+    tools_grant_ui(ui, env, f.vm, &mut f.caps, &mut f.tools, editable);
     theme::divider(ui);
     let input = f.caps.contains(&Capability::VmInput);
     if !input {
@@ -1159,6 +1339,9 @@ fn workspace_session(
                 .truncate(),
         );
         state_pill(ui, s);
+        if s.standing_grant_id.is_some() {
+            theme::pill(ui, "Approved automatically", Tone::Accent);
+        }
         let input = input_text(env, s);
         theme::pill(
             ui,
@@ -1605,14 +1788,759 @@ pub fn banner_ui(
     choice
 }
 
-fn tools_grant_ui(ui: &mut egui::Ui, env: &AgentsEnv<'_>, f: &mut ApproveForm, editable: bool) {
+/// Time left until `until` with days: `6 d 23 h left`, below a day as
+/// [`time_left`].
+pub fn days_left(now: UtcTimestamp, until: UtcTimestamp) -> String {
+    let ms = until.millis_since(now);
+    if ms < 86_400_000 {
+        return time_left(now, until);
+    }
+    let h = u64::try_from(ms).unwrap_or(0) / 3_600_000;
+    format!("{} d {} h left", h / 24, h % 24)
+}
+
+/// The capability checkboxes of [`OFFERED`], with the ones that can lose
+/// work marked.
+fn capabilities_ui(ui: &mut egui::Ui, caps: &mut BTreeSet<Capability>, editable: bool) {
+    for (c, text, dangerous) in OFFERED {
+        ui.horizontal(|ui| {
+            let mut on = caps.contains(&c);
+            if ui
+                .add_enabled(editable, egui::Checkbox::new(&mut on, text))
+                .changed()
+            {
+                if on {
+                    caps.insert(c);
+                } else {
+                    caps.remove(&c);
+                }
+            }
+            if dangerous {
+                theme::pill(ui, "Can lose unsaved work", Tone::Danger);
+            }
+        });
+    }
+}
+
+/// Readable outcome of a failed unattended access control.
+pub fn standing_error(op: StandingOp, f: &crate::service::Failure) -> String {
+    use lightvm_proto::ErrorCode;
+    match (op, f.code) {
+        (StandingOp::Create, Some(ErrorCode::StateConflict)) => {
+            "Another unattended access is active: only one at a time. Revoke it first.".into()
+        }
+        (StandingOp::Create, Some(ErrorCode::NotFound)) => "The VM no longer exists.".into(),
+        (StandingOp::Create, Some(ErrorCode::InvalidArgument)) => {
+            format!("Not created: {}", f.message)
+        }
+        (StandingOp::Create, _) => f.message.clone(),
+        (StandingOp::Revoke(_), _) => {
+            format!("The unattended access was not revoked: {}", f.message)
+        }
+        (StandingOp::Confirm(_), _) => {
+            format!("The unattended access was not confirmed: {}", f.message)
+        }
+    }
+}
+
+/// What happened to the last unattended access that ended.
+fn ended_text(env: &AgentsEnv<'_>, g: &StandingGrant) -> String {
+    let vm = env.vm_name(g.vm_id);
+    match g.state {
+        StandingGrantState::Revoked { cause, at } => match cause {
+            StandingRevokeCause::User => format!(
+                "The last unattended access, on {vm}, was revoked on {}.",
+                crate::baselines::format_time(at)
+            ),
+            StandingRevokeCause::EmergencyStop => format!(
+                "The last unattended access, on {vm}, was revoked by the Emergency Stop on {}.",
+                crate::baselines::format_time(at)
+            ),
+            StandingRevokeCause::VmDeleted => {
+                "The last unattended access was revoked: its VM was deleted.".to_owned()
+            }
+        },
+        StandingGrantState::Expired { at } => format!(
+            "The last unattended access, on {vm}, expired on {}.",
+            crate::baselines::format_time(at)
+        ),
+        StandingGrantState::Active | StandingGrantState::Suspended => String::new(),
+    }
+}
+
+/// Unattended access card of the Agents page: the live grant with Revoke
+/// (and Confirm when suspended), or Create… and its form.
+fn standing_ui(
+    ui: &mut egui::Ui,
+    env: &AgentsEnv<'_>,
+    form: &mut Option<StandingForm>,
+    choice: &mut Option<AgentAction>,
+) {
+    let st = &env.state.agents.standing;
+    if let Some(e) = &st.error {
+        theme::notice(
+            ui,
+            &format!("Unattended access not read: {}", e.message),
+            Tone::Warning,
+        );
+        ui.add_space(6.0);
+    }
+    if let Some(c) = &st.control
+        && c.op != StandingOp::Create
+        && let RequestStatus::Failed(f) = &c.status
+    {
+        theme::notice(ui, &standing_error(c.op, f), Tone::Danger);
+        ui.add_space(6.0);
+    }
+    if let Some(g) = st.live() {
+        standing_live_ui(ui, env, g, choice);
+        return;
+    }
+    if let Some(f) = form.as_mut() {
+        standing_form_ui(ui, env, f, choice);
+        return;
+    }
+    crate::empty_state(
+        ui,
+        "No unattended access.",
+        "Lets one agent work on one VM for up to 7 days without approving each session, also across LightVM restarts. Create it only for a VM you dedicate to that agent.",
+    );
+    if let Some(g) = &st.ended {
+        small(ui, &ended_text(env, g));
+    }
+    ui.add_space(4.0);
+    let hover = if st.loaded {
+        "Choose the VM, what the agent may do and for how many days"
+    } else {
+        "Waiting for the supervisor"
+    };
+    if button(
+        ui,
+        env.active && st.loaded,
+        egui::Button::new("Create\u{2026}"),
+        "Create unattended access",
+        hover,
+    ) {
+        *choice = Some(AgentAction::CreateStanding);
+    }
+}
+
+/// The live unattended access: VM, client, expiry, sessions, state, file.
+fn standing_live_ui(
+    ui: &mut egui::Ui,
+    env: &AgentsEnv<'_>,
+    g: &StandingGrant,
+    choice: &mut Option<AgentAction>,
+) {
+    let p = theme::Palette::of(ui);
+    let st = &env.state.agents.standing;
+    let suspended = g.state == StandingGrantState::Suspended;
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(env.vm_name(g.vm_id))
+                    .size(15.0)
+                    .color(p.text),
+            )
+            .truncate(),
+        );
+        if suspended {
+            theme::pill(ui, "Suspended", Tone::Warning);
+        } else {
+            theme::pill(ui, "Active", Tone::Positive);
+        }
+    });
+    if suspended {
+        theme::notice(
+            ui,
+            "Suspended: VM configuration changed \u{2014} Confirm to allow sessions again with the current settings. Until then every request is denied.",
+            Tone::Warning,
+        );
+    }
+    if let Some(StandingFile::Unusable(why)) = &st.file {
+        theme::notice(
+            ui,
+            &format!(
+                "The pairing file of the unattended access is missing or unusable ({why}): the agent cannot connect. Revoke it and create it again."
+            ),
+            Tone::Danger,
+        );
+    }
+    ui.add_space(4.0);
+    theme::row(ui, "Client", None, |ui| {
+        // Plain text given by the user: a label.
+        ui.label(g.client_name.as_deref().map_or_else(
+            || "Any client (the name is not checked)".to_owned(),
+            |c| format!("Only \u{201c}{c}\u{201d} (name declared by the client)"),
+        ));
+    });
+    theme::row(ui, "Expires", None, |ui| {
+        ui.label(format!(
+            "{} \u{b7} {}",
+            crate::baselines::format_time(g.expires_at),
+            days_left(env.now, g.expires_at)
+        ));
+    });
+    theme::row(ui, "Sessions approved automatically", None, |ui| {
+        let live = if st.live_session.is_some()
+            || env
+                .state
+                .agents
+                .live()
+                .any(|s| s.standing_grant_id == Some(g.grant_id))
+        {
+            " \u{b7} one is active now"
+        } else {
+            ""
+        };
+        ui.label(format!("{}{live}", g.sessions_approved));
+    });
+    theme::row(ui, "Last activity", None, |ui| {
+        ui.label(g.last_session_at.map_or_else(
+            || "No session yet".to_owned(),
+            |t| {
+                format!(
+                    "Last session approved on {}",
+                    crate::baselines::format_time(t)
+                )
+            },
+        ));
+    });
+    theme::row(ui, "Allowed", None, |ui| {
+        let caps: Vec<&str> = g
+            .capabilities
+            .iter()
+            .filter(|c| **c != Capability::NetworkEndpoints)
+            .map(|c| capability_text(*c))
+            .collect();
+        ui.add(egui::Label::new(caps.join("; ")).wrap());
+        if g.network_endpoints.is_empty() {
+            small(ui, "No network: the VM runs offline in its sessions.");
+        } else {
+            small(
+                ui,
+                &format!(
+                    "Network: only these endpoints: {}",
+                    g.network_endpoints.join(", ")
+                ),
+            );
+        }
+    });
+    if let Some((at, reason)) = &st.last_denied {
+        small(
+            ui,
+            &format!(
+                "Last request denied at {}: {}.",
+                clock(*at),
+                crate::service::standing_denial_text(reason)
+            ),
+        );
+    }
+    ui.add_space(6.0);
+    let busy = st.pending(|op| op != StandingOp::Create);
+    ui.horizontal(|ui| {
+        if suspended
+            && button(
+                ui,
+                env.active && !busy,
+                theme::primary(ui, "Confirm"),
+                "Confirm the unattended access",
+                "Allow sessions again with the VM's current settings",
+            )
+        {
+            *choice = Some(AgentAction::ConfirmStanding(g.grant_id));
+        }
+        if button(
+            ui,
+            env.active && !busy,
+            theme::danger(ui, "Revoke\u{2026}"),
+            "Revoke the unattended access",
+            "Its pairing credential stops working and its session ends; the VM keeps running",
+        ) {
+            *choice = Some(AgentAction::RevokeStanding(g.grant_id));
+        }
+    });
+}
+
+/// Creation form of the unattended access: what is granted, then the
+/// summary of what changes and the confirmation.
+fn standing_form_ui(
+    ui: &mut egui::Ui,
+    env: &AgentsEnv<'_>,
+    f: &mut StandingForm,
+    choice: &mut Option<AgentAction>,
+) {
+    let st = &env.state.agents.standing;
+    let control = st.control.as_ref().filter(|c| c.op == StandingOp::Create);
+    let pending = f.sent && control.is_some_and(|c| c.status.is_pending());
+    if f.reviewing {
+        standing_summary_ui(ui, env, f, pending, control, choice);
+        return;
+    }
+    let editable = !pending;
+    theme::row(
+        ui,
+        "Virtual machine",
+        Some("One VM only. Dedicate it to the agent: it stays running between sessions."),
+        |ui| {
+            if env.state.vms.is_empty() {
+                small(ui, "The catalog has no VM.");
+            }
+            for v in &env.state.vms {
+                ui.horizontal(|ui| {
+                    ui.add_enabled_ui(editable, |ui| {
+                        ui.radio_value(&mut f.vm, Some(v.vm_id), v.name.as_str());
+                    });
+                    let (s, tone) = crate::dashboard::vm_state(v.state);
+                    theme::pill(ui, s, tone);
+                });
+            }
+        },
+    );
+    theme::divider(ui);
+    theme::row(
+        ui,
+        "What it may do",
+        Some("Each session gets what it asks for among these; anything else is denied."),
+        |ui| capabilities_ui(ui, &mut f.caps, editable),
+    );
+    theme::divider(ui);
+    network_grant_ui(ui, env, f.vm, &mut f.endpoints, editable);
+    let tools =
+        f.vm.and_then(|id| env.state.vm(id))
+            .map(|v| &v.config.tools)
+            .filter(|t| t.enabled);
+    tools_grant_ui(ui, env, f.vm, &mut f.caps, &mut f.tools, editable);
+    if f.vm.is_some() && tools.is_none() {
+        small(
+            ui,
+            "Guest Tools capabilities (commands, clipboard, file transfer, application controls, shared folders, USB devices) are offered when LightVM Tools are turned on in the VM settings.",
+        );
+    }
+    if tools.is_none_or(|t| t.usb_devices.is_empty()) {
+        let mut usb = false;
+        ui.add_enabled(false, egui::Checkbox::new(&mut usb, "Use USB devices"))
+            .on_disabled_hover_text("No USB device is allowed in the VM settings");
+    }
+    theme::divider(ui);
+    let input = f.caps.contains(&Capability::VmInput);
+    if !input {
+        f.give_input = false;
+    }
+    theme::row(
+        ui,
+        "Keyboard and mouse",
+        Some("You can take control back at any moment from the console or the bar at the top."),
+        |ui| {
+            ui.add_enabled(
+                editable && input,
+                egui::Checkbox::new(
+                    &mut f.give_input,
+                    "Give keyboard and mouse to the agent at the start of each session",
+                ),
+            )
+            .on_disabled_hover_text("Needs \u{201c}Type and use the mouse\u{201d}");
+        },
+    );
+    theme::divider(ui);
+    theme::row(
+        ui,
+        "Lifetime",
+        Some("The unattended access ends by itself after this time; then you create it again."),
+        |ui| {
+            ui.add_enabled_ui(editable, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    for (s, label) in STANDING_DURATIONS {
+                        ui.selectable_value(&mut f.duration_s, s, label);
+                    }
+                });
+            });
+        },
+    );
+    theme::divider(ui);
+    theme::row(
+        ui,
+        "Limits of each session",
+        Some("Over the limit the supervisor refuses further actions in that session."),
+        |ui| {
+            ui.add_enabled_ui(editable, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    for q in QuotaPreset::ALL {
+                        ui.selectable_value(&mut f.quotas, q, q.label());
+                    }
+                });
+            });
+            small(ui, &f.quotas.description());
+        },
+    );
+    theme::divider(ui);
+    theme::row(
+        ui,
+        "If the agent stops answering",
+        Some(
+            "The agent must check in within this time; otherwise its session ends. The VM keeps running.",
+        ),
+        |ui| {
+            ui.add_enabled_ui(editable, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    for (ms, label) in LEASES {
+                        ui.selectable_value(&mut f.lease_ms, ms, label);
+                    }
+                });
+            });
+        },
+    );
+    theme::divider(ui);
+    theme::row(
+        ui,
+        "Expected client name",
+        Some(
+            "Optional. Requests must declare exactly this name; it is declared by the client, not a proof of identity.",
+        ),
+        |ui| {
+            let r = ui.add_enabled(
+                editable,
+                egui::TextEdit::singleline(&mut f.client_name)
+                    .char_limit(lightvm_proto::standing::MAX_STANDING_CLIENT_NAME_CHARS)
+                    .hint_text("Any client"),
+            );
+            theme::accessible_name(&r, WidgetType::TextEdit, "Expected client name");
+        },
+    );
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        if button(
+            ui,
+            true,
+            egui::Button::new("Cancel"),
+            "Cancel the unattended access",
+            "Nothing is created",
+        ) {
+            *choice = Some(AgentAction::CancelStanding);
+        }
+        let ready = f.spec().is_some();
+        let hover = if f.vm.is_none() {
+            "Choose the VM"
+        } else if !ready {
+            "Tick at least one action"
+        } else {
+            "See what changes before creating it"
+        };
+        if button(
+            ui,
+            ready,
+            theme::primary(ui, "Review\u{2026}"),
+            "Review the unattended access",
+            hover,
+        ) {
+            f.reviewing = true;
+            f.understood = false;
+        }
+    });
+}
+
+/// Second step of the creation: what changes compared with a session
+/// approved by hand, what is granted, the confirmation.
+fn standing_summary_ui(
+    ui: &mut egui::Ui,
+    env: &AgentsEnv<'_>,
+    f: &mut StandingForm,
+    pending: bool,
+    control: Option<&crate::service::StandingControl>,
+    choice: &mut Option<AgentAction>,
+) {
+    let p = theme::Palette::of(ui);
+    let spec = f.spec();
+    let vm = f.vm.map_or_else(|| "no VM".into(), |id| env.vm_name(id));
+    let until = env
+        .now
+        .checked_add_millis(i64::from(f.duration_s) * 1000)
+        .unwrap_or(env.now);
+    ui.label(
+        egui::RichText::new("What changes compared with a session you approve")
+            .size(15.0)
+            .color(p.text),
+    );
+    for c in STANDING_CHANGES {
+        ui.horizontal_top(|ui| {
+            ui.label(egui::RichText::new("\u{2022}").color(p.text_weak));
+            ui.add(egui::Label::new(egui::RichText::new(c).color(p.text)).wrap());
+        });
+    }
+    ui.add_space(6.0);
+    theme::divider(ui);
+    theme::row(ui, "Virtual machine", None, |ui| {
+        ui.label(&vm);
+    });
+    theme::row(ui, "Until", None, |ui| {
+        ui.label(format!(
+            "{} (about {})",
+            crate::baselines::format_time(until),
+            STANDING_DURATIONS
+                .iter()
+                .find(|(s, _)| *s == f.duration_s)
+                .map_or("", |(_, l)| l)
+        ));
+    });
+    theme::row(ui, "Client", None, |ui| {
+        ui.label(f.client().map_or_else(
+            || "Any client".to_owned(),
+            |c| format!("Only \u{201c}{c}\u{201d}"),
+        ));
+    });
+    theme::row(ui, "Allowed", None, |ui| {
+        for c in &f.caps {
+            if *c == Capability::NetworkEndpoints {
+                continue;
+            }
+            ui.horizontal(|ui| {
+                ui.label(capability_text(*c));
+                if capability_dangerous(*c) {
+                    theme::pill(ui, "Can lose unsaved work", Tone::Danger);
+                }
+            });
+        }
+        if f.endpoints.is_empty() {
+            small(ui, "No network: the VM runs offline in its sessions.");
+        } else {
+            small(
+                ui,
+                &format!(
+                    "Network: only these endpoints: {}",
+                    f.endpoints.iter().cloned().collect::<Vec<_>>().join(", ")
+                ),
+            );
+        }
+    });
+    theme::divider(ui);
+    ui.add_enabled(
+        !pending,
+        egui::Checkbox::new(
+            &mut f.understood,
+            format!(
+                "I understand: sessions on {vm} are approved without asking me until {}",
+                crate::baselines::format_time(until)
+            ),
+        ),
+    );
+    if f.sent
+        && let Some(RequestStatus::Failed(e)) = control.map(|c| &c.status)
+    {
+        ui.add_space(6.0);
+        theme::notice(ui, &standing_error(StandingOp::Create, e), Tone::Danger);
+    }
+    if pending {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label("Waiting for the supervisor\u{2026}");
+        });
+    }
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        if button(
+            ui,
+            !pending,
+            egui::Button::new("Cancel"),
+            "Cancel the unattended access",
+            "Nothing is created",
+        ) {
+            *choice = Some(AgentAction::CancelStanding);
+        }
+        if button(
+            ui,
+            !pending,
+            egui::Button::new("Back"),
+            "Back to the unattended access choices",
+            "Change what is granted",
+        ) {
+            f.reviewing = false;
+        }
+        let ready = spec.filter(|_| f.understood);
+        if button(
+            ui,
+            env.active && !pending && ready.is_some(),
+            theme::primary(ui, "Create unattended access"),
+            "Create the unattended access",
+            if f.understood {
+                "Writes its pairing file; sessions are then approved without asking you"
+            } else {
+                "Confirm that you understand what changes"
+            },
+        ) && let Some(spec) = ready
+        {
+            *choice = Some(AgentAction::SubmitStanding(Box::new(spec)));
+        }
+    });
+}
+
+/// Indicator shown on every page while the unattended access is live:
+/// distinct from the agent session bar, with Revoke and the Emergency Stop.
+pub fn standing_banner_ui(ui: &mut egui::Ui, env: &AgentsEnv<'_>) -> Option<AgentAction> {
+    let st = &env.state.agents.standing;
+    let g = st.live()?;
+    let p = theme::Palette::of(ui);
+    let mut choice = None;
+    let mut text = if g.state == StandingGrantState::Suspended {
+        format!(
+            "Unattended agent access suspended on {} (VM configuration changed) until {}",
+            env.vm_name(g.vm_id),
+            crate::baselines::format_time(g.expires_at)
+        )
+    } else {
+        format!(
+            "Unattended agent access active on {} until {}",
+            env.vm_name(g.vm_id),
+            crate::baselines::format_time(g.expires_at)
+        )
+    };
+    if matches!(st.file, Some(StandingFile::Unusable(_))) {
+        text.push_str(" \u{b7} pairing file missing: the agent cannot connect");
+    }
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 10.0;
+        let text_width = (ui.available_width() - 330.0).max(220.0);
+        ui.allocate_ui_with_layout(
+            egui::vec2(text_width, 0.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.set_max_width(text_width);
+                theme::dot(ui, p.accent);
+                let r = ui.add(egui::Label::new(egui::RichText::new(&text).color(p.text)).wrap());
+                theme::accessible_name(&r, WidgetType::Label, &text);
+            },
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let stop = ui.add(theme::danger(ui, "Emergency Stop")).on_hover_text(
+                "Immediately terminates all VMs, revokes the agent sessions and the unattended access",
+            );
+            theme::accessible_name(
+                &stop,
+                WidgetType::Button,
+                "Emergency Stop: stop all VMs and revoke the unattended access",
+            );
+            // Where it is: a dialog draws it again at the same place (the
+            // session bar, drawn after this one, takes precedence).
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(egui::Id::new(BANNER_STOP_RECT), stop.rect));
+            if stop.clicked() {
+                choice = Some(AgentAction::EmergencyStop);
+            }
+            if button(
+                ui,
+                env.active && !st.pending(|op| op != StandingOp::Create),
+                theme::danger(ui, "Revoke\u{2026}"),
+                "Revoke the unattended agent access",
+                "Its pairing credential stops working and its session ends; the VM keeps running",
+            ) {
+                choice = Some(AgentAction::RevokeStanding(g.grant_id));
+            }
+            if button(
+                ui,
+                true,
+                theme::subtle("Details"),
+                "Open the unattended access",
+                "Open the AI Workspace page",
+            ) {
+                choice = Some(AgentAction::Open);
+            }
+        });
+    });
+    choice
+}
+
+/// Choice in the notice shown at start while an unattended access is live.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StandingNoticeChoice {
+    /// Acknowledged: it stays.
+    Keep,
+    /// Revoke it (confirmation dialog).
+    Revoke,
+}
+
+/// Notice shown when the app starts with a live unattended access: it must
+/// be acknowledged with a button (Esc and a click outside do not close it).
+pub fn standing_notice_ui(ui: &egui::Ui, env: &AgentsEnv<'_>) -> Option<StandingNoticeChoice> {
+    let st = &env.state.agents.standing;
+    let g = st.live()?;
+    let ctx = ui.ctx().clone();
+    let mut choice = None;
+    let p = theme::Palette::of(ui);
+    let frame = egui::Frame::new()
+        .fill(p.surface)
+        .stroke(egui::Stroke::new(1.0, p.border))
+        .inner_margin(egui::Margin::same(20))
+        .shadow(ui.visuals().window_shadow);
+    egui::Modal::new(egui::Id::new("lightvm_standing_notice"))
+        .frame(frame)
+        .show(&ctx, |ui| {
+            ui.set_width(460.0);
+            let p = theme::Palette::of(ui);
+            ui.label(
+                egui::RichText::new("Unattended agent access is active")
+                    .size(17.0)
+                    .color(p.text),
+            );
+            ui.add_space(6.0);
+            let mut body = format!(
+                "An agent can use {} without asking you until {}: its sessions are approved automatically, and the VM stays running between them. Sessions approved so far: {}.",
+                env.vm_name(g.vm_id),
+                crate::baselines::format_time(g.expires_at),
+                g.sessions_approved
+            );
+            if g.state == StandingGrantState::Suspended {
+                body.push_str("\n\nIt is suspended: the VM configuration changed. Requests are denied until you confirm it on the AI Workspace page.");
+            }
+            if let Some(StandingFile::Unusable(why)) = &st.file {
+                body.push_str(&format!(
+                    "\n\nIts pairing file is missing or unusable ({why}): the agent cannot connect. Revoke it and create it again."
+                ));
+            }
+            body.push_str("\n\nYou can revoke it now, or later from the AI Workspace page or the bar at the top of the window.");
+            ui.add(egui::Label::new(egui::RichText::new(body).color(p.text_weak)).wrap());
+            ui.add_space(16.0);
+            ui.horizontal(|ui| {
+                if button(
+                    ui,
+                    true,
+                    theme::danger(ui, "Revoke\u{2026}"),
+                    "Revoke the unattended access now",
+                    "Asks for a confirmation",
+                ) {
+                    choice = Some(StandingNoticeChoice::Revoke);
+                }
+                if button(
+                    ui,
+                    true,
+                    theme::primary(ui, "Keep it"),
+                    "Keep the unattended access",
+                    "It stays active; the bar at the top of the window shows it",
+                ) {
+                    choice = Some(StandingNoticeChoice::Keep);
+                }
+            });
+        });
+    choice
+}
+
+fn tools_grant_ui(
+    ui: &mut egui::Ui,
+    env: &AgentsEnv<'_>,
+    vm: Option<VmId>,
+    caps: &mut BTreeSet<Capability>,
+    tools: &mut lightvm_proto::ToolGrant,
+    editable: bool,
+) {
     use lightvm_proto::Capability::*;
-    let config =
-        f.vm.and_then(|id| env.state.vms.iter().find(|v| v.vm_id == id))
-            .map(|v| &v.config.tools);
+    let config = vm
+        .and_then(|id| env.state.vms.iter().find(|v| v.vm_id == id))
+        .map(|v| &v.config.tools);
     let Some(config) = config.filter(|c| c.enabled) else {
-        f.tools = Default::default();
-        f.caps.retain(|c| !c.is_integration());
+        *tools = Default::default();
+        caps.retain(|c| !c.is_integration());
         return;
     };
     theme::divider(ui);
@@ -1620,53 +2548,35 @@ fn tools_grant_ui(ui: &mut egui::Ui, env: &AgentsEnv<'_>, f: &mut ApproveForm, e
         ui,
         "Guest Tools: every permission starts off. Shared folders expose the selected host files to this guest.",
     );
-    for (cap, enabled, label) in [
-        (
-            GuestExec,
-            config.guest_exec,
-            "Execute commands in the guest user session",
-        ),
-        (
-            Clipboard,
-            config.clipboard,
-            "Read and write guest clipboard text and images",
-        ),
-        (
-            FilesTransfer,
-            config.files_transfer,
-            "Transfer guest inbox/outbox files",
-        ),
-        (
-            UiInspect,
-            config.ui_inspect,
-            "Inspect guest application controls",
-        ),
-        (
-            UiAct,
-            config.ui_act,
-            "Act on guest controls (requires input ownership)",
-        ),
-    ] {
-        let mut on = enabled && f.caps.contains(&cap);
+    for (cap, label) in INTEGRATIONS {
+        let enabled = match cap {
+            GuestExec => config.guest_exec,
+            Clipboard => config.clipboard,
+            FilesTransfer => config.files_transfer,
+            UiInspect => config.ui_inspect,
+            UiAct => config.ui_act,
+            _ => false,
+        };
+        let mut on = enabled && caps.contains(&cap);
         ui.add_enabled(editable && enabled, egui::Checkbox::new(&mut on, label));
         if on {
-            f.caps.insert(cap);
+            caps.insert(cap);
         } else {
-            f.caps.remove(&cap);
+            caps.remove(&cap);
         }
     }
-    if f.caps.contains(&UiAct) {
-        f.caps.insert(UiInspect);
-        f.caps.insert(VmInput);
+    if caps.contains(&UiAct) {
+        caps.insert(UiInspect);
+        caps.insert(VmInput);
     }
-    f.tools
+    tools
         .shares
         .retain(|name, _| config.shares.iter().any(|s| &s.name == name));
     for share in &config.shares {
         ui.horizontal(|ui| {
-            let mut read = f.tools.shares.contains_key(&share.name);
+            let mut read = tools.shares.contains_key(&share.name);
             let mut write =
-                f.tools.shares.get(&share.name).copied().unwrap_or(false) && share.writable;
+                tools.shares.get(&share.name).copied().unwrap_or(false) && share.writable;
             ui.add_enabled(
                 editable,
                 egui::Checkbox::new(&mut read, format!("Shared folder: {}", share.name)),
@@ -1676,19 +2586,41 @@ fn tools_grant_ui(ui: &mut egui::Ui, env: &AgentsEnv<'_>, f: &mut ApproveForm, e
                 egui::Checkbox::new(&mut write, "Write"),
             );
             if read {
-                f.tools.shares.insert(share.name.clone(), write);
+                tools.shares.insert(share.name.clone(), write);
             } else {
-                f.tools.shares.remove(&share.name);
+                tools.shares.remove(&share.name);
             }
         });
     }
-    f.caps.remove(&ShareRead);
-    f.caps.remove(&ShareWrite);
-    if !f.tools.shares.is_empty() {
-        f.caps.insert(ShareRead);
+    caps.remove(&ShareRead);
+    caps.remove(&ShareWrite);
+    if !tools.shares.is_empty() {
+        caps.insert(ShareRead);
     }
-    if f.tools.shares.values().any(|write| *write) {
-        f.caps.insert(ShareWrite);
+    if tools.shares.values().any(|write| *write) {
+        caps.insert(ShareWrite);
+    }
+    tools.usb_devices.retain(|d| config.usb_devices.contains(d));
+    for device in &config.usb_devices {
+        let mut on = tools.usb_devices.contains(device);
+        if ui
+            .add_enabled(
+                editable,
+                egui::Checkbox::new(&mut on, format!("USB device: {device}")),
+            )
+            .changed()
+        {
+            if on {
+                tools.usb_devices.insert(device.clone());
+            } else {
+                tools.usb_devices.remove(device);
+            }
+        }
+    }
+    if tools.usb_devices.is_empty() {
+        caps.remove(&Usb);
+    } else {
+        caps.insert(Usb);
     }
 }
 

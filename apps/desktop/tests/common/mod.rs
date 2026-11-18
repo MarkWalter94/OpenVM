@@ -427,6 +427,7 @@ pub(crate) fn session(
         expires_at: at(52 * 60),
         lease_expires_at: at(8),
         input_owner: input,
+        standing_grant_id: None,
     }
 }
 

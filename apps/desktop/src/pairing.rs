@@ -26,6 +26,14 @@
 //! turned off and when the app stops the supervisor. Same-user processes
 //! can read it, as they can already reach the endpoint: the threat model
 //! (ROADMAP 7.1) leaves them out of the guarantees.
+//!
+//! Unattended access (standing grant, ADR-0039): the same file, in the same
+//! format, holds the grant's credential, valid until the grant's expiry.
+//! While the grant is live the file is kept when the supervisor stops or
+//! starts and when agent access is turned off; at every supervisor start the
+//! app rewrites it with the new endpoint ([`read`], then [`write`]), keeping
+//! credential and expiry. It is removed when the grant is revoked or
+//! expires and at the Emergency Stop.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -117,6 +125,127 @@ fn write_inner(
 pub fn remove(dir: &Path) {
     let _ = std::fs::remove_file(dir.join(FILE_NAME));
     let _ = std::fs::remove_file(dir.join(format!("{FILE_NAME}.tmp")));
+}
+
+/// Largest pairing file read back.
+const MAX_FILE_BYTES: u64 = 4096;
+
+/// Content of a pairing file read back. `Debug` does not show the
+/// credential, whose memory is overwritten on drop.
+pub struct StoredPairing {
+    /// IPC endpoint written in the file.
+    pub endpoint: String,
+    /// Credential (64 hexadecimal digits).
+    credential: String,
+    /// Expiry written in the file.
+    pub expires_at: UtcTimestamp,
+}
+
+impl StoredPairing {
+    /// Takes the credential out (for [`write`], which overwrites it).
+    pub fn take_credential(&mut self) -> String {
+        std::mem::take(&mut self.credential)
+    }
+}
+
+impl std::fmt::Debug for StoredPairing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoredPairing")
+            .field("endpoint", &self.endpoint)
+            .field("credential", &"<redacted>")
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
+impl Drop for StoredPairing {
+    fn drop(&mut self) {
+        let mut b = std::mem::take(&mut self.credential).into_bytes();
+        b.fill(0);
+        std::hint::black_box(&b);
+    }
+}
+
+/// Reads back the pairing file of `dir`, with the checks of the adapter
+/// (`crates/lightvm-mcp/src/pairing.rs`): a small regular file (no link),
+/// in a folder private to the current user, in the [`FORMAT`] format with a
+/// well-formed credential. The error never contains the content.
+pub fn read(dir: &Path) -> Result<StoredPairing, String> {
+    let path = dir.join(FILE_NAME);
+    let meta = std::fs::symlink_metadata(&path).map_err(|_| "pairing file not found")?;
+    if !meta.is_file() || meta.len() > MAX_FILE_BYTES {
+        return Err("the pairing file is not a small regular file".into());
+    }
+    if !private(dir, &path) {
+        return Err("the pairing folder is not private to the current user".into());
+    }
+    let mut bytes = std::fs::read(&path).map_err(|_| "pairing file not readable")?;
+    let parsed = parse(&bytes);
+    bytes.fill(0);
+    std::hint::black_box(&bytes);
+    parsed
+}
+
+fn parse(bytes: &[u8]) -> Result<StoredPairing, String> {
+    #[derive(serde::Deserialize)]
+    struct Raw {
+        format: String,
+        endpoint: String,
+        credential: String,
+        expires_at: String,
+    }
+    let raw: Raw =
+        serde_json::from_slice(bytes).map_err(|_| "the pairing file is not valid".to_owned())?;
+    let stored = StoredPairing {
+        endpoint: raw.endpoint,
+        credential: raw.credential,
+        expires_at: raw
+            .expires_at
+            .parse()
+            .map_err(|_| "the pairing file has no valid expiry".to_owned())?,
+    };
+    if raw.format != FORMAT {
+        return Err("the pairing file has an unknown format".into());
+    }
+    if stored.endpoint.is_empty() {
+        return Err("the pairing file has no endpoint".into());
+    }
+    let c = stored.credential.as_bytes();
+    if c.len() != 64 || !c.iter().all(u8::is_ascii_hexdigit) {
+        return Err("the pairing file has a malformed credential".into());
+    }
+    Ok(stored)
+}
+
+/// Unix: folder and file without group/other permission bits.
+#[cfg(unix)]
+fn private(dir: &Path, file: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    let mode = |p: &Path| std::fs::metadata(p).map(|m| m.permissions().mode() & 0o077);
+    std::fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir())
+        && matches!((mode(dir), mode(file)), (Ok(0), Ok(0)))
+}
+
+/// Windows: the folder is not a link and its ACL has exactly one entry,
+/// for the current user (as [`restrict`] leaves it).
+#[cfg(windows)]
+fn private(dir: &Path, _file: &Path) -> bool {
+    if !std::fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir()) {
+        return false;
+    }
+    let Ok(out) = system_tool("whoami.exe").output() else {
+        return false;
+    };
+    let user = String::from_utf8_lossy(&out.stdout).trim().to_lowercase();
+    if user.is_empty() || !user.contains('\\') {
+        return false;
+    }
+    let Ok(out) = system_tool("icacls.exe").arg(dir).output() else {
+        return false;
+    };
+    let text = String::from_utf8_lossy(&out.stdout).to_lowercase();
+    let entries: Vec<&str> = text.lines().filter(|l| l.contains(":(")).collect();
+    entries.len() == 1 && entries[0].contains(&format!("{user}:("))
 }
 
 fn write_private_file(path: &Path, data: &[u8]) -> std::io::Result<()> {
@@ -251,6 +380,43 @@ mod tests {
         assert_eq!(v["credential"], cred2.as_str());
         remove(&dir);
         assert!(!path.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The file of a standing grant is read back (credential redacted in
+    /// `Debug`) and rewritten with a new endpoint, keeping credential and
+    /// expiry; a missing or malformed file is refused without its content.
+    #[test]
+    fn reads_back_and_rewrites_with_a_new_endpoint() {
+        let dir = temp_dir("read");
+        let cred = "9f".repeat(32);
+        let at = UtcTimestamp::from_unix_millis(1_792_314_720_123).unwrap();
+        assert!(read(&dir).is_err(), "missing");
+        write(&dir, "old-endpoint", cred.clone(), at).unwrap();
+        let mut p = read(&dir).unwrap();
+        assert_eq!(p.endpoint, "old-endpoint");
+        assert_eq!(p.expires_at, at);
+        assert!(!format!("{p:?}").contains(&cred));
+        let c = p.take_credential();
+        assert_eq!(c, cred);
+        write(&dir, "new-endpoint", c, p.expires_at).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join(FILE_NAME)).unwrap()).unwrap();
+        assert_eq!(v["endpoint"], "new-endpoint");
+        assert_eq!(v["credential"], cred.as_str());
+        assert_eq!(v["expires_at"], at.to_string());
+
+        // Malformed content: refused, the error does not quote it.
+        std::fs::write(
+            dir.join(FILE_NAME),
+            format!(r#"{{"format":"{FORMAT}","endpoint":"e","credential":"zz{cred}","expires_at":"{at}"}}"#),
+        )
+        .unwrap();
+        let e = read(&dir).unwrap_err();
+        assert!(!e.contains(&cred), "{e}");
+        std::fs::write(dir.join(FILE_NAME), "x".repeat(5000)).unwrap();
+        assert!(read(&dir).is_err(), "too large");
+        remove(&dir);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
