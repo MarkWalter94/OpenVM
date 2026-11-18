@@ -341,6 +341,19 @@ Started on 2026-10-15 at the owner's request (ROADMAP 12, R6; declared exception
 | End to end through the product (agent session, Ubuntu live desktop) | `lightvm-service` `tests/f4_real.rs::e2e_real_qemu_network_endpoints`, R6-06 §6 | partial: grant, attached stack, allowed set, audit with the session and revocation verified on hardware; guest traffic through a product-started stack not observed (guest UI automation at 2 GiB on a shared host) |
 | Windows guest client reaching a WCF service and SQL Server through the allowlist (the real case) | — | not verified |
 
+## R6 work: standing grant, unattended agent access (ADR-0039)
+
+Started on 2026-11-18 at the owner's request (declared exception to ROADMAP sections 4 and 7.3 and to ADR-0006; `docs/ROADMAP.md` unchanged). The user creates in **Agents** a standing grant for **one** VM (at most one live grant, at most 7 days): capabilities, endpoints, quotas and lease of each session. The catalog keeps the policy and the SHA-256 of its pairing credential (schema 12, `0012_standing_grant.sql`) and it survives restarts of LightVM. Requests presented with its credential are approved by the supervisor without a click when they conform, denied otherwise (never queued); the audit names the grant as the actor. Sessions of a grant end by expiry, lease loss or client loss **without stopping the VM** (owner decision D1); Emergency Stop and deleting the VM revoke the grant; a change of the VM's configuration suspends it until the user confirms it. The MCP adapter renews sessions by itself under a grant. Evidence: `docs/verification/R6-10-standing-grant.md`.
+
+| Item | Evidence | Declared outcome |
+| --- | --- | --- |
+| Catalog: one live grant, terminal states, baselines of a grant, revocation with the VM deletion in the same transaction | `vm-storage` `src/standing.rs` tests | verified in simulation/test |
+| Core: D1 (expiry, lease, client loss keep the VM running; UI close and host resume stop it), grant as audit actor, agent access switch leaves the grant's session | `vm-core` `tests/scenarios.rs::standing_grant_sessions_keep_the_vm_running_on_expiry_and_client_loss` | verified in simulation/test |
+| Service through the real IPC (§5 items 1–11 of the specification) | `lightvm-service` `tests/standing_grant.rs` (11 tests), role matrix in `tests/f4.rs` | verified in simulation/test |
+| MCP adapter: automatic renewal, reconnection after a restart, `help` | `lightvm-mcp` `tests/standing.rs` (5 tests) | verified in simulation/test |
+| App: Agents page, creation form, indicator, notice at start, pairing file kept and rewritten | `lightvm-desktop` `tests/standing_ui.rs` (10 tests), `src/service.rs` unit tests | verified in simulation/test |
+| Real QEMU cycle: three renewals, LightVM restart in the middle, VM still running, revocation | `tests/standing_grant_real.rs`, R6-10 §3 | partial: two renewals with the VM running (same run) and the grant across a LightVM restart verified on hardware; renewal after the restart and revocation not executed (WHPX did not initialise under host load) |
+
 ## R2c work: Windows guests
 
 Started on 2026-10-12 at the owner's request (ADR-0027); it does not change the MVP scope or any exit criterion, and R2c is not closed by it.

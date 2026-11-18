@@ -123,6 +123,7 @@ Workspace status (2026-10-10, Windows 11 host with Rust 1.99.0 MSVC): `cargo fmt
 | F4 | Revocation and Emergency Stop with a concurrent input flood, 100 samples also with the guest at the desktop | `F0-06` Limits; sec. 13; D-18 |
 | F6 | Additional provenance verification of the QEMU build (expired signature) | ADR-0010 |
 | R2a | All Linux tests on a physical host listed in ADR-0016 | ADR-0016 |
+| R6 | Standing grant (unattended agent access, owner decision): real QEMU cycle with at least three accelerated session renewals, a LightVM restart in the middle, the VM still running, revocation | ADR-0039; `R6-10` |
 
 ## Open decisions
 

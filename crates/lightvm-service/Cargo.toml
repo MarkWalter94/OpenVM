@@ -126,6 +126,10 @@ name = "standing_grant"
 required-features = ["supervisor"]
 
 [[test]]
+name = "standing_grant_real"
+required-features = ["supervisor"]
+
+[[test]]
 name = "user_snapshots"
 required-features = ["supervisor"]
 
