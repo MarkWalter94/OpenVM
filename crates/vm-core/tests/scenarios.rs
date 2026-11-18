@@ -963,14 +963,16 @@ fn standing_grant_sessions_keep_the_vm_running_on_expiry_and_client_loss() {
         );
     }
     // Lease and grant expiry through the tick.
-    for (advance, cause) in [
-        (10_001, TerminationCause::LeaseExpired),
-        (5_000, TerminationCause::GrantExpired),
+    // (grant lifetime, clock advance, expected cause): the lease (10 s)
+    // expires first in the first case, the grant in the second.
+    for (expires_in, advance, cause) in [
+        (3_600_000, 10_001, TerminationCause::LeaseExpired),
+        (4_000, 5_000, TerminationCause::GrantExpired),
     ] {
         let mut h = Harness::new();
         let vm = h.create_vm("a");
         h.start(vm);
-        let _ = standing(&mut h, vm, 4_000);
+        let _ = standing(&mut h, vm, expires_in);
         h.clock.advance(advance);
         let t = h.core.tick().unwrap();
         assert_eq!(t.len(), 1);
